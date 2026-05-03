@@ -52,7 +52,7 @@ run: $(ISO)
 	$(QEMU) -cdrom $(ISO) -m 512M
 
 clean:
-	rm -rf $(BUILD_DIR)
+	sudo rm -rf $(BUILD_DIR)
 
 info:
 	@echo "HBOS - He Bit OS"

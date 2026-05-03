@@ -73,8 +73,33 @@ static void vga_putc(char c) {
     update_cursor();
 }
 
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static void vga_print(const char *s) {
-    while (*s) vga_putc(*s++);
+    uint8_t saved_color = color;
+    uint8_t cur_color = color;
+    while (*s) {
+        if (*s == '\\' && *(s+1) == 'x') {
+            int h1 = hex_val(*(s+2));
+            int h2 = hex_val(*(s+3));
+            if (h1 >= 0 && h2 >= 0) {
+                cur_color = (h1 << 4) | h2;
+                s += 4;
+                continue;
+            }
+        }
+        uint8_t old = color;
+        color = cur_color;
+        vga_putc(*s);
+        color = old;
+        s++;
+    }
+    color = saved_color;
 }
 
 static int strcmp(const char *s1, const char *s2) {
@@ -117,12 +142,17 @@ static const char shift_map[128] = {
 static int shift_pressed = 0;
 static int caps_lock = 0;
 
-static char get_key(void) {
+#define KEY_UP 0x100
+#define KEY_DOWN 0x101
+
+static int get_key(void) {
     while (1) {
         uint8_t status = inb(0x64);
         if (status & 1) {
             uint8_t sc = inb(0x60);
             
+            if (sc == 0x48) return KEY_UP;
+            if (sc == 0x50) return KEY_DOWN;
             if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; continue; }
             if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; continue; }
             if (sc == 0x3A) { caps_lock = !caps_lock; continue; }
@@ -156,6 +186,7 @@ static void show_help(void) {
     vga_print("  poweroff - Shutdown system\n");
     vga_print("  echo     - Print text\n");
     vga_print("  color FG BG - Set colors (0-15)\n");
+    vga_print("  credits  - show Acknowledgments\n");
     vga_print("\n");
 }
 
@@ -166,11 +197,23 @@ static void show_version(void) {
     vga_print("A 64-bit command-line operating system primarily written in C\n");
     vga_print("Architecture: x86_64 (Long Mode)\n");
     vga_print("Boot: GRUB Multiboot\n\n");
-    vga_print("by linpinf \n");
 }
 
+static void show_credits(void) {
+    vga_print("\\x0Ecredits: \\x07\n");
+    vga_print("\\x0Elinpinf\\x07 -- v0.1 building\n");
+    vga_print("\\x0CPCJKL(aaamemz)\\x07 -- show the video\n");
+    vga_print("\\x0ANuclear weapons\\x07 -- Members\n");
+    vga_print("\\x09Future community members\\x07\n");
+    vga_print("\\x0EThanks everyone\\x07\n\n");
+}
 static char cmd[256];
 static int cmd_pos;
+
+#define HIST_SIZE 64
+static char history[HIST_SIZE][256];
+static int hist_count = 0;
+static int hist_idx = 0;
 
 static void process_cmd(void) {
     cmd[cmd_pos] = 0;
@@ -183,6 +226,17 @@ static void process_cmd(void) {
     
     if (cmd_pos == 0) return;
     
+    if (hist_count < HIST_SIZE) {
+        for (int i = 0; i <= cmd_pos; i++) history[hist_count][i] = cmd[i];
+        hist_count++;
+    } else {
+        for (int i = 1; i < HIST_SIZE; i++) {
+            for (int j = 0; j < 256; j++) history[i-1][j] = history[i][j];
+        }
+        for (int i = 0; i <= cmd_pos; i++) history[HIST_SIZE-1][i] = cmd[i];
+    }
+    hist_idx = hist_count;
+    
     if (strcmp(cmd, "help") == 0) {
         show_help();
     } else if (strcmp(cmd, "clear") == 0) {
@@ -191,6 +245,8 @@ static void process_cmd(void) {
         show_version();
     } else if (strcmp(cmd, "reboot") == 0) {
         reboot();
+    } else if (strcmp(cmd, "credits") == 0) {
+        show_credits();   
     } else if (strcmp(cmd, "poweroff") == 0 || strcmp(cmd, "shutdown") == 0) {
         poweroff();
     } else if (strncmp(cmd, "echo ", 5) == 0) {
@@ -241,8 +297,9 @@ void kmain(void *mbi) {
         color = 0x07;
         
         cmd_pos = 0;
+        hist_idx = hist_count;
         while (1) {
-            char c = get_key();
+            int c = get_key();
             if (c == '\n') {
                 vga_putc('\n');
                 process_cmd();
@@ -251,6 +308,27 @@ void kmain(void *mbi) {
                 if (cmd_pos > 0) {
                     cmd_pos--;
                     vga_putc('\b');
+                }
+            } else if (c == KEY_UP) {
+                if (hist_idx > 0) {
+                    hist_idx--;
+                    while (cmd_pos > 0) { cmd_pos--; vga_putc('\b'); }
+                    for (int i = 0; history[hist_idx][i] && i < 255; i++) {
+                        cmd[cmd_pos++] = history[hist_idx][i];
+                        vga_putc(history[hist_idx][i]);
+                    }
+                }
+            } else if (c == KEY_DOWN) {
+                if (hist_idx < hist_count - 1) {
+                    hist_idx++;
+                    while (cmd_pos > 0) { cmd_pos--; vga_putc('\b'); }
+                    for (int i = 0; history[hist_idx][i] && i < 255; i++) {
+                        cmd[cmd_pos++] = history[hist_idx][i];
+                        vga_putc(history[hist_idx][i]);
+                    }
+                } else if (hist_idx < hist_count) {
+                    hist_idx++;
+                    while (cmd_pos > 0) { cmd_pos--; vga_putc('\b'); }
                 }
             } else if (c >= ' ' && cmd_pos < 255) {
                 cmd[cmd_pos++] = c;
