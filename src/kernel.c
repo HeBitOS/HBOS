@@ -177,17 +177,52 @@ static int get_key(void) {
     }
 }
 
-static void show_help(void) {
-    vga_print("\nHBOS Commands:\n\n");
-    vga_print("  help     - Show this help\n");
-    vga_print("  clear    - Clear screen\n");
-    vga_print("  version  - Show version\n");
-    vga_print("  reboot   - Reboot system\n");
-    vga_print("  poweroff - Shutdown system\n");
-    vga_print("  echo     - Print text\n");
-    vga_print("  color FG BG - Set colors (0-15)\n");
-    vga_print("  credits  - show Acknowledgments\n");
-    vga_print("\n");
+static int in_help = 0;
+
+static void help_cmd(const char *name) {
+    if (strcmp(name, "list") == 0) {
+        vga_print("Commands: help, clear, version, reboot, poweroff, echo, color, history, clearhistory, search, credits\n");
+    } else if (strcmp(name, "help") == 0) {
+        vga_print("help - Enter online help mode\n");
+        vga_print("Usage: help\n");
+    } else if (strcmp(name, "clear") == 0) {
+        vga_print("clear - Clear the screen\n");
+        vga_print("Usage: clear\n");
+    } else if (strcmp(name, "version") == 0) {
+        vga_print("version - Show system version\n");
+        vga_print("Usage: version\n");
+    } else if (strcmp(name, "reboot") == 0) {
+        vga_print("reboot - Reboot the system\n");
+        vga_print("Usage: reboot\n");
+    } else if (strcmp(name, "poweroff") == 0) {
+        vga_print("poweroff - Shutdown the system\n");
+        vga_print("Usage: poweroff\n");
+    } else if (strcmp(name, "echo") == 0) {
+        vga_print("echo - Print text to screen\n");
+        vga_print("Usage: echo <text>\n");
+    } else if (strcmp(name, "color") == 0) {
+        vga_print("color - Set text colors\n");
+        vga_print("Usage: color <fg> <bg>\n");
+        vga_print("Colors: 0-15\n");
+    } else if (strcmp(name, "history") == 0) {
+        vga_print("history - Show command history\n");
+        vga_print("Usage: history\n");
+    } else if (strcmp(name, "clearhistory") == 0) {
+        vga_print("clearhistory - Clear command history\n");
+        vga_print("Usage: clearhistory\n");
+    } else if (strcmp(name, "search") == 0) {
+        vga_print("search - Search command history\n");
+        vga_print("Usage: search <term>\n");
+    } else if (strcmp(name, "credits") == 0) {
+        vga_print("credits - Show credits\n");
+        vga_print("Usage: credits\n");
+    } else if (strcmp(name, "exit") == 0) {
+        vga_print("exit - Exit help mode\n");
+    } else {
+        vga_print("Unknown command: ");
+        vga_print(name);
+        vga_print("\nType 'list' to see all commands\n");
+    }
 }
 
 static void show_version(void) {
@@ -199,6 +234,14 @@ static void show_version(void) {
     vga_print("Boot: GRUB Multiboot\n\n");
 }
 
+static char cmd[256];
+static int cmd_pos;
+
+#define HIST_SIZE 64
+static char history[HIST_SIZE][256];
+static int hist_count = 0;
+static int hist_idx = 0;
+
 static void show_credits(void) {
     vga_print("\\x0Ecredits: \\x07\n");
     vga_print("\\x0Elinpinf\\x07 -- v0.1 building\n");
@@ -207,13 +250,137 @@ static void show_credits(void) {
     vga_print("\\x09Future community members\\x07\n");
     vga_print("\\x0EThanks everyone\\x07\n\n");
 }
-static char cmd[256];
-static int cmd_pos;
 
-#define HIST_SIZE 64
-static char history[HIST_SIZE][256];
-static int hist_count = 0;
-static int hist_idx = 0;
+static void show_help(void) {
+    in_help = 1;
+    vga_print("\n\\x0EHBOS Online Help Mode\\x07\n");
+    vga_print("Type command name for detailed help (e.g., 'help')\n");
+    vga_print("Type 'list' to see all commands\n");
+    vga_print("Type 'exit' or 'quit' to exit help mode\n\n");
+    
+    while (in_help) {
+        vga_print("help> ");
+        
+        cmd_pos = 0;
+        while (1) {
+            int c = get_key();
+            if (c == '\n') {
+                vga_putc('\n');
+                cmd[cmd_pos] = 0;
+                
+                while (cmd_pos > 0 && cmd[cmd_pos-1] == ' ') cmd[--cmd_pos] = 0;
+                while (cmd[0] == ' ') {
+                    for (int i = 0; cmd[i]; i++) cmd[i] = cmd[i+1];
+                    cmd_pos--;
+                }
+                
+                if (cmd_pos == 0) break;
+                
+                if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0 || strcmp(cmd, "q") == 0) {
+                    in_help = 0;
+                    vga_print("Exiting help mode\n\n");
+                    return;
+                }
+                
+                help_cmd(cmd);
+                break;
+            } else if (c == '\b') {
+                if (cmd_pos > 0) {
+                    cmd_pos--;
+                    vga_putc('\b');
+                }
+            } else if (c >= ' ' && cmd_pos < 255) {
+                cmd[cmd_pos++] = c;
+                vga_putc(c);
+            }
+        }
+    }
+}
+
+static void show_history(void) {
+    vga_print("\\x0ECommand History (");
+    char buf[16];
+    int i = 0;
+    int t = hist_count;
+    while (t > 0) { buf[i++] = '0' + (t % 10); t /= 10; }
+    if (i == 0) buf[i++] = '0';
+    while (i > 0) vga_putc(buf[--i]);
+    vga_print("/");
+    i = 0;
+    t = HIST_SIZE;
+    while (t > 0) { buf[i++] = '0' + (t % 10); t /= 10; }
+    if (i == 0) buf[i++] = '0';
+    while (i > 0) vga_putc(buf[--i]);
+    vga_print("):\\x07\n\n");
+    
+    for (int j = 0; j < hist_count; j++) {
+        vga_print("  ");
+        i = 0;
+        t = j + 1;
+        while (t > 0) { buf[i++] = '0' + (t % 10); t /= 10; }
+        if (i == 0) buf[i++] = '0';
+        while (i > 0) vga_putc(buf[--i]);
+        vga_print(". ");
+        vga_print(history[j]);
+        vga_print("\n");
+    }
+    vga_print("\n");
+}
+
+static void clear_history(void) {
+    hist_count = 0;
+    hist_idx = 0;
+    vga_print("\\x0ECommand history cleared\\x07\n");
+}
+
+static void search_history(const char *term) {
+    if (term[0] == 0) {
+        vga_print("Usage: search <term>\\n");
+        return;
+    }
+    
+    vga_print("\\x0ESearching for: \\x07");
+    vga_print(term);
+    vga_print("\\n\\n");
+    
+    int found = 0;
+    for (int j = 0; j < hist_count; j++) {
+        const char *pos = history[j];
+        while (*pos) {
+            const char *p1 = pos;
+            const char *p2 = term;
+            while (*p1 && *p2 && *p1 == *p2) { p1++; p2++; }
+            if (*p2 == 0) {
+                vga_print("  ");
+                char buf[16];
+                int i = 0;
+                int t = j + 1;
+                while (t > 0) { buf[i++] = '0' + (t % 10); t /= 10; }
+                if (i == 0) buf[i++] = '0';
+                while (i > 0) vga_putc(buf[--i]);
+                vga_print(". ");
+                vga_print(history[j]);
+                vga_print("\\n");
+                found++;
+                break;
+            }
+            pos++;
+        }
+    }
+    
+    if (found == 0) {
+        vga_print("No matching commands found\\n");
+    } else {
+        vga_print("\\nFound ");
+        char buf[16];
+        int i = 0;
+        int t = found;
+        while (t > 0) { buf[i++] = '0' + (t % 10); t /= 10; }
+        if (i == 0) buf[i++] = '0';
+        while (i > 0) vga_putc(buf[--i]);
+        vga_print(" matches\\n");
+    }
+}
 
 static void process_cmd(void) {
     cmd[cmd_pos] = 0;
@@ -225,6 +392,16 @@ static void process_cmd(void) {
     }
     
     if (cmd_pos == 0) return;
+    
+    if (in_help) {
+        if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0 || strcmp(cmd, "q") == 0) {
+            in_help = 0;
+            vga_print("Exiting help mode\n\n");
+            return;
+        }
+        help_cmd(cmd);
+        return;
+    }
     
     if (hist_count < HIST_SIZE) {
         for (int i = 0; i <= cmd_pos; i++) history[hist_count][i] = cmd[i];
@@ -269,6 +446,12 @@ static void process_cmd(void) {
         } else {
             vga_print("Color range: 0-15\n");
         }
+    } else if (strcmp(cmd, "history") == 0) {
+        show_history();
+    } else if (strcmp(cmd, "clearhistory") == 0) {
+        clear_history();
+    } else if (strncmp(cmd, "search ", 7) == 0) {
+        search_history(cmd + 7);
     } else {
         vga_print("Unknown command: ");
         vga_print(cmd);
