@@ -12,6 +12,12 @@ typedef unsigned long uint64_t;
 static int cursor = 0;
 static uint8_t color = 0x0F;
 
+// 函数声明
+static void vga_putc(char c);
+static void my_strcpy(char *dest, const char *src);
+static int my_strcmp(const char *s1, const char *s2);
+static int my_strncmp(const char *s1, const char *s2, int n);
+
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -23,6 +29,14 @@ static inline uint8_t inb(uint16_t port) {
     __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
+
+static inline uint16_t inw(uint16_t port) {
+    uint16_t ret;
+    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+
 
 static void update_cursor(void) {
     outb(0x3D4, 14);
@@ -102,14 +116,23 @@ static void vga_print(const char *s) {
     color = saved_color;
 }
 
-static int strcmp(const char *s1, const char *s2) {
-    while (*s1 && *s1 == *s2) { s1++; s2++; }
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
-}
 
-static int strncmp(const char *s1, const char *s2, int n) {
+
+static int my_strncmp(const char *s1, const char *s2, int n) {
     while (n > 0 && *s1 && *s1 == *s2) { s1++; s2++; n--; }
     return n == 0 ? 0 : *(unsigned char *)s1 - *(unsigned char *)s2;
+}
+
+static void my_strcpy(char *dest, const char *src) {
+    while (*src) {
+        *dest++ = *src++;
+    }
+    *dest = 0;
+}
+
+static int my_strcmp(const char *s1, const char *s2) {
+    while (*s1 && *s1 == *s2) { s1++; s2++; }
+    return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
 static void poweroff(void) {
@@ -180,43 +203,44 @@ static int get_key(void) {
 static int in_help = 0;
 
 static void help_cmd(const char *name) {
-    if (strcmp(name, "list") == 0) {
+    if (my_strcmp(name, "list") == 0) {
         vga_print("Commands: help, clear, version, reboot, poweroff, echo, color, history, clearhistory, search, credits\n");
-    } else if (strcmp(name, "help") == 0) {
+    } else if (my_strcmp(name, "help") == 0) {
         vga_print("help - Enter online help mode\n");
         vga_print("Usage: help\n");
-    } else if (strcmp(name, "clear") == 0) {
+    } else if (my_strcmp(name, "clear") == 0) {
         vga_print("clear - Clear the screen\n");
         vga_print("Usage: clear\n");
-    } else if (strcmp(name, "version") == 0) {
+    } else if (my_strcmp(name, "version") == 0) {
         vga_print("version - Show system version\n");
         vga_print("Usage: version\n");
-    } else if (strcmp(name, "reboot") == 0) {
+    } else if (my_strcmp(name, "reboot") == 0) {
         vga_print("reboot - Reboot the system\n");
         vga_print("Usage: reboot\n");
-    } else if (strcmp(name, "poweroff") == 0) {
+    } else if (my_strcmp(name, "poweroff") == 0) {
         vga_print("poweroff - Shutdown the system\n");
         vga_print("Usage: poweroff\n");
-    } else if (strcmp(name, "echo") == 0) {
+    } else if (my_strcmp(name, "echo") == 0) {
         vga_print("echo - Print text to screen\n");
         vga_print("Usage: echo <text>\n");
-    } else if (strcmp(name, "color") == 0) {
+    } else if (my_strcmp(name, "color") == 0) {
         vga_print("color - Set text colors\n");
         vga_print("Usage: color <fg> <bg>\n");
         vga_print("Colors: 0-15\n");
-    } else if (strcmp(name, "history") == 0) {
+    } else if (my_strcmp(name, "history") == 0) {
         vga_print("history - Show command history\n");
         vga_print("Usage: history\n");
-    } else if (strcmp(name, "clearhistory") == 0) {
+    } else if (my_strcmp(name, "clearhistory") == 0) {
         vga_print("clearhistory - Clear command history\n");
         vga_print("Usage: clearhistory\n");
-    } else if (strcmp(name, "search") == 0) {
+    } else if (my_strcmp(name, "search") == 0) {
         vga_print("search - Search command history\n");
         vga_print("Usage: search <term>\n");
-    } else if (strcmp(name, "credits") == 0) {
+    } else if (my_strcmp(name, "credits") == 0) {
         vga_print("credits - Show credits\n");
         vga_print("Usage: credits\n");
-    } else if (strcmp(name, "exit") == 0) {
+
+    } else if (my_strcmp(name, "exit") == 0) {
         vga_print("exit - Exit help mode\n");
     } else {
         vga_print("Unknown command: ");
@@ -276,7 +300,7 @@ static void show_help(void) {
                 
                 if (cmd_pos == 0) break;
                 
-                if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0 || strcmp(cmd, "q") == 0) {
+                if (my_strcmp(cmd, "exit") == 0 || my_strcmp(cmd, "quit") == 0 || my_strcmp(cmd, "q") == 0) {
                     in_help = 0;
                     vga_print("Exiting help mode\n\n");
                     return;
@@ -394,7 +418,7 @@ static void process_cmd(void) {
     if (cmd_pos == 0) return;
     
     if (in_help) {
-        if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0 || strcmp(cmd, "q") == 0) {
+        if (my_strcmp(cmd, "exit") == 0 || my_strcmp(cmd, "quit") == 0 || my_strcmp(cmd, "q") == 0) {
             in_help = 0;
             vga_print("Exiting help mode\n\n");
             return;
@@ -414,22 +438,22 @@ static void process_cmd(void) {
     }
     hist_idx = hist_count;
     
-    if (strcmp(cmd, "help") == 0) {
+    if (my_strcmp(cmd, "help") == 0) {
         show_help();
-    } else if (strcmp(cmd, "clear") == 0) {
+    } else if (my_strcmp(cmd, "clear") == 0) {
         vga_clear();
-    } else if (strcmp(cmd, "version") == 0) {
+    } else if (my_strcmp(cmd, "version") == 0) {
         show_version();
-    } else if (strcmp(cmd, "reboot") == 0) {
+    } else if (my_strcmp(cmd, "reboot") == 0) {
         reboot();
-    } else if (strcmp(cmd, "credits") == 0) {
+    } else if (my_strcmp(cmd, "credits") == 0) {
         show_credits();   
-    } else if (strcmp(cmd, "poweroff") == 0 || strcmp(cmd, "shutdown") == 0) {
+    } else if (my_strcmp(cmd, "poweroff") == 0 || my_strcmp(cmd, "shutdown") == 0) {
         poweroff();
-    } else if (strncmp(cmd, "echo ", 5) == 0) {
+    } else if (my_strncmp(cmd, "echo ", 5) == 0) {
         vga_print(cmd + 5);
         vga_print("\n");
-    } else if (strncmp(cmd, "color ", 6) == 0) {
+    } else if (my_strncmp(cmd, "color ", 6) == 0) {
         int fg = 7, bg = 0;
         char *p = cmd + 6;
         fg = 0;
@@ -446,12 +470,13 @@ static void process_cmd(void) {
         } else {
             vga_print("Color range: 0-15\n");
         }
-    } else if (strcmp(cmd, "history") == 0) {
+    } else if (my_strcmp(cmd, "history") == 0) {
         show_history();
-    } else if (strcmp(cmd, "clearhistory") == 0) {
+    } else if (my_strcmp(cmd, "clearhistory") == 0) {
         clear_history();
-    } else if (strncmp(cmd, "search ", 7) == 0) {
+    } else if (my_strncmp(cmd, "search ", 7) == 0) {
         search_history(cmd + 7);
+
     } else {
         vga_print("Unknown command: ");
         vga_print(cmd);
@@ -463,6 +488,8 @@ void kmain(void *mbi) {
     (void)mbi;
     
     vga_clear();
+    
+
     
     color = 0x0E;
     vga_print("========================================\n");
