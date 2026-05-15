@@ -8,22 +8,22 @@ SECTIONS {
         *(.multiboot)
     }
 
-    .text ALIGN(4K) : {
+    .text ALIGN(0x1000) : {
         *(.text)
         *(.text.*)
     }
 
-    .rodata ALIGN(4K) : {
+    .rodata ALIGN(0x1000) : {
         *(.rodata)
         *(.rodata.*)
     }
 
-    .data ALIGN(4K) : {
+    .data ALIGN(0x1000) : {
         *(.data)
         *(.data.*)
     }
 
-    .bss ALIGN(4K) : {
+    .bss ALIGN(0x1000) : {
         *(COMMON)
         *(.bss)
         *(.bss.*)

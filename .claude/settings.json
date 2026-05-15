@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)"
+    ],
+    "additionalDirectories": [
+      "/media/data/hbosv2/limine"
+    ]
+  }
+}

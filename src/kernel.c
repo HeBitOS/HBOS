@@ -9,10 +9,14 @@ typedef unsigned long uint64_t;
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
 
+#define SERIAL_PORT 0x3F8
+#define SERIAL_LSR 0x3FD
+
 static int cursor = 0;
 static uint8_t color = 0x0F;
 
 // 函数声明
+static void serial_putc(char c);
 static void vga_putc(char c);
 static void my_strcpy(char *dest, const char *src);
 static int my_strcmp(const char *s1, const char *s2);
@@ -37,6 +41,37 @@ static inline uint16_t inw(uint16_t port) {
 }
 
 
+
+static void serial_init(void) {
+    // Disable interrupts
+    outb(SERIAL_PORT + 1, 0x00);
+
+    // Set baud rate to 115200
+    outb(SERIAL_PORT + 3, 0x80);    // Enable DLAB
+    outb(SERIAL_PORT + 0, 0x01);    // Divisor low byte (115200)
+    outb(SERIAL_PORT + 1, 0x00);    // Divisor high byte
+
+    // Set line control: 8 bits, 1 stop, no parity
+    outb(SERIAL_PORT + 3, 0x03);
+
+    // Enable FIFO
+    outb(SERIAL_PORT + 2, 0xC7);
+
+    // Set modem control: RTS + DTR
+    outb(SERIAL_PORT + 4, 0x0B);
+}
+
+static void serial_putc(char c) {
+    while (!(inb(SERIAL_PORT + 5) & 0x20));  // Wait for TX empty
+    outb(SERIAL_PORT, c);
+}
+
+static void serial_print(const char *s) {
+    while (*s) {
+        if (*s == '\n') serial_putc('\r');
+        serial_putc(*s++);
+    }
+}
 
 static void update_cursor(void) {
     outb(0x3D4, 14);
@@ -486,7 +521,17 @@ static void process_cmd(void) {
 
 void kmain(void *mbi) {
     (void)mbi;
-    
+
+    // Initialize serial port
+    serial_init();
+
+    serial_print("\n=====================================\n");
+    serial_print("      HBOS Kernel Initializing\n");
+    serial_print("      64-bit Operating System\n");
+    serial_print("=====================================\n");
+    serial_print("Serial console initialized\n");
+    serial_print("Setting up VGA...\n");
+
     vga_clear();
     
 

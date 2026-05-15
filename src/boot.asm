@@ -1,9 +1,34 @@
-; Multiboot1 Header - must be in first 8KB of kernel
+; Multiboot2 Header for 64-bit
+; Must appear in the first 32KB of the ELF file
 section .multiboot
-align 4
-    dd 0x1BADB002                ; magic
-    dd 0x00000003                ; flags (ALIGN + MEMINFO)
-    dd -(0x1BADB002 + 0x00000003); checksum
+align 8
+
+header_start:
+    dd 0xE85250D6                ; magic
+    dd 0                         ; ISA: 0 = i386
+    dd header_end - header_start ; header length
+    dd 0x100000000 - (0xE85250D6 + 0 + (header_end - header_start))  ; checksum
+
+    ; address tag
+    dw 3                         ; type
+    dw 0                         ; flags
+    dd 24                        ; size
+    dd 0                         ; reserved
+    dq 0x100000                  ; load_addr
+    dq 0                         ; load_end_addr (0 means no bss)
+    dq 0x100000                  ; bss_end_addr
+
+    ; entry point tag
+    dw 3                         ; type
+    dw 0                         ; flags
+    dd 12                        ; size
+    dq _start
+
+    ; end tag
+    dw 0                         ; type
+    dw 0                         ; flags
+    dd 8                         ; size
+header_end:
 
 section .text
 bits 32
@@ -13,6 +38,11 @@ extern kmain
 _start:
     mov esp, stack_top
     push ebx                     ; multiboot info
+
+    ; Serial debug: marker for GRUB/Multiboot
+    mov al, 'B'
+    mov dx, 0x3F8
+    out dx, al
 
     ; check long mode
     mov eax, 0x80000000
@@ -24,6 +54,11 @@ _start:
     cpuid
     test edx, 1 << 29
     jz .no_long
+
+    ; Serial: long mode available
+    mov al, 'L'
+    mov dx, 0x3F8
+    out dx, al
 
     ; clear page tables
     mov edi, p4_table
@@ -70,6 +105,11 @@ _start:
     or eax, 1 << 31
     mov cr0, eax
 
+    ; Serial: paging enabled
+    mov al, 'P'
+    mov dx, 0x3F8
+    out dx, al
+
     ; load 64-bit GDT and jump
     lgdt [gdt64.pointer]
     jmp gdt64.code:long_mode
@@ -86,6 +126,18 @@ long_mode:
     mov fs, ax
     mov gs, ax
     mov ss, ax
+
+    ; Setup stack for 64-bit
+    mov rsp, stack_top
+
+    ; Debug: serial output "OK"
+    mov al, 'O'
+    mov dx, 0x3F8
+    out dx, al
+    mov al, 'K'
+    out dx, al
+    mov al, 10
+    out dx, al
 
     pop rdi                      ; multiboot info
     call kmain
