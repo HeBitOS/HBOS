@@ -81,11 +81,21 @@ static void update_cursor(void) {
 }
 
 static void vga_clear(void) {
+    serial_print("VGA: Clearing screen...\n");
+
+    // Wait a bit to ensure memory is stable
+    for (volatile int i = 0; i < 10000; i++);
+
+    // Clear the screen with 0x0F (white on black)
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-        VGA[i] = (color << 8) | ' ';
+        VGA[i] = (0x0F << 8) | ' ';
     }
+
     cursor = 0;
+    color = 0x0F;
     update_cursor();
+
+    serial_print("VGA: Screen cleared\n");
 }
 
 static void vga_scroll(void) {
@@ -533,18 +543,20 @@ void kmain(void *mbi) {
     serial_print("Setting up VGA...\n");
 
     vga_clear();
-    
 
-    
+
+
     color = 0x0E;
     vga_print("========================================\n");
     vga_print("         HBOS - He Bit OS\n");
     vga_print("       64-bit Operating System\n");
     vga_print("========================================\n\n");
-    
+
     color = 0x07;
     vga_print("System started!\n");
     vga_print("Type 'help' for commands\n\n");
+
+    serial_print("VGA initialized, shell starting...\n");
     
     while (1) {
         color = 0x0A;

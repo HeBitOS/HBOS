@@ -111,8 +111,8 @@ iso: $(ISO_HYBRID)
 
 # Legacy target
 run: $(ISO_HYBRID)
-	@echo "Booting hybrid ISO (BIOS mode)..."
-	$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d -serial stdio -vga none
+	@echo "Booting hybrid ISO (BIOS mode with VGA)..."
+	$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d -serial stdio -vga std
 
 run-bios: $(ISO_BIOS)
 	@echo "Booting BIOS-only ISO..."
