@@ -83,10 +83,12 @@ $(ISO_BIOS): $(KERNEL_BIOS)
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir/boot/hbos.bin
 	@echo 'set timeout=3' > $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@echo 'set default=0' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'insmod all_video' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'set gfxmode=auto' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo 'terminal_input console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo 'terminal_output console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@echo 'menuentry "HBOS - He Bit OS (BIOS)" {' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo '    echo Loading HBOS...' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@echo '    multiboot2 /boot/hbos.bin' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo '    echo Press Enter to boot' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@echo '}' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir 2>/dev/null || \
 	 grub-mkrescue -o $@ $(BUILD_DIR)/isodir
@@ -98,9 +100,10 @@ $(ISO_HYBRID): $(KERNEL_BIOS)
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir/boot/hbos.bin
 	@echo 'set timeout=5' > $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@echo 'set default=0' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'insmod all_video' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'set gfxmode=auto' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'menuentry "HBOS - He Bit OS" {' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo 'terminal_input console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo 'terminal_output console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo 'menuentry "HBOS - He Bit OS (BIOS/UEFI)" {' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@echo '    echo Loading HBOS...' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@echo '    multiboot2 /boot/hbos.bin' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@echo '}' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@grub-mkrescue --efi-boot-part --efi-boot-image -o $@ $(BUILD_DIR)/isodir 2>/dev/null || \
@@ -112,7 +115,7 @@ iso: $(ISO_HYBRID)
 # Legacy target
 run: $(ISO_HYBRID)
 	@echo "Booting hybrid ISO (BIOS mode with VGA)..."
-	$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d -serial stdio -vga std
+	$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d -serial stdio -vga std -monitor none
 
 run-bios: $(ISO_BIOS)
 	@echo "Booting BIOS-only ISO..."
@@ -138,5 +141,5 @@ run-efi: $(ISO_HYBRID)
 	fi
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)/* && rmdir $(BUILD_DIR) 2>/dev/null || true
 	@echo "✓ Build directory cleaned"

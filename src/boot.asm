@@ -15,8 +15,8 @@ header_start:
     dd 24                        ; size
     dd 0                         ; reserved
     dq 0x100000                  ; load_addr
-    dq 0                         ; load_end_addr (0 means no bss)
-    dq 0x100000                  ; bss_end_addr
+    dq 0x120000                  ; load_end_addr (end of kernel)
+    dq 0x140000                  ; bss_end_addr
 
     ; entry point tag
     dw 3                         ; type
@@ -36,6 +36,11 @@ global _start
 extern kmain
 
 _start:
+    ; Very early output to serial
+    mov al, 'X'
+    mov dx, 0x3F8
+    out dx, al
+
     mov esp, stack_top
     push ebx                     ; multiboot info
 
