@@ -249,7 +249,7 @@ static int in_help = 0;
 
 static void help_cmd(const char *name) {
     if (my_strcmp(name, "list") == 0) {
-        vga_print("Commands: help, clear, version, reboot, poweroff, echo, color, history, clearhistory, search, credits\n");
+        vga_print("Commands: help, clear, version, status, reboot, poweroff, echo, color, history, clearhistory, search, credits\n");
     } else if (my_strcmp(name, "help") == 0) {
         vga_print("help - Enter online help mode\n");
         vga_print("Usage: help\n");
@@ -259,6 +259,9 @@ static void help_cmd(const char *name) {
     } else if (my_strcmp(name, "version") == 0) {
         vga_print("version - Show system version\n");
         vga_print("Usage: version\n");
+    } else if (my_strcmp(name, "status") == 0) {
+        vga_print("status - Show system status\n");
+        vga_print("Usage: status\n");
     } else if (my_strcmp(name, "reboot") == 0) {
         vga_print("reboot - Reboot the system\n");
         vga_print("Usage: reboot\n");
@@ -519,6 +522,13 @@ static void process_cmd(void) {
         show_history();
     } else if (my_strcmp(cmd, "clearhistory") == 0) {
         clear_history();
+    } else if (my_strcmp(cmd, "status") == 0) {
+        vga_print("System Status:\n");
+        vga_print("  Architecture: x86-64\n");
+        vga_print("  Mode: 64-bit Long Mode\n");
+        vga_print("  Console: VGA + Serial\n");
+        vga_print("  Memory: 512MB (allocated)\n");
+        vga_print("  Bootloader: GRUB Multiboot2\n\n");
     } else if (my_strncmp(cmd, "search ", 7) == 0) {
         search_history(cmd + 7);
 
