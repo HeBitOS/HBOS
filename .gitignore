@@ -1,6 +1,7 @@
 .vscode/
 .kilo/
 build/
+.claude/
 *.iso
 *.bin
 *.o
