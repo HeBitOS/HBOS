@@ -1,33 +1,15 @@
-; Multiboot2 Header for 64-bit
-; Must appear in the first 32KB of the ELF file
+; Multiboot2 Header - minimal, let GRUB read ELF headers directly
 section .multiboot
 align 8
-
 header_start:
-    dd 0xE85250D6                ; magic
-    dd 0                         ; ISA: 0 = i386
-    dd header_end - header_start ; header length
+    dd 0xE85250D6                        ; magic
+    dd 0                                 ; ISA: i386
+    dd header_end - header_start         ; header length
     dd 0x100000000 - (0xE85250D6 + 0 + (header_end - header_start))  ; checksum
-
-    ; address tag
-    dw 3                         ; type
-    dw 0                         ; flags
-    dd 24                        ; size
-    dd 0                         ; reserved
-    dq 0x100000                  ; load_addr
-    dq 0x120000                  ; load_end_addr (end of kernel)
-    dq 0x140000                  ; bss_end_addr
-
-    ; entry point tag
-    dw 3                         ; type
-    dw 0                         ; flags
-    dd 12                        ; size
-    dq _start
-
     ; end tag
-    dw 0                         ; type
-    dw 0                         ; flags
-    dd 8                         ; size
+    dw 0
+    dw 0
+    dd 8
 header_end:
 
 section .text
