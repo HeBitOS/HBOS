@@ -4,19 +4,6 @@
 // 全局文件系统实例
 static filesystem_t fs;
 
-// 字符串操作函数（简化实现）
-static int my_strcmp(const char *s1, const char *s2) {
-    while (*s1 && *s1 == *s2) { s1++; s2++; }
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
-}
-
-static void my_strcpy(char *dest, const char *src) {
-    while (*src) {
-        *dest++ = *src++;
-    }
-    *dest = 0;
-}
-
 // 文件系统初始化
 int fs_init(void) {
     // 初始化文件系统结构
@@ -38,11 +25,13 @@ void fs_list(void) {
 
 // 查找文件
 file_t *fs_find_file(const char *name) {
+    (void)name;
     // 空实现 - 文件系统功能暂不实现
     return NULL;
 }
 
 // 读取文件
 void fs_read_file(file_t *f) {
+    (void)f;
     // 空实现 - 文件系统功能暂不实现
 }

@@ -1,166 +1,192 @@
-# HBOS - He Bit OS
+   # HBOS - He Bit OS
+
+> 当前版本：bata1
+> 64-bit 高分辨率图形命令行操作系统，支持多阶段 AI 协同开发
+
 ![截图](./photo/hbosv0.1.png "v0.1截图")
 
-一个简单的 64 位操作系统，支持命令行交互。
+## bata1 更新
 
-**现已支持 BIOS (Multiboot) 和 UEFI 双启动！** 🎉
+- ✅ 内核启动横幅与 `version` 命令显示更新为 `bata1`
+- ✅ 支持构建时 TTF → HZK16 点阵字体生成，并内嵌 CJK 字库
+- ✅ 支持 UTF-8 中文/CJK 字符输出，应用程序可直接通过控制台 API 输出中文
+- ✅ Shell 基础命令拆分到 `src/tools/`，按 System/Debug/History/Help 模块化注册
+- ✅ PS/2 键盘支持方向键、Home/End、PgUp/PgDn、小键盘与 NumLock 状态切换
+- ✅ 支持 PgUp/PgDn 浏览终端历史上下文
+- ✅ 初步加入协作式多任务框架和任务上下文切换
+
+## 功能特性
+
+- ✅ 64 位长模式 (x86_64) — 启动页表覆盖 0-4GB
+- ✅ BIOS/Multiboot2 + UEFI 双启动
+- ✅ VGA 文本模式 + 高分辨率图形终端 (flanterm) 双输出
+- ✅ ANSI→VGA 颜色转换 (VGA 16 色，支持高亮)
+- ✅ PS/2 键盘驱动 (Shift/CapsLock/NumLock/方向键/Home/End/PgUp/PgDn/小键盘)
+- ✅ 交互式 Help 模式 (类似 Python `help()`)
+- ✅ 命令分组管理 (系统/文件/图形/调试/用户)，基础命令已模块化到 `src/tools/`
+- ✅ 命令历史 / 搜索 / 上下键回滚 / PgUp-PgDn 上下文浏览
+- ✅ UTF-8 中文/CJK 字符显示（构建时 TTF → HZK16 点阵）
+- ✅ 初步协作式多任务框架
+- ✅ 多阶段 AI 开发文档体系
+- ✅ 应用程序 API (硬件抽象层)
+
+## 快速开始
+
+### 依赖
+```bash
+sudo apt install build-essential nasm grub-pc-bin mtools qemu-system-x86 ovmf
+```
+
+### 构建与运行
+```bash
+make           # 构建混合 ISO
+make run       # QEMU 窗口运行（高分辨率图形终端）
+# 当前 Makefile 主要提供 BIOS/Multiboot2 ISO 与 QEMU 运行目标
+```
 
 ## 项目结构
 
 ```
 hbosv2/
 ├── src/
-│   ├── boot.asm          # Multiboot 引导入口 (32位到64位转换, BIOS)
-│   ├── boot_efi.asm      # UEFI 引导入口 (64位, EFI固件)
-│   ├── kernel.c          # 内核主代码 (VGA输出, 键盘输入, Shell)
-│   ├── fs.c              # 文件系统
-│   ├── types.h           # 类型定义
-│   └── limine.h          # Limine 引导协议支持
-├── linker_bios.ld        # 链接脚本 (BIOS/Multiboot启动)
-├── linker_efi.ld         # 链接脚本 (UEFI/EFI启动)
-├── limine.cfg            # Limine 配置文件
-├── Makefile              # 构建脚本 (支持双启动)
-└── README.md             # 本文件
+│   ├── boot.asm              # Multiboot2 引导 + 4GB 页表
+│   ├── kernel.c               # 内核入口（极简，仅调用各子系统初始化）
+│   ├── graphics/
+│   │   ├── graphics.h         # 图形子系统 API
+│   │   ├── graphics.c         # flanterm + VGA 回退 + ANSI→VGA 颜色 + CJK 渲染
+│   │   ├── font_cjk.c/.h      # CJK 字库查找与 UTF-8 辅助
+│   │   └── cjk_glyph.asm      # 内嵌 build/font_cjk.bin
+│   ├── shell/
+│   │   ├── shell.h            # Shell/命令系统 API
+│   │   └── shell.c            # 历史 + 键盘驱动 + 行编辑 + 命令注册
+│   ├── tools/                 # Shell 基础命令模块
+│   │   ├── help.c             # help 命令
+│   │   ├── system.c           # reboot/poweroff/echo/version/clear/credits
+│   │   ├── debug.c            # status 等调试命令
+│   │   └── history.c          # history/clearhistory/search
+│   ├── core/                  # 内核核心框架
+│   │   ├── task.c/.h          # 协作式多任务调度
+│   │   └── task_switch.asm    # x86_64 上下文切换
+│   ├── api/
+│   │   └── hal.h              # 硬件抽象层 — 应用程序开发入口
+│   ├── fb.c / flanterm.c      # flanterm 高分辨率终端渲染引擎
+│   └── fs.c                   # 文件系统框架 (待实现)
+├── docs/                      # 8 个子目录的完整 AI 开发文档
+├── Makefile                   # 构建系统
+└── linker_bios.ld             # 链接脚本
 ```
 
-## 功能特性
+## Shell 命令
 
-- ✅ 64 位长模式运行
-- ✅ BIOS/Multiboot 启动支持
-- ✅ **UEFI/EFI 启动支持** ✨
-- ✅ **混合 ISO 映像 (二合一)** - 同时支持 BIOS 和 UEFI 启动
-- ✅ VGA 文本模式显示
-- ✅ 硬件光标支持
-- ✅ PS/2 键盘驱动
-- ✅ Shift/CapsLock 支持
-- ✅ 简易 Shell 命令行
+| 命令 | 分组 | 说明 |
+|------|------|------|
+| `help` | System | 交互式帮助模式（Python 风格） |
+| `help <cmd>` | System | 显示单条命令帮助 |
+| `clear` | System | 清屏 |
+| `version` | System | 版本信息（bata1） |
+| `echo <text>` | System | 输出文本 |
+| `reboot` | System | 重启系统 |
+| `poweroff` / `shutdown` | System | 关机 |
+| `credits` | System | 致谢 |
+| `status` | Debug | 系统状态 |
+| `history` | System | 命令历史 |
+| `clearhistory` | System | 清除历史 |
+| `search <term>` | System | 搜索历史 |
 
-## 可用命令
+## 应用程序开发 API
 
-| 命令 | 说明 |
+### 示例程序
+
+```c
+/* myapp.c — HBOS 应用程序示例 */
+#include "api/hal.h"
+
+static void my_handler(int argc, char **argv) {
+    console_puts("Hello from my app!\n");
+    console_set_fg(0x00FF00);
+    console_puts("This is green text\n");
+    console_set_fg(0xFFFFFF);
+}
+
+void app_main(void) {
+    app_register_command("myapp", "My first HBOS app", my_handler);
+}
+```
+
+### API 参考
+
+| 函数 | 类别 | 说明 |
+|------|------|------|
+| `console_puts(str)` | 控制台 | 输出字符串（自动计算长度） |
+| `console_write(str, len)` | 控制台 | 输出指定长度的字符串 |
+| `console_putchar(c)` | 控制台 | 输出单字符（自动刷新缓冲区） |
+| `console_flush()` | 控制台 | 强制刷新输出缓冲区 |
+| `console_clear()` | 控制台 | 清除屏幕 |
+| `console_set_fg(color)` | 控制台 | 设置前景色 (24-bit RGB) |
+| `console_set_bg(color)` | 控制台 | 设置背景色 (24-bit RGB) |
+| `console_get_size(&cols, &rows)` | 控制台 | 获取终端字符尺寸 |
+| `console_is_initialized()` | 控制台 | 检查终端是否就绪 |
+| `kb_get_key()` | 键盘 | 阻塞式按键读取 |
+| `sys_reboot()` | 系统 | 重启系统 |
+| `sys_poweroff()` | 系统 | 关闭系统 |
+| `sys_udelay(us)` | 系统 | 微秒级忙等延时 |
+| `sys_mdelay(ms)` | 系统 | 毫秒级忙等延时 |
+| `app_register_command(name, desc, handler)` | 命令 | 注册 Shell 命令 |
+
+### 编译应用程序
+
+```makefile
+# 在 Makefile 的 C_SRCS 中添加
+C_SRCS += apps/myapp.c
+```
+
+## 技术架构
+
+### 启动流程
+
+```
+BIOS → GRUB (Multiboot2) → boot.asm (32-bit)
+  ├── CPUID 长模式检测
+  ├── 4 级页表 (P4 + P3 + 4×P2 = 6 页，4GB 2MB 大页映射)
+  ├── PAE → EFER.LME → CR0.PG
+  └── LGDT → 64-bit long_mode
+      └── call kmain(mbi)
+```
+
+### 图形双模式与 CJK 输出
+
+```
+console_puts(str)
+  ├── ASCII / ANSI → flanterm_write() → 高分辨率帧缓冲
+  ├── UTF-8 CJK    → UTF-8 解码 → HZK16 字形查找 → 像素级绘制
+  └── VGA fallback → vga_putc_fallback() → ANSI SGR → VGA 颜色属性
+```
+
+### 页表布局 (4GB)
+
+| 页表 | 映射 |
 |------|------|
-| `help` | 显示帮助信息 |
-| `clear` | 清屏 |
-| `version` | 显示系统版本 |
-| `reboot` | 重启系统 |
-| `poweroff` | 关闭系统 |
-| `echo <text>` | 输出文本 |
-| `color FG BG` | 设置颜色 (0-15) |
+| p2_0 | 0GB - 1GB |
+| p2_1 | 1GB - 2GB |
+| p2_2 | 2GB - 3GB |
+| p2_3 | 3GB - 4GB |
 
-## 快速开始
+## 多阶段计划
 
-### 依赖
+| Phase | 名称 | 状态 |
+|-------|------|------|
+| 0 | 引导系统 | ✅ |
+| 1 | 内核核心 | ✅ 初步任务框架 |
+| 2 | 图形系统 | ✅ CJK/Framebuffer/VGA |
+| 3 | Shell | ✅ 模块化命令/行编辑/历史 |
+| 4 | 设备驱动 | ✅ PS/2 键盘；ATA 待完善 |
+| 5 | 文件系统 | ⬜ |
+| 6 | 内存管理 | ⬜ |
+| 7 | 进程管理 | ✅ 协作式多任务雏形 |
 
-- `gcc` - C 编译器
-- `nasm` - 汇编器
-- `ld` - 链接器
-- `grub-mkrescue` - ISO 制作工具 (支持 EFI)
-- `mtools` - GRUB 依赖
-- `qemu-system-x86_64` - 模拟器
-- `ovmf` (可选) - UEFI 固件用于 UEFI 模式测试
+## 许可证
 
-```bash
-# Ubuntu/Debian
-sudo apt install build-essential nasm grub-pc-bin mtools qemu-system-x86 ovmf
-
-# Fedora
-sudo dnf install gcc nasm grub2-tools mtools qemu-system-x86 ovmf
-```
-
-### 构建
-
-```bash
-# 构建混合 ISO (支持 BIOS 和 UEFI)
-make
-
-# 仅构建 BIOS 内核
-make all-bios
-
-# 清理构建输出
-make clean
-```
-
-### 运行
-
-```bash
-# 在 BIOS 模式运行
-make run
-
-# 在 UEFI 模式运行 (需要 OVMF)
-make run-efi
-
-# 手动运行
-qemu-system-x86_64 -cdrom build/hbos.iso -m 512M
-```
-
-### 详细的编译选项
-
-```bash
-# 查看所有可用的编译目标
-make help
-```
-
-## 技术细节
-
-### 启动流程对比
-
-#### BIOS/Multiboot 启动流程
-```
-BIOS → GRUB → Multiboot Header → _start (boot.asm)
-      → 设置页表 → 启用长模式 → 跳转64位
-      → kmain() (kernel.c) → Shell
-```
-
-#### UEFI/EFI 启动流程
-```
-UEFI 固件 → EFI 启动管理器 → efi_main (boot_efi.asm)
-         → 已处于 64 位长模式
-         → kmain() (kernel.c) → Shell
-```
-
-### 混合 ISO (二合一) 说明
-
-混合 ISO 同时包含：
-1. **BIOS 引导部分**: 使用 GRUB Multiboot 协议
-   - 存放位置: `/boot/hbos.bin`
-   - 启动方式: 传统 BIOS 引导
-
-2. **UEFI 引导部分**: 使用 EFI PE 可执行文件格式
-   - 存放位置: `/EFI/BOOT/bootx64.efi`
-   - 启动方式: UEFI 固件直接执行
-   - 支持 64 位 UEFI (x64)
-
-启动时，firmware 自动选择相应的引导方式：
-- **Legacy BIOS**: 使用 Multiboot 模式
-- **UEFI**: 使用 EFI 模式
-
-### 内存布局
-
-```
-0x100000  - 内核加载地址 (BIOS 模式)
-0x100000  - Multiboot Header
-0x101000  - 代码段 (.text)
-0x102000  - 只读数据 (.rodata)
-0x103000  - 数据段 (.data)
-0x104000  - BSS段 (.bss)
-          - 页表 (12KB)
-          - 栈 (64KB)
-
-UEFI 模式: 由 UEFI 固件动态分配和加载
-```
-
-### 构建系统架构
-
-```
-Makefile:
-├── BIOS 目标
-│   ├── boot.asm → boot_bios.o → linker_bios.ld → hbos_bios.bin
-│   └── kernel.c, fs.c → 编译到 BIOS 内核
-├── UEFI 目标
-│   ├── boot_efi.asm → boot_efi.o → linker_efi.ld → hbos_efi.efi
-│   └── kernel.c, fs.c → 编译到 UEFI 内核
-└── ISO 目标
-    ├── BIOS ISO: 包含 BIOS 启动部分
+GPL-3.0
     ├── Hybrid ISO: 同时包含 BIOS 和 UEFI 部分
     └── EFI ISO: (未来支持) 仅包含 UEFI 部分
 ```
@@ -180,6 +206,61 @@ Makefile:
 
 
 
+
+## 应用程序开发 API
+
+### 示例程序
+
+```c
+/* myapp.c — HBOS 应用程序示例 */
+#include "api/hal.h"
+
+static void my_handler(int argc, char **argv) {
+    console_puts("Hello from my app!\n");
+    console_set_fg(0x00FF00);
+    console_puts("This is green text\n");
+    console_set_fg(0xFFFFFF);
+}
+
+void app_main(void) {
+    app_register_command("myapp", "My first HBOS app", my_handler);
+}
+```
+
+### API 参考
+
+| 函数 | 类别 | 说明 |
+|------|------|------|
+| `console_puts(str)` | 控制台 | 输出字符串 (自动计算长度) |
+| `console_write(str, len)` | 控制台 | 输出指定长度的字符串 |
+| `console_putchar(c)` | 控制台 | 输出单字符 (自动刷新缓冲区) |
+| `console_flush()` | 控制台 | 强制刷新输出缓冲区 |
+| `console_clear()` | 控制台 | 清除屏幕 |
+| `console_set_fg(color)` | 控制台 | 设置前景色 (24-bit RGB) |
+| `console_set_bg(color)` | 控制台 | 设置背景色 (24-bit RGB) |
+| `console_get_size(&cols, &rows)` | 控制台 | 获取终端字符尺寸 |
+| `console_is_initialized()` | 控制台 | 检查终端是否就绪 |
+| `kb_get_key()` | 键盘 | 阻塞式按键读取 |
+| `sys_reboot()` | 系统 | 重启系统 |
+| `sys_poweroff()` | 系统 | 关闭系统 |
+| `sys_udelay(us)` | 系统 | 微秒级忙等延时 |
+| `sys_mdelay(ms)` | 系统 | 毫秒级忙等延时 |
+| `app_register_command(name, desc, handler)` | 命令 | 注册 Shell 命令 |
+
+特殊键码：`KB_UP` `KB_DOWN` `KB_LEFT` `KB_RIGHT` `KB_ESC`
+
+## 多阶段开发计划
+
+| Phase | 名称 | 状态 | 说明 |
+|-------|------|------|------|
+| Phase 0 | 引导系统 (BOOT) | ✅ | Multiboot2, 4GB 页表, 长模式 |
+| Phase 1 | 内核核心 (CORE) | ⬜ | GDT/IDT, CPU 检测, 中断 |
+| Phase 2 | 图形系统 (GRAPHICS) | ✅ | flanterm + VGA 颜色回退 + CJK 渲染 |
+| Phase 3 | Shell 命令系统 (SHELL) | ✅ | 模块化命令, help, 分组, 历史, 行编辑 |
+| Phase 4 | 设备驱动 (DRIVERS) | ✅/⬜ | PS/2 键盘已增强，ATA/PCI/串口待完善 |
+| Phase 5 | 文件系统 (FILESYSTEM) | ⬜ | 块设备, FAT32, VFS |
+| Phase 6 | 内存管理 (MEMORY) | ⬜ | PMM, VMM, Heap |
+| Phase 7 | 进程管理 (PROCESS) | ✅/⬜ | 协作式任务调度已加入，Syscall 待实现 |
 
 ## 许可证
 

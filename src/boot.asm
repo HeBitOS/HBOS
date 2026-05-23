@@ -1,4 +1,4 @@
-; Multiboot2 Header - minimal, let GRUB read ELF headers directly
+; Multiboot2 Header - request high-resolution framebuffer
 section .multiboot
 align 8
 header_start:
@@ -6,7 +6,18 @@ header_start:
     dd 0                                 ; ISA: i386
     dd header_end - header_start         ; header length
     dd 0x100000000 - (0xE85250D6 + 0 + (header_end - header_start))  ; checksum
+
+    ; Framebuffer request tag (type 5) - optional
+    align 8
+    dw 5
+    dw 1                                 ; flags: 1=optional
+    dd 20                                ; size
+    dd 1024                              ; preferred width
+    dd 768                               ; preferred height
+    dd 32                                ; preferred depth
+
     ; end tag
+    align 8
     dw 0
     dw 0
     dd 8
@@ -18,15 +29,13 @@ global _start
 extern kmain
 
 _start:
-    ; Very early output to serial
     mov al, 'X'
     mov dx, 0x3F8
     out dx, al
 
     mov esp, stack_top
-    push ebx                     ; multiboot info
+    mov [saved_mbi], ebx
 
-    ; Serial debug: marker for GRUB/Multiboot
     mov al, 'B'
     mov dx, 0x3F8
     out dx, al
@@ -36,36 +45,42 @@ _start:
     cpuid
     cmp eax, 0x80000001
     jb .no_long
-
     mov eax, 0x80000001
     cpuid
     test edx, 1 << 29
     jz .no_long
 
-    ; Serial: long mode available
     mov al, 'L'
     mov dx, 0x3F8
     out dx, al
 
-    ; clear page tables
+    ; Clear page table memory: P4 + P3 + 4x P2 = 6 pages = 24576 bytes
     mov edi, p4_table
     xor eax, eax
-    mov ecx, 3072                ; 3 pages * 1024 dwords
+    mov ecx, 24576 / 4                  ; 6144 dwords
     rep stosd
 
-    ; set up page tables
+    ; P4[0] → P3
     mov eax, p3_table
     or eax, 3
     mov [p4_table], eax
 
-    mov eax, p2_table
+    ; P3[0..3] → P2_0 .. P2_3  (covers 0-4GB)
+    mov edi, p3_table
+    mov ebx, p2_0
+    mov ecx, 4
+.set_p3:
+    mov eax, ebx
     or eax, 3
-    mov [p3_table], eax
+    mov [edi], eax
+    add edi, 8
+    add ebx, 4096
+    loop .set_p3
 
-    ; map 1GB using 2MB pages
-    mov edi, p2_table
-    mov eax, 0x83
-    mov ecx, 512
+    ; Fill 4 P2 tables (2048 entries total) with 2MB pages = 4GB
+    mov edi, p2_0
+    mov eax, 0x83                       ; present + writable + 2MB page
+    mov ecx, 2048
 .fill_p2:
     mov [edi], eax
     add eax, 0x200000
@@ -76,28 +91,23 @@ _start:
     mov eax, cr4
     or eax, 1 << 5
     mov cr4, eax
-
     ; load page table
     mov eax, p4_table
     mov cr3, eax
-
     ; enable long mode
     mov ecx, 0xC0000080
     rdmsr
     or eax, 1 << 8
     wrmsr
-
     ; enable paging
     mov eax, cr0
     or eax, 1 << 31
     mov cr0, eax
 
-    ; Serial: paging enabled
     mov al, 'P'
     mov dx, 0x3F8
     out dx, al
 
-    ; load 64-bit GDT and jump
     lgdt [gdt64.pointer]
     jmp gdt64.code:long_mode
 
@@ -106,6 +116,7 @@ _start:
     jmp $
 
 bits 64
+default abs
 long_mode:
     xor ax, ax
     mov ds, ax
@@ -114,10 +125,9 @@ long_mode:
     mov gs, ax
     mov ss, ax
 
-    ; Setup stack for 64-bit
+    mov rdi, [saved_mbi]
     mov rsp, stack_top
 
-    ; Debug: serial output "OK"
     mov al, 'O'
     mov dx, 0x3F8
     out dx, al
@@ -126,7 +136,6 @@ long_mode:
     mov al, 10
     out dx, al
 
-    pop rdi                      ; multiboot info
     call kmain
 
 .halt:
@@ -146,6 +155,10 @@ section .bss
 align 4096
 p4_table: resb 4096
 p3_table: resb 4096
-p2_table: resb 4096
+p2_0: resb 4096    ; 0GB - 1GB
+p2_1: resb 4096    ; 1GB - 2GB
+p2_2: resb 4096    ; 2GB - 3GB
+p2_3: resb 4096    ; 3GB - 4GB
+saved_mbi: resq 1
 stack_bottom: resb 65536
 stack_top:

@@ -2,6 +2,9 @@
 .kilo/
 build/
 .claude/
+.roo/
+
 *.iso
 *.bin
-*.o
+.roomodes
+

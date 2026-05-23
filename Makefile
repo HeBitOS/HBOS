@@ -1,145 +1,121 @@
 CC = gcc
 AS = nasm
 LD = ld
-OBJCOPY = objcopy
 
 BUILD_DIR = build
 SRC_DIR = src
 
-# BIOS/Multiboot targets
 KERNEL_BIOS = $(BUILD_DIR)/hbos_bios.bin
-KERNEL_EFI = $(BUILD_DIR)/hbos_efi.efi
-
-# ISO targets
-ISO_BIOS = $(BUILD_DIR)/hbos_bios.iso
 ISO_HYBRID = $(BUILD_DIR)/hbos.iso
 
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
-         -O2 -Wall -Wextra
+         -O2 -Wall -Wextra \
+         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools
 
 ASFLAGS = -f elf64
 LDFLAGS_BIOS = -m elf_x86_64 -static -Bsymbolic -nostdlib -T linker_bios.ld
-LDFLAGS_EFI = --subsystem=10 -shared --no-undefined -Bsymbolic
 
-QEMU = qemu-system-x86_64
+QEMU = /usr/bin/qemu-system-x86_64
 
-.PHONY: all clean run iso run-bios run-efi all-bios all-efi help
+# 字体文件
+FONT_TTF = fonts/ZhengGeDianHei-16.ttf
+FONT_BIN = $(BUILD_DIR)/font_cjk.bin
+
+# 所有 C 源文件
+C_SRCS = \
+	$(SRC_DIR)/kernel.c \
+	$(SRC_DIR)/fs.c \
+	$(SRC_DIR)/fb.c \
+	$(SRC_DIR)/flanterm.c \
+	$(SRC_DIR)/graphics/graphics.c \
+	$(SRC_DIR)/graphics/font_cjk.c \
+	$(SRC_DIR)/shell/shell.c \
+	$(SRC_DIR)/core/task.c \
+	$(SRC_DIR)/tools/help.c \
+	$(SRC_DIR)/tools/system.c \
+	$(SRC_DIR)/tools/debug.c \
+	$(SRC_DIR)/tools/history.c
+
+C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+
+# 所有汇编源文件
+ASM_SRCS = \
+	$(SRC_DIR)/boot.asm \
+	$(SRC_DIR)/core/task_switch.asm \
+	$(SRC_DIR)/graphics/cjk_glyph.asm
+
+ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
+
+ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
+
+.PHONY: all clean run iso help font
 
 all: iso
 
 help:
-	@echo "HBOS Build System"
-	@echo "=================="
-	@echo "Targets:"
-	@echo "  all          - Build hybrid ISO (BIOS + UEFI)"
-	@echo "  all-bios     - Build BIOS version only"
-	@echo "  all-efi      - Build UEFI version only"
-	@echo "  iso          - Create hybrid bootable ISO (default)"
-	@echo "  run          - Build and run hybrid ISO in QEMU (BIOS mode)"
-	@echo "  run-bios     - Build and run BIOS ISO in QEMU"
-	@echo "  run-efi      - Build and run UEFI ISO in QEMU (requires OVMF)"
-	@echo "  clean        - Remove all build files"
+	@echo "HBOS Build Targets:"
+	@echo "  make all       - Build hybrid ISO"
+	@echo "  make run       - Build and run in QEMU"
+	@echo "  make clean     - Clean build files"
+	@echo "  make font      - Regenerate CJK font binary"
 
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools
 
-# ============ BIOS/Multiboot Build ============
+# Font generation
+font: $(FONT_BIN)
 
+$(FONT_BIN): $(FONT_TTF) tools/genhzk.py
+	@echo "[MAKE] Generating CJK font bitmap..."
+	python3 tools/genhzk.py $(FONT_TTF) $(FONT_BIN)
+	@echo "[MAKE] CJK font: $(FONT_BIN)"
+
+# NASM (.asm) — various directories
 $(BUILD_DIR)/boot.o: $(SRC_DIR)/boot.asm | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/boot_efi.o: $(SRC_DIR)/boot_efi.asm | $(BUILD_DIR)
+$(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.asm | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/kernel.o: $(SRC_DIR)/kernel.c | $(BUILD_DIR)
+$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN)
+	$(AS) $(ASFLAGS) $< -o $@
+
+# C rules — one generic rule for all subdirectories
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/fs.o: $(SRC_DIR)/fs.c | $(BUILD_DIR)
+$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.c | $(BUILD_DIR) $(FONT_BIN)
 	$(CC) -c $(CFLAGS) $< -o $@
 
-# BIOS Kernel
-$(KERNEL_BIOS): $(BUILD_DIR)/boot.o $(BUILD_DIR)/kernel.o $(BUILD_DIR)/fs.o
+$(BUILD_DIR)/shell/%.o: $(SRC_DIR)/shell/%.c | $(BUILD_DIR)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.c | $(BUILD_DIR)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(BUILD_DIR)/tools/%.o: $(SRC_DIR)/tools/%.c | $(BUILD_DIR)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+# Link
+$(KERNEL_BIOS): $(ALL_OBJS)
 	$(LD) $(LDFLAGS_BIOS) $^ -o $@
-	@echo "✓ BIOS kernel built: $@"
-
-# EFI Kernel (kept for reference, not used in default hybrid ISO)
-# Hybrid GRUB ISO includes EFI support automatically
-$(KERNEL_EFI): $(BUILD_DIR)/boot_efi.o $(BUILD_DIR)/kernel.o $(BUILD_DIR)/fs.o
-	$(LD) -m elf_x86_64 -static -Bsymbolic -nostdlib -T $(SRC_DIR)/linker_efi.ld $^ -o $@
-	@echo "✓ EFI kernel built: $@"
-
-all-bios: $(KERNEL_BIOS)
-	@echo "✓ BIOS build complete"
-
-all-efi: $(KERNEL_BIOS)
-	@echo "⚠ UEFI support is built into the hybrid ISO via GRUB"
-	@echo "✓ UEFI-compatible build complete"
-
-# ============ ISO Generation ============
-
-$(ISO_BIOS): $(KERNEL_BIOS)
-	@mkdir -p $(BUILD_DIR)/isodir/boot/grub
-	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir/boot/hbos.bin
-	@echo 'set timeout=3' > $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'set default=0' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'terminal_input console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'terminal_output console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'menuentry "HBOS - He Bit OS (BIOS)" {' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo '    echo Loading HBOS...' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo '    multiboot2 /boot/hbos.bin' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo '    echo Press Enter to boot' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo '}' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir 2>/dev/null || \
-	 grub-mkrescue -o $@ $(BUILD_DIR)/isodir
-	@echo "✓ BIOS ISO created: $@"
+	@echo "✓ BIOS kernel: $@"
 
 $(ISO_HYBRID): $(KERNEL_BIOS)
-	@echo "Creating hybrid ISO with BIOS and UEFI support..."
 	@mkdir -p $(BUILD_DIR)/isodir/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir/boot/hbos.bin
-	@echo 'set timeout=5' > $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'set default=0' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'terminal_input console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'terminal_output console' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo 'menuentry "HBOS - He Bit OS (BIOS/UEFI)" {' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo '    echo Loading HBOS...' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo '    multiboot2 /boot/hbos.bin' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
-	@echo '}' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@printf 'set timeout=5\nset default=0\nset gfxpayload=1920x1080x32,1024x768x32,800x600x32,640x480x32\n' > $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@printf 'menuentry "HBOS" {\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@grub-mkrescue --efi-boot-part --efi-boot-image -o $@ $(BUILD_DIR)/isodir 2>/dev/null || \
 	 grub-mkrescue -o $@ $(BUILD_DIR)/isodir 2>/dev/null
-	@echo "✓ Hybrid ISO created: $@"
+	@echo "✓ Hybrid ISO: $@"
 
 iso: $(ISO_HYBRID)
 
-# Legacy target
 run: $(ISO_HYBRID)
-	@echo "Booting hybrid ISO (BIOS mode with VGA)..."
 	$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d -serial stdio -vga std -monitor none
 
-run-bios: $(ISO_BIOS)
-	@echo "Booting BIOS-only ISO..."
-	$(QEMU) -cdrom $(ISO_BIOS) -m 512M -boot d
-
-run-efi: $(ISO_HYBRID)
-	@echo "Booting hybrid ISO (UEFI mode with OVMF)..."
-	@echo "Checking for OVMF firmware..."
-	@if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then \
-		$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d \
-			-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd; \
-	elif [ -f /usr/share/ovmf/OVMF.fd ]; then \
-		$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d \
-			-drive if=pflash,format=raw,readonly=on,file=/usr/share/ovmf/OVMF.fd; \
-	elif [ -f /usr/share/qemu/OVMF.fd ]; then \
-		$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d \
-			-drive if=pflash,format=raw,readonly=on,file=/usr/share/qemu/OVMF.fd; \
-	else \
-		echo "⚠ OVMF firmware not found. Install with:"; \
-		echo "  sudo apt install ovmf"; \
-		echo "Falling back to BIOS mode..."; \
-		$(QEMU) -cdrom $(ISO_HYBRID) -m 512M -boot d; \
-	fi
-
 clean:
-	rm -rf $(BUILD_DIR)/* && rmdir $(BUILD_DIR) 2>/dev/null || true
-	@echo "✓ Build directory cleaned"
+	rm -rf $(BUILD_DIR)
+	@echo "✓ Cleaned"
