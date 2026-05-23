@@ -7,16 +7,11 @@ header_start:
     dd header_end - header_start         ; header length
     dd 0x100000000 - (0xE85250D6 + 0 + (header_end - header_start))  ; checksum
 
-    ; Framebuffer request tag (type 5) - optional
-    ; Use 0/0/0 so GRUB chooses any available framebuffer mode.
-    ; This avoids "no suitable video mode found" on VirtualBox/VMSVGA/VBoxVGA.
-    align 8
-    dw 5
-    dw 1                                 ; flags: 1=optional
-    dd 20                                ; size
-    dd 0                                 ; preferred width:  no preference
-    dd 0                                 ; preferred height: no preference
-    dd 0                                 ; preferred depth:  no preference
+    ; No framebuffer request tag here.
+    ; Some VirtualBox/GRUB combinations fail with:
+    ;   error: no suitable video mode found.
+    ; By omitting the Multiboot2 framebuffer request entirely, GRUB stays in
+    ; text/VGA-compatible mode and the kernel can use its VGA fallback path.
 
     ; end tag
     align 8
