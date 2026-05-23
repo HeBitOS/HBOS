@@ -103,10 +103,11 @@ void kmain(void *mbi) {
         kfree(test);
     }
 
-    // Enable interrupts (after IDT is set up)
-    int_enable();
-    serial_print("[KERN] GDT+IDT+PIC initialized, interrupts enabled\n");
-    console_puts("[KERN] GDT+IDT+PIC initialized, interrupts enabled\n");
+    // Note: interrupts intentionally NOT enabled yet.
+    // PIC IRQ handlers are registered but no device IRQs have been configured.
+    // Enabling interrupts now would cause spurious IRQ7 storms and crash.
+    serial_print("[KERN] GDT+IDT+PIC initialized (interrupts remain disabled)\n");
+    console_puts("[KERN] GDT+IDT+PIC initialized (interrupts remain disabled)\n");
 
     // Phase 6: Task system + Shell
     task_init();

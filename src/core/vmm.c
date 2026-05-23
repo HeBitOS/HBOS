@@ -67,6 +67,13 @@ static pte_t *vmm_get_pte(uint64_t virt_addr, bool create, uint64_t flags) {
     return &pt[VMM_IDX(virt_addr, VMM_PT)];
 }
 
+// Reload CR3 to flush TLB — called after page table modifications
+static void vmm_flush_tlb(void) {
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+}
+
 // ============================================================
 // Public API
 // ============================================================
@@ -75,8 +82,6 @@ void vmm_init(uint64_t p4_phys) {
     g_pml4_phys = p4_phys;
     g_pml4 = (pte_t *)(uintptr_t)p4_phys; // Identity-mapped
 
-    // Map kernel heap area
-    // We allocate pages on demand via vmm_alloc_page_at
     console_puts("[VMM] Initialized, PML4 at 0x");
     int started = 0;
     for (int s = 15; s >= 0; s--) {
@@ -94,7 +99,8 @@ int vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     if (!pte) return -1;
 
     *pte = (phys_addr & ~0xFFFULL) | (flags & 0xFFF) | VMM_P;
-    __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+    // Full TLB flush to ensure new page tables are visible
+    vmm_flush_tlb();
     return 0;
 }
 
@@ -102,18 +108,23 @@ void vmm_unmap_page(uint64_t virt_addr) {
     pte_t *pte = vmm_get_pte(virt_addr, false, 0);
     if (!pte) return;
     *pte = 0;
-    __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+    vmm_flush_tlb();
 }
 
 uint64_t vmm_get_phys(uint64_t virt_addr) {
     pte_t *pte = vmm_get_pte(virt_addr, false, 0);
     if (!pte) return 0;
+    if (*pte & VMM_PS) {
+        return (*pte & ~((1ULL<<21)-1)) | (virt_addr & ((1ULL<<21)-1));
+    }
     return (*pte & ~0xFFFULL) | (virt_addr & 0xFFF);
 }
 
 uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags) {
     uint64_t phys = pmm_alloc_page();
-    if (!phys) return 0;
+    if (!phys) {
+        return 0;
+    }
 
     if (vmm_map_page(virt_addr, phys, flags) != 0) {
         pmm_free_page(phys);

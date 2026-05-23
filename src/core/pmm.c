@@ -21,9 +21,6 @@
 #define PAGE_SIZE   4096ULL
 #define PAGE_SHIFT  12
 
-// Where to place the bitmap in physical memory
-#define PMM_BITMAP_PHYS 0xFE000000ULL  // ~4GB - 32MB
-
 // Memory map entry from Multiboot2
 struct mb2_mmap_entry {
     uint64_t base_addr;
@@ -130,6 +127,7 @@ void pmm_init(void *mbi) {
             uint64_t end = e->base_addr + e->length;
             if (end > max_addr && end <= PMM_MAX_PHYS_ADDR)
                 max_addr = end;
+            if (end > max_addr) max_addr = end;
         }
     }
 
@@ -143,17 +141,22 @@ void pmm_init(void *mbi) {
     // Bitmap size in bytes
     size_t bitmap_bytes = (g_total_pages + 7) / 8;
 
-    // We need a physical location for the bitmap.
-    // Place it just below PMM_BITMAP_PHYS, aligned to page.
-    // First, check if there's enough space.
-    uint64_t bitmap_phys = (PMM_BITMAP_PHYS - bitmap_bytes) & ~(PAGE_SIZE - 1);
-    if (bitmap_phys + bitmap_bytes > PMM_MAX_PHYS_ADDR) {
-        console_puts("\x1b[31m[PMM] Not enough room for bitmap!\x1b[0m\n");
-        return;
+    // Find the bitmap location: right after the kernel's BSS end.
+    extern uint64_t _end[];
+    uint64_t kernel_end = (uint64_t)_end;
+    if (kernel_end < 0x200000) kernel_end = 0x200000;
+
+    // Round up to page boundary
+    uint64_t bitmap_phys = (kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    // Verify the bitmap fits within available memory
+    if (bitmap_phys + bitmap_bytes > max_addr) {
+        console_puts("\x1b[31m[PMM] Not enough room for bitmap after kernel!\x1b[0m\n");
+        // Fallback: try placing at max_addr - bitmap_bytes
+        bitmap_phys = (max_addr - bitmap_bytes) & ~(PAGE_SIZE - 1);
     }
 
-    // The bitmap is in physical memory. We need it mapped to write to it.
-    // Since our page tables identity-map the first 4GB, we can write directly.
+    // The bitmap is in the identity-mapped region, so we can write directly.
     g_bitmap = (uint8_t *)(uintptr_t)bitmap_phys;
 
     // Mark everything as used initially, then free available regions
@@ -171,10 +174,10 @@ void pmm_init(void *mbi) {
         uint64_t end  = e->base_addr + e->length;
 
         // Clamp to our managed range
-        if (base >= PMM_MAX_PHYS_ADDR) continue;
-        if (end > PMM_MAX_PHYS_ADDR) end = PMM_MAX_PHYS_ADDR;
+        if (base >= max_addr) continue;
+        if (end > max_addr) end = max_addr;
 
-        // Round to page boundaries
+        // Round to page boundaries: start after any partial page
         uint64_t start_page = (base + PAGE_SIZE - 1) >> PAGE_SHIFT;
         uint64_t end_page   = end >> PAGE_SHIFT;
 
@@ -196,14 +199,11 @@ void pmm_init(void *mbi) {
         }
     }
 
-    // Reserve low memory (page 0, EBDA, etc.)
-    // Reserve first 1MB (boot code, multiboot structures, etc.)
+    // Reserve low memory (page 0, EBDA, etc.) — first 1MB
     pmm_reserve_region(0x0, 0x100000);
 
-    // Reserve the kernel's own location — we'll use the boot's pagetables area
-    // Reserve a bit from 0x100000 to ~0x200000 for kernel image
-    // (Our kernel is linked at 1M, loaded by GRUB)
-    pmm_reserve_region(0x100000, 0x200000);
+    // Reserve kernel image location (from kernel_end rounding we already know)
+    pmm_reserve_region(0x100000, bitmap_phys - 0x100000);
 
     g_pmm_ready = true;
 
@@ -213,6 +213,8 @@ void pmm_init(void *mbi) {
     print_hex64(g_total_mem);
     console_puts(" bytes\n  Free pages:  ");
     print_hex64(g_free_pages);
+    console_puts("\n  Bitmap at:   ");
+    print_hex64(bitmap_phys);
     console_puts("\x1b[0m\n");
 }
 
