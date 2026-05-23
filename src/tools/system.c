@@ -37,7 +37,7 @@ static void cmd_echo(int argc, char **argv) {
 static void cmd_version(int argc, char **argv) {
     (void)argc; (void)argv;
     console_puts("\n\x1b[33m========================================\x1b[0m\n");
-    console_puts("    \x1b[36mHBOS - He Bit OS bata1\x1b[0m\n");
+    console_puts("    \x1b[36mHBOS - He Bit OS beta1\x1b[0m\n");
     console_puts("\x1b[33m========================================\x1b[0m\n\n");
     console_puts("64-bit x86_64 Long Mode OS\n");
 }

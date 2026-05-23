@@ -1,13 +1,13 @@
    # HBOS - He Bit OS
 
-> 当前版本：bata1
+> 当前版本：beta1
 > 64-bit 高分辨率图形命令行操作系统，支持多阶段 AI 协同开发
 
 ![截图](./photo/hbosv0.1.png "v0.1截图")
 
-## bata1 更新
+## beta1 更新
 
-- ✅ 内核启动横幅与 `version` 命令显示更新为 `bata1`
+- ✅ 内核启动横幅与 `version` 命令显示更新为 `beta1`
 - ✅ 支持构建时 TTF → HZK16 点阵字体生成，并内嵌 CJK 字库
 - ✅ 支持 UTF-8 中文/CJK 字符输出，应用程序可直接通过控制台 API 输出中文
 - ✅ Shell 基础命令拆分到 `src/tools/`，按 System/Debug/History/Help 模块化注册
@@ -83,7 +83,7 @@ hbosv2/
 | `help` | System | 交互式帮助模式（Python 风格） |
 | `help <cmd>` | System | 显示单条命令帮助 |
 | `clear` | System | 清屏 |
-| `version` | System | 版本信息（bata1） |
+| `version` | System | 版本信息（beta1） |
 | `echo <text>` | System | 输出文本 |
 | `reboot` | System | 重启系统 |
 | `poweroff` / `shutdown` | System | 关机 |

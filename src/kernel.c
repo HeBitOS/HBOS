@@ -48,7 +48,7 @@ void int_enable(void);
 // ============================================================
 void kmain(void *mbi) {
     serial_init();
-    serial_print("\n===== HBOS bata1 Starting =====\n");
+    serial_print("\n===== HBOS beta1 Starting =====\n");
 
     // Phase 1: Init graphics (needs console_puts/console_write for debug output)
     graphics_init(mbi);
@@ -57,7 +57,7 @@ void kmain(void *mbi) {
     // Banner
     console_write("\n", 1);
     console_write("========================================\n", 41);
-    console_write("      HBOS - He Bit OS bata1\n", 29);
+    console_write("      HBOS - He Bit OS beta1\n", 29);
     console_write("       64-bit Operating System\n", 31);
     console_write("========================================\n\n", 41);
 
