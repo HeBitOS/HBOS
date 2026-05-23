@@ -8,13 +8,15 @@ header_start:
     dd 0x100000000 - (0xE85250D6 + 0 + (header_end - header_start))  ; checksum
 
     ; Framebuffer request tag (type 5) - optional
+    ; Use 0/0/0 so GRUB chooses any available framebuffer mode.
+    ; This avoids "no suitable video mode found" on VirtualBox/VMSVGA/VBoxVGA.
     align 8
     dw 5
     dw 1                                 ; flags: 1=optional
     dd 20                                ; size
-    dd 1024                              ; preferred width
-    dd 768                               ; preferred height
-    dd 32                                ; preferred depth
+    dd 0                                 ; preferred width:  no preference
+    dd 0                                 ; preferred height: no preference
+    dd 0                                 ; preferred depth:  no preference
 
     ; end tag
     align 8

@@ -105,7 +105,7 @@ $(KERNEL_BIOS): $(ALL_OBJS)
 $(ISO_HYBRID): $(KERNEL_BIOS)
 	@mkdir -p $(BUILD_DIR)/isodir/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir/boot/hbos.bin
-	@printf 'set timeout=5\nset default=0\nset gfxpayload=1920x1080x32,1024x768x32,800x600x32,640x480x32\n' > $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	@printf 'set timeout=5\nset default=0\n' > $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS" {\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir/boot/grub/grub.cfg
 	@grub-mkrescue --efi-boot-part --efi-boot-image -o $@ $(BUILD_DIR)/isodir 2>/dev/null || \
 	 grub-mkrescue -o $@ $(BUILD_DIR)/isodir 2>/dev/null
