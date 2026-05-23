@@ -280,34 +280,10 @@ void console_scroll_reset(void) {
 // graphics_init — initialize framebuffer or VGA fallback
 // ============================================================
 
-// Serial diagnostic (static version to avoid header dependency)
-static void dbg_putc(char c) {
-    while (!(inb(0x3F8 + 5) & 0x20));
-    outb(0x3F8, c);
-}
-static void dbg_str(const char *s) {
-    while (*s) { if (*s == '\n') dbg_putc('\r'); dbg_putc(*s++); }
-}
-static void dbg_hex(uint64_t v) {
-    char buf[17]; buf[16] = 0;
-    for (int i = 15; i >= 0; i--) { buf[i] = "0123456789ABCDEF"[v & 0xF]; v >>= 4; }
-    dbg_str(buf);
-}
-
 int graphics_init(void *mbi) {
     struct mb2_tag_framebuffer *fb = (struct mb2_tag_framebuffer *)mb2_find_tag(mbi, 8);
     /* Page tables map 0-4GB, so any framebuffer address is accessible */
     if (fb && fb->framebuffer_addr && fb->framebuffer_bpp == 32) {
-        dbg_str("[FB] Found framebuffer: addr=0x");
-        dbg_hex(fb->framebuffer_addr);
-        dbg_str(" wxh=");
-        dbg_hex(fb->framebuffer_width);
-        dbg_putc('x');
-        dbg_hex(fb->framebuffer_height);
-        dbg_str(" bpp=");
-        dbg_hex(fb->framebuffer_bpp);
-        dbg_putc('\n');
-
         uint32_t ansi[8] = {0x000000,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa};
         uint32_t bright[8] = {0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff};
         g_term = flanterm_fb_init(NULL, NULL,
@@ -318,23 +294,9 @@ int graphics_init(void *mbi) {
         if (g_term) {
             g_initialized = true;
             use_vga_fallback = false;
-            dbg_str("[FB] flanterm initialized OK\n");
-            // Initialize CJK font subsystem
-            if (cjk_font_init()) {
-                dbg_str("[CJK] Font loaded: ");
-                uint32_t cnt = cjk_font_get_count();
-                char tmp[16]; int ti = 0;
-                do { tmp[ti++] = '0' + (cnt % 10); cnt /= 10; } while (cnt);
-                for (int k = ti-1; k >= 0; k--) dbg_putc(tmp[k]);
-                dbg_str(" glyphs\n");
-            } else {
-                dbg_str("[CJK] Font init FAILED\n");
-            }
+            cjk_font_init();
             return 0;
         }
-        dbg_str("[FB] flanterm_fb_init returned NULL\n");
-    } else {
-        dbg_str("[FB] No framebuffer found, using VGA fallback\n");
     }
     use_vga_fallback = true;
     g_initialized = true;

@@ -12,7 +12,7 @@
 #include "tools/tool.h"
 
 // ============================================================
-// HBOS 内核主入口 — 统一通过 graphics 子系统输出
+// HBOS 内核主入口
 // ============================================================
 
 #define SERIAL_PORT 0x3F8
@@ -39,9 +39,8 @@ static void serial_print(const char *s) {
     while (*s) { if (*s == '\n') serial_putc('\r'); serial_putc(*s++); }
 }
 
-// Forward declarations for GDT/IDT init
+// Forward declarations
 void gdt_idt_init(void);
-void int_enable(void);
 
 // ============================================================
 // 内核入口
@@ -50,11 +49,10 @@ void kmain(void *mbi) {
     serial_init();
     serial_print("\n===== HBOS beta1 Starting =====\n");
 
-    // Phase 1: Init graphics (needs console_puts/console_write for debug output)
     graphics_init(mbi);
     console_clear();
 
-    // Banner
+    // 启动横幅
     console_write("\n", 1);
     console_write("========================================\n", 41);
     console_write("      HBOS - He Bit OS beta1\n", 29);
@@ -69,45 +67,24 @@ void kmain(void *mbi) {
     console_puts("\x1b[0m");
     console_puts("\n");
 
-    // Phase 2: GDT + IDT + PIC (custom 64-bit GDT, interrupt handlers)
-    serial_print("[KERN] Initializing GDT/IDT/PIC...\n");
-    console_puts("[KERN] Initializing GDT/IDT/PIC...\n");
+    // Phase 2: GDT + IDT + PIC
     gdt_idt_init();
 
-    // Set TSS ring0 stack to current RSP (for interrupt entry)
+    // Set TSS ring0 stack
     uint64_t rsp;
     __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
     tss_set_stack(rsp);
 
     // Phase 3: Physical memory manager
-    serial_print("[KERN] Initializing PMM...\n");
-    console_puts("[KERN] Initializing PMM\n");
     pmm_init(mbi);
 
-    // Phase 4: Virtual memory manager (extend boot page tables)
-    serial_print("[KERN] Initializing VMM...\n");
-    console_puts("[KERN] Initializing VMM\n");
+    // Phase 4: Virtual memory manager
     uint64_t cr3 = 0;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     vmm_init(cr3);
 
     // Phase 5: Kernel heap
-    serial_print("[KERN] Initializing heap...\n");
-    console_puts("[KERN] Initializing heap\n");
     heap_init();
-
-    // Test kmalloc/kfree
-    void *test = kmalloc(128);
-    if (test) {
-        console_puts("[HEAP] kmalloc test OK\n");
-        kfree(test);
-    }
-
-    // Note: interrupts intentionally NOT enabled yet.
-    // PIC IRQ handlers are registered but no device IRQs have been configured.
-    // Enabling interrupts now would cause spurious IRQ7 storms and crash.
-    serial_print("[KERN] GDT+IDT+PIC initialized (interrupts remain disabled)\n");
-    console_puts("[KERN] GDT+IDT+PIC initialized (interrupts remain disabled)\n");
 
     // Phase 6: Task system + Shell
     task_init();
