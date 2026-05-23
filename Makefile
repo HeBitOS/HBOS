@@ -40,9 +40,16 @@ C_SRCS = \
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
 # 所有汇编源文件
+C_SRCS += \
+	$(SRC_DIR)/core/gdt_idt.c \
+	$(SRC_DIR)/core/pmm.c \
+	$(SRC_DIR)/core/vmm.c \
+	$(SRC_DIR)/core/heap.c
+
 ASM_SRCS = \
 	$(SRC_DIR)/boot.asm \
 	$(SRC_DIR)/core/task_switch.asm \
+	$(SRC_DIR)/core/interrupt_asm.asm \
 	$(SRC_DIR)/graphics/cjk_glyph.asm
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)

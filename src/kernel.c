@@ -2,6 +2,13 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "graphics/graphics.h"
+#include "shell/shell.h"
+#include "core/task.h"
+#include "core/cpu.h"
+#include "core/pmm.h"
+#include "core/vmm.h"
+#include "core/heap.h"
 #include "tools/tool.h"
 
 // ============================================================
@@ -32,12 +39,9 @@ static void serial_print(const char *s) {
     while (*s) { if (*s == '\n') serial_putc('\r'); serial_putc(*s++); }
 }
 
-// ============================================================
-// 外部模块接口
-// ============================================================
-#include "graphics/graphics.h"
-#include "shell/shell.h"
-#include "core/task.h"
+// Forward declarations for GDT/IDT init
+void gdt_idt_init(void);
+void int_enable(void);
 
 // ============================================================
 // 内核入口
@@ -46,6 +50,7 @@ void kmain(void *mbi) {
     serial_init();
     serial_print("\n===== HBOS bata1 Starting =====\n");
 
+    // Phase 1: Init graphics (needs console_puts/console_write for debug output)
     graphics_init(mbi);
     console_clear();
 
@@ -64,11 +69,51 @@ void kmain(void *mbi) {
     console_puts("\x1b[0m");
     console_puts("\n");
 
+    // Phase 2: GDT + IDT + PIC (custom 64-bit GDT, interrupt handlers)
+    serial_print("[KERN] Initializing GDT/IDT/PIC...\n");
+    console_puts("[KERN] Initializing GDT/IDT/PIC...\n");
+    gdt_idt_init();
+
+    // Set TSS ring0 stack to current RSP (for interrupt entry)
+    uint64_t rsp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
+    tss_set_stack(rsp);
+
+    // Phase 3: Physical memory manager
+    serial_print("[KERN] Initializing PMM...\n");
+    console_puts("[KERN] Initializing PMM\n");
+    pmm_init(mbi);
+
+    // Phase 4: Virtual memory manager (extend boot page tables)
+    serial_print("[KERN] Initializing VMM...\n");
+    console_puts("[KERN] Initializing VMM\n");
+    uint64_t cr3 = 0;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    vmm_init(cr3);
+
+    // Phase 5: Kernel heap
+    serial_print("[KERN] Initializing heap...\n");
+    console_puts("[KERN] Initializing heap\n");
+    heap_init();
+
+    // Test kmalloc/kfree
+    void *test = kmalloc(128);
+    if (test) {
+        console_puts("[HEAP] kmalloc test OK\n");
+        kfree(test);
+    }
+
+    // Enable interrupts (after IDT is set up)
+    int_enable();
+    serial_print("[KERN] GDT+IDT+PIC initialized, interrupts enabled\n");
+    console_puts("[KERN] GDT+IDT+PIC initialized, interrupts enabled\n");
+
+    // Phase 6: Task system + Shell
     task_init();
     shell_init();
-    tool_init_all();  // 注册所有工具模块命令
+    tool_init_all();
 
-    console_puts("Type 'help' for commands\n\n");
+    console_puts("\nType 'help' for commands\n\n");
     serial_print("[KERN] Shell ready\n");
 
     shell_run();
