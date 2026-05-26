@@ -512,6 +512,21 @@ void console_get_size(uint64_t *cols, uint64_t *rows) {
 
 bool console_is_initialized(void) { return g_initialized; }
 
+// Cursor blink counter — incremented on each call from the shell loop.
+// When it reaches BLINK_INTERVAL, we toggle cursor_enabled and flush.
+#define BLINK_INTERVAL 120000
+static uint64_t g_blink_count = 0;
+
+void console_cursor_blink(void) {
+    if (!g_term) return;
+    g_blink_count++;
+    if (g_blink_count >= BLINK_INTERVAL) {
+        g_blink_count = 0;
+        g_term->cursor_enabled = !g_term->cursor_enabled;
+        flanterm_flush(g_term);
+    }
+}
+
 void fb_put_pixel(uint64_t x, uint64_t y, uint32_t color) {
     if (!g_term) return;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;

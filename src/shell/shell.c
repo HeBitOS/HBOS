@@ -379,6 +379,7 @@ void shell_run(void) {
                 }
             }
 
+            console_cursor_blink();
             task_yield();
         }
     }

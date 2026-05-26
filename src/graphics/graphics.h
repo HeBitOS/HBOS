@@ -47,6 +47,9 @@ void console_set_title(const char *title);
 // 获取终端是否已初始化
 bool console_is_initialized(void);
 
+// 光标闪烁（每 ~120k 循环翻转一次）
+void console_cursor_blink(void);
+
 // 检查是否工作在高分辨率 Framebuffer 模式（可显示 CJK）
 // VGA 文本模式回退时中文无法渲染，返回 false
 bool console_is_framebuffer(void);
