@@ -133,43 +133,135 @@ static void vga_clear_fallback(void) {
 static utf8_state_t g_u8st;
 static bool g_u8_init = false;
 
-// Render a CJK glyph onto the framebuffer at flanterm's current cursor position.
-// Uses the exact same pixel layout as flanterm's internal renderer:
-//   pixel_x = offset_x + cursor_x * font_width
-//   pixel_y = offset_y + cursor_y * font_height
-// Writes spaces via raw_putchar (updates grid + advances cursor), then overpaints.
+// Render a CJK glyph at flanterm's current cursor position.
+//
+// This approach completely bypasses the flanterm queue system to
+// avoid the "symbols and Chinese go haywire" bug.
+//
+// ROOT CAUSE (why raw_putchar+flush doesn't work for consecutive CJK):
+//   raw_putchar(' ') × 2 advances cursor_x by 2.  Then flanterm_flush
+//   compares old_cursor vs cursor → if different, it redraws grid[]
+//   at old_cursor.  When CJK characters run consecutively, the first
+//   CJK's flush sets old_cursor=(cx+2,cy).  The second CJK calls
+//   raw_putchar(' ') × 2 moving cursor to (cx+4,cy), THEN flush sees
+//   old_cursor=(cx+2,cy) ≠ cursor=(cx+4,cy) and redraws grid[cy*cols+cx+2]
+//   (a space) at pixel position (cx+2) — which is the RIGHT HALF of
+//   the first CJK glyph.  The first CJK's right half is overwritten
+//   by a space.  Repeating this for every consecutive CJK character
+//   fragments all glyphs → "symbols flying everywhere".
+//
+// SOLUTION:
+//   1. Write spaces into fc->grid[] ONLY (no fc->map[] writes —
+//      map entries are harmless stales that flush will handle).
+//   2. Fill background pixels of both CJK cells (erases old ASCII).
+//   3. Paint CJK 16×16 glyph pixels (upscaled).
+//   4. Advance fc->cursor_x and fc->old_cursor_x by 2.
+//   5. NO raw_putchar calls, NO flanterm_flush calls.
+//      This eliminates the old_cursor redraw entirely.
+//
+// Sync flanterm's old_cursor to current cursor so the next
+// flanterm_flush won't redraw a stale grid cell on the framebuffer.
+// This must be called BEFORE every flanterm_flush, especially after
+// CJK rendering where the cursor has advanced past the CJK glyphs.
+static inline void cjk_sync_old_cursor(struct flanterm_fb_context *fc) {
+    fc->old_cursor_x = fc->cursor_x;
+    fc->old_cursor_y = fc->cursor_y;
+}
+
 static void cjk_render_at_cursor(uint32_t codepoint) {
     if (!g_term) return;
 
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
 
-    // Pixel position = offset + cursor * font size — same formula flanterm uses
-    uint64_t px = fc->offset_x + fc->cursor_x * fc->font_width;
-    uint64_t py = fc->offset_y + fc->cursor_y * fc->font_height;
+    uint64_t cursor_x = fc->cursor_x;
+    uint64_t cursor_y = fc->cursor_y;
+    uint64_t scale_x  = fc->font_scale_x;
+    uint64_t scale_y  = fc->font_scale_y;
+    uint64_t cols     = g_term->cols;
+    uint64_t rows     = g_term->rows;
+
+    // ---- edge wrap ----
+    if (cursor_x >= cols - 1) {
+        cursor_x = 0;
+        cursor_y++;
+        if (cursor_y >= rows) {
+            cursor_y = rows - 1;
+            if (g_term->scroll) g_term->scroll(g_term);
+        }
+    }
+
+    // ---- effective colours ----
     uint32_t fg = fc->text_fg;
+    if (fg == 0xffffffff) fg = fc->default_fg;
+    uint32_t bg = fc->text_bg;
+    if (bg == 0xffffffff) bg = fc->default_bg;
 
-    // Write two spaces through raw_putchar — advances cursor, updates grid
-    g_term->raw_putchar(g_term, ' ');
-    g_term->raw_putchar(g_term, ' ');
-    flanterm_flush(g_term);
+    // ---- pixel origin ----
+    uint64_t px = fc->offset_x + cursor_x * fc->glyph_width;
+    uint64_t py = fc->offset_y + cursor_y * fc->glyph_height;
+    uint64_t cell_w = fc->glyph_width;
+    uint64_t cell_h = fc->glyph_height;
 
-    // Overpaint CJK foreground pixels at the saved position
+    // ---- background fill: erase old ASCII pixels ----
+    for (uint64_t rr = 0; rr < cell_h; rr++)
+        for (uint64_t cc = 0; cc < cell_w * 2; cc++)
+            fb_put_pixel(px + cc, py + rr, bg);
+
+    // ---- paint CJK 16×16 glyph pixels (upscaled) ----
     const uint8_t *glyph = cjk_font_lookup(codepoint);
-    if (!glyph) return;
-
-    for (int row = 0; row < CJK_GLYPH_SIZE; row++) {
-        uint8_t byte0 = glyph[row * 2];
-        uint8_t byte1 = glyph[row * 2 + 1];
-        uint16_t line16 = ((uint16_t)byte0 << 8) | byte1;
-        if (line16 == 0) continue;
-        for (int col = 0; col < 16; col++) {
-            if (line16 & (0x8000 >> col)) {
-                fb_put_pixel(px + col, py + row, fg);
+    if (glyph) {
+        for (int row = 0; row < CJK_GLYPH_SIZE; row++) {
+            uint8_t byte0 = glyph[row * 2];
+            uint8_t byte1 = glyph[row * 2 + 1];
+            uint16_t line16 = ((uint16_t)byte0 << 8) | byte1;
+            if (line16 == 0) continue;
+            for (int col = 0; col < 16; col++) {
+                if (!(line16 & (0x8000 >> col))) continue;
+                uint64_t base_x = px + (uint64_t)col * scale_x;
+                uint64_t base_y = py + (uint64_t)row * scale_y;
+                for (uint64_t sy = 0; sy < scale_y; sy++)
+                    for (uint64_t sx = 0; sx < scale_x; sx++)
+                        fb_put_pixel(base_x + sx, base_y + sy, fg);
             }
         }
     }
-}
 
+    // ---- write spaces into grid[] for both cells ----
+    // Keep scroll/full_refresh consistent
+    struct flanterm_fb_char empty;
+    empty.c = ' ';
+    empty.fg = fg;
+    empty.bg = 0xffffffff;
+    uint64_t i0 = cursor_y * cols + cursor_x;
+    uint64_t i1 = cursor_y * cols + cursor_x + 1;
+    if (i0 < cols * rows) fc->grid[i0] = empty;
+    if (i1 < cols * rows) fc->grid[i1] = empty;
+
+    // ---- advance cursor ----
+    fc->cursor_x = cursor_x + 2;
+    if (fc->cursor_x >= cols) {
+        fc->cursor_x -= cols;
+        fc->cursor_y = cursor_y + 1;
+        if (fc->cursor_y >= rows) {
+            fc->cursor_y = rows - 1;
+            if (g_term->scroll) g_term->scroll(g_term);
+        }
+    }
+
+    // ---- sync old_cursor AND zap queue ----
+    fc->old_cursor_x = fc->cursor_x;
+    fc->old_cursor_y = fc->cursor_y;
+    // Clear any stale map entries at our CJK cell positions
+    if (i0 < cols * rows) fc->map[i0] = NULL;
+    if (i1 < cols * rows) fc->map[i1] = NULL;
+    // Force queue_i to 0 — discards any orphaned slots.
+    // This is SAFE because:
+    //   - grid[] is already up-to-date (we wrote spaces above)
+    //   - framebuffer pixels are already correct (we painted above)
+    //   - no flanterm_flush will be called until the next ASCII char
+    //   - the next flanterm_putchar + flush will start queue_i fresh
+    fc->queue_i = 0;
+}
 // ============================================================
 // Scrollback buffer for PgUp/PgDn — simple line-based approach
 // ============================================================
@@ -425,6 +517,8 @@ void fb_put_pixel(uint64_t x, uint64_t y, uint32_t color) {
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     if (x < fc->width && y < fc->height) fc->framebuffer[y*(fc->pitch/4)+x] = color;
 }
+
+bool console_is_framebuffer(void) { return g_initialized && g_term != NULL; }
 
 void fb_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t color) {
     if (!g_term || w == 0 || h == 0) return;

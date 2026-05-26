@@ -20,11 +20,11 @@ static const command_t *cmd_registry[MAX_COMMANDS];
 static uint32_t cmd_count = 0;
 
 static const char *group_names[CMD_GROUP_COUNT] = {
-    [CMD_GROUP_SYSTEM]   = "System / 系统",
-    [CMD_GROUP_FILE]     = "File / 文件",
-    [CMD_GROUP_GRAPHICS] = "Graphics / 图形",
-    [CMD_GROUP_DEBUG]    = "Debug / 调试",
-    [CMD_GROUP_USER]     = "User / 用户",
+    [CMD_GROUP_SYSTEM]   = "System",
+    [CMD_GROUP_FILE]     = "File",
+    [CMD_GROUP_GRAPHICS] = "Graphics",
+    [CMD_GROUP_DEBUG]    = "Debug",
+    [CMD_GROUP_USER]     = "User",
 };
 
 void cmd_register(const command_t *cmd) {
@@ -223,8 +223,9 @@ void cmd_execute(const char *line) {
     for (uint32_t i = 0; i < cmd_count; i++) {
         if (strcmp(cmd_registry[i]->name, argv[0]) == 0) { cmd_registry[i]->handler(argc, argv); return; }
     }
-    console_puts("\x1b[31mUnknown command / 未知命令:\x1b[0m "); console_puts(argv[0]);
-    console_puts("\n\x1b[33mType 'help' for commands / 输入 help 查看命令列表\x1b[0m\n");
+    (void)argv;
+    console_puts("\x1b[0m\x1b[31mUnknown command.\x1b[0m\n");
+    console_puts("\x1b[33mType 'help' for commands\x1b[0m\n");
 }
 
 void shell_init(void) {
