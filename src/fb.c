@@ -663,6 +663,8 @@ static void draw_cursor(struct flanterm_context *_ctx) {
 
     uint64_t i = ctx->cursor_x + ctx->cursor_y * _ctx->cols;
 
+    // Always redraw the normal character at cursor position
+    // (erases I-beam pixels when cursor is off)
     struct flanterm_fb_char c;
     struct flanterm_fb_queue_item *q = ctx->map[i];
     if (q != NULL) {
@@ -670,22 +672,33 @@ static void draw_cursor(struct flanterm_context *_ctx) {
     } else {
         c = ctx->grid[i];
     }
-    uint32_t tmp = c.fg;
-    c.fg         = c.bg;
-    c.bg         = tmp;
     ctx->plot_char(_ctx, &c, ctx->cursor_x, ctx->cursor_y);
     if (q != NULL) {
         ctx->grid[i] = q->c;
         ctx->map[i]  = NULL;
+    }
+
+    // Only draw I-beam when cursor is enabled
+    if (!_ctx->cursor_enabled) return;
+
+    uint64_t px = ctx->offset_x + ctx->cursor_x * ctx->glyph_width;
+    uint64_t py = ctx->offset_y + ctx->cursor_y * ctx->glyph_height;
+    uint32_t cursor_colour = c.fg;
+    if (cursor_colour == 0xffffffff) cursor_colour = ctx->default_fg;
+
+    for (uint64_t row = 0; row < ctx->glyph_height; row++) {
+        volatile uint32_t *fb_line = ctx->framebuffer + px + (py + row) * (ctx->pitch / 4);
+        fb_line[0] = cursor_colour;
+        fb_line[1] = cursor_colour;
     }
 }
 
 static void flanterm_fb_double_buffer_flush(struct flanterm_context *_ctx) {
     struct flanterm_fb_context *ctx = (void *)_ctx;
 
-    if (_ctx->cursor_enabled) {
-        draw_cursor(_ctx);
-    }
+    // Always call draw_cursor: it redraws the character (erasing old
+    // cursor pixels) and only draws the I-beam when cursor_enabled.
+    draw_cursor(_ctx);
 
     for (uint64_t i = 0; i < ctx->queue_i; i++) {
         struct flanterm_fb_queue_item *q = &ctx->queue[i];
