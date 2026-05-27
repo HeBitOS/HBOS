@@ -514,7 +514,7 @@ bool console_is_initialized(void) { return g_initialized; }
 
 // Cursor blink counter — incremented on each call from the shell loop.
 // When it reaches BLINK_INTERVAL, we toggle cursor_enabled and flush.
-#define BLINK_INTERVAL 120000
+#define BLINK_INTERVAL 600000
 static uint64_t g_blink_count = 0;
 
 void console_cursor_blink(void) {
