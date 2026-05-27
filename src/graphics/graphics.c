@@ -514,7 +514,7 @@ bool console_is_initialized(void) { return g_initialized; }
 
 // Cursor blink using RDTSC for CPU-speed-independent timing.
 // Toggle every ~500ms.  Assumes ~1 GHz TSC (conservative for QEMU).
-#define BLINK_TSC_INTERVAL 500000000ULL
+#define BLINK_TSC_INTERVAL 1000000000ULL
 static uint64_t g_blink_last_tsc = 0;
 static bool g_blink_initialized = false;
 
