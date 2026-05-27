@@ -512,16 +512,28 @@ void console_get_size(uint64_t *cols, uint64_t *rows) {
 
 bool console_is_initialized(void) { return g_initialized; }
 
-// Cursor blink counter — incremented on each call from the shell loop.
-// When it reaches BLINK_INTERVAL, we toggle cursor_enabled and flush.
-#define BLINK_INTERVAL 1500000
-static uint64_t g_blink_count = 0;
+// Cursor blink using RDTSC for CPU-speed-independent timing.
+// Toggle every ~500ms.  Assumes ~1 GHz TSC (conservative for QEMU).
+#define BLINK_TSC_INTERVAL 500000000ULL
+static uint64_t g_blink_last_tsc = 0;
+static bool g_blink_initialized = false;
+
+static inline uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
 
 void console_cursor_blink(void) {
     if (!g_term) return;
-    g_blink_count++;
-    if (g_blink_count >= BLINK_INTERVAL) {
-        g_blink_count = 0;
+    uint64_t now = rdtsc();
+    if (!g_blink_initialized) {
+        g_blink_last_tsc = now;
+        g_blink_initialized = true;
+        return;
+    }
+    if (now - g_blink_last_tsc >= BLINK_TSC_INTERVAL) {
+        g_blink_last_tsc = now;
         g_term->cursor_enabled = !g_term->cursor_enabled;
         flanterm_flush(g_term);
     }
