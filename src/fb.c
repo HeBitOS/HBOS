@@ -334,6 +334,8 @@ static void plot_char_scaled_canvas(
         return;
     }
 
+    if (c->c >= FLANTERM_FB_FONT_GLYPHS) return;   // CJK cell: pixels already correct
+
     x = ctx->offset_x + x * ctx->glyph_width;
     y = ctx->offset_y + y * ctx->glyph_height;
 
@@ -364,6 +366,8 @@ static void plot_char_scaled_uncanvas(
     if (x >= _ctx->cols || y >= _ctx->rows) {
         return;
     }
+
+    if (c->c >= FLANTERM_FB_FONT_GLYPHS) return;   // CJK cell: pixels already correct
 
     uint32_t default_bg = ctx->default_bg;
 
@@ -398,6 +402,8 @@ static void plot_char_unscaled_canvas(
         return;
     }
 
+    if (c->c >= FLANTERM_FB_FONT_GLYPHS) return;   // CJK cell: pixels already correct
+
     x = ctx->offset_x + x * ctx->glyph_width;
     y = ctx->offset_y + y * ctx->glyph_height;
 
@@ -423,6 +429,8 @@ static void plot_char_unscaled_uncanvas(
     if (x >= _ctx->cols || y >= _ctx->rows) {
         return;
     }
+
+    if (c->c >= FLANTERM_FB_FONT_GLYPHS) return;   // CJK cell: pixels already correct
 
     uint32_t default_bg = ctx->default_bg;
 
@@ -475,6 +483,15 @@ push_to_queue(struct flanterm_context *_ctx, struct flanterm_fb_char *c, uint64_
 static void flanterm_fb_revscroll(struct flanterm_context *_ctx) {
     struct flanterm_fb_context *ctx = (void *)_ctx;
 
+    // Erase cursor I-beam before pixel scroll to prevent ghost cursor.
+    if (_ctx->cursor_enabled && ctx->cursor_x < _ctx->cols && ctx->cursor_y < _ctx->rows) {
+        uint64_t ci = ctx->cursor_x + ctx->cursor_y * _ctx->cols;
+        struct flanterm_fb_char cc;
+        struct flanterm_fb_queue_item *cq = ctx->map[ci];
+        if (cq != NULL) { cc = cq->c; } else { cc = ctx->grid[ci]; }
+        ctx->plot_char(_ctx, &cc, ctx->cursor_x, ctx->cursor_y);
+    }
+
     for (uint64_t i = (_ctx->scroll_bottom_margin - 1) * _ctx->cols - 1;
          i >= _ctx->scroll_top_margin * _ctx->cols;
          i--) {
@@ -499,10 +516,44 @@ static void flanterm_fb_revscroll(struct flanterm_context *_ctx) {
     for (uint64_t i = 0; i < _ctx->cols; i++) {
         push_to_queue(_ctx, &empty, i, _ctx->scroll_top_margin);
     }
+
+    // Pixel-level scroll: move framebuffer content down by one glyph row.
+    {
+        uint64_t pitch_px = ctx->pitch / 4;
+        uint64_t x_start  = ctx->offset_x;
+        uint64_t x_count  = _ctx->cols * ctx->glyph_width;
+        uint64_t top_px   = ctx->offset_y + _ctx->scroll_top_margin * ctx->glyph_height;
+        uint64_t bot_px   = ctx->offset_y + _ctx->scroll_bottom_margin * ctx->glyph_height;
+
+        for (uint64_t y = bot_px - 1; y >= top_px + ctx->glyph_height; y--) {
+            volatile uint32_t *dst = ctx->framebuffer + y * pitch_px + x_start;
+            volatile uint32_t *src = ctx->framebuffer + (y - ctx->glyph_height) * pitch_px + x_start;
+            for (uint64_t x = 0; x < x_count; x++) {
+                dst[x] = src[x];
+            }
+        }
+        // Clear the top glyph row
+        for (uint64_t y = top_px; y < top_px + ctx->glyph_height; y++) {
+            volatile uint32_t *row = ctx->framebuffer + y * pitch_px + x_start;
+            for (uint64_t x = 0; x < x_count; x++) {
+                row[x] = ctx->default_bg;
+            }
+        }
+    }
 }
 
 static void flanterm_fb_scroll(struct flanterm_context *_ctx) {
     struct flanterm_fb_context *ctx = (void *)_ctx;
+
+    // Erase cursor I-beam before pixel scroll to prevent ghost cursor.
+    // Redraw the character under the cursor (same as draw_cursor's erase step).
+    if (_ctx->cursor_enabled && ctx->cursor_x < _ctx->cols && ctx->cursor_y < _ctx->rows) {
+        uint64_t ci = ctx->cursor_x + ctx->cursor_y * _ctx->cols;
+        struct flanterm_fb_char cc;
+        struct flanterm_fb_queue_item *cq = ctx->map[ci];
+        if (cq != NULL) { cc = cq->c; } else { cc = ctx->grid[ci]; }
+        ctx->plot_char(_ctx, &cc, ctx->cursor_x, ctx->cursor_y);
+    }
 
     for (uint64_t i = (_ctx->scroll_top_margin + 1) * _ctx->cols;
          i < _ctx->scroll_bottom_margin * _ctx->cols;
@@ -524,6 +575,30 @@ static void flanterm_fb_scroll(struct flanterm_context *_ctx) {
     empty.bg = ctx->text_bg;
     for (uint64_t i = 0; i < _ctx->cols; i++) {
         push_to_queue(_ctx, &empty, i, _ctx->scroll_bottom_margin - 1);
+    }
+
+    // Pixel-level scroll: move framebuffer content up by one glyph row.
+    // This preserves CJK (and any direct-painted) pixel data.
+    {
+        uint64_t pitch_px  = ctx->pitch / 4;
+        uint64_t x_start   = ctx->offset_x;
+        uint64_t x_count   = _ctx->cols * ctx->glyph_width;
+        uint64_t top_px    = ctx->offset_y + _ctx->scroll_top_margin * ctx->glyph_height;
+        uint64_t bot_px    = ctx->offset_y + _ctx->scroll_bottom_margin * ctx->glyph_height;
+        for (uint64_t y = top_px; y + ctx->glyph_height < bot_px; y++) {
+            volatile uint32_t *dst = ctx->framebuffer + y * pitch_px + x_start;
+            volatile uint32_t *src = ctx->framebuffer + (y + ctx->glyph_height) * pitch_px + x_start;
+            for (uint64_t x = 0; x < x_count; x++) {
+                dst[x] = src[x];
+            }
+        }
+        // Clear the bottom glyph row
+        for (uint64_t y = bot_px - ctx->glyph_height; y < bot_px; y++) {
+            volatile uint32_t *row = ctx->framebuffer + y * pitch_px + x_start;
+            for (uint64_t x = 0; x < x_count; x++) {
+                row[x] = ctx->default_bg;
+            }
+        }
     }
 }
 

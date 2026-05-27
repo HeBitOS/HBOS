@@ -226,10 +226,12 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
         }
     }
 
-    // ---- write spaces into grid[] for both cells ----
-    // Keep scroll/full_refresh consistent
+    // ---- write CJK codepoint into grid[] for both cells ----
+    // Storing the actual codepoint (>= 0x100) lets plot_char guard
+    // against font_bool out-of-bounds and preserves CJK pixels
+    // during terminal scroll via framebuffer-level pixel scroll.
     struct flanterm_fb_char empty;
-    empty.c = ' ';
+    empty.c = codepoint;
     empty.fg = fg;
     empty.bg = 0xffffffff;
     uint64_t i0 = cursor_y * cols + cursor_x;
