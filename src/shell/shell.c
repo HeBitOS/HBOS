@@ -115,6 +115,7 @@ static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')',
 
 static int get_key(void) {
     while (1) {
+        console_cursor_blink();
         uint8_t status = inb(0x64);
         if (status & 1) {
             uint8_t sc = inb(0x60);
