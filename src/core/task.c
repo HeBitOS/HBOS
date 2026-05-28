@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "task.h"
+#include "../string.h"
 #include "../graphics/graphics.h"
 
 // ============================================================
@@ -79,6 +80,7 @@ void task_init(void) {
     main_task->next = main_task; // circular list (single element)
     main_task->stack_base = (uint64_t)task_stacks[0];
     main_task->stack_size = TASK_STACK_SIZE;
+    memset(main_task->fds, 0, sizeof(main_task->fds));
 
     current_task = main_task;
     task_count = 1;
@@ -98,6 +100,7 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->arg = arg;
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
+    memset(tcb->fds, 0, sizeof(tcb->fds));
 
     // ---- Set up initial stack frame ----
     // task_switch pushes: rbp, rbx, r12, r13, r14, r15 (in that order)
@@ -180,6 +183,10 @@ void task_exit(void) {
 
 uint32_t task_get_id(void) {
     return current_task ? current_task->id : 0;
+}
+
+task_t *task_current(void) {
+    return current_task;
 }
 
 int task_get_count(void) {

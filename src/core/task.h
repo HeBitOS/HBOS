@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "../fd.h"
 
 // ============================================================
 // Cooperative Multitasking / Threading Framework
@@ -38,6 +39,8 @@ typedef struct task {
 
     // Link for round-robin list
     struct task *next;
+
+    fd_entry_t fds[POSIX_MAX_FDS];
 } task_t;
 
 // ============================================================
@@ -59,6 +62,9 @@ void task_exit(void);
 
 // Get current task ID
 uint32_t task_get_id(void);
+
+// Get current task object
+task_t *task_current(void);
 
 // Get number of active (non-terminated) tasks
 int task_get_count(void);

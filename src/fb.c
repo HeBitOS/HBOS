@@ -3,21 +3,9 @@
 #include "flanterm.h"
 #include "fb.h"
 #include "fb_private.h"
+#include "string.h"
 
 #define inline __attribute__((always_inline)) inline
-
-void *memset(void *s, int c, uint64_t n) {
-    uint8_t *p = s;
-    while (n--) *p++ = c;
-    return s;
-}
-
-void *memcpy(void *dest, const void *src, uint64_t n) {
-    uint8_t *d = dest;
-    const uint8_t *s = src;
-    while (n--) *d++ = *s++;
-    return dest;
-}
 
 #define FLANTERM_FB_BUMP_ALLOC_POOL_SIZE 873000
 #define FLANTERM_FB_WIDTH_LIMIT  1920

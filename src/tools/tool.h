@@ -22,6 +22,7 @@ void tool_help_init(void);
 void tool_system_init(void);
 void tool_debug_init(void);
 void tool_history_init(void);
+void tool_file_init(void);
 
 // 聚合初始化 — 注册所有内建工具
 static inline void tool_init_all(void) {
@@ -29,6 +30,7 @@ static inline void tool_init_all(void) {
     tool_system_init();
     tool_debug_init();
     tool_history_init();
+    tool_file_init();
 }
 
 #endif /* HBOS_TOOL_H */

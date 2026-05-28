@@ -10,6 +10,8 @@
 #include "core/vmm.h"
 #include "core/heap.h"
 #include "tools/tool.h"
+#include "selftest.h"
+#include "vfs.h"
 
 // ============================================================
 // HBOS 内核主入口
@@ -86,8 +88,12 @@ void kmain(void *mbi) {
     // Phase 5: Kernel heap
     heap_init();
 
-    // Phase 6: Task system + Shell
+    // Phase 5.5: RAM filesystem + task-local fd table + POSIX smoke tests
+    vfs_init();
     task_init();
+    selftest_run();
+
+    // Phase 6: Shell
     shell_init();
     tool_init_all();
 
