@@ -105,6 +105,7 @@ isr_stub_table:
 ; IRQ stubs (PIC remap: IRQ0→INT 32 … IRQ15→INT 47)
 ; ============================================================
 extern irq_handler
+extern syscall_dispatch_frame
 
 %macro IRQ 2
 global irq_stub_%1
@@ -217,4 +218,33 @@ irq_common:
     pop rax
 
     add rsp, 16
+    iretq
+
+; ============================================================
+; Syscall ABI — int 0x80
+; rax = syscall number
+; rdi, rsi, rdx, r10, r8, r9 = args 0..5
+; return value in rax; negative values are -errno.
+; ============================================================
+global syscall_int80_stub
+syscall_int80_stub:
+    push r9
+    push r8
+    push r10
+    push rdx
+    push rsi
+    push rdi
+    push rax
+
+    mov rdi, rsp
+    call syscall_dispatch_frame
+
+    mov [rsp], rax
+    pop rax
+    pop rdi
+    pop rsi
+    pop rdx
+    pop r10
+    pop r8
+    pop r9
     iretq

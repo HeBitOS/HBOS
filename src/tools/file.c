@@ -109,6 +109,42 @@ static void cmd_selftest(int argc, char **argv) {
     selftest_run();
 }
 
+static void cmd_fsinfo(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    console_puts("fs: ");
+    console_puts(fs_backend_name());
+    console_puts("\nfiles: ");
+    print_uint(vfs_count());
+    console_putchar('\n');
+}
+
+static void cmd_mount(int argc, char **argv) {
+    (void)argv;
+    if (argc > 1) {
+        console_puts("Usage: mount\n");
+        return;
+    }
+    if (fs_mount_disk() < 0) {
+        console_puts("mount: no valid HBFS ATA disk\n");
+        return;
+    }
+    console_puts("mount: hbfs/ata mounted\n");
+}
+
+static void cmd_mkfs(int argc, char **argv) {
+    (void)argv;
+    if (argc > 1) {
+        console_puts("Usage: mkfs\n");
+        return;
+    }
+    if (fs_format_disk() < 0) {
+        console_puts("mkfs: no writable ATA disk\n");
+        return;
+    }
+    console_puts("mkfs: formatted and mounted hbfs/ata\n");
+}
+
 static void cmd_writefile(int argc, char **argv) {
     if (argc < 3) {
         console_puts("Usage: writefile <file> <text...>\n");
@@ -133,6 +169,9 @@ void tool_file_init(void) {
         {"rm",         CMD_GROUP_FILE, "Remove a file",          "rm <file>",                  cmd_rm},
         {"writefile",  CMD_GROUP_FILE, "Write text to a file",   "writefile <file> <text...>", cmd_writefile},
         {"appendfile", CMD_GROUP_FILE, "Append text to a file",  "appendfile <file> <text...>",cmd_appendfile},
+        {"fsinfo",     CMD_GROUP_FILE, "Show filesystem backend","fsinfo",                    cmd_fsinfo},
+        {"mount",      CMD_GROUP_FILE, "Mount HBFS ATA disk",    "mount",                     cmd_mount},
+        {"mkfs",       CMD_GROUP_FILE, "Format HBFS ATA disk",   "mkfs",                      cmd_mkfs},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)

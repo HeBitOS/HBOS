@@ -7,6 +7,8 @@
 #include "sys/stat.h"
 #include "unistd.h"
 #include "graphics/graphics.h"
+#include "user/app.h"
+#include "user/syscall.h"
 
 static inline void serial_outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -94,6 +96,18 @@ int selftest_run(void) {
     CHECK("unlink", unlink("__selftest") == 0);
     CHECK("stat unlinked", stat("__selftest", &st) < 0 && errno == ENOENT);
     CHECK("unlink missing", unlink("__selftest") < 0 && errno == ENOENT);
+
+    (void)hbos_unlink("__syscall");
+    fd = hbos_open("__syscall", O_CREAT | O_RDWR | O_TRUNC, 0);
+    CHECK("syscall open", fd >= 3);
+    CHECK("syscall write", hbos_write(fd, "abi", 3) == 3);
+    CHECK("syscall seek", hbos_lseek(fd, 0, SEEK_SET) == 0);
+    memset(b, 0, sizeof(b));
+    CHECK("syscall read", hbos_read(fd, b, 3) == 3);
+    CHECK("syscall compare", memcmp(b, "abi", 3) == 0);
+    CHECK("syscall close", hbos_close(fd) == 0);
+    CHECK("syscall unlink", hbos_unlink("__syscall") == 0);
+    CHECK("app registry", hbos_app_find("hello") != NULL);
 
     console_puts("[SELFTEST] POSIX/ramfs: PASS\n");
     selftest_serial_puts("[SELFTEST] POSIX/ramfs: PASS\n");

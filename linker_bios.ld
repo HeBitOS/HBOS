@@ -21,6 +21,11 @@ SECTIONS {
     .data ALIGN(0x1000) : {
         *(.data)
         *(.data.*)
+        . = ALIGN(8);
+        __start_hbos_apps = .;
+        KEEP(*(hbos_apps))
+        . = ALIGN(8);
+        __stop_hbos_apps = .;
     }
 
     .bss ALIGN(0x1000) : {

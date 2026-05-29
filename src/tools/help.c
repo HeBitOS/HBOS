@@ -15,6 +15,7 @@ static int strcmp(const char *s1, const char *s2) {
 
 static const char *cmd_cn(const char *name) {
     if (strcmp(name, "help") == 0) return "显示帮助信息";
+    if (strcmp(name, "list") == 0) return "列出所有命令";
     if (strcmp(name, "reboot") == 0) return "重启系统";
     if (strcmp(name, "poweroff") == 0) return "关闭系统";
     if (strcmp(name, "shutdown") == 0) return "关机别名";
@@ -26,6 +27,8 @@ static const char *cmd_cn(const char *name) {
     if (strcmp(name, "history") == 0) return "显示命令历史";
     if (strcmp(name, "clearhistory") == 0) return "清除命令历史";
     if (strcmp(name, "search") == 0) return "搜索命令历史";
+    if (strcmp(name, "diskmgr") == 0) return "显示磁盘占用和分区信息";
+    if (strcmp(name, "install") == 0) return "分区并格式化系统磁盘";
     return NULL;
 }
 
@@ -94,8 +97,26 @@ static void print_group_commands(int group, int start_col) {
     console_putchar('\n');
 }
 
+static void print_command_index(void) {
+    console_puts("\n\x1b[33mCommand Index\x1b[0m");
+    PUTS_CN(" / 命令索引");
+    console_puts("\n");
+    console_puts("\x1b[36mSystem\x1b[0m"); PUTS_CN(" / 系统"); console_puts(": "); print_group_commands(CMD_GROUP_SYSTEM, 16);
+    console_puts("\x1b[36mFile\x1b[0m"); PUTS_CN(" / 文件"); console_puts(": "); print_group_commands(CMD_GROUP_FILE, 14);
+    console_puts("\x1b[36mGraphics\x1b[0m"); PUTS_CN(" / 图形"); console_puts(": "); print_group_commands(CMD_GROUP_GRAPHICS, 18);
+    console_puts("\x1b[36mDebug\x1b[0m"); PUTS_CN(" / 调试"); console_puts(": "); print_group_commands(CMD_GROUP_DEBUG, 15);
+    console_puts("\x1b[36mUser\x1b[0m"); PUTS_CN(" / 用户"); console_puts(": "); print_group_commands(CMD_GROUP_USER, 14);
+    console_puts("\nUse \x1b[36mhelp <command>\x1b[0m for details.\n");
+    PUTS_CN("使用 \x1b[36mhelp <命令>\x1b[0m 查看详情。\n");
+    console_putchar('\n');
+}
+
 static void cmd_help(int argc, char **argv) {
-    if (argc > 1) { print_cmd_help(argv[1]); return; }
+    if (argc > 1) {
+        if (strcmp(argv[1], "list") == 0) print_command_index();
+        else print_cmd_help(argv[1]);
+        return;
+    }
     console_puts("\n\x1b[33mHBOS Help\x1b[0m\n");
     PUTS_CN("\x1b[33mHBOS 帮助\x1b[0m\n");
     console_puts("Commands: list | help <command> | exit\n");
@@ -120,24 +141,21 @@ static void cmd_help(int argc, char **argv) {
             return;
         }
         if (strcmp(line, "list") == 0) {
-            console_puts("\n\x1b[33mCommand Index\x1b[0m");
-            PUTS_CN(" / 命令索引");
-            console_puts("\n");
-            console_puts("\x1b[36mSystem\x1b[0m"); PUTS_CN(" / 系统"); console_puts(": "); print_group_commands(CMD_GROUP_SYSTEM, 16);
-            console_puts("\x1b[36mFile\x1b[0m"); PUTS_CN(" / 文件"); console_puts(": "); print_group_commands(CMD_GROUP_FILE, 14);
-            console_puts("\x1b[36mGraphics\x1b[0m"); PUTS_CN(" / 图形"); console_puts(": "); print_group_commands(CMD_GROUP_GRAPHICS, 18);
-            console_puts("\x1b[36mDebug\x1b[0m"); PUTS_CN(" / 调试"); console_puts(": "); print_group_commands(CMD_GROUP_DEBUG, 15);
-            console_puts("\x1b[36mUser\x1b[0m"); PUTS_CN(" / 用户"); console_puts(": "); print_group_commands(CMD_GROUP_USER, 14);
-            console_puts("\nUse \x1b[36mhelp <command>\x1b[0m for details.\n");
-            PUTS_CN("使用 \x1b[36mhelp <命令>\x1b[0m 查看详情。\n");
-            console_putchar('\n');
+            print_command_index();
         } else { print_cmd_help(line); }
     }
+}
+
+static void cmd_list(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    print_command_index();
 }
 
 void tool_help_init(void) {
     static const command_t cmds[] = {
         {"help", CMD_GROUP_SYSTEM, "Show help info", "help [command]", cmd_help},
+        {"list", CMD_GROUP_SYSTEM, "List commands", "list", cmd_list},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

@@ -10,6 +10,8 @@ ISO_BIOS = $(BUILD_DIR)/hbos_bios.iso
 ISO_UEFI = $(BUILD_DIR)/hbos_uefi.iso
 ISO_HYBRID = $(BUILD_DIR)/hbos.iso
 UEFI_IMG = $(BUILD_DIR)/hbos_uefi.img
+DISK_IMG = $(BUILD_DIR)/hbos_disk.img
+INSTALL_IMG = $(BUILD_DIR)/hbos_installed.img
 LIMINE_EFI = limine-bin/bin/BOOTX64.EFI
 UEFI_CD_IMG = $(BUILD_DIR)/limine_uefi_cd.img
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -18,7 +20,7 @@ OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
          -O2 -Wall -Wextra \
-         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools
+         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_DIR)/user
 
 ASFLAGS = -f elf64
 LDFLAGS_BIOS = -m elf_x86_64 -static -Bsymbolic -nostdlib -T linker_bios.ld
@@ -30,11 +32,18 @@ FONT_TTF = fonts/ZhengGeDianHei-16.ttf
 FONT_BIN = $(BUILD_DIR)/font_cjk.bin
 
 # 所有 C 源文件
+APP_SRCS = $(wildcard $(SRC_DIR)/apps/*.c)
+
 C_SRCS = \
 	$(SRC_DIR)/kernel.c \
 	$(SRC_DIR)/selftest.c \
+	$(SRC_DIR)/syscall.c \
+	$(SRC_DIR)/pci.c \
+	$(SRC_DIR)/block.c \
+	$(SRC_DIR)/ahci.c \
 	$(SRC_DIR)/fs.c \
 	$(SRC_DIR)/vfs.c \
+	$(SRC_DIR)/ata.c \
 	$(SRC_DIR)/fb.c \
 	$(SRC_DIR)/flanterm.c \
 	$(SRC_DIR)/graphics/graphics.c \
@@ -43,11 +52,17 @@ C_SRCS = \
 	$(SRC_DIR)/core/task.c \
 	$(SRC_DIR)/lib/posix.c \
 	$(SRC_DIR)/lib/string.c \
+	$(SRC_DIR)/user/app_runtime.c \
+	$(SRC_DIR)/user/syscall.c \
 	$(SRC_DIR)/tools/help.c \
 	$(SRC_DIR)/tools/system.c \
 	$(SRC_DIR)/tools/debug.c \
 	$(SRC_DIR)/tools/history.c \
-	$(SRC_DIR)/tools/file.c
+	$(SRC_DIR)/tools/file.c \
+	$(SRC_DIR)/tools/app.c \
+	$(SRC_DIR)/tools/ata.c \
+	$(SRC_DIR)/tools/disk.c \
+	$(APP_SRCS)
 
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
@@ -68,24 +83,31 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
 
-.PHONY: all clean run run-bios iso bios-iso uefi uefi-iso uefi-img run-uefi run-uefi-headless run-uefi-img limine-uefi help font
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
 
-all: iso
+all: iso disk-img install-img
 
 help:
 	@echo "HBOS Build Targets:"
-	@echo "  make all       - Build BIOS and UEFI ISOs"
+	@echo "  make all       - Build ISOs, data disk, and installed disk image"
+	@echo "  make run       - Boot installed hard disk image in BIOS mode"
+	@echo "  make run-uefi  - Boot installed hard disk image in UEFI mode"
+	@echo "  make install-img - Build bootable BIOS/UEFI hard disk image"
+	@echo "  make run-hdd   - Alias for make run"
+	@echo "  make run-iso   - Boot ISO with persistent AHCI data disk"
+	@echo "  make run-iso-uefi - Boot UEFI ISO with persistent AHCI data disk"
+	@echo "  make vm        - Alias for make run"
 	@echo "  make bios-iso  - Build BIOS ISO"
 	@echo "  make uefi-iso  - Build UEFI ISO"
-	@echo "  make run       - Build and run BIOS ISO"
-	@echo "  make run-uefi  - Build and run UEFI ISO with OVMF"
-	@echo "  make uefi-img  - Build UEFI FAT boot image"
-	@echo "  make run-uefi-headless - Run UEFI ISO with serial output only"
+	@echo "  make disk-img  - Build blank HBFS disk image"
+	@echo "  make run-bios-nodisk - Run BIOS VM without disk"
+	@echo "  make run-uefi-nodisk - Run UEFI VM without disk"
+	@echo "  make run-uefi-headless - Run UEFI VM with serial output only"
 	@echo "  make clean     - Clean build files"
 	@echo "  make font      - Regenerate CJK font binary"
 
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib
+	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps
 
 # Font generation
 font: $(FONT_BIN)
@@ -97,31 +119,48 @@ $(FONT_BIN): $(FONT_TTF) tools/genhzk.py
 
 # NASM (.asm) — various directories
 $(BUILD_DIR)/boot.o: $(SRC_DIR)/boot.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN)
+	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # C rules — one generic rule for all subdirectories
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.c | $(BUILD_DIR) $(FONT_BIN)
+	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/shell/%.o: $(SRC_DIR)/shell/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/tools/%.o: $(SRC_DIR)/tools/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/lib/%.o: $(SRC_DIR)/lib/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(BUILD_DIR)/user/%.o: $(SRC_DIR)/user/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(BUILD_DIR)/apps/%.o: $(SRC_DIR)/apps/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 # Link
@@ -161,10 +200,59 @@ bios-iso: $(ISO_BIOS)
 
 uefi-iso: $(ISO_UEFI)
 
-run: run-bios
+run: run-hdd-bios
 
-run-bios: $(ISO_BIOS)
+vm: run
+
+run-bios: run
+
+run-iso: run-bios-ahci
+
+run-bios-nodisk: $(ISO_BIOS)
 	$(QEMU) -cdrom $(ISO_BIOS) -m 512M -boot d -serial stdio -vga std -monitor none
+
+$(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
+	python3 tools/mkhbfs.py $@
+
+disk-img: $(DISK_IMG)
+
+$(INSTALL_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf tools/mkhbosdisk.py
+	python3 tools/mkhbosdisk.py $@ --kernel $(KERNEL_BIOS) --limine-conf limine.conf --limine-dir limine-bin/bin
+
+install-img: $(INSTALL_IMG)
+
+run-hdd: run-hdd-bios
+
+run-hdd-bios: $(INSTALL_IMG)
+	$(QEMU) -m 512M \
+		-device ich9-ahci,id=ahci \
+		-drive file=$(INSTALL_IMG),format=raw,if=none,id=hd0 \
+		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-boot c -serial stdio -vga std -monitor none
+
+run-hdd-uefi: $(INSTALL_IMG)
+	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_HDD.fd
+	$(QEMU) -machine q35 -m 512M \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_HDD.fd \
+		-device ich9-ahci,id=ahci \
+		-drive file=$(INSTALL_IMG),format=raw,if=none,id=hd0 \
+		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-boot c -serial stdio -monitor none -vga std -no-reboot
+
+run-bios-disk: $(ISO_BIOS) $(DISK_IMG)
+	$(QEMU) -m 512M \
+		-drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+		-cdrom $(ISO_BIOS) -boot d \
+		-serial stdio -vga std -monitor none
+
+run-bios-ahci: $(ISO_BIOS) $(DISK_IMG)
+	$(QEMU) -m 512M \
+		-device ich9-ahci,id=ahci \
+		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
+		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-cdrom $(ISO_BIOS) -boot d \
+		-serial stdio -vga std -monitor none
 
 limine-uefi: $(LIMINE_EFI)
 
@@ -194,7 +282,11 @@ uefi: $(ISO_UEFI)
 
 uefi-img: $(UEFI_IMG)
 
-run-uefi: $(ISO_UEFI)
+run-uefi: run-hdd-uefi
+
+run-iso-uefi: run-uefi-ahci
+
+run-uefi-nodisk: $(ISO_UEFI)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
 	$(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
@@ -217,6 +309,26 @@ run-uefi-headless: $(ISO_UEFI)
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-cdrom $(ISO_UEFI) -boot d \
 		-serial stdio -monitor none -display none -no-reboot
+
+run-uefi-disk: $(ISO_UEFI) $(DISK_IMG)
+	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
+	$(QEMU) -machine q35 -m 512M \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
+		-drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+		-cdrom $(ISO_UEFI) -boot d \
+		-serial stdio -monitor none -vga std -no-reboot
+
+run-uefi-ahci: $(ISO_UEFI) $(DISK_IMG)
+	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
+	$(QEMU) -machine q35 -m 512M \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
+		-device ich9-ahci,id=ahci \
+		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
+		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-cdrom $(ISO_UEFI) -boot d \
+		-serial stdio -monitor none -vga std -no-reboot
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "cpu.h"
+#include "../syscall.h"
 #include "../graphics/graphics.h"
 
 // ============================================================
@@ -155,6 +156,7 @@ static idt_entry_t idt_entries[256];
 // Stub address tables defined in interrupt_asm.asm
 extern uint64_t isr_stub_table[32];
 extern uint64_t irq_stub_table[16];
+extern void syscall_int80_stub(void);
 
 static void idt_set_entry(int vec, uint64_t handler, uint8_t flags) {
     idt_entries[vec].offset_low  = (uint16_t)(handler & 0xFFFF);
@@ -347,6 +349,9 @@ void gdt_idt_init(void) {
         uint64_t addr = irq_stub_table[i];
         idt_set_entry(IRQ_BASE + i, addr, IDT_PRESENT | IDT_DPL0 | IDT_INT_GATE);
     }
+
+    idt_set_entry(HBOS_SYSCALL_VECTOR, (uint64_t)syscall_int80_stub,
+                  IDT_PRESENT | IDT_DPL3 | IDT_TRAP_GATE);
 
     // Load IDT
     idt_ptr_t idt_ptr;

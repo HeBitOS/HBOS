@@ -17,6 +17,7 @@ typedef struct file {
     uint32_t capacity;
     uint8_t *data;
     vfs_node_t node;
+    uint32_t disk_slot;
     uint8_t used;
     uint8_t type; // 0=文件, 1=目录
 } file_t;
@@ -30,6 +31,16 @@ typedef struct filesystem {
 
 // 函数声明
 int fs_init(void);
+int fs_format_disk(void);
+int fs_install_disk(void);
+int fs_mount_disk(void);
+int fs_sync(void);
+int fs_is_disk(void);
+const char *fs_backend_name(void);
+uint32_t fs_disk_start_lba(void);
+uint32_t fs_disk_total_sectors(void);
+uint32_t fs_capacity_bytes(void);
+uint32_t fs_used_bytes(void);
 void fs_list(void);
 file_t *fs_find_file(const char *name);
 file_t *fs_create_file(const char *name);

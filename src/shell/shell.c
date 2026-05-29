@@ -250,9 +250,25 @@ static void cursor_left_n(int n) {
     for (int i = 0; i < n; i++) cursor_left_one();
 }
 
-static void line_redraw_from(char *line, int len, int start) {
+static void line_redraw_tail(char *line, int len, int pos, int start, int erase_extra) {
     for (int i = start; i < len; i++) console_putchar(line[i]);
-    cursor_left_n(len - start);
+    for (int i = 0; i < erase_extra; i++) console_putchar(' ');
+    cursor_left_n((len - pos) + erase_extra);
+}
+
+static void line_replace(char *line, int *len, int *pos, const char *next) {
+    while (*pos > 0) { cursor_left_one(); (*pos)--; }
+    for (int i = 0; i < *len; i++) console_putchar(' ');
+    cursor_left_n(*len);
+
+    int n = 0;
+    while (next[n] && n < CMD_BUF_SIZE - 1) {
+        line[n] = next[n];
+        console_putchar(next[n]);
+        n++;
+    }
+    *len = n;
+    *pos = n;
 }
 
 static void line_insert(char *line, int *len, int *pos, char c) {
@@ -260,7 +276,7 @@ static void line_insert(char *line, int *len, int *pos, char c) {
     int p = *pos;
     for (int i = *len; i > p; i--) line[i] = line[i-1];
     line[p] = c; (*len)++; (*pos)++;
-    line_redraw_from(line, *len, p);
+    line_redraw_tail(line, *len, *pos, p, 0);
 }
 
 static void line_delete(char *line, int *len, int *pos) {
@@ -270,17 +286,8 @@ static void line_delete(char *line, int *len, int *pos) {
     (*len)--;
     (*pos) = p;
 
-    // Strategy: use ANSI cursor-left to move back, redraw, erase ghost
-    // ANSI \033[D = cursor left one position
-    // Move cursor left by 1 (from old pos to deletion point p)
     cursor_left_one();
-    // Redraw remaining characters from deletion point
-    for (int i = p; i < *len; i++) console_putchar(line[i]);
-    // Erase the trailing ghost character
-    console_putchar(' ');
-    // Move cursor back to correct position using ANSI escapes
-    int total_back = *len - p + 1; // chars drawn + space
-    cursor_left_n(total_back);
+    line_redraw_tail(line, *len, *pos, p, 1);
 }
 
 void shell_run(void) {
@@ -312,35 +319,16 @@ void shell_run(void) {
             } else if (c == KEY_UP) {
                 if (hist_idx > 0) {
                     hist_idx--;
-                    while (cmd_pos > 0) { cursor_left_one(); cmd_pos--; }
-                    for (int i = 0; i < cmd_len; i++) console_putchar(' ');
-                    cursor_left_n(cmd_len);
-                    cmd_len = 0;
-                    const char *h = history[hist_idx];
-                    for (int i = 0; h[i] && i < CMD_BUF_SIZE - 1; i++) {
-                        cmd_line[cmd_len++] = h[i]; console_putchar(h[i]);
-                    }
-                    cmd_pos = cmd_len;
+                    line_replace(cmd_line, &cmd_len, &cmd_pos, history[hist_idx]);
                 }
 
             } else if (c == KEY_DOWN) {
                 if (hist_idx < hist_count - 1) {
                     hist_idx++;
-                    while (cmd_pos > 0) { cursor_left_one(); cmd_pos--; }
-                    for (int i = 0; i < cmd_len; i++) console_putchar(' ');
-                    cursor_left_n(cmd_len);
-                    cmd_len = 0;
-                    const char *h = history[hist_idx];
-                    for (int i = 0; h[i] && i < CMD_BUF_SIZE - 1; i++) {
-                        cmd_line[cmd_len++] = h[i]; console_putchar(h[i]);
-                    }
-                    cmd_pos = cmd_len;
+                    line_replace(cmd_line, &cmd_len, &cmd_pos, history[hist_idx]);
                 } else if (hist_idx < hist_count) {
                     hist_idx++;
-                    while (cmd_pos > 0) { cursor_left_one(); cmd_pos--; }
-                    for (int i = 0; i < cmd_len; i++) console_putchar(' ');
-                    cursor_left_n(cmd_len);
-                    cmd_len = 0; cmd_pos = 0;
+                    line_replace(cmd_line, &cmd_len, &cmd_pos, "");
                 }
 
             } else if (c == KEY_PGUP) {
@@ -362,10 +350,7 @@ void shell_run(void) {
                 if (cmd_pos < cmd_len) {
                     for (int i = cmd_pos; i < cmd_len - 1; i++) cmd_line[i] = cmd_line[i+1];
                     cmd_len--;
-                    for (int i = cmd_pos; i < cmd_len; i++) console_putchar(cmd_line[i]);
-                    console_putchar(' ');
-                    int total_back = cmd_len - cmd_pos + 1;
-                    cursor_left_n(total_back);
+                    line_redraw_tail(cmd_line, cmd_len, cmd_pos, cmd_pos, 1);
                 }
 
             } else if (c >= ' ' && c <= '~') {
