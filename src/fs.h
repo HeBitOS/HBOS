@@ -29,16 +29,27 @@ typedef struct filesystem {
     uint32_t total_sectors;
 } filesystem_t;
 
+typedef struct {
+    uint8_t present;
+    uint8_t bootable;
+    uint8_t type;
+    uint32_t start_lba;
+    uint32_t sectors;
+} fs_partition_info_t;
+
 // 函数声明
 int fs_init(void);
 int fs_format_disk(void);
 int fs_install_disk(void);
+int fs_install_disk_at(uint32_t start_lba, uint32_t sectors);
+int fs_read_partitions(fs_partition_info_t out[4]);
 int fs_mount_disk(void);
 int fs_sync(void);
 int fs_is_disk(void);
 const char *fs_backend_name(void);
 uint32_t fs_disk_start_lba(void);
 uint32_t fs_disk_total_sectors(void);
+uint32_t fs_min_sectors(void);
 uint32_t fs_capacity_bytes(void);
 uint32_t fs_used_bytes(void);
 void fs_list(void);

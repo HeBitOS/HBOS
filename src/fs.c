@@ -68,6 +68,10 @@ static uint32_t hbfs_needed_sectors(void) {
     return 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS;
 }
 
+uint32_t fs_min_sectors(void) {
+    return hbfs_needed_sectors();
+}
+
 static const char *normalize_path(const char *path, char *out) {
     if (!path) return NULL;
     while (*path == '/') path++;
@@ -300,19 +304,121 @@ static int hbfs_find_mbr_partition(uint32_t *start, uint32_t *sectors) {
     return -1;
 }
 
-static int hbfs_write_mbr(uint32_t start, uint32_t sectors) {
+int fs_read_partitions(fs_partition_info_t out[4]) {
+    if (!out) return -1;
+    for (uint32_t i = 0; i < 4; i++) {
+        out[i].present = 0;
+        out[i].bootable = 0;
+        out[i].type = 0;
+        out[i].start_lba = 0;
+        out[i].sectors = 0;
+    }
+
+    if (block_init() < 0) return -1;
+
     uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
-    memset(mbr, 0, sizeof(mbr));
-    uint8_t *e = mbr + 446;
-    e[0] = 0x80;
+    if (block_read_sector(0, mbr) < 0) return -1;
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
+
+    for (uint32_t i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        uint32_t lba = get_le32(e + 8);
+        uint32_t cnt = get_le32(e + 12);
+        if (e[4] == 0 || cnt == 0) continue;
+        out[i].present = 1;
+        out[i].bootable = (e[0] == 0x80);
+        out[i].type = e[4];
+        out[i].start_lba = lba;
+        out[i].sectors = cnt;
+    }
+    return 0;
+}
+
+static void write_mbr_entry(uint8_t *e, uint8_t bootable, uint8_t type,
+                            uint32_t start, uint32_t sectors) {
+    e[0] = bootable ? 0x80 : 0x00;
     e[1] = 0x01; e[2] = 0x01; e[3] = 0x00;
-    e[4] = HBFS_PARTITION_TYPE;
+    e[4] = type;
     e[5] = 0xFE; e[6] = 0xFF; e[7] = 0xFF;
     put_le32(e + 8, start);
     put_le32(e + 12, sectors);
+}
+
+static int ranges_overlap(uint32_t a_start, uint32_t a_count,
+                          uint32_t b_start, uint32_t b_count) {
+    uint32_t a_end = a_start + a_count;
+    uint32_t b_end = b_start + b_count;
+    return a_start < b_end && b_start < a_end;
+}
+
+static int hbfs_write_mbr_partition(uint32_t start, uint32_t sectors) {
+    uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    if (block_read_sector(0, mbr) < 0 || mbr[510] != 0x55 || mbr[511] != 0xAA) {
+        memset(mbr, 0, sizeof(mbr));
+    }
+
+    int slot = -1;
+    int empty = -1;
+    for (uint32_t i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        uint8_t type = e[4];
+        uint32_t lba = get_le32(e + 8);
+        uint32_t cnt = get_le32(e + 12);
+        if (type == HBFS_PARTITION_TYPE) {
+            slot = (int)i;
+            break;
+        }
+        if ((type == 0 || cnt == 0) && empty < 0) {
+            empty = (int)i;
+            continue;
+        }
+        if (cnt != 0 && ranges_overlap(start, sectors, lba, cnt))
+            return -1;
+    }
+    if (slot < 0) slot = empty;
+    if (slot < 0) return -1;
+
+    write_mbr_entry(mbr + 446 + (uint32_t)slot * 16, 0, HBFS_PARTITION_TYPE, start, sectors);
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
     return block_write_sector(0, mbr);
+}
+
+static uint32_t align_up(uint32_t value, uint32_t align) {
+    return (value + align - 1) & ~(align - 1);
+}
+
+static int hbfs_choose_install_range(uint32_t *start, uint32_t *sectors) {
+    uint32_t total = block_sector_count();
+    uint32_t min = hbfs_needed_sectors();
+    if (total <= HBFS_DEFAULT_START_LBA + min) return -1;
+
+    if (hbfs_find_mbr_partition(start, sectors) == 0) return 0;
+
+    fs_partition_info_t parts[4];
+    uint32_t candidate = HBFS_DEFAULT_START_LBA;
+    if (fs_read_partitions(parts) == 0) {
+        for (uint32_t pass = 0; pass < 4; pass++) {
+            uint32_t best_start = 0xFFFFFFFFU;
+            uint32_t best_end = 0;
+            for (uint32_t i = 0; i < 4; i++) {
+                if (!parts[i].present) continue;
+                uint32_t end = parts[i].start_lba + parts[i].sectors;
+                if (parts[i].start_lba >= candidate && parts[i].start_lba < best_start) {
+                    best_start = parts[i].start_lba;
+                    best_end = end;
+                }
+            }
+            if (best_start == 0xFFFFFFFFU) break;
+            if (candidate + min <= best_start) break;
+            candidate = align_up(best_end, 2048);
+        }
+    }
+
+    if (candidate + min > total) return -1;
+    *start = candidate;
+    *sectors = total - candidate;
+    return 0;
 }
 
 // 文件系统初始化
@@ -339,11 +445,18 @@ int fs_format_disk(void) {
 
 int fs_install_disk(void) {
     if (block_init() < 0) return -1;
-    uint32_t total = block_sector_count();
-    uint32_t start = HBFS_DEFAULT_START_LBA;
-    if (total <= start + hbfs_needed_sectors()) return -1;
-    uint32_t sectors = total - start;
-    if (hbfs_write_mbr(start, sectors) < 0) return -1;
+    uint32_t start = 0;
+    uint32_t sectors = 0;
+    if (hbfs_choose_install_range(&start, &sectors) < 0) return -1;
+    return fs_install_disk_at(start, sectors);
+}
+
+int fs_install_disk_at(uint32_t start, uint32_t sectors) {
+    if (block_init() < 0) return -1;
+    if (start < 2048) return -1;
+    if (sectors < hbfs_needed_sectors()) return -1;
+    if (start + sectors > block_sector_count()) return -1;
+    if (hbfs_write_mbr_partition(start, sectors) < 0) return -1;
     hbfs_start_lba = start;
     hbfs_total_sectors = sectors;
     return fs_format_disk();
