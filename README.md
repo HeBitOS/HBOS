@@ -48,6 +48,13 @@
 sudo apt install build-essential nasm grub-pc-bin mtools qemu-system-x86 ovmf
 ```
 
+Windows 推荐使用 WSL 构建。先安装 Ubuntu WSL，然后在 WSL 内安装依赖：
+
+```bash
+sudo apt update
+sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools python3 python3-pil
+```
+
 ### 构建与运行
 ```bash
 make           # 构建 BIOS/UEFI 双 ISO
@@ -55,6 +62,23 @@ make bios-iso  # 只构建 build/hbos-bios.iso
 make uefi-iso  # 只构建 build/hbos-uefi.iso
 make run       # QEMU BIOS 硬盘启动目标
 ```
+
+Windows PowerShell / CMD 中也可以直接调用：
+
+```powershell
+.\scripts\build-windows.ps1 -Clean
+```
+
+或：
+
+```cmd
+scripts\build-windows.cmd -Clean
+```
+
+构建产物仍在：
+
+- `build/hbos-bios.iso`
+- `build/hbos-uefi.iso`
 
 ## 项目结构
 
