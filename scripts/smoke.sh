@@ -25,7 +25,8 @@ run_guest() {
     local pid=$!
 
     for _ in $(seq 1 30); do
-        if grep -q "\[KERN\] Shell ready" "$log"; then
+        if grep -q "\[SELFTEST\] POSIX/ramfs: PASS" "$log" &&
+           grep -q "\[KERN\] Shell ready" "$log"; then
             kill "$pid" >/dev/null 2>&1 || true
             wait "$pid" >/dev/null 2>&1 || true
             echo "[SMOKE] $name: PASS"
@@ -55,18 +56,40 @@ if [[ ! -r "$OVMF_CODE" || ! -r "$OVMF_VARS" ]]; then
     exit 1
 fi
 
-make -C "$ROOT" release
+make -C "$ROOT" release install-img
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 cp "$OVMF_VARS" "$BUILD/OVMF_VARS_SMOKE_ISO.fd"
+run_guest "bios-iso" "$tmpdir/bios-iso.log" \
+    "$QEMU" -m 512M \
+    -cdrom "$BUILD/hbos-bios.iso" -boot d \
+    -serial stdio -monitor none -display none -no-reboot
+
 run_guest "uefi-iso" "$tmpdir/uefi-iso.log" \
     "$QEMU" -machine q35 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$BUILD/OVMF_VARS_SMOKE_ISO.fd" \
     -cdrom "$BUILD/hbos-uefi.iso" -boot d \
     -serial stdio -monitor none -display none -no-reboot
+
+run_guest "bios-hdd" "$tmpdir/bios-hdd.log" \
+    "$QEMU" -m 512M \
+    -device ich9-ahci,id=ahci \
+    -drive file="$BUILD/hbos_installed_bios.img",format=raw,if=none,id=hd0 \
+    -device ide-hd,drive=hd0,bus=ahci.0 \
+    -boot c -serial stdio -monitor none -display none -no-reboot
+
+cp "$OVMF_VARS" "$BUILD/OVMF_VARS_SMOKE_HDD.fd"
+run_guest "uefi-hdd" "$tmpdir/uefi-hdd.log" \
+    "$QEMU" -machine q35 -m 512M \
+    -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+    -drive if=pflash,format=raw,file="$BUILD/OVMF_VARS_SMOKE_HDD.fd" \
+    -device ich9-ahci,id=ahci \
+    -drive file="$BUILD/hbos_installed_uefi.img",format=raw,if=none,id=hd0 \
+    -device ide-hd,drive=hd0,bus=ahci.0 \
+    -boot c -serial stdio -monitor none -display none -no-reboot
 
 cp "$OVMF_VARS" "$BUILD/OVMF_VARS_SMOKE_VMDK.fd"
 run_guest "vmware-vmdk" "$tmpdir/vmware-vmdk.log" \
