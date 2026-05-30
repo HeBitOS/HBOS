@@ -14,11 +14,13 @@ DISK_IMG = $(BUILD_DIR)/hbos_disk.img
 INSTALL_IMG = $(BUILD_DIR)/hbos_installed.img
 INSTALL_IMG_BIOS = $(BUILD_DIR)/hbos_installed_bios.img
 INSTALL_IMG_UEFI = $(BUILD_DIR)/hbos_installed_uefi.img
+VMWARE_UEFI_VMDK = $(BUILD_DIR)/hbos_vmware_uefi.vmdk
 VBOX_UEFI_VDI = $(BUILD_DIR)/hbos_virtualbox_uefi.vdi
 LIMINE_EFI = limine-bin/bin/BOOTX64.EFI
 UEFI_CD_IMG = $(BUILD_DIR)/limine_uefi_cd.img
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
+QEMU_IMG ?= qemu-img
 
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
@@ -87,7 +89,7 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vbox-uefi run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-uefi vbox-uefi release run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
 
 all: iso
 
@@ -97,7 +99,9 @@ help:
 	@echo "  make run       - Boot installed hard disk image in BIOS mode"
 	@echo "  make run-uefi  - Boot installed hard disk image in UEFI mode"
 	@echo "  make install-img - Build bootable BIOS/UEFI hard disk image"
+	@echo "  make vmware-uefi - Build VMware UEFI VMDK"
 	@echo "  make vbox-uefi - Build VirtualBox UEFI VDI"
+	@echo "  make release   - Build release artifacts"
 	@echo "  make run-hdd   - Alias for make run"
 	@echo "  make run-iso   - Boot ISO with persistent AHCI data disk"
 	@echo "  make run-iso-uefi - Boot UEFI ISO with persistent AHCI data disk"
@@ -229,11 +233,26 @@ $(INSTALL_IMG): $(INSTALL_IMG_UEFI)
 
 install-img: $(INSTALL_IMG_BIOS) $(INSTALL_IMG_UEFI) $(INSTALL_IMG)
 
+$(VMWARE_UEFI_VMDK): $(INSTALL_IMG_UEFI)
+	@rm -f $@
+	$(QEMU_IMG) convert -f raw -O vmdk -o adapter_type=ide,subformat=monolithicSparse $(INSTALL_IMG_UEFI) $@
+	@echo "✓ VMware UEFI VMDK: $@"
+
 $(VBOX_UEFI_VDI): $(INSTALL_IMG_UEFI)
 	@rm -f $@
-	VBoxManage convertfromraw --format VDI $(INSTALL_IMG_UEFI) $@
+	$(QEMU_IMG) convert -f raw -O vdi $(INSTALL_IMG_UEFI) $@
+	@echo "✓ VirtualBox UEFI VDI: $@"
+
+vmware-uefi: $(VMWARE_UEFI_VMDK)
 
 vbox-uefi: $(VBOX_UEFI_VDI)
+
+release: $(ISO_BIOS) $(ISO_UEFI) $(VMWARE_UEFI_VMDK) $(VBOX_UEFI_VDI)
+	@echo "✓ Release artifacts:"
+	@echo "  $(ISO_BIOS)"
+	@echo "  $(ISO_UEFI)"
+	@echo "  $(VMWARE_UEFI_VMDK)"
+	@echo "  $(VBOX_UEFI_VDI)"
 
 run-hdd: run-hdd-bios
 

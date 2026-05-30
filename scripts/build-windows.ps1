@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("all", "iso", "bios-iso", "uefi-iso", "clean")]
+    [ValidateSet("all", "iso", "bios-iso", "uefi-iso", "install-img", "vmware-uefi", "vbox-uefi", "release", "clean")]
     [string]$Target = "all",
 
     [switch]$Clean,
@@ -35,6 +35,9 @@ if ($Clean -and $Target -ne "clean") {
 }
 
 $deps = "command -v make >/dev/null && command -v gcc >/dev/null && command -v nasm >/dev/null && command -v grub-mkrescue >/dev/null && command -v xorriso >/dev/null && command -v mkfs.fat >/dev/null && command -v mcopy >/dev/null"
+if ($Target -eq "release" -or $Target -eq "vmware-uefi" -or $Target -eq "vbox-uefi") {
+    $deps += " && command -v qemu-img >/dev/null"
+}
 $build = "cd '$wslRepo' && $deps && make $makeTarget"
 
 $wslArgs = @()
@@ -49,7 +52,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "Missing dependencies inside WSL can be installed with:"
     Write-Host "  sudo apt update"
-    Write-Host "  sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools python3 python3-pil"
+    Write-Host "  sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools qemu-utils python3 python3-pil"
     exit $LASTEXITCODE
 }
 
@@ -57,3 +60,9 @@ Write-Host ""
 Write-Host "[HBOS] Build complete:"
 Write-Host "  build/hbos-bios.iso"
 Write-Host "  build/hbos-uefi.iso"
+if ($Target -eq "release" -or $Target -eq "vmware-uefi") {
+    Write-Host "  build/hbos_vmware_uefi.vmdk"
+}
+if ($Target -eq "release" -or $Target -eq "vbox-uefi") {
+    Write-Host "  build/hbos_virtualbox_uefi.vdi"
+}

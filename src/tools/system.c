@@ -59,6 +59,19 @@ static void cmd_version(int argc, char **argv) {
     console_puts("    \x1b[36m" HBOS_VERSION_NAME "\x1b[0m\n");
     console_puts("\x1b[33m========================================\x1b[0m\n\n");
     console_puts("64-bit x86_64 Long Mode OS\n");
+    console_puts("Boot: BIOS Multiboot2 / UEFI Limine\n");
+    console_puts("Files: ramfs + HBFS disk backend\n");
+}
+
+static void cmd_about(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts("\n\x1b[33mHBOS\x1b[0m - He Bit OS\n");
+    console_puts("Version: \x1b[36m" HBOS_VERSION_NAME "\x1b[0m\n");
+    console_puts("Release targets: BIOS ISO, UEFI ISO, VMware VMDK, VirtualBox VDI\n");
+    console_puts("Useful commands: help list, diskmgr, install, ls, cat, writefile, run\n");
+    PUTS_CN("提示：VMware/VirtualBox 使用 UEFI 时请关闭 Secure Boot。\n");
+    PUTS_CN("输入 install 查看安装向导，输入 diskmgr 查看磁盘占用。\n");
+    console_putchar('\n');
 }
 
 static void cmd_clear(int argc, char **argv) {
@@ -73,6 +86,7 @@ void tool_system_init(void) {
         {"credits", CMD_GROUP_SYSTEM, "Show credits",        "credits", cmd_credits},
         {"echo",    CMD_GROUP_SYSTEM, "Print text",          "echo <text>", cmd_echo},
         {"version", CMD_GROUP_SYSTEM, "Show version info",   "version", cmd_version},
+        {"about",   CMD_GROUP_SYSTEM, "Show HBOS overview",  "about",   cmd_about},
         {"clear",   CMD_GROUP_SYSTEM, "Clear the screen",    "clear",   cmd_clear},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)

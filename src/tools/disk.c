@@ -168,6 +168,20 @@ static void cmd_diskmgr(int argc, char **argv) {
 }
 
 static void cmd_install(int argc, char **argv) {
+    if (argc == 1) {
+        console_puts("\n\x1b[33mHBOS Installer\x1b[0m\n");
+        console_puts("This installer prepares an HBFS data partition on a writable disk.\n");
+        console_puts("No disk changes were made.\n\n");
+        console_puts("Commands:\n");
+        console_puts("  install status                 show disk and partition status\n");
+        console_puts("  install auto                   create/format HBFS in free space\n");
+        console_puts("  install format                 format the mounted HBFS partition\n");
+        console_puts("  install part <start> <sectors> create HBFS at an exact LBA range\n");
+        console_puts("  diskmgr                        view disk usage map\n\n");
+        cmd_diskmgr(0, 0);
+        return;
+    }
+
     if (argc > 1 && streq(argv[1], "status")) {
         cmd_diskmgr(0, 0);
         return;
@@ -199,7 +213,7 @@ static void cmd_install(int argc, char **argv) {
         return;
     }
 
-    if (argc > 1 && !streq(argv[1], "auto")) {
+    if (!streq(argv[1], "auto")) {
         console_puts("usage: install [auto|status|format|part <start_lba> <sectors>]\n");
         return;
     }
@@ -216,7 +230,7 @@ static void cmd_install(int argc, char **argv) {
 void tool_disk_init(void) {
     static const command_t cmds[] = {
         {"diskmgr", CMD_GROUP_FILE, "Show disk usage map", "diskmgr", cmd_diskmgr},
-        {"install", CMD_GROUP_SYSTEM, "Partition disk and install HBFS", "install [auto|status|format|part <start_lba> <sectors>]", cmd_install},
+        {"install", CMD_GROUP_SYSTEM, "Show installer or prepare HBFS", "install [auto|status|format|part <start_lba> <sectors>]", cmd_install},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

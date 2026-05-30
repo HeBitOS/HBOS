@@ -22,13 +22,14 @@ static const char *cmd_cn(const char *name) {
     if (strcmp(name, "credits") == 0) return "显示致谢";
     if (strcmp(name, "echo") == 0) return "输出文本";
     if (strcmp(name, "version") == 0) return "显示版本信息";
+    if (strcmp(name, "about") == 0) return "显示系统概览和使用提示";
     if (strcmp(name, "clear") == 0) return "清屏";
     if (strcmp(name, "status") == 0) return "显示系统状态";
     if (strcmp(name, "history") == 0) return "显示命令历史";
     if (strcmp(name, "clearhistory") == 0) return "清除命令历史";
     if (strcmp(name, "search") == 0) return "搜索命令历史";
     if (strcmp(name, "diskmgr") == 0) return "显示磁盘占用和分区信息";
-    if (strcmp(name, "install") == 0) return "分区并格式化系统磁盘";
+    if (strcmp(name, "install") == 0) return "显示安装向导或准备 HBFS 分区";
     return NULL;
 }
 

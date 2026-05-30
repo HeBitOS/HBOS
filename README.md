@@ -45,14 +45,14 @@
 
 ### 依赖
 ```bash
-sudo apt install build-essential nasm grub-pc-bin mtools qemu-system-x86 ovmf
+sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools qemu-system-x86 qemu-utils ovmf python3 python3-pil
 ```
 
 Windows 推荐使用 WSL 构建。先安装 Ubuntu WSL，然后在 WSL 内安装依赖：
 
 ```bash
 sudo apt update
-sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools python3 python3-pil
+sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools qemu-utils python3 python3-pil
 ```
 
 ### 构建与运行
@@ -60,6 +60,7 @@ sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mto
 make           # 构建 BIOS/UEFI 双 ISO
 make bios-iso  # 只构建 build/hbos-bios.iso
 make uefi-iso  # 只构建 build/hbos-uefi.iso
+make release   # 构建发布产物：ISO + VMware VMDK + VirtualBox VDI
 make run       # QEMU BIOS 硬盘启动目标
 ```
 
@@ -79,6 +80,25 @@ scripts\build-windows.cmd -Clean
 
 - `build/hbos-bios.iso`
 - `build/hbos-uefi.iso`
+- `build/hbos_vmware_uefi.vmdk`（`make release` / `make vmware-uefi`）
+- `build/hbos_virtualbox_uefi.vdi`（`make release` / `make vbox-uefi`）
+
+### 虚拟机使用
+
+VMware Workstation/Player 25H2：
+
+- 固件类型选择 `UEFI`
+- 关闭 `Secure Boot`
+- 光盘启动使用 `build/hbos-uefi.iso`
+- 硬盘启动可添加现有磁盘 `build/hbos_vmware_uefi.vmdk`
+- 推荐内存 `512 MiB` 或更高
+
+VirtualBox：
+
+- 勾选 `Enable EFI`
+- 关闭 Secure Boot 相关选项
+- 光盘启动使用 `build/hbos-uefi.iso`
+- 硬盘启动可添加现有磁盘 `build/hbos_virtualbox_uefi.vdi`
 
 ## 项目结构
 
