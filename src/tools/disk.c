@@ -118,6 +118,17 @@ static void print_file_usage(void) {
     }
 }
 
+static void print_next_step(void) {
+    console_puts("next:    ");
+    if (block_sector_count() == 0) {
+        console_puts("\x1b[33mattach a writable disk, then run diskmgr\x1b[0m\n");
+    } else if (fs_is_disk()) {
+        console_puts("\x1b[32mpersistent storage ready\x1b[0m; try writefile a hello\n");
+    } else {
+        console_puts("\x1b[36mrun install auto\x1b[0m to prepare persistent HBFS\n");
+    }
+}
+
 static void cmd_diskmgr(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -164,20 +175,21 @@ static void cmd_diskmgr(int argc, char **argv) {
 
     if (sectors != 0) print_partitions(sectors);
     print_file_usage();
+    print_next_step();
     console_putchar('\n');
 }
 
 static void cmd_install(int argc, char **argv) {
     if (argc == 1) {
         console_puts("\n\x1b[33mHBOS Installer\x1b[0m\n");
-        console_puts("This installer prepares an HBFS data partition on a writable disk.\n");
-        console_puts("No disk changes were made.\n\n");
-        console_puts("Commands:\n");
-        console_puts("  install status                 show disk and partition status\n");
-        console_puts("  install auto                   create/format HBFS in free space\n");
-        console_puts("  install format                 format the mounted HBFS partition\n");
-        console_puts("  install part <start> <sectors> create HBFS at an exact LBA range\n");
-        console_puts("  diskmgr                        view disk usage map\n\n");
+        console_puts("No disk changes were made.\n");
+        console_puts("Recommended path:\n");
+        console_puts("  1. diskmgr        inspect disk and partition status\n");
+        console_puts("  2. install auto   prepare persistent HBFS storage\n");
+        console_puts("  3. diskmgr        confirm storage is ready\n\n");
+        console_puts("Advanced:\n");
+        console_puts("  install format                 erase the current HBFS filesystem\n");
+        console_puts("  install part <start> <sectors> create HBFS at an exact LBA range\n\n");
         cmd_diskmgr(0, 0);
         return;
     }
@@ -224,13 +236,15 @@ static void cmd_install(int argc, char **argv) {
         return;
     }
     console_puts("\x1b[32minstall: HBFS partition ready\x1b[0m\n");
-    console_puts("use diskmgr to inspect partitions and usage.\n");
+    cmd_diskmgr(0, 0);
 }
 
 void tool_disk_init(void) {
     static const command_t cmds[] = {
         {"diskmgr", CMD_GROUP_FILE, "Show disk usage map", "diskmgr", cmd_diskmgr},
+        {"disk", CMD_GROUP_FILE, "Show disk usage map", "disk", cmd_diskmgr},
         {"install", CMD_GROUP_SYSTEM, "Show installer or prepare HBFS", "install [auto|status|format|part <start_lba> <sectors>]", cmd_install},
+        {"setup", CMD_GROUP_SYSTEM, "Show installer or prepare HBFS", "setup [auto|status|format|part <start_lba> <sectors>]", cmd_install},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

@@ -58,10 +58,10 @@ sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mto
 ### 构建与运行
 ```bash
 make           # 构建 BIOS/UEFI 双 ISO
-make bios-iso  # 只构建 build/hbos-bios.iso
-make uefi-iso  # 只构建 build/hbos-uefi.iso
 make release   # 构建发布产物：ISO + VMware VMDK + VirtualBox VDI
-make run       # QEMU BIOS 硬盘启动目标
+make run       # QEMU BIOS 硬盘启动
+make run-uefi  # QEMU UEFI 硬盘启动
+make smoke     # 构建并自动验证 BIOS/UEFI ISO/HDD/VMDK 启动
 ```
 
 Windows PowerShell / CMD 中也可以直接调用：
@@ -119,6 +119,8 @@ hbosv2/
 │   │   ├── help.c             # help 命令
 │   │   ├── system.c           # reboot/poweroff/echo/version/clear/credits
 │   │   ├── debug.c            # status 等调试命令
+│   │   ├── file.c             # ls/cat/touch/rm/writefile/appendfile
+│   │   ├── disk.c             # diskmgr/install/setup 磁盘管理与安装
 │   │   └── history.c          # history/clearhistory/search
 │   ├── core/                  # 内核核心框架
 │   │   ├── task.c/.h          # 协作式多任务调度
@@ -126,7 +128,7 @@ hbosv2/
 │   ├── api/
 │   │   └── hal.h              # 硬件抽象层 — 应用程序开发入口
 │   ├── fb.c / flanterm.c      # flanterm 高分辨率终端渲染引擎
-│   └── fs.c                   # 文件系统框架 (待实现)
+│   └── fs.c                   # ramfs + HBFS 磁盘文件系统
 ├── docs/                      # 8 个子目录的完整 AI 开发文档
 ├── Makefile                   # 构建系统
 └── linker_bios.ld             # 链接脚本
@@ -148,6 +150,15 @@ hbosv2/
 | `history` | System | 命令历史 |
 | `clearhistory` | System | 清除历史 |
 | `search <term>` | System | 搜索历史 |
+| `ls` | File | 列出文件 |
+| `cat <file>` | File | 输出文件内容 |
+| `touch <file>` | File | 创建空文件 |
+| `rm <file>` | File | 删除文件 |
+| `writefile <file> <text...>` | File | 覆盖写入文本 |
+| `appendfile <file> <text...>` | File | 追加写入文本 |
+| `diskmgr` / `disk` | File | 查看磁盘、分区和 HBFS 占用 |
+| `install` / `setup` | System | 显示安装向导 |
+| `install auto` | System | 自动准备 HBFS 持久化存储 |
 
 ## 应用程序开发 API
 
@@ -313,10 +324,10 @@ void app_main(void) {
 | Phase 1 | 内核核心 (CORE) | ⬜ | GDT/IDT, CPU 检测, 中断 |
 | Phase 2 | 图形系统 (GRAPHICS) | ✅ | flanterm + VGA 颜色回退 + CJK 渲染 |
 | Phase 3 | Shell 命令系统 (SHELL) | ✅ | 模块化命令, help, 分组, 历史, 行编辑 |
-| Phase 4 | 设备驱动 (DRIVERS) | ✅/⬜ | PS/2 键盘已增强，ATA/PCI/串口待完善 |
-| Phase 5 | 文件系统 (FILESYSTEM) | ⬜ | 块设备, FAT32, VFS |
-| Phase 6 | 内存管理 (MEMORY) | ⬜ | PMM, VMM, Heap |
-| Phase 7 | 进程管理 (PROCESS) | ✅/⬜ | 协作式任务调度已加入，Syscall 待实现 |
+| Phase 4 | 设备驱动 (DRIVERS) | ✅/⬜ | PS/2 键盘、PCI、ATA/AHCI、串口已具备基础能力 |
+| Phase 5 | 文件系统 (FILESYSTEM) | ✅/⬜ | POSIX fd、ramfs、HBFS、VFS、安装器已接入 |
+| Phase 6 | 内存管理 (MEMORY) | ✅/⬜ | PMM、VMM、Heap 已接入，仍需继续增强 |
+| Phase 7 | 进程管理 (PROCESS) | ✅/⬜ | 协作式任务调度与 syscall ABI 已加入 |
 
 ## 许可证
 

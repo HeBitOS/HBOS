@@ -29,7 +29,9 @@ static const char *cmd_cn(const char *name) {
     if (strcmp(name, "clearhistory") == 0) return "清除命令历史";
     if (strcmp(name, "search") == 0) return "搜索命令历史";
     if (strcmp(name, "diskmgr") == 0) return "显示磁盘占用和分区信息";
+    if (strcmp(name, "disk") == 0) return "磁盘查看器别名";
     if (strcmp(name, "install") == 0) return "显示安装向导或准备 HBFS 分区";
+    if (strcmp(name, "setup") == 0) return "安装向导别名";
     return NULL;
 }
 
