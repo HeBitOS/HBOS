@@ -1,5 +1,6 @@
 #include "../graphics/graphics.h"
 #include "../acpi.h"
+#include "../version.h"
 #include "tool.h"
 #define PUTS_CN(str) do { if (console_is_framebuffer()) console_puts(str); } while(0)
 
@@ -55,7 +56,7 @@ static void cmd_echo(int argc, char **argv) {
 static void cmd_version(int argc, char **argv) {
     (void)argc; (void)argv;
     console_puts("\n\x1b[33m========================================\x1b[0m\n");
-    console_puts("    \x1b[36mHBOS - He Bit OS beta1\x1b[0m\n");
+    console_puts("    \x1b[36m" HBOS_VERSION_NAME "\x1b[0m\n");
     console_puts("\x1b[33m========================================\x1b[0m\n\n");
     console_puts("64-bit x86_64 Long Mode OS\n");
 }

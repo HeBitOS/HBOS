@@ -13,6 +13,7 @@
 #include "selftest.h"
 #include "vfs.h"
 #include "acpi.h"
+#include "version.h"
 
 // ============================================================
 // HBOS 内核主入口
@@ -50,7 +51,7 @@ void gdt_idt_init(void);
 // ============================================================
 void kmain(void *mbi) {
     serial_init();
-    serial_print("\n===== HBOS beta1 Starting =====\n");
+    serial_print("\n===== " HBOS_VERSION_NAME " Starting =====\n");
 
     graphics_init(mbi);
     console_clear();
@@ -58,7 +59,7 @@ void kmain(void *mbi) {
     // 启动横幅
     console_write("\n", 1);
     console_write("========================================\n", 41);
-    console_write("      HBOS - He Bit OS beta1\n", 29);
+    console_puts("      " HBOS_VERSION_NAME "\n");
     console_write("       64-bit Operating System\n", 31);
     console_write("========================================\n\n", 41);
 

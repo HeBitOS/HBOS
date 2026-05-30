@@ -4,6 +4,7 @@ LD = ld
 
 BUILD_DIR = build
 SRC_DIR = src
+HBOS_VERSION = 0.1 beta2
 
 KERNEL_BIOS = $(BUILD_DIR)/hbos-bios.bin
 ISO_BIOS = $(BUILD_DIR)/hbos-bios.iso
@@ -177,8 +178,8 @@ $(ISO_BIOS): $(KERNEL_BIOS)
 	@mkdir -p $(BUILD_DIR)/isodir-bios/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-bios/boot/hbos.bin
 	@printf 'set timeout=5\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=auto\n' > $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
-	@printf 'menuentry "HBOS beta1 (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
-	@printf 'menuentry "HBOS beta1 (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
+	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
+	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios 2>/dev/null
 	@echo "✓ BIOS ISO: $@"
 

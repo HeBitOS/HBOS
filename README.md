@@ -1,9 +1,20 @@
    # HBOS - He Bit OS
 
-> 当前版本：beta1
+> 当前版本：0.1 beta2
 > 64-bit 高分辨率图形命令行操作系统，支持多阶段 AI 协同开发
 
 ![截图](./photo/hbosv0.1.png "v0.1截图")
+
+## 0.1 beta2 更新
+
+- ✅ 默认构建产物收敛为 BIOS/UEFI 双 ISO：`build/hbos-bios.iso` 与 `build/hbos-uefi.iso`
+- ✅ UEFI 启动链路改进，支持生成面向虚拟机使用的 GPT/ESP 安装盘镜像
+- ✅ 新增 HBFS 磁盘文件系统路径，支持从 MBR/GPT 分区挂载
+- ✅ POSIX/ramfs 文件工作流完善：`open/read/write/lseek/stat/unlink` 等接口可用于 shell 与用户应用
+- ✅ Shell 增加文件、应用、ATA、磁盘管理相关命令
+- ✅ 新增启动自测，POSIX/ramfs 通过时输出 `[SELFTEST] POSIX/ramfs: PASS`
+- ✅ 新增 ACPI poweroff 路径，`poweroff`/`shutdown` 优先走 ACPI，失败后回退到虚拟机端口
+- ✅ 修复 CJK 滚动错位与滚动时光标残影问题
 
 ## beta1 更新
 
@@ -39,9 +50,10 @@ sudo apt install build-essential nasm grub-pc-bin mtools qemu-system-x86 ovmf
 
 ### 构建与运行
 ```bash
-make           # 构建混合 ISO
-make run       # QEMU 窗口运行（高分辨率图形终端）
-# 当前 Makefile 主要提供 BIOS/Multiboot2 ISO 与 QEMU 运行目标
+make           # 构建 BIOS/UEFI 双 ISO
+make bios-iso  # 只构建 build/hbos-bios.iso
+make uefi-iso  # 只构建 build/hbos-uefi.iso
+make run       # QEMU BIOS 硬盘启动目标
 ```
 
 ## 项目结构
@@ -83,7 +95,7 @@ hbosv2/
 | `help` | System | 交互式帮助模式（Python 风格） |
 | `help <cmd>` | System | 显示单条命令帮助 |
 | `clear` | System | 清屏 |
-| `version` | System | 版本信息（beta1） |
+| `version` | System | 版本信息（0.1 beta2） |
 | `echo <text>` | System | 输出文本 |
 | `reboot` | System | 重启系统 |
 | `poweroff` / `shutdown` | System | 关机 |
