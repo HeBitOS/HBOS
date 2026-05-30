@@ -190,8 +190,8 @@ $(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) limine.conf
 	@cp limine.conf $(BUILD_DIR)/isodir-uefi/limine.conf
 	@cp $(LIMINE_EFI) $(BUILD_DIR)/isodir-uefi/EFI/BOOT/BOOTX64.EFI
 	@cp $(UEFI_CD_IMG) $(BUILD_DIR)/isodir-uefi/boot/uefi-cd.img
-	@xorriso -as mkisofs -R -r -J \
-		--efi-boot boot/uefi-cd.img \
+	@xorriso -as mkisofs -R -r -J -V HBOS_UEFI \
+		-eltorito-alt-boot -e boot/uefi-cd.img -no-emul-boot \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		-o $@ $(BUILD_DIR)/isodir-uefi >/dev/null 2>&1
 	@echo "✓ UEFI ISO: $@"
@@ -275,12 +275,12 @@ $(LIMINE_EFI):
 
 $(UEFI_CD_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf
 	@rm -f $@
-	@truncate -s 64M $@
-	@mkfs.fat -F 32 $@ >/dev/null
+	@dd if=/dev/zero of=$@ bs=512 count=32768 2>/dev/null
+	@mformat -i $@ -h 64 -t 32 -s 16 -N 12345678 ::
 	@mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
-	@mcopy -i $@ $(LIMINE_EFI) ::/EFI/BOOT/BOOTX64.EFI
-	@mcopy -i $@ limine.conf ::/limine.conf
-	@mcopy -i $@ $(KERNEL_BIOS) ::/boot/hbos.bin
+	@mcopy -D o -m -i $@ $(LIMINE_EFI) ::/EFI/BOOT/BOOTX64.EFI
+	@mcopy -D o -m -i $@ limine.conf ::/limine.conf
+	@mcopy -D o -m -i $@ $(KERNEL_BIOS) ::/boot/hbos.bin
 
 $(UEFI_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf
 	@rm -f $@
