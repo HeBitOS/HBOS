@@ -14,6 +14,15 @@ static void strcpy(char *dest, const char *src) {
     while (*src) *dest++ = *src++;
     *dest = 0;
 }
+static void copy_line(char *dest, const char *src, int max_len) {
+    int i = 0;
+    if (max_len <= 0) return;
+    while (src[i] && i < max_len - 1) {
+        dest[i] = src[i];
+        i++;
+    }
+    dest[i] = 0;
+}
 
 #define MAX_COMMANDS 128
 static const command_t *cmd_registry[MAX_COMMANDS];
@@ -123,12 +132,17 @@ static int get_key(void) {
             if (sc == 0xE0) {
                 while (!(inb(0x64) & 1));
                 sc = inb(0x60);
+                if (sc & 0x80) continue;
+                if (sc == 0x47) return KEY_HOME;
                 if (sc == 0x48) return KEY_UP;
+                if (sc == 0x4F) return KEY_END;
                 if (sc == 0x50) return KEY_DOWN;
                 if (sc == 0x4B) return KEY_LEFT;
                 if (sc == 0x4D) return KEY_RIGHT;
                 if (sc == 0x49) return KEY_PGUP;
                 if (sc == 0x51) return KEY_PGDWN;
+                if (sc == 0x52) return KEY_INSERT;
+                if (sc == 0x53) return KEY_DELETE;
                 continue;
             }
             if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; continue; }
@@ -267,8 +281,13 @@ static void line_replace(char *line, int *len, int *pos, const char *next) {
         console_putchar(next[n]);
         n++;
     }
+    line[n] = 0;
     *len = n;
     *pos = n;
+}
+
+static void ensure_live_input(void) {
+    if (console_is_scrolled()) console_scroll_reset();
 }
 
 static void line_insert(char *line, int *len, int *pos, char c) {
@@ -276,6 +295,7 @@ static void line_insert(char *line, int *len, int *pos, char c) {
     int p = *pos;
     for (int i = *len; i > p; i--) line[i] = line[i-1];
     line[p] = c; (*len)++; (*pos)++;
+    line[*len] = 0;
     line_redraw_tail(line, *len, *pos, p, 0);
 }
 
@@ -285,6 +305,7 @@ static void line_delete(char *line, int *len, int *pos) {
     for (int i = p; i < *len - 1; i++) line[i] = line[i+1];
     (*len)--;
     (*pos) = p;
+    line[*len] = 0;
 
     cursor_left_one();
     line_redraw_tail(line, *len, *pos, p, 1);
@@ -292,43 +313,59 @@ static void line_delete(char *line, int *len, int *pos) {
 
 void shell_run(void) {
     char cmd_line[CMD_BUF_SIZE];
+    char history_draft[CMD_BUF_SIZE];
     int cmd_len = 0, cmd_pos = 0;
+    bool browsing_history = false;
 
     while (1) {
         shell_print_prompt();
         cmd_len = 0; cmd_pos = 0; hist_idx = hist_count;
+        history_draft[0] = 0;
+        browsing_history = false;
 
         while (1) {
             int c = get_key();
 
             if (c == '\n') {
+                ensure_live_input();
                 cmd_line[cmd_len] = '\0';
                 console_putchar('\n');
                 if (cmd_len > 0) cmd_execute(cmd_line);
                 break;
 
             } else if (c == '\b' || c == 0x7F) {
+                ensure_live_input();
                 line_delete(cmd_line, &cmd_len, &cmd_pos);
 
             } else if (c == KEY_LEFT) {
+                ensure_live_input();
                 if (cmd_pos > 0) { cmd_pos--; cursor_left_one(); }
 
             } else if (c == KEY_RIGHT) {
+                ensure_live_input();
                 if (cmd_pos < cmd_len) { console_putchar(cmd_line[cmd_pos]); cmd_pos++; }
 
             } else if (c == KEY_UP) {
+                ensure_live_input();
                 if (hist_idx > 0) {
+                    if (!browsing_history) {
+                        cmd_line[cmd_len] = 0;
+                        copy_line(history_draft, cmd_line, CMD_BUF_SIZE);
+                        browsing_history = true;
+                    }
                     hist_idx--;
                     line_replace(cmd_line, &cmd_len, &cmd_pos, history[hist_idx]);
                 }
 
             } else if (c == KEY_DOWN) {
+                ensure_live_input();
                 if (hist_idx < hist_count - 1) {
                     hist_idx++;
                     line_replace(cmd_line, &cmd_len, &cmd_pos, history[hist_idx]);
                 } else if (hist_idx < hist_count) {
                     hist_idx++;
-                    line_replace(cmd_line, &cmd_len, &cmd_pos, "");
+                    line_replace(cmd_line, &cmd_len, &cmd_pos, history_draft);
+                    browsing_history = false;
                 }
 
             } else if (c == KEY_PGUP) {
@@ -338,15 +375,18 @@ void shell_run(void) {
                 console_scroll_down(10);
 
             } else if (c == KEY_HOME) {
+                ensure_live_input();
                 while (cmd_pos > 0) { cmd_pos--; cursor_left_one(); }
 
             } else if (c == KEY_END) {
+                ensure_live_input();
                 while (cmd_pos < cmd_len) { console_putchar(cmd_line[cmd_pos]); cmd_pos++; }
 
             } else if (c == KEY_INSERT) {
                 // Insert key — no action for now
 
             } else if (c == KEY_DELETE) {
+                ensure_live_input();
                 if (cmd_pos < cmd_len) {
                     for (int i = cmd_pos; i < cmd_len - 1; i++) cmd_line[i] = cmd_line[i+1];
                     cmd_len--;
@@ -354,11 +394,15 @@ void shell_run(void) {
                 }
 
             } else if (c >= ' ' && c <= '~') {
-                // If we were in scrollback, restore live view first
-                if (console_is_scrolled()) console_scroll_reset();
+                ensure_live_input();
+                browsing_history = false;
+                hist_idx = hist_count;
                 if (cmd_pos == cmd_len) {
                     if (cmd_len < CMD_BUF_SIZE - 1) {
-                        cmd_line[cmd_len++] = c; cmd_pos = cmd_len; console_putchar(c);
+                        cmd_line[cmd_len++] = c;
+                        cmd_line[cmd_len] = 0;
+                        cmd_pos = cmd_len;
+                        console_putchar(c);
                     }
                 } else {
                     line_insert(cmd_line, &cmd_len, &cmd_pos, c);

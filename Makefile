@@ -89,7 +89,7 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-uefi vbox-uefi release run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-uefi vbox-uefi release smoke run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
 
 all: iso
 
@@ -102,6 +102,7 @@ help:
 	@echo "  make vmware-uefi - Build VMware UEFI VMDK"
 	@echo "  make vbox-uefi - Build VirtualBox UEFI VDI"
 	@echo "  make release   - Build release artifacts"
+	@echo "  make smoke     - Build release and boot-test UEFI ISO/VMDK"
 	@echo "  make run-hdd   - Alias for make run"
 	@echo "  make run-iso   - Boot ISO with persistent AHCI data disk"
 	@echo "  make run-iso-uefi - Boot UEFI ISO with persistent AHCI data disk"
@@ -253,6 +254,9 @@ release: $(ISO_BIOS) $(ISO_UEFI) $(VMWARE_UEFI_VMDK) $(VBOX_UEFI_VDI)
 	@echo "  $(ISO_UEFI)"
 	@echo "  $(VMWARE_UEFI_VMDK)"
 	@echo "  $(VBOX_UEFI_VDI)"
+
+smoke:
+	bash scripts/smoke.sh
 
 run-hdd: run-hdd-bios
 
