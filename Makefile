@@ -54,6 +54,7 @@ C_SRCS = \
 	$(SRC_DIR)/flanterm.c \
 	$(SRC_DIR)/graphics/graphics.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
+	$(SRC_DIR)/input/mouse.c \
 	$(SRC_DIR)/shell/shell.c \
 	$(SRC_DIR)/core/task.c \
 	$(SRC_DIR)/lib/posix.c \
@@ -68,6 +69,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/app.c \
 	$(SRC_DIR)/tools/ata.c \
 	$(SRC_DIR)/tools/disk.c \
+	$(SRC_DIR)/tools/gui.c \
 	$(APP_SRCS)
 
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -118,7 +120,7 @@ help:
 	@echo "  make run-uefi-headless"
 
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps
+	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/input $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps
 
 # Font generation
 font: $(FONT_BIN)
@@ -151,6 +153,10 @@ $(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.c | $(BUILD_DIR) $(FONT_BIN)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/shell/%.o: $(SRC_DIR)/shell/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(BUILD_DIR)/input/%.o: $(SRC_DIR)/input/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
