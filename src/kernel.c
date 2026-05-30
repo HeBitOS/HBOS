@@ -12,6 +12,7 @@
 #include "tools/tool.h"
 #include "selftest.h"
 #include "vfs.h"
+#include "acpi.h"
 
 // ============================================================
 // HBOS 内核主入口
@@ -71,6 +72,7 @@ void kmain(void *mbi) {
 
     // Phase 2: GDT + IDT + PIC
     gdt_idt_init();
+    acpi_init(mbi);
 
     // Set TSS ring0 stack
     uint64_t rsp;

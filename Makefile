@@ -5,13 +5,15 @@ LD = ld
 BUILD_DIR = build
 SRC_DIR = src
 
-KERNEL_BIOS = $(BUILD_DIR)/hbos_bios.bin
-ISO_BIOS = $(BUILD_DIR)/hbos_bios.iso
-ISO_UEFI = $(BUILD_DIR)/hbos_uefi.iso
-ISO_HYBRID = $(BUILD_DIR)/hbos.iso
+KERNEL_BIOS = $(BUILD_DIR)/hbos-bios.bin
+ISO_BIOS = $(BUILD_DIR)/hbos-bios.iso
+ISO_UEFI = $(BUILD_DIR)/hbos-uefi.iso
 UEFI_IMG = $(BUILD_DIR)/hbos_uefi.img
 DISK_IMG = $(BUILD_DIR)/hbos_disk.img
 INSTALL_IMG = $(BUILD_DIR)/hbos_installed.img
+INSTALL_IMG_BIOS = $(BUILD_DIR)/hbos_installed_bios.img
+INSTALL_IMG_UEFI = $(BUILD_DIR)/hbos_installed_uefi.img
+VBOX_UEFI_VDI = $(BUILD_DIR)/hbos_virtualbox_uefi.vdi
 LIMINE_EFI = limine-bin/bin/BOOTX64.EFI
 UEFI_CD_IMG = $(BUILD_DIR)/limine_uefi_cd.img
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -37,6 +39,7 @@ APP_SRCS = $(wildcard $(SRC_DIR)/apps/*.c)
 C_SRCS = \
 	$(SRC_DIR)/kernel.c \
 	$(SRC_DIR)/selftest.c \
+	$(SRC_DIR)/acpi.c \
 	$(SRC_DIR)/syscall.c \
 	$(SRC_DIR)/pci.c \
 	$(SRC_DIR)/block.c \
@@ -83,16 +86,17 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vbox-uefi run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
 
-all: iso disk-img install-img
+all: iso
 
 help:
 	@echo "HBOS Build Targets:"
-	@echo "  make all       - Build ISOs, data disk, and installed disk image"
+	@echo "  make all       - Build BIOS and UEFI ISOs"
 	@echo "  make run       - Boot installed hard disk image in BIOS mode"
 	@echo "  make run-uefi  - Boot installed hard disk image in UEFI mode"
 	@echo "  make install-img - Build bootable BIOS/UEFI hard disk image"
+	@echo "  make vbox-uefi - Build VirtualBox UEFI VDI"
 	@echo "  make run-hdd   - Alias for make run"
 	@echo "  make run-iso   - Boot ISO with persistent AHCI data disk"
 	@echo "  make run-iso-uefi - Boot UEFI ISO with persistent AHCI data disk"
@@ -176,7 +180,6 @@ $(ISO_BIOS): $(KERNEL_BIOS)
 	@printf 'menuentry "HBOS beta1 (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS beta1 (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios 2>/dev/null
-	@cp $@ $(ISO_HYBRID)
 	@echo "✓ BIOS ISO: $@"
 
 $(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) limine.conf
@@ -191,8 +194,6 @@ $(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) limine.conf
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		-o $@ $(BUILD_DIR)/isodir-uefi >/dev/null 2>&1
 	@echo "✓ UEFI ISO: $@"
-
-$(ISO_HYBRID): $(ISO_BIOS)
 
 iso: $(ISO_BIOS) $(ISO_UEFI)
 
@@ -216,27 +217,39 @@ $(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
 
 disk-img: $(DISK_IMG)
 
-$(INSTALL_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf tools/mkhbosdisk.py
-	python3 tools/mkhbosdisk.py $@ --kernel $(KERNEL_BIOS) --limine-conf limine.conf --limine-dir limine-bin/bin
+$(INSTALL_IMG_BIOS): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf tools/mkhbosdisk.py
+	python3 tools/mkhbosdisk.py $@ --mode bios --kernel $(KERNEL_BIOS) --limine-conf limine.conf --limine-dir limine-bin/bin
 
-install-img: $(INSTALL_IMG)
+$(INSTALL_IMG_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf tools/mkhbosdisk.py
+	python3 tools/mkhbosdisk.py $@ --mode uefi --kernel $(KERNEL_BIOS) --limine-conf limine.conf --limine-dir limine-bin/bin
+
+$(INSTALL_IMG): $(INSTALL_IMG_UEFI)
+	@cp $(INSTALL_IMG_UEFI) $@
+
+install-img: $(INSTALL_IMG_BIOS) $(INSTALL_IMG_UEFI) $(INSTALL_IMG)
+
+$(VBOX_UEFI_VDI): $(INSTALL_IMG_UEFI)
+	@rm -f $@
+	VBoxManage convertfromraw --format VDI $(INSTALL_IMG_UEFI) $@
+
+vbox-uefi: $(VBOX_UEFI_VDI)
 
 run-hdd: run-hdd-bios
 
-run-hdd-bios: $(INSTALL_IMG)
+run-hdd-bios: $(INSTALL_IMG_BIOS)
 	$(QEMU) -m 512M \
 		-device ich9-ahci,id=ahci \
-		-drive file=$(INSTALL_IMG),format=raw,if=none,id=hd0 \
+		-drive file=$(INSTALL_IMG_BIOS),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
 		-boot c -serial stdio -vga std -monitor none
 
-run-hdd-uefi: $(INSTALL_IMG)
+run-hdd-uefi: $(INSTALL_IMG_UEFI)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_HDD.fd
 	$(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_HDD.fd \
 		-device ich9-ahci,id=ahci \
-		-drive file=$(INSTALL_IMG),format=raw,if=none,id=hd0 \
+		-drive file=$(INSTALL_IMG_UEFI),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
 		-boot c -serial stdio -monitor none -vga std -no-reboot
 

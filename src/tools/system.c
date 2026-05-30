@@ -1,4 +1,5 @@
 #include "../graphics/graphics.h"
+#include "../acpi.h"
 #include "tool.h"
 #define PUTS_CN(str) do { if (console_is_framebuffer()) console_puts(str); } while(0)
 
@@ -18,7 +19,10 @@ static void cmd_poweroff(int argc, char **argv) {
     (void)argc; (void)argv;
     console_puts("\n\x1b[33mShutting down HBOS...\x1b[0m\n");
     PUTS_CN("\x1b[33m系统关机中...\x1b[0m\n");
-    tool_outw(0x604, 0x2000); tool_outw(0x4004, 0x3400);
+    (void)acpi_poweroff();
+    tool_outw(0x604, 0x2000);
+    tool_outw(0xB004, 0x2000);
+    tool_outw(0x4004, 0x3400);
     while(1) __asm__ volatile("cli; hlt");
 }
 

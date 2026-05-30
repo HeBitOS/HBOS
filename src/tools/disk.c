@@ -76,6 +76,7 @@ static void print_partition_line(uint32_t idx, const fs_partition_info_t *p, uin
     else console_puts("  ");
     print_hex8(p->type);
     if (p->type == 0x0C) console_puts(" FAT32 ");
+    else if (p->type == 0xEF) console_puts(" ESP   ");
     else if (p->type == 0xEB) console_puts(" HBFS  ");
     else console_puts("       ");
     console_puts(" start=");

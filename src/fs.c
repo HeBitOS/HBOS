@@ -8,6 +8,9 @@
 #define HBFS_TABLE_SECTORS 8
 #define HBFS_FILE_SECTORS (RAMFS_MAX_FILE_SIZE / BLOCK_SECTOR_SIZE)
 #define HBFS_PARTITION_TYPE 0xEB
+#define GPT_ENTRY_SIZE 128
+#define GPT_ENTRY_COUNT 128
+#define GPT_ENTRY_SECTORS 32
 
 typedef enum {
     FS_BACKEND_RAM = 0,
@@ -286,10 +289,89 @@ static uint32_t get_le32(const uint8_t *p) {
            ((uint32_t)p[3] << 24);
 }
 
+static uint64_t get_le64(const uint8_t *p) {
+    return (uint64_t)get_le32(p) | ((uint64_t)get_le32(p + 4) << 32);
+}
+
+static int guid_eq(const uint8_t *a, const uint8_t *b) {
+    for (uint32_t i = 0; i < 16; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+
+static uint8_t gpt_type_to_mbr_type(const uint8_t *guid) {
+    static const uint8_t esp_guid[16] = {
+        0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+        0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b
+    };
+    static const uint8_t hbfs_guid[16] = {
+        0x53, 0x46, 0x42, 0x48, 0x00, 0x00, 0x00, 0x40,
+        0x80, 0x00, 0x48, 0x42, 0x4f, 0x53, 0x00, 0x01
+    };
+    static const uint8_t zero_guid[16] = {0};
+
+    if (guid_eq(guid, zero_guid)) return 0;
+    if (guid_eq(guid, esp_guid)) return 0xEF;
+    if (guid_eq(guid, hbfs_guid)) return HBFS_PARTITION_TYPE;
+    return 0xEE;
+}
+
+static int read_gpt_entries(fs_partition_info_t out[4], uint32_t *hbfs_start, uint32_t *hbfs_sectors) {
+    uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    if (block_read_sector(1, sector) < 0) return -1;
+    if (sector[0] != 'E' || sector[1] != 'F' || sector[2] != 'I' || sector[3] != ' ' ||
+        sector[4] != 'P' || sector[5] != 'A' || sector[6] != 'R' || sector[7] != 'T') {
+        return -1;
+    }
+
+    uint64_t entries_lba = get_le64(sector + 72);
+    uint32_t entry_count = get_le32(sector + 80);
+    uint32_t entry_size = get_le32(sector + 84);
+    if (entries_lba == 0 || entry_size < GPT_ENTRY_SIZE) return -1;
+    if (entry_count > GPT_ENTRY_COUNT) entry_count = GPT_ENTRY_COUNT;
+
+    uint32_t shown = 0;
+    uint8_t entries[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    for (uint32_t i = 0; i < entry_count; i++) {
+        uint32_t sector_index = (i * entry_size) / BLOCK_SECTOR_SIZE;
+        uint32_t sector_off = (i * entry_size) % BLOCK_SECTOR_SIZE;
+        if (sector_off + GPT_ENTRY_SIZE > BLOCK_SECTOR_SIZE) return -1;
+        if (block_read_sector((uint32_t)entries_lba + sector_index, entries) < 0) return -1;
+
+        uint8_t type = gpt_type_to_mbr_type(entries + sector_off);
+        if (type == 0) continue;
+
+        uint64_t first = get_le64(entries + sector_off + 32);
+        uint64_t last = get_le64(entries + sector_off + 40);
+        if (first == 0 || last < first || first > 0xFFFFFFFFULL) continue;
+        uint64_t count64 = last - first + 1;
+        if (count64 > 0xFFFFFFFFULL) count64 = 0xFFFFFFFFULL;
+
+        if (shown < 4 && out) {
+            out[shown].present = 1;
+            out[shown].bootable = (type == 0xEF);
+            out[shown].type = type;
+            out[shown].start_lba = (uint32_t)first;
+            out[shown].sectors = (uint32_t)count64;
+            shown++;
+        }
+
+        if (type == HBFS_PARTITION_TYPE && count64 >= hbfs_needed_sectors()) {
+            if (hbfs_start) *hbfs_start = (uint32_t)first;
+            if (hbfs_sectors) *hbfs_sectors = (uint32_t)count64;
+        }
+    }
+    return shown > 0 ? 0 : -1;
+}
+
 static int hbfs_find_mbr_partition(uint32_t *start, uint32_t *sectors) {
     uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
     if (block_read_sector(0, mbr) < 0) return -1;
     if (mbr[510] != 0x55 || mbr[511] != 0xAA) return -1;
+
+    if ((mbr + 446)[4] == 0xEE && read_gpt_entries(NULL, start, sectors) == 0)
+        return 0;
 
     for (uint32_t i = 0; i < 4; i++) {
         uint8_t *e = mbr + 446 + i * 16;
@@ -319,6 +401,9 @@ int fs_read_partitions(fs_partition_info_t out[4]) {
     uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
     if (block_read_sector(0, mbr) < 0) return -1;
     if (mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
+
+    if ((mbr + 446)[4] == 0xEE && read_gpt_entries(out, NULL, NULL) == 0)
+        return 0;
 
     for (uint32_t i = 0; i < 4; i++) {
         uint8_t *e = mbr + 446 + i * 16;
