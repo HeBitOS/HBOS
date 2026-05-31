@@ -37,7 +37,7 @@
 - ✅ 命令分组管理 (系统/文件/图形/调试/用户)，基础命令已模块化到 `src/tools/`
 - ✅ 命令历史 / 搜索 / 上下键回滚 / PgUp-PgDn 上下文浏览
 - ✅ UTF-8 中文/CJK 字符显示（构建时 TTF → HZK16 点阵）
-- ✅ 可由 `gui` / `startx` 命令启动的图形桌面，支持 PS/2 鼠标指针与点击交互
+- ✅ `gui` / `startx` 图形桌面，包含文件管理、磁盘管理、资源管理器、应用启动器和内置小游戏
 - ✅ 初步协作式多任务框架
 - ✅ 多阶段 AI 开发文档体系
 - ✅ 应用程序 API (硬件抽象层)
@@ -122,7 +122,7 @@ hbosv2/
 │   │   ├── debug.c            # status 等调试命令
 │   │   ├── file.c             # ls/cat/touch/rm/writefile/appendfile
 │   │   ├── disk.c             # diskmgr/install/setup 磁盘管理与安装
-│   │   ├── gui.c              # gui/startx 图形桌面
+│   │   ├── gui.c              # gui/startx 图形文件和磁盘控制面板
 │   │   └── history.c          # history/clearhistory/search
 │   ├── input/
 │   │   └── mouse.c/.h         # PS/2 鼠标轮询驱动
@@ -163,8 +163,7 @@ hbosv2/
 | `diskmgr` / `disk` | File | 查看磁盘、分区和 HBFS 占用 |
 | `install` / `setup` | System | 显示安装向导 |
 | `install auto` | System | 自动准备 HBFS 持久化存储 |
-| `gui` / `startx` | Graphics | 启动图形桌面，按 Esc 或 q 返回 Shell |
-
+| `gui` / `startx` | Graphics | 启动 HBOS 图形桌面，可操作文件、查看资源、打开系统软件和小游戏 |
 ## 应用程序开发 API
 
 ### 示例程序

@@ -46,11 +46,21 @@ static uint8_t ramfs_storage[MAX_FILES][RAMFS_MAX_FILE_SIZE];
 static hbfs_entry_t hbfs_table[MAX_FILES];
 static uint32_t hbfs_start_lba = HBFS_DEFAULT_START_LBA;
 static uint32_t hbfs_total_sectors = 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS;
+static const char *fs_error = "ok";
 
 static int ramfs_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);
 static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count);
 static int ramfs_vfs_truncate(vfs_node_t *node);
 static int ramfs_vfs_unlink(vfs_node_t *node);
+
+static int fs_fail(const char *msg) {
+    fs_error = msg;
+    return -1;
+}
+
+const char *fs_last_error(void) {
+    return fs_error;
+}
 
 static const vfs_ops_t ramfs_ops = {
     .read = ramfs_vfs_read,
@@ -476,7 +486,8 @@ static uint32_t align_up(uint32_t value, uint32_t align) {
 static int hbfs_choose_install_range(uint32_t *start, uint32_t *sectors) {
     uint32_t total = block_sector_count();
     uint32_t min = hbfs_needed_sectors();
-    if (total <= HBFS_DEFAULT_START_LBA + min) return -1;
+    if (total == 0) return fs_fail("未检测到可写硬盘");
+    if (total <= HBFS_DEFAULT_START_LBA + min) return fs_fail("硬盘空间不足");
 
     if (hbfs_find_mbr_partition(start, sectors) == 0) return 0;
 
@@ -500,7 +511,7 @@ static int hbfs_choose_install_range(uint32_t *start, uint32_t *sectors) {
         }
     }
 
-    if (candidate + min > total) return -1;
+    if (candidate + min > total) return fs_fail("没有可用分区空间");
     *start = candidate;
     *sectors = total - candidate;
     return 0;
@@ -516,13 +527,13 @@ static int hbfs_range_valid(uint32_t start, uint32_t sectors) {
 }
 
 static int hbfs_format_range(uint32_t start, uint32_t sectors) {
-    if (!hbfs_range_valid(start, sectors)) return -1;
+    if (!hbfs_range_valid(start, sectors)) return fs_fail("HBFS 分区范围无效");
     hbfs_start_lba = start;
     hbfs_total_sectors = sectors;
 
     memset(hbfs_table, 0, sizeof(hbfs_table));
-    if (hbfs_write_super() < 0) return -1;
-    if (hbfs_sync_table() < 0) return -1;
+    if (hbfs_write_super() < 0) return fs_fail("写入超级块失败");
+    if (hbfs_sync_table() < 0) return fs_fail("写入文件表失败");
     return fs_mount_disk();
 }
 
@@ -534,7 +545,8 @@ int fs_init(void) {
 }
 
 int fs_format_disk(void) {
-    if (block_init() < 0) return -1;
+    fs_error = "ok";
+    if (block_init() < 0) return fs_fail("未检测到可写硬盘");
     uint32_t start = HBFS_DEFAULT_START_LBA;
     uint32_t sectors = block_sector_count() > start ? block_sector_count() - start : 0;
     (void)hbfs_find_mbr_partition(&start, &sectors);
@@ -542,7 +554,8 @@ int fs_format_disk(void) {
 }
 
 int fs_install_disk(void) {
-    if (block_init() < 0) return -1;
+    fs_error = "ok";
+    if (block_init() < 0) return fs_fail("未检测到可写硬盘");
     uint32_t start = 0;
     uint32_t sectors = 0;
     if (hbfs_find_mbr_partition(&start, &sectors) == 0)
@@ -552,9 +565,10 @@ int fs_install_disk(void) {
 }
 
 int fs_install_disk_at(uint32_t start, uint32_t sectors) {
-    if (block_init() < 0) return -1;
-    if (!hbfs_range_valid(start, sectors)) return -1;
-    if (hbfs_write_mbr_partition(start, sectors) < 0) return -1;
+    fs_error = "ok";
+    if (block_init() < 0) return fs_fail("未检测到可写硬盘");
+    if (!hbfs_range_valid(start, sectors)) return fs_fail("HBFS 分区范围无效");
+    if (hbfs_write_mbr_partition(start, sectors) < 0) return fs_fail("写入分区表失败");
     return hbfs_format_range(start, sectors);
 }
 

@@ -12,7 +12,8 @@
 #define MOUSE_MIDDLE 0x04
 
 static int mouse_ready;
-static uint8_t packet[3];
+static int mouse_packet_size = 3;
+static uint8_t packet[4];
 static uint8_t packet_i;
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -73,9 +74,21 @@ static int read_ack(void) {
     return ack == 0xFA ? 0 : -1;
 }
 
+static int mouse_set_sample_rate(uint8_t rate) {
+    if (write_mouse(0xF3) < 0 || read_ack() < 0) return -1;
+    if (write_mouse(rate) < 0 || read_ack() < 0) return -1;
+    return 0;
+}
+
+static int mouse_read_id(uint8_t *id) {
+    if (write_mouse(0xF2) < 0 || read_ack() < 0) return -1;
+    return read_data(id);
+}
+
 int mouse_init(void) {
     uint8_t status = 0;
     mouse_ready = 0;
+    mouse_packet_size = 3;
     packet_i = 0;
 
     flush_output();
@@ -88,6 +101,13 @@ int mouse_init(void) {
     if (write_data(status) < 0) return -1;
 
     if (write_mouse(0xF6) < 0 || read_ack() < 0) return -1;
+    if (mouse_set_sample_rate(200) == 0 &&
+        mouse_set_sample_rate(100) == 0 &&
+        mouse_set_sample_rate(80) == 0) {
+        uint8_t id = 0;
+        if (mouse_read_id(&id) == 0 && id == 3) mouse_packet_size = 4;
+    }
+    if (mouse_set_sample_rate(60) < 0) return -1;
     if (write_mouse(0xF4) < 0 || read_ack() < 0) return -1;
     mouse_ready = 1;
     return 0;
@@ -112,18 +132,24 @@ int mouse_poll(mouse_event_t *ev) {
 
         if (packet_i == 0 && !(b & 0x08)) continue;
         packet[packet_i++] = b;
-        if (packet_i < 3) continue;
+        if (packet_i < mouse_packet_size) continue;
 
         packet_i = 0;
         int x = (int)packet[1];
         int y = (int)packet[2];
+        int z = 0;
         if (packet[0] & 0x10) x -= 256;
         if (packet[0] & 0x20) y -= 256;
         if (packet[0] & 0x40) x = 0;
         if (packet[0] & 0x80) y = 0;
+        if (mouse_packet_size == 4) {
+            z = packet[3] & 0x0F;
+            if (z & 0x08) z -= 16;
+        }
 
         ev->dx = x;
         ev->dy = -y;
+        ev->dz = z;
         ev->buttons = packet[0] & (MOUSE_LEFT | MOUSE_RIGHT | MOUSE_MIDDLE);
         return 1;
     }

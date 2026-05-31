@@ -32,6 +32,9 @@ void console_putchar_raw(char c);
 // 清除屏幕
 void console_clear(void);
 
+// 重置终端状态和 framebuffer 内容（用于从像素级 GUI 返回 shell）
+void console_reset_terminal(void);
+
 // 设置前景色（RGB 24-bit 颜色值）
 void console_set_fg(uint32_t color);
 

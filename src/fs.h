@@ -42,6 +42,7 @@ int fs_init(void);
 int fs_format_disk(void);
 int fs_install_disk(void);
 int fs_install_disk_at(uint32_t start_lba, uint32_t sectors);
+const char *fs_last_error(void);
 int fs_read_partitions(fs_partition_info_t out[4]);
 int fs_mount_disk(void);
 int fs_sync(void);

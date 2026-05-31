@@ -6,6 +6,7 @@
 typedef struct {
     int dx;
     int dy;
+    int dz;
     uint8_t buttons;
 } mouse_event_t;
 

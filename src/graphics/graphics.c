@@ -9,6 +9,7 @@
 
 #include "graphics.h"
 #include "font_cjk.h"
+#include "string.h"
 
 static struct flanterm_context *g_term = NULL;
 static bool g_initialized = false;
@@ -488,6 +489,37 @@ void console_clear(void) {
     if (!g_initialized) return;
     if (g_term) { flanterm_write(g_term, "\033[2J\033[H", 8); flanterm_flush(g_term); }
     else vga_clear_fallback();
+}
+
+void console_reset_terminal(void) {
+    if (!g_initialized) return;
+    sb_active = false;
+    sb_offset = 0;
+    sb_line_pos = 0;
+    if (!g_term) {
+        vga_clear_fallback();
+        return;
+    }
+
+    struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
+    flanterm_context_reinit(g_term);
+    fc->text_fg = fc->default_fg;
+    fc->text_bg = 0xffffffff;
+    fc->cursor_x = 0;
+    fc->cursor_y = 0;
+    fc->old_cursor_x = 0;
+    fc->old_cursor_y = 0;
+    fc->queue_i = 0;
+    if (fc->map) memset(fc->map, 0, fc->map_size);
+
+    struct flanterm_fb_char empty;
+    empty.c = ' ';
+    empty.fg = fc->text_fg;
+    empty.bg = fc->text_bg;
+    for (uint64_t i = 0; i < g_term->rows * g_term->cols; i++)
+        fc->grid[i] = empty;
+
+    if (g_term->full_refresh) g_term->full_refresh(g_term);
 }
 
 void console_set_title(const char *title) {

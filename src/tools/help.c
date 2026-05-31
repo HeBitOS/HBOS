@@ -32,8 +32,8 @@ static const char *cmd_cn(const char *name) {
     if (strcmp(name, "disk") == 0) return "磁盘查看器别名";
     if (strcmp(name, "install") == 0) return "显示安装向导或准备 HBFS 分区";
     if (strcmp(name, "setup") == 0) return "安装向导别名";
-    if (strcmp(name, "gui") == 0) return "启动图形桌面";
-    if (strcmp(name, "startx") == 0) return "启动图形桌面别名";
+    if (strcmp(name, "gui") == 0) return "启动图形文件和磁盘控制面板";
+    if (strcmp(name, "startx") == 0) return "图形控制面板别名";
     return NULL;
 }
 

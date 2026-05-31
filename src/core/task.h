@@ -69,6 +69,9 @@ task_t *task_current(void);
 // Get number of active (non-terminated) tasks
 int task_get_count(void);
 
+// Get active task by visible index, or NULL when out of range
+const task_t *task_get_active(uint32_t index);
+
 // List all tasks (for debug)
 void task_list_all(void);
 

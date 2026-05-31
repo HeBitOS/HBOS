@@ -31,6 +31,10 @@ ASFLAGS = -f elf64
 LDFLAGS_BIOS = -m elf_x86_64 -static -Bsymbolic -nostdlib -T linker_bios.ld
 
 QEMU = /usr/bin/qemu-system-x86_64
+QEMU_ENV = env -u SNAP -u SNAP_NAME -u SNAP_REVISION -u SNAP_ARCH -u SNAP_INSTANCE_NAME \
+           -u SNAP_COMMON -u SNAP_DATA -u SNAP_USER_COMMON -u SNAP_USER_DATA \
+           -u SNAP_LIBRARY_PATH -u GTK_PATH -u GTK_EXE_PREFIX -u GIO_MODULE_DIR \
+           -u GTK_IM_MODULE_FILE -u LOCPATH
 
 # 字体文件
 FONT_TTF = fonts/ZhengGeDianHei-16.ttf
@@ -189,7 +193,7 @@ $(ISO_BIOS): $(KERNEL_BIOS)
 	@rm -rf $(BUILD_DIR)/isodir-bios
 	@mkdir -p $(BUILD_DIR)/isodir-bios/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-bios/boot/hbos.bin
-	@printf 'set timeout=5\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=auto\n' > $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
+	@printf 'set timeout=5\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1440x900x32,1280x800x32,1024x768x32,auto\n' > $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios 2>/dev/null
@@ -223,7 +227,7 @@ run-bios: run
 run-iso: run-bios-ahci
 
 run-bios-nodisk: $(ISO_BIOS)
-	$(QEMU) -cdrom $(ISO_BIOS) -m 512M -boot d -serial stdio -vga std -monitor none
+	$(QEMU_ENV) $(QEMU) -cdrom $(ISO_BIOS) -m 512M -boot d -serial stdio -vga std -monitor none
 
 $(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
 	python3 tools/mkhbfs.py $@
@@ -268,7 +272,7 @@ smoke:
 run-hdd: run-hdd-bios
 
 run-hdd-bios: $(INSTALL_IMG_BIOS)
-	$(QEMU) -m 512M \
+	$(QEMU_ENV) $(QEMU) -m 512M \
 		-device ich9-ahci,id=ahci \
 		-drive file=$(INSTALL_IMG_BIOS),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
@@ -276,7 +280,7 @@ run-hdd-bios: $(INSTALL_IMG_BIOS)
 
 run-hdd-uefi: $(INSTALL_IMG_UEFI)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_HDD.fd
-	$(QEMU) -machine q35 -m 512M \
+	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_HDD.fd \
 		-device ich9-ahci,id=ahci \
@@ -285,13 +289,13 @@ run-hdd-uefi: $(INSTALL_IMG_UEFI)
 		-boot c -serial stdio -monitor none -vga std -no-reboot
 
 run-bios-disk: $(ISO_BIOS) $(DISK_IMG)
-	$(QEMU) -m 512M \
+	$(QEMU_ENV) $(QEMU) -m 512M \
 		-drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
 		-cdrom $(ISO_BIOS) -boot d \
 		-serial stdio -vga std -monitor none
 
 run-bios-ahci: $(ISO_BIOS) $(DISK_IMG)
-	$(QEMU) -m 512M \
+	$(QEMU_ENV) $(QEMU) -m 512M \
 		-device ich9-ahci,id=ahci \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
@@ -332,7 +336,7 @@ run-iso-uefi: run-uefi-ahci
 
 run-uefi-nodisk: $(ISO_UEFI)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
-	$(QEMU) -machine q35 -m 512M \
+	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-cdrom $(ISO_UEFI) -boot d \
@@ -340,7 +344,7 @@ run-uefi-nodisk: $(ISO_UEFI)
 
 run-uefi-img: $(UEFI_IMG)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
-	$(QEMU) -machine q35 -m 512M \
+	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-drive file=$(UEFI_IMG),format=raw,if=virtio \
@@ -348,7 +352,7 @@ run-uefi-img: $(UEFI_IMG)
 
 run-uefi-headless: $(ISO_UEFI)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
-	$(QEMU) -machine q35 -m 512M \
+	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-cdrom $(ISO_UEFI) -boot d \
@@ -356,7 +360,7 @@ run-uefi-headless: $(ISO_UEFI)
 
 run-uefi-disk: $(ISO_UEFI) $(DISK_IMG)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
-	$(QEMU) -machine q35 -m 512M \
+	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
@@ -365,7 +369,7 @@ run-uefi-disk: $(ISO_UEFI) $(DISK_IMG)
 
 run-uefi-ahci: $(ISO_UEFI) $(DISK_IMG)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_UEFI.fd
-	$(QEMU) -machine q35 -m 512M \
+	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-device ich9-ahci,id=ahci \
