@@ -28,8 +28,6 @@ extern void task_yield(void);
 #define GUI_APP_UWC   2
 #define GUI_APP_SNAKE 3
 
-#define CURSOR_SAVE_W 24
-#define CURSOR_SAVE_H 24
 #define ACTION_W 104
 #define ACTION_H 28
 #define GUI_MOUSE_POLL_BUDGET 16
@@ -39,18 +37,10 @@ extern void task_yield(void);
 #define SNAKE_H 10
 #define SNAKE_MAX (SNAKE_W * SNAKE_H)
 #define GUI_MAX_WINDOWS 8
+#define GUI_PAGE_SIZE 4096ULL
 
 #define GUI_WIN_PANEL 0
 #define GUI_WIN_APP   1
-
-typedef struct {
-    int valid;
-    int x;
-    int y;
-    int w;
-    int h;
-    uint32_t pixels[CURSOR_SAVE_W * CURSOR_SAVE_H];
-} cursor_save_t;
 
 typedef struct {
     int used;
@@ -96,6 +86,7 @@ typedef struct {
     char note_buf[NOTE_EDIT_CAP];
     uint32_t note_len;
     int note_loaded;
+    char note_name[MAX_FILENAME];
     const char *status;
 } gui_state_t;
 
@@ -106,7 +97,7 @@ typedef struct {
 } gui_app_t;
 
 static const gui_app_t gui_apps[] = {
-    {"记事本", "编辑 gui-note 文件", GUI_APP_NOTES},
+    {"记事本", "编辑笔记文件", GUI_APP_NOTES},
     {"计算器", "方向键调整数值", GUI_APP_CALC},
     {"文件统计", "统计选中文件行数和字节", GUI_APP_UWC},
     {"贪吃蛇", "方向键移动", GUI_APP_SNAKE},
@@ -286,8 +277,49 @@ static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
 
+static uint32_t *g_gui_surface = 0;
+static uint32_t g_gui_surface_pitch = 0;
+static int g_gui_surface_w = 0;
+static int g_gui_surface_h = 0;
+
+static void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px) {
+    g_gui_surface = surface;
+    g_gui_surface_w = surface ? w : 0;
+    g_gui_surface_h = surface ? h : 0;
+    g_gui_surface_pitch = surface ? pitch_px : 0;
+}
+
+static void gui_present_surface(const fb_info_t *fb) {
+    if (!fb || !g_gui_surface) return;
+    uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
+    for (int y = 0; y < g_gui_surface_h; y++) {
+        uint32_t *dst = fb->addr + (uint32_t)y * fb_pitch;
+        uint32_t *src = g_gui_surface + (uint32_t)y * g_gui_surface_pitch;
+        for (int x = 0; x < g_gui_surface_w; x++) dst[x] = src[x];
+    }
+}
+
 static void rect(int x, int y, int w, int h, uint32_t color) {
     if (w <= 0 || h <= 0) return;
+    if (g_gui_surface) {
+        if (x >= g_gui_surface_w || y >= g_gui_surface_h) return;
+        if (x < 0) {
+            w += x;
+            x = 0;
+        }
+        if (y < 0) {
+            h += y;
+            y = 0;
+        }
+        if (w <= 0 || h <= 0) return;
+        if (x + w > g_gui_surface_w) w = g_gui_surface_w - x;
+        if (y + h > g_gui_surface_h) h = g_gui_surface_h - y;
+        for (int yy = 0; yy < h; yy++) {
+            uint32_t *row = g_gui_surface + (uint32_t)(y + yy) * g_gui_surface_pitch + (uint32_t)x;
+            for (int xx = 0; xx < w; xx++) row[xx] = color;
+        }
+        return;
+    }
     fb_fill_rect((uint64_t)x, (uint64_t)y, (uint64_t)w, (uint64_t)h, color);
 }
 
@@ -486,6 +518,31 @@ static void append_int(char *buf, uint32_t cap, uint32_t *pos, int v) {
     append_uint(buf, cap, pos, (uint32_t)(v < 0 ? -v : v));
 }
 
+static void gui_make_note_name(char *out, uint32_t cap, uint32_t index) {
+    uint32_t pos = 0;
+    out[0] = 0;
+    append_str(out, cap, &pos, "gui-note");
+    if (index > 0) {
+        append_char(out, cap, &pos, '-');
+        append_uint(out, cap, &pos, index);
+    }
+}
+
+static void gui_set_note_name(gui_state_t *st, const char *name) {
+    uint32_t i = 0;
+    while (name && name[i] && i + 1 < sizeof(st->note_name)) {
+        st->note_name[i] = name[i];
+        i++;
+    }
+    st->note_name[i] = 0;
+    st->note_loaded = 0;
+}
+
+static const char *gui_note_name(gui_state_t *st) {
+    if (!st->note_name[0]) gui_set_note_name(st, "gui-note");
+    return st->note_name;
+}
+
 static uint8_t bcd_to_bin(uint8_t v) {
     return (uint8_t)((v & 0x0f) + ((v >> 4) * 10));
 }
@@ -572,46 +629,6 @@ static void draw_cursor(int x, int y) {
     for (int i = 0; i < 12; i++) rect(x + i, y + i, 2, 2, rgb(238, 246, 255));
     rect(x + 5, y + 13, 9, 3, rgb(20, 27, 34));
     rect(x + 8, y + 15, 4, 7, rgb(20, 27, 34));
-}
-
-static void cursor_restore(const fb_info_t *fb, cursor_save_t *save) {
-    if (!save->valid) return;
-    uint32_t pitch_px = (uint32_t)(fb->pitch / 4);
-    for (int yy = 0; yy < save->h; yy++) {
-        uint32_t *row = fb->addr + (save->y + yy) * pitch_px + save->x;
-        for (int xx = 0; xx < save->w; xx++)
-            row[xx] = save->pixels[yy * CURSOR_SAVE_W + xx];
-    }
-    save->valid = 0;
-}
-
-static void cursor_save_bg(const fb_info_t *fb, cursor_save_t *save, int x, int y) {
-    int w = CURSOR_SAVE_W;
-    int h = CURSOR_SAVE_H;
-    if (x < 0 || y < 0 || x >= (int)fb->width || y >= (int)fb->height) {
-        save->valid = 0;
-        return;
-    }
-    if (x + w > (int)fb->width) w = (int)fb->width - x;
-    if (y + h > (int)fb->height) h = (int)fb->height - y;
-
-    uint32_t pitch_px = (uint32_t)(fb->pitch / 4);
-    for (int yy = 0; yy < h; yy++) {
-        uint32_t *row = fb->addr + (y + yy) * pitch_px + x;
-        for (int xx = 0; xx < w; xx++)
-            save->pixels[yy * CURSOR_SAVE_W + xx] = row[xx];
-    }
-    save->valid = 1;
-    save->x = x;
-    save->y = y;
-    save->w = w;
-    save->h = h;
-}
-
-static void cursor_present(const fb_info_t *fb, cursor_save_t *save, int x, int y) {
-    cursor_restore(fb, save);
-    cursor_save_bg(fb, save, x, y);
-    draw_cursor(x, y);
 }
 
 enum {
@@ -772,7 +789,7 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     uint32_t count = fs_get_count();
     if (count == 0) {
         text(tx, list_y, "暂无文件", rgb(148, 162, 174), 1);
-        text(tx, list_y + 22, "按 N 创建 gui-note", rgb(148, 162, 174), 1);
+        text(tx, list_y + 22, "按 N 创建新笔记", rgb(148, 162, 174), 1);
         return;
     }
 
@@ -933,7 +950,7 @@ static void note_load(gui_state_t *st) {
     if (st->note_loaded) return;
     st->note_len = 0;
     st->note_buf[0] = 0;
-    file_t *f = fs_find_file("gui-note");
+    file_t *f = fs_find_file(gui_note_name(st));
     if (f) {
         uint32_t n = f->size;
         if (n >= NOTE_EDIT_CAP) n = NOTE_EDIT_CAP - 1;
@@ -944,8 +961,9 @@ static void note_load(gui_state_t *st) {
 }
 
 static void note_save(gui_state_t *st) {
-    file_t *f = fs_find_file("gui-note");
-    if (!f) f = fs_create_file("gui-note");
+    const char *name = gui_note_name(st);
+    file_t *f = fs_find_file(name);
+    if (!f) f = fs_create_file(name);
     if (!f) {
         st->status = "笔记创建失败";
         return;
@@ -985,12 +1003,14 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     text(tx, ty, "记事本", rgb(124, 220, 154), 1);
     text(tx, ty + 40, "直接输入自动保存，Backspace 删除，Enter 换行", rgb(148, 162, 174), 1);
     char line[96];
-    line_u32(line, sizeof(line), "大小: ", st->note_len, "B");
+    line2(line, sizeof(line), "文件: ", gui_note_name(st));
     text(tx, ty + 70, line, rgb(210, 221, 230), 1);
-    rect(tx, ty + 96, win_w - 68, 196, rgb(5, 10, 16));
-    border(tx, ty + 96, win_w - 68, 196, rgb(85, 180, 120));
+    line_u32(line, sizeof(line), "大小: ", st->note_len, "B");
+    text(tx, ty + 92, line, rgb(210, 221, 230), 1);
+    rect(tx, ty + 118, win_w - 68, 174, rgb(5, 10, 16));
+    border(tx, ty + 118, win_w - 68, 174, rgb(85, 180, 120));
     int x = tx;
-    int y = ty + 104;
+    int y = ty + 126;
     utf8_state_t utf8;
     utf8_init(&utf8);
     for (uint32_t i = 0; i < st->note_len && y < ty + 280; i++) {
@@ -1307,6 +1327,12 @@ static void draw_gui_screen(int w, int h, gui_state_t *st) {
     draw_desktop(w, h, st);
 }
 
+static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my) {
+    draw_gui_screen(w, h, st);
+    draw_cursor(mx, my);
+    gui_present_surface(fb);
+}
+
 static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h);
 
@@ -1338,9 +1364,38 @@ static file_t *selected_file(gui_state_t *st) {
     return fs_get_file((uint32_t)st->selected_file);
 }
 
+static int file_display_index(file_t *target) {
+    uint32_t count = fs_get_count();
+    for (uint32_t i = 0; i < count; i++) {
+        if (fs_get_file(i) == target) return (int)i;
+    }
+    return 0;
+}
+
+static void gui_select_file(gui_state_t *st, int index) {
+    uint32_t count = fs_get_count();
+    if (count == 0) {
+        st->selected_file = 0;
+        return;
+    }
+    if (index < 0) index = 0;
+    if ((uint32_t)index >= count) index = (int)count - 1;
+    st->selected_file = index;
+
+    file_t *f = fs_get_file((uint32_t)index);
+    if (f) gui_set_note_name(st, f->name);
+}
+
 static void gui_create_note(gui_state_t *st) {
-    file_t *f = fs_find_file("gui-note");
-    if (!f) f = fs_create_file("gui-note");
+    char name[MAX_FILENAME];
+    file_t *f = 0;
+    uint32_t index = 0;
+    for (; index < MAX_FILES; index++) {
+        gui_make_note_name(name, sizeof(name), index);
+        if (fs_find_file(name)) continue;
+        f = fs_create_file(name);
+        break;
+    }
     if (!f) {
         st->status = "创建失败";
         return;
@@ -1348,16 +1403,18 @@ static void gui_create_note(gui_state_t *st) {
     const char msg[] = "来自 HBOS 图形桌面的笔记\n";
     if (fs_write_file_data(f, 0, msg, sizeof(msg) - 1) < 0) st->status = "写入失败";
     else {
-        st->status = "已创建 gui-note";
+        st->status = "已创建新笔记";
         uint32_t len = sizeof(msg) - 1;
         if (len >= NOTE_EDIT_CAP) len = NOTE_EDIT_CAP - 1;
         for (uint32_t i = 0; i < len; i++) st->note_buf[i] = msg[i];
         st->note_buf[len] = 0;
         st->note_len = len;
         st->note_loaded = 1;
+        gui_set_note_name(st, f->name);
+        st->note_loaded = 1;
     }
     (void)fs_sync();
-    st->selected_file = 0;
+    gui_select_file(st, file_display_index(f));
 }
 
 static void gui_append_note(gui_state_t *st) {
@@ -1391,13 +1448,15 @@ static void gui_delete_selected(gui_state_t *st) {
     if (fs_delete_file(name) < 0) st->status = "删除失败";
     else {
         st->status = "文件已删除";
-        if (strcmp(name, "gui-note") == 0) {
+        if (strcmp(name, gui_note_name(st)) == 0) {
             st->note_len = 0;
             st->note_buf[0] = 0;
+            st->note_name[0] = 0;
             st->note_loaded = 1;
         }
     }
-    if (st->selected_file > 0) st->selected_file--;
+    if (fs_get_count() > 0) gui_select_file(st, st->selected_file > 0 ? st->selected_file - 1 : 0);
+    else st->selected_file = 0;
     (void)fs_sync();
 }
 
@@ -1446,7 +1505,7 @@ static void handle_wheel(gui_state_t *st, int dz) {
 
     gui_sync_focus(st);
     if (st->app_mode == GUI_APP_UWC || (st->app_mode == GUI_APP_NONE && st->active == PANEL_FILES)) {
-        st->selected_file = gui_step_selection(st->selected_file, fs_get_count(), steps);
+        gui_select_file(st, gui_step_selection(st->selected_file, fs_get_count(), steps));
         st->status = "滚轮选择文件";
     } else if (st->app_mode == GUI_APP_NONE && st->active == PANEL_APPS) {
         st->selected_app = gui_step_selection(st->selected_app, gui_app_count(), steps);
@@ -1626,8 +1685,8 @@ static void handle_app_key(gui_state_t *st, int key) {
         }
     } else if (st->app_mode == GUI_APP_UWC) {
         if (key == 'n') gui_create_note(st);
-        else if (key == GUI_KEY_UP && st->selected_file > 0) st->selected_file--;
-        else if (key == GUI_KEY_DOWN && (uint32_t)(st->selected_file + 1) < fs_get_count()) st->selected_file++;
+        else if (key == GUI_KEY_UP && st->selected_file > 0) gui_select_file(st, st->selected_file - 1);
+        else if (key == GUI_KEY_DOWN && (uint32_t)(st->selected_file + 1) < fs_get_count()) gui_select_file(st, st->selected_file + 1);
     } else if (st->app_mode == GUI_APP_SNAKE) {
         if (key == '\n') snake_reset(st);
         else if (key == GUI_KEY_LEFT) snake_move(st, -1, 0);
@@ -1650,10 +1709,10 @@ static void handle_key(gui_state_t *st, int key) {
         gui_active_window(st)->mode = st->active;
         st->status = "已切换面板";
     } else if (key == GUI_KEY_UP && st->active == PANEL_FILES) {
-        if (st->selected_file > 0) st->selected_file--;
+        if (st->selected_file > 0) gui_select_file(st, st->selected_file - 1);
         st->status = "已选择文件";
     } else if (key == GUI_KEY_DOWN && st->active == PANEL_FILES) {
-        if ((uint32_t)(st->selected_file + 1) < fs_get_count()) st->selected_file++;
+        if ((uint32_t)(st->selected_file + 1) < fs_get_count()) gui_select_file(st, st->selected_file + 1);
         st->status = "已选择文件";
     } else if (key == GUI_KEY_UP && st->active == PANEL_APPS) {
         if (st->selected_app > 0) st->selected_app--;
@@ -1703,7 +1762,6 @@ static void cmd_gui(int argc, char **argv) {
     int drag_last_draw_x = 0;
     int drag_last_draw_y = 0;
     int drag_pending = 0;
-    cursor_save_t cursor = {0};
     gui_state_t st = {
         .active = PANEL_FILES,
         .selected_file = 0,
@@ -1725,25 +1783,29 @@ static void cmd_gui(int argc, char **argv) {
     if (mouse_init() < 0) st.status = "未检测到鼠标";
     gui_open_panel_window(&st, PANEL_FILES);
 
-    draw_gui_screen(w, h, &st);
-    cursor_present(&fb, &cursor, mx, my);
+    uint64_t surface_bytes = (uint64_t)w * (uint64_t)h * sizeof(uint32_t);
+    size_t surface_pages = (size_t)((surface_bytes + GUI_PAGE_SIZE - 1) / GUI_PAGE_SIZE);
+    uint64_t surface_phys = pmm_alloc_blocks(surface_pages);
+    if (surface_phys) {
+        gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
+    } else {
+        st.status = "图形缓冲分配失败";
+    }
+
+    draw_gui_frame(&fb, w, h, &st, mx, my);
     while (1) {
         int key = key_poll();
         if (key == 27 && st.window_count > 0) {
-            cursor_restore(&fb, &cursor);
             gui_close_window(&st, st.active_window);
-            draw_gui_screen(w, h, &st);
-            cursor_present(&fb, &cursor, mx, my);
+            draw_gui_frame(&fb, w, h, &st, mx, my);
             continue;
         }
         if (key == 27 || key == 'q') break;
         if (key) {
-            cursor_restore(&fb, &cursor);
             gui_sync_focus(&st);
             if (st.app_mode == GUI_APP_NONE) handle_key(&st, key);
             else handle_app_key(&st, key);
-            draw_gui_screen(w, h, &st);
-            cursor_present(&fb, &cursor, mx, my);
+            draw_gui_frame(&fb, w, h, &st, mx, my);
         }
 
         mouse_event_t ev;
@@ -1844,7 +1906,7 @@ static void cmd_gui(int argc, char **argv) {
                                 st.selected_app = action - APP_ACTION_BASE;
                                 st.status = "已选择应用";
                             } else {
-                                st.selected_file = action - FILE_ACTION_BASE;
+                                gui_select_file(&st, action - FILE_ACTION_BASE);
                                 st.status = "已选择文件";
                             }
                         } else if (action >= 0) {
@@ -1859,16 +1921,16 @@ static void cmd_gui(int argc, char **argv) {
             last_buttons = st.buttons;
 
             if (redraw) {
-                cursor_restore(&fb, &cursor);
-                draw_gui_screen(w, h, &st);
+                draw_gui_frame(&fb, w, h, &st, mx, my);
+            } else if (mx != old_mx || my != old_my) {
+                draw_gui_frame(&fb, w, h, &st, mx, my);
             }
-            if (redraw || mx != old_mx || my != old_my)
-                cursor_present(&fb, &cursor, mx, my);
         }
         task_yield();
     }
 
-    cursor_restore(&fb, &cursor);
+    gui_set_surface(0, 0, 0, 0);
+    if (surface_phys) pmm_free_blocks(surface_phys, surface_pages);
     mouse_shutdown();
     console_reset_terminal();
     console_puts("gui: 已返回 shell\n");
