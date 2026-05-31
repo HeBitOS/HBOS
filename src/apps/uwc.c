@@ -16,15 +16,15 @@ static void put_uint(uint32_t v) {
 }
 
 static int app_uwc_main(int argc, char **argv) {
-    if (argc < 2) {
-        hbos_puts("Usage: run uwc <file>\n");
-        return 1;
-    }
-
-    int fd = hbos_open(argv[1], O_RDONLY, 0);
-    if (fd < 0) {
-        hbos_puts("uwc: open failed\n");
-        return errno;
+    const char *name = "-";
+    int fd = STDIN_FILENO;
+    if (argc >= 2) {
+        name = argv[1];
+        fd = hbos_open(argv[1], O_RDONLY, 0);
+        if (fd < 0) {
+            hbos_puts("uwc: open failed\n");
+            return errno;
+        }
     }
 
     char buf[128];
@@ -37,13 +37,13 @@ static int app_uwc_main(int argc, char **argv) {
             if (buf[i] == '\n') lines++;
         }
     }
-    hbos_close(fd);
+    if (fd != STDIN_FILENO) hbos_close(fd);
 
     put_uint(lines);
     hbos_puts(" lines ");
     put_uint(bytes);
     hbos_puts(" bytes ");
-    hbos_puts(argv[1]);
+    hbos_puts(name);
     hbos_puts("\n");
     return 0;
 }

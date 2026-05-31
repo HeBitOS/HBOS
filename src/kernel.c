@@ -27,6 +27,7 @@
 #include "vfs.h"
 #include "acpi.h"
 #include "version.h"
+#include "net.h"
 
 // ============================================================
 // 串口调试输出 (COM1, I/O 端口 0x3F8)
@@ -136,6 +137,7 @@ void kmain(void *mbi) {
     // 自测: POSIX open/read/write/close/stat/unlink 冒烟测试
     vfs_init();
     task_init();
+    net_init();
     selftest_run();
 
     // ---- Phase 6: Shell ----

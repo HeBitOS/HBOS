@@ -49,6 +49,7 @@ C_SRCS = \
 	$(SRC_DIR)/acpi.c \
 	$(SRC_DIR)/syscall.c \
 	$(SRC_DIR)/pci.c \
+	$(SRC_DIR)/net.c \
 	$(SRC_DIR)/block.c \
 	$(SRC_DIR)/ahci.c \
 	$(SRC_DIR)/fs.c \
@@ -73,6 +74,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/app.c \
 	$(SRC_DIR)/tools/ata.c \
 	$(SRC_DIR)/tools/disk.c \
+	$(SRC_DIR)/tools/net.c \
 	$(SRC_DIR)/tools/gui.c \
 	$(APP_SRCS)
 
@@ -276,6 +278,7 @@ run-hdd-bios: $(INSTALL_IMG_BIOS)
 		-device ich9-ahci,id=ahci \
 		-drive file=$(INSTALL_IMG_BIOS),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-boot c -serial stdio -vga std -monitor none
 
 run-hdd-uefi: $(INSTALL_IMG_UEFI)
@@ -286,11 +289,13 @@ run-hdd-uefi: $(INSTALL_IMG_UEFI)
 		-device ich9-ahci,id=ahci \
 		-drive file=$(INSTALL_IMG_UEFI),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-boot c -serial stdio -monitor none -vga std -no-reboot
 
 run-bios-disk: $(ISO_BIOS) $(DISK_IMG)
 	$(QEMU_ENV) $(QEMU) -m 512M \
 		-drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(ISO_BIOS) -boot d \
 		-serial stdio -vga std -monitor none
 
@@ -299,6 +304,7 @@ run-bios-ahci: $(ISO_BIOS) $(DISK_IMG)
 		-device ich9-ahci,id=ahci \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(ISO_BIOS) -boot d \
 		-serial stdio -vga std -monitor none
 
@@ -339,6 +345,7 @@ run-uefi-nodisk: $(ISO_UEFI)
 	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(ISO_UEFI) -boot d \
 		-serial none -vga std -monitor none -no-reboot
 
@@ -348,6 +355,7 @@ run-uefi-img: $(UEFI_IMG)
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-drive file=$(UEFI_IMG),format=raw,if=virtio \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-serial none -vga std -monitor none -no-reboot
 
 run-uefi-headless: $(ISO_UEFI)
@@ -355,6 +363,7 @@ run-uefi-headless: $(ISO_UEFI)
 	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(ISO_UEFI) -boot d \
 		-serial stdio -monitor none -display none -no-reboot
 
@@ -364,6 +373,7 @@ run-uefi-disk: $(ISO_UEFI) $(DISK_IMG)
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/OVMF_VARS_UEFI.fd \
 		-drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(ISO_UEFI) -boot d \
 		-serial stdio -monitor none -vga std -no-reboot
 
@@ -375,6 +385,7 @@ run-uefi-ahci: $(ISO_UEFI) $(DISK_IMG)
 		-device ich9-ahci,id=ahci \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(ISO_UEFI) -boot d \
 		-serial stdio -monitor none -vga std -no-reboot
 

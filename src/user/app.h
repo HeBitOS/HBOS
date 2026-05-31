@@ -20,5 +20,6 @@ uint32_t hbos_app_count(void);
 const hbos_app_t *hbos_app_get(uint32_t index);
 const hbos_app_t *hbos_app_find(const char *name);
 int hbos_app_run(const char *name, int argc, char **argv);
+int hbos_app_spawn(const char *name, int argc, char **argv);
 
 #endif

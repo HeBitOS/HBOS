@@ -119,6 +119,8 @@ void task_init(void) {
     main_task->rsp = 0;  // 首次 task_yield 时保存
     main_task->entry = NULL;
     main_task->arg = NULL;
+    main_task->exit_status = 0;
+    main_task->parent_id = 0;
     main_task->next = main_task;  // 循环链表（单元素）
     main_task->stack_base = (uint64_t)task_stacks[0];
     main_task->stack_size = TASK_STACK_SIZE;
@@ -149,10 +151,21 @@ void task_init(void) {
  * @return 任务 ID，-1 表示失败
  */
 int task_create(const char *name, void (*entry)(void *), void *arg) {
-    if (task_count >= MAX_TASKS) return -1;
     if (!entry) return -1;
 
-    int idx = task_count;
+    int idx = -1;
+    int reuse = 0;
+    for (int i = 1; i < task_count; i++) {
+        if (task_pool[i].state == TASK_TERMINATED) {
+            idx = i;
+            reuse = 1;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (task_count >= MAX_TASKS) return -1;
+        idx = task_count;
+    }
     task_t *tcb = &task_pool[idx];
 
     tcb->id = next_id++;
@@ -160,6 +173,8 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->state = TASK_READY;
     tcb->entry = entry;
     tcb->arg = arg;
+    tcb->exit_status = 0;
+    tcb->parent_id = current_task ? current_task->id : 0;
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
     memset(tcb->fds, 0, sizeof(tcb->fds));
@@ -180,11 +195,13 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
 
     tcb->rsp = (uint64_t)sp;
 
-    // 插入循环链表（在 head 之后）
-    tcb->next = task_pool[0].next;
-    task_pool[0].next = tcb;
+    if (!reuse) {
+        // 插入循环链表（在 head 之后）
+        tcb->next = task_pool[0].next;
+        task_pool[0].next = tcb;
 
-    task_count++;
+        task_count++;
+    }
     return tcb->id;
 }
 
@@ -233,6 +250,34 @@ void task_exit(void) {
         task_switch(&prev->rsp, &next->rsp);
         // 如果回到这里，再试一次
     }
+}
+
+void task_set_exit_status(int status) {
+    if (current_task) current_task->exit_status = status;
+}
+
+const task_t *task_get_by_id(uint32_t id) {
+    for (int i = 0; i < task_count; i++) {
+        if (task_pool[i].id == id) return &task_pool[i];
+    }
+    return NULL;
+}
+
+int task_wait(uint32_t id, int *status) {
+    task_t *target = NULL;
+    for (int i = 0; i < task_count; i++) {
+        if (task_pool[i].id == id) {
+            target = &task_pool[i];
+            break;
+        }
+    }
+    if (!target || target == current_task) return -1;
+
+    while (target->state != TASK_TERMINATED) {
+        task_yield();
+    }
+    if (status) *status = target->exit_status;
+    return 0;
 }
 
 /** 获取当前任务 ID */

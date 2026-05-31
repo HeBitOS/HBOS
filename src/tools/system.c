@@ -1,5 +1,7 @@
 #include "../graphics/graphics.h"
 #include "../acpi.h"
+#include "../string.h"
+#include "../unistd.h"
 #include "../version.h"
 #include "tool.h"
 #define PUTS_CN(str) do { if (console_is_framebuffer()) console_puts(str); } while(0)
@@ -49,8 +51,11 @@ static void cmd_credits(int argc, char **argv) {
 }
 
 static void cmd_echo(int argc, char **argv) {
-    for (int i = 1; i < argc; i++) { if (i > 1) console_putchar(' '); console_puts(argv[i]); }
-    console_putchar('\n');
+    for (int i = 1; i < argc; i++) {
+        if (i > 1) write(STDOUT_FILENO, " ", 1);
+        write(STDOUT_FILENO, argv[i], strlen(argv[i]));
+    }
+    write(STDOUT_FILENO, "\n", 1);
 }
 
 static void cmd_version(int argc, char **argv) {

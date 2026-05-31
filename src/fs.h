@@ -37,8 +37,18 @@ typedef struct {
     uint32_t sectors;
 } fs_partition_info_t;
 
+typedef struct {
+    uint32_t files_seen;
+    uint32_t file_count;
+    uint32_t used_bytes;
+    uint32_t capacity_bytes;
+    uint32_t errors;
+    const char *first_error;
+} fs_check_result_t;
+
 // 函数声明
 int fs_init(void);
+int fs_check(fs_check_result_t *out);
 int fs_format_disk(void);
 int fs_install_disk(void);
 int fs_install_disk_at(uint32_t start_lba, uint32_t sectors);

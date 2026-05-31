@@ -50,8 +50,24 @@ static fd_entry_t *fd_get(int fd) {
     return &fds[fd];
 }
 
+static fd_entry_t *fd_get_redirectable(int fd) {
+    fd_entry_t *fds = fd_table();
+    if (!fds || fd < 0 || fd >= POSIX_MAX_FDS || !fds[fd].used) return NULL;
+    return &fds[fd];
+}
+
 ssize_t write(int fd, const void *buf, size_t count) {
     if (!buf && count) return set_errno(EFAULT);
+    if (fd == STDOUT_FILENO || fd == STDERR_FILENO) {
+        fd_entry_t *redir = fd_get_redirectable(fd);
+        if (redir) {
+            uint32_t offset = (redir->flags & O_APPEND) ? redir->node->size : redir->offset;
+            int written = vfs_write(redir->node, offset, buf, (uint32_t)count);
+            if (written < 0) return set_errno(ENOSPC);
+            redir->offset = offset + (uint32_t)written;
+            return (ssize_t)written;
+        }
+    }
     if (fd == STDOUT_FILENO || fd == STDERR_FILENO) {
         console_write((const char *)buf, count);
         return (ssize_t)count;
@@ -71,6 +87,14 @@ ssize_t write(int fd, const void *buf, size_t count) {
 ssize_t read(int fd, void *buf, size_t count) {
     if (!buf && count) return set_errno(EFAULT);
     if (fd == STDIN_FILENO) {
+        fd_entry_t *redir = fd_get_redirectable(fd);
+        if (redir) {
+            int got_i = vfs_read(redir->node, redir->offset, buf, (uint32_t)count);
+            if (got_i < 0) return set_errno(EIO);
+            uint32_t got = (uint32_t)got_i;
+            redir->offset += got;
+            return (ssize_t)got;
+        }
         char *out = buf;
         size_t i = 0;
         while (i < count) {
@@ -94,7 +118,16 @@ ssize_t read(int fd, void *buf, size_t count) {
 }
 
 int close(int fd) {
-    if (fd >= STDIN_FILENO && fd <= STDERR_FILENO) return 0;
+    if (fd >= STDIN_FILENO && fd <= STDERR_FILENO) {
+        fd_entry_t *redir = fd_get_redirectable(fd);
+        if (redir) {
+            redir->used = false;
+            redir->node = NULL;
+            redir->offset = 0;
+            redir->flags = 0;
+        }
+        return 0;
+    }
     fd_entry_t *ent = fd_get(fd);
     if (ent) {
         ent->used = false;

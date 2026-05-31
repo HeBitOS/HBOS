@@ -28,7 +28,7 @@ extern void task_yield(void);
 #define GUI_APP_UWC   2
 #define GUI_APP_SNAKE 3
 
-#define ACTION_W 104
+#define ACTION_W 116
 #define ACTION_H 28
 #define GUI_MOUSE_POLL_BUDGET 16
 #define TASKBAR_H 44
@@ -38,6 +38,9 @@ extern void task_yield(void);
 #define SNAKE_MAX (SNAKE_W * SNAKE_H)
 #define GUI_MAX_WINDOWS 8
 #define GUI_PAGE_SIZE 4096ULL
+#define FILE_LIST_ROWS 8
+#define FILE_ROW_H 26
+#define NOTE_FILE_ROWS 7
 
 #define GUI_WIN_PANEL 0
 #define GUI_WIN_APP   1
@@ -74,6 +77,7 @@ typedef struct {
     int snake_dx;
     int snake_dy;
     int snake_alive;
+    uint8_t snake_last_sec;
     int snake_body_x[SNAKE_MAX];
     int snake_body_y[SNAKE_MAX];
     int win_x;
@@ -83,6 +87,7 @@ typedef struct {
     gui_window_t windows[GUI_MAX_WINDOWS];
     int window_count;
     int active_window;
+    int last_clicked_file;
     char note_buf[NOTE_EDIT_CAP];
     uint32_t note_len;
     int note_loaded;
@@ -127,12 +132,12 @@ static void draw_desktop(int w, int h, gui_state_t *st);
 static void gui_sync_focus(gui_state_t *st);
 
 static void default_window_metrics(int w, int h, int *win_x, int *win_y, int *win_w, int *win_h) {
-    *win_w = w > 820 ? 720 : w - 80;
-    *win_h = h > 560 ? 370 : h - 160;
-    *win_x = w > 900 ? 150 : 110;
+    *win_w = w > 920 ? 790 : w - 120;
+    *win_h = h > 620 ? 430 : h - 140;
+    *win_x = w > 900 ? 132 : 110;
     if (*win_x + *win_w > w - 28) *win_x = w - *win_w - 28;
     if (*win_x < 100) *win_x = 100;
-    *win_y = 62;
+    *win_y = 42;
 }
 
 static void clamp_window(gui_state_t *st, int w, int h, int win_w, int win_h) {
@@ -552,6 +557,13 @@ static uint8_t cmos_read(uint8_t reg) {
     return inb(0x71);
 }
 
+static uint8_t cmos_second(void) {
+    uint8_t status_b = cmos_read(0x0b);
+    uint8_t sec = cmos_read(0x00);
+    if ((status_b & 0x04) == 0) sec = bcd_to_bin(sec);
+    return sec;
+}
+
 static void time_line(char *buf, uint32_t cap) {
     uint8_t status_b = cmos_read(0x0b);
     uint8_t hour = cmos_read(0x04);
@@ -602,10 +614,19 @@ static int clamp_delta(int v) {
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
-    rect(x, y, ACTION_W, ACTION_H, rgb(15, 24, 34));
+    rect(x, y, ACTION_W, ACTION_H, rgb(16, 30, 42));
     rect(x, y, 4, ACTION_H, color);
-    border(x, y, ACTION_W, ACTION_H, rgb(55, 76, 92));
-    text(x + 12, y + 10, label, rgb(222, 232, 240), 1);
+    rect(x + 4, y + ACTION_H - 2, ACTION_W - 4, 2, rgb(6, 12, 18));
+    border(x, y, ACTION_W, ACTION_H, rgb(82, 118, 140));
+    text(x + 13, y + 10, label, rgb(244, 250, 255), 1);
+}
+
+static void draw_small_button(int x, int y, int w, const char *label, uint32_t color) {
+    rect(x, y, w, ACTION_H, rgb(16, 30, 42));
+    rect(x, y, 4, ACTION_H, color);
+    rect(x + 4, y + ACTION_H - 2, w - 4, 2, rgb(6, 12, 18));
+    border(x, y, w, ACTION_H, rgb(82, 118, 140));
+    text(x + 13, y + 10, label, rgb(244, 250, 255), 1);
 }
 
 static void draw_task_button(int x, int y, int w, const char *label, int active, uint32_t color) {
@@ -616,12 +637,13 @@ static void draw_task_button(int x, int y, int w, const char *label, int active,
 }
 
 static void draw_icon(int x, int y, int active, const char *label, uint32_t color) {
-    uint32_t base = active ? rgb(26, 66, 88) : rgb(12, 37, 55);
-    rect(x, y, 82, 68, base);
-    border(x, y, 82, 68, active ? rgb(132, 196, 232) : rgb(45, 89, 112));
-    rect(x + 26, y + 10, 30, 28, color);
-    rect(x + 31, y + 15, 20, 16, rgb(236, 244, 255));
-    text(x + 9, y + 46, label, rgb(228, 239, 246), 1);
+    uint32_t base = active ? rgb(32, 86, 116) : rgb(21, 48, 64);
+    rect(x, y, 82, 58, base);
+    rect(x, y, 4, 58, active ? color : rgb(58, 82, 96));
+    border(x, y, 82, 58, active ? rgb(176, 218, 244) : rgb(50, 76, 92));
+    rect(x + 14, y + 12, 20, 20, color);
+    rect(x + 18, y + 16, 12, 12, rgb(238, 246, 252));
+    text(x + 42, y + 22, label, rgb(232, 242, 248), 1);
 }
 
 static void draw_cursor(int x, int y) {
@@ -746,15 +768,28 @@ static int key_poll(void) {
 
 static void draw_wallpaper(int w, int h) {
     char line[32];
-    rect(0, 0, w, h, rgb(9, 28, 44));
-    rect(0, 0, w, h / 3, rgb(13, 54, 76));
-    rect(0, h - TASKBAR_H, w, TASKBAR_H, rgb(9, 13, 18));
-    rect(0, h - TASKBAR_H - 1, w, 1, rgb(42, 119, 166));
-    rect(10, h - 36, 96, 30, rgb(23, 147, 209));
-    border(10, h - 36, 96, 30, rgb(132, 196, 232));
-    text(24, h - 27, "开始", rgb(244, 250, 255), 1);
+    rect(0, 0, w, h, rgb(18, 27, 36));
+    rect(0, 0, 112, h - TASKBAR_H, rgb(12, 22, 31));
+    rect(112, 0, w - 112, 62, rgb(22, 34, 44));
+    rect(112, 61, w - 112, 1, rgb(58, 82, 98));
+    rect(0, h - TASKBAR_H, w, TASKBAR_H, rgb(16, 27, 37));
+    rect(0, h - TASKBAR_H - 1, w, 1, rgb(90, 130, 154));
+    rect(10, h - 36, 96, 30, rgb(27, 116, 166));
+    border(10, h - 36, 96, 30, rgb(176, 218, 244));
+    text(26, h - 27, "开始", rgb(244, 250, 255), 1);
     time_line(line, sizeof(line));
-    text(w - 76, h - 27, line, rgb(224, 238, 246), 1);
+    rect(w - 96, h - 36, 86, 30, rgb(22, 38, 50));
+    border(w - 96, h - 36, 86, 30, rgb(58, 86, 104));
+    text(w - 82, h - 27, line, rgb(224, 238, 246), 1);
+}
+
+static void draw_desktop_tile(int x, int y, int w, int h, const char *title,
+                              const char *value, uint32_t accent) {
+    rect(x, y, w, h, rgb(25, 38, 48));
+    rect(x, y, 5, h, accent);
+    border(x, y, w, h, rgb(66, 92, 108));
+    text(x + 16, y + 12, title, rgb(154, 176, 190), 1);
+    text(x + 16, y + 36, value, rgb(232, 240, 246), 1);
 }
 
 static void draw_usage_bar(int x, int y, int w, int h, uint32_t used, uint32_t total, uint32_t color) {
@@ -777,46 +812,145 @@ static const char *task_state_name(task_state_t state) {
 
 static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     char line[96];
+    int content_w = win_w - 60;
+    int side_w = 118;
+    int main_x = tx + side_w + 12;
+    int detail_w = 184;
+    int main_w = content_w - side_w - detail_w - 24;
+    if (main_w < 260) {
+        detail_w = 152;
+        main_w = content_w - side_w - detail_w - 24;
+    }
+    if (main_w < 220) main_w = 220;
+    int detail_x = main_x + main_w + 12;
+
     text(tx, ty, "文件管理器", rgb(124, 220, 154), 1);
-    line_u32(line, sizeof(line), "文件数量: ", fs_get_count(), " / 64");
-    text(tx, ty + 34, line, rgb(210, 221, 230), 1);
+    line_u32(line, sizeof(line), "文件: ", fs_get_count(), " / 64");
+    text(tx + 112, ty + 2, line, rgb(168, 188, 202), 1);
+    rect(tx, ty + 30, content_w, 30, rgb(9, 18, 27));
+    rect(tx + 1, ty + 31, content_w - 2, 8, rgb(17, 34, 48));
+    border(tx, ty + 30, content_w, 30, rgb(66, 91, 108));
+    text(tx + 12, ty + 40, "根目录 /", rgb(230, 238, 245), 1);
 
-    draw_button(tx, ty + 58, "新建 N", rgb(85, 180, 120));
-    draw_button(tx + 116, ty + 58, "追加 A", rgb(23, 147, 209));
-    draw_button(tx + 232, ty + 58, "删除 D", rgb(234, 82, 82));
+    draw_small_button(tx, ty + 72, 76, "新建", rgb(85, 180, 120));
+    draw_small_button(tx + 84, ty + 72, 76, "打开", rgb(23, 147, 209));
+    draw_small_button(tx + 168, ty + 72, 76, "追加", rgb(102, 214, 255));
+    draw_small_button(tx + 252, ty + 72, 76, "清空", rgb(244, 194, 82));
+    draw_small_button(tx + 336, ty + 72, 76, "删除", rgb(234, 82, 82));
 
-    int list_y = ty + 102;
+    rect(tx, ty + 114, side_w, 206, rgb(11, 23, 32));
+    border(tx, ty + 114, side_w, 206, rgb(53, 78, 94));
+    text(tx + 14, ty + 128, "位置", rgb(194, 226, 242), 1);
+    rect(tx + 10, ty + 154, side_w - 20, 28, rgb(28, 66, 88));
+    rect(tx + 10, ty + 154, 3, 28, rgb(85, 180, 120));
+    text(tx + 22, ty + 164, "根目录", rgb(244, 250, 255), 1);
+    text(tx + 22, ty + 202, "文档", rgb(132, 150, 162), 1);
+    text(tx + 22, ty + 232, "系统", rgb(132, 150, 162), 1);
+    text(tx + 14, ty + 286, "滚轮切换", rgb(122, 142, 156), 1);
+
+    rect(main_x, ty + 114, main_w, 206, rgb(24, 35, 44));
+    border(main_x, ty + 114, main_w, 206, rgb(68, 96, 112));
+    rect(main_x, ty + 114, main_w, 26, rgb(32, 48, 60));
+    rect(main_x, ty + 139, main_w, 1, rgb(72, 100, 116));
+    text(main_x + 14, ty + 122, "名称", rgb(208, 226, 236), 1);
+    text(main_x + main_w - 166, ty + 122, "类型", rgb(208, 226, 236), 1);
+    text(main_x + main_w - 82, ty + 122, "大小", rgb(208, 226, 236), 1);
+
+    int list_y = ty + 146;
     uint32_t count = fs_get_count();
     if (count == 0) {
-        text(tx, list_y, "暂无文件", rgb(148, 162, 174), 1);
-        text(tx, list_y + 22, "按 N 创建新笔记", rgb(148, 162, 174), 1);
+        text(main_x + 18, list_y + 18, "暂无文件", rgb(190, 208, 218), 1);
+        text(main_x + 18, list_y + 42, "点击新建或按 N 创建", rgb(148, 168, 180), 1);
+        rect(detail_x, ty + 114, detail_w, 206, rgb(11, 23, 32));
+        border(detail_x, ty + 114, detail_w, 206, rgb(53, 78, 94));
+        text(detail_x + 12, ty + 130, "详细信息", rgb(194, 226, 242), 1);
+        text(detail_x + 12, ty + 164, "未选择文件", rgb(148, 162, 174), 1);
         return;
     }
 
     int selected = st->selected_file;
     if (selected < 0) selected = 0;
     if ((uint32_t)selected >= count) selected = (int)count - 1;
-    uint32_t start = selected >= 8 ? (uint32_t)selected - 7 : 0;
+    uint32_t start = selected >= FILE_LIST_ROWS ? (uint32_t)selected - (FILE_LIST_ROWS - 1) : 0;
     uint32_t max = count - start;
-    if (max > 8) max = 8;
+    if (max > FILE_LIST_ROWS) max = FILE_LIST_ROWS;
     for (uint32_t i = 0; i < max; i++) {
         uint32_t file_idx = start + i;
         file_t *f = fs_get_file(file_idx);
         if (!f) continue;
-        int y = list_y + (int)i * 24;
+        int y = list_y + (int)i * FILE_ROW_H;
+        if ((i & 1) == 1) rect(main_x + 1, y - 8, main_w - 2, FILE_ROW_H, rgb(29, 43, 54));
         if ((int)file_idx == selected) {
-            rect(tx - 8, y - 5, win_w - 60, 22, rgb(24, 42, 58));
-            text(tx - 2, y, ">", rgb(124, 220, 154), 1);
+            rect(main_x + 6, y - 7, main_w - 12, 24, rgb(24, 122, 170));
+            rect(main_x + 6, y - 7, 4, 24, rgb(85, 180, 120));
         }
+        rect(main_x + 16, y - 2, 18, 14, rgb(244, 194, 82));
+        rect(main_x + 20, y - 7, 18, 7, rgb(230, 184, 74));
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, f->name);
+        uint32_t row_fg = (int)file_idx == selected ? rgb(248, 252, 255) : rgb(218, 232, 240);
+        uint32_t meta_fg = (int)file_idx == selected ? rgb(228, 244, 252) : rgb(150, 170, 182);
+        text(main_x + 48, y, line, row_fg, 1);
+        text(main_x + main_w - 126, y, f->type ? "目录" : "文件", meta_fg, 1);
+        line_u32(line, sizeof(line), "", f->size, "B");
+        text(main_x + main_w - 64, y, line, meta_fg, 1);
+    }
+
+    file_t *f = fs_get_file((uint32_t)selected);
+    if (f) {
+        rect(detail_x, ty + 114, detail_w, 206, rgb(11, 23, 32));
+        border(detail_x, ty + 114, detail_w, 206, rgb(53, 78, 94));
+        rect(detail_x, ty + 114, detail_w, 30, rgb(18, 36, 48));
+        text(detail_x + 12, ty + 124, "详细信息", rgb(194, 226, 242), 1);
+        rect(detail_x + 12, ty + 156, 30, 24, rgb(244, 194, 82));
+        rect(detail_x + 17, ty + 150, 28, 8, rgb(230, 184, 74));
+        text(detail_x + 52, ty + 160, f->name, rgb(238, 246, 255), 1);
+        line_u32(line, sizeof(line), "大小: ", f->size, "B");
+        text(detail_x + 12, ty + 194, line, rgb(210, 221, 230), 1);
+        line_u32(line, sizeof(line), "容量: ", f->capacity, "B");
+        text(detail_x + 12, ty + 216, line, rgb(210, 221, 230), 1);
+        text(detail_x + 12, ty + 246, "预览", rgb(194, 226, 242), 1);
+        char preview[64];
+        uint32_t n = fs_read_file_data(f, 0, preview, sizeof(preview) - 1);
+        preview[n] = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            if ((uint8_t)preview[i] < 32 && preview[i] != '\n') preview[i] = '.';
+        }
+        int px = detail_x + 12;
+        int py = ty + 270;
+        utf8_state_t utf8;
+        utf8_init(&utf8);
+        for (uint32_t i = 0; i < n && py < ty + 312; i++) {
+            if (preview[i] == '\n') {
+                px = detail_x + 12;
+                py += 18;
+                utf8_init(&utf8);
+                continue;
+            }
+            uint32_t cp = 0;
+            int ok = utf8_feed(&utf8, (uint8_t)preview[i], &cp);
+            if (ok < 0) continue;
+            if (ok == 0) cp = '?';
+            px += draw_text_codepoint(px, py, cp, rgb(210, 221, 230), 1);
+            if (px > detail_x + detail_w - 20) {
+                px = detail_x + 12;
+                py += 18;
+            }
+        }
+
+        rect(tx, ty + 330, content_w, 28, rgb(9, 18, 27));
+        border(tx, ty + 330, content_w, 28, rgb(53, 78, 94));
+        uint32_t pos = 0;
+        line[0] = 0;
+        append_str(line, sizeof(line), &pos, "已选择: ");
+        append_str(line, sizeof(line), &pos, f->name);
         append_str(line, sizeof(line), &pos, "  ");
         append_uint(line, sizeof(line), &pos, f->size);
-        append_str(line, sizeof(line), &pos, "B");
-        text(tx + 18, y, line, rgb(220, 230, 238), 1);
+        append_str(line, sizeof(line), &pos, "B  再次点击/Enter 打开编辑");
+        text(tx + 12, ty + 340, line, rgb(210, 221, 230), 1);
     }
-    if (count > 8) {
+    if (count > FILE_LIST_ROWS) {
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, "显示 ");
@@ -825,7 +959,7 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         append_uint(line, sizeof(line), &pos, start + max);
         append_str(line, sizeof(line), &pos, " / ");
         append_uint(line, sizeof(line), &pos, count);
-        text(tx, list_y + 204, line, rgb(148, 162, 174), 1);
+        text(main_x + main_w - 96, ty + 340, line, rgb(148, 162, 174), 1);
     }
 }
 
@@ -902,11 +1036,12 @@ static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
 }
 
 static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
+    (void)win_w;
     char line[96];
-    text(tx, ty, "应用程序", rgb(102, 214, 255), 1);
+    text(tx, ty, "应用程序", rgb(24, 112, 166), 1);
     line_u32(line, sizeof(line), "图形应用: ", gui_app_count(), "");
-    text(tx, ty + 34, line, rgb(210, 221, 230), 1);
-    draw_button(tx, ty + 58, "打开 Enter", rgb(23, 147, 209));
+    text(tx + 112, ty + 2, line, rgb(94, 112, 124), 1);
+    draw_button(tx, ty + 42, "打开 Enter", rgb(23, 147, 209));
 
     int selected = st->selected_app;
     if (selected < 0) selected = 0;
@@ -915,19 +1050,31 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     for (uint32_t i = 0; i < max; i++) {
         const gui_app_t *app = &gui_apps[i];
         if (!app) continue;
-        int y = ty + 102 + (int)i * 28;
+        int card_w = 250;
+        int card_h = 78;
+        int col = (int)(i & 1);
+        int row = (int)(i >> 1);
+        int x = tx + col * (card_w + 18);
+        int y = ty + 88 + row * (card_h + 16);
+        uint32_t accent = app->mode == GUI_APP_NOTES ? rgb(85, 180, 120) :
+                          app->mode == GUI_APP_CALC ? rgb(23, 147, 209) :
+                          app->mode == GUI_APP_UWC ? rgb(244, 194, 82) :
+                                                     rgb(124, 220, 154);
+        rect(x, y, card_w, card_h, (int)i == selected ? rgb(32, 58, 74) : rgb(24, 36, 46));
+        rect(x, y, 6, card_h, accent);
+        border(x, y, card_w, card_h, (int)i == selected ? rgb(80, 152, 192) : rgb(66, 92, 108));
+        rect(x + 20, y + 18, 34, 34, accent);
+        rect(x + 26, y + 24, 22, 22, rgb(28, 40, 50));
         if ((int)i == selected) {
-            rect(tx - 8, y - 5, win_w - 60, 24, rgb(24, 42, 58));
-            text(tx - 2, y, ">", rgb(102, 214, 255), 1);
+            rect(x + card_w - 26, y + 12, 10, 10, rgb(36, 126, 176));
         }
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, app->name);
-        append_str(line, sizeof(line), &pos, " - ");
-        append_str(line, sizeof(line), &pos, app->description);
-        text(tx + 18, y, line, rgb(220, 230, 238), 1);
+        text(x + 70, y + 18, line, rgb(230, 240, 246), 1);
+        text(x + 70, y + 42, app->description, rgb(156, 176, 188), 1);
     }
-    text(tx, ty + 230, "方向键选择  Enter 打开  Esc 返回", rgb(148, 162, 174), 1);
+    text(tx, ty + 286, "方向键选择  Enter 打开  鼠标点击卡片选择", rgb(94, 112, 124), 1);
 }
 
 static uint32_t count_file_lines(file_t *f) {
@@ -1000,22 +1147,51 @@ static void note_backspace(gui_state_t *st) {
 
 static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     note_load(st);
+    int list_w = 150;
+    int edit_x = tx + list_w + 18;
+    int edit_w = win_w - list_w - 86;
+    if (edit_w < 260) edit_w = 260;
     text(tx, ty, "记事本", rgb(124, 220, 154), 1);
-    text(tx, ty + 40, "直接输入自动保存，Backspace 删除，Enter 换行", rgb(148, 162, 174), 1);
+    text(tx, ty + 40, "选择左侧文件后直接编辑，输入会自动保存", rgb(148, 162, 174), 1);
     char line[96];
+
+    rect(tx, ty + 70, list_w, 222, rgb(8, 18, 27));
+    border(tx, ty + 70, list_w, 222, rgb(43, 64, 78));
+    text(tx + 12, ty + 82, "文件", rgb(190, 224, 242), 1);
+    uint32_t count = fs_get_count();
+    if (count == 0) {
+        text(tx + 12, ty + 112, "暂无文件", rgb(148, 162, 174), 1);
+        text(tx + 12, ty + 134, "按 N 新建", rgb(148, 162, 174), 1);
+    } else {
+        int selected = st->selected_file;
+        if (selected < 0) selected = 0;
+        if ((uint32_t)selected >= count) selected = (int)count - 1;
+        uint32_t start = selected >= NOTE_FILE_ROWS ? (uint32_t)selected - (NOTE_FILE_ROWS - 1) : 0;
+        uint32_t max = count - start;
+        if (max > NOTE_FILE_ROWS) max = NOTE_FILE_ROWS;
+        for (uint32_t i = 0; i < max; i++) {
+            uint32_t file_idx = start + i;
+            file_t *f = fs_get_file(file_idx);
+            if (!f) continue;
+            int y = ty + 112 + (int)i * FILE_ROW_H;
+            if ((int)file_idx == selected) rect(tx + 8, y - 6, list_w - 16, 24, rgb(24, 60, 86));
+            text(tx + 18, y, f->name, rgb(220, 230, 238), 1);
+        }
+    }
+
     line2(line, sizeof(line), "文件: ", gui_note_name(st));
-    text(tx, ty + 70, line, rgb(210, 221, 230), 1);
+    text(edit_x, ty + 70, line, rgb(210, 221, 230), 1);
     line_u32(line, sizeof(line), "大小: ", st->note_len, "B");
-    text(tx, ty + 92, line, rgb(210, 221, 230), 1);
-    rect(tx, ty + 118, win_w - 68, 174, rgb(5, 10, 16));
-    border(tx, ty + 118, win_w - 68, 174, rgb(85, 180, 120));
-    int x = tx;
+    text(edit_x, ty + 92, line, rgb(210, 221, 230), 1);
+    rect(edit_x, ty + 118, edit_w, 174, rgb(5, 10, 16));
+    border(edit_x, ty + 118, edit_w, 174, rgb(85, 180, 120));
+    int x = edit_x + 8;
     int y = ty + 126;
     utf8_state_t utf8;
     utf8_init(&utf8);
     for (uint32_t i = 0; i < st->note_len && y < ty + 280; i++) {
         if (st->note_buf[i] == '\n') {
-            x = tx;
+            x = edit_x + 8;
             y += 18;
             utf8_init(&utf8);
             continue;
@@ -1028,8 +1204,8 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
 
         int advance = draw_text_codepoint(x, y, cp, rgb(220, 230, 238), 1);
         x += advance;
-        if (x > tx + win_w - 70) {
-            x = tx;
+        if (x > edit_x + edit_w - 16) {
+            x = edit_x + 8;
             y += 18;
         }
     }
@@ -1227,8 +1403,19 @@ static void snake_reset(gui_state_t *st) {
     st->snake_y = st->snake_body_y[0];
     st->snake_tx = 10;
     st->snake_ty = 4;
+    st->snake_last_sec = cmos_second();
     snake_place_food(st);
     st->status = "贪吃蛇已开始";
+}
+
+static void snake_turn(gui_state_t *st, int dx, int dy) {
+    if (st->snake_len <= 0) snake_reset(st);
+    if (!st->snake_alive) return;
+    if (st->snake_len <= 1 || dx != -st->snake_dx || dy != -st->snake_dy) {
+        st->snake_dx = dx;
+        st->snake_dy = dy;
+    }
+    st->status = "贪吃蛇已转向";
 }
 
 static void draw_snake_app(int tx, int ty, gui_state_t *st) {
@@ -1252,13 +1439,15 @@ static void draw_snake_app(int tx, int ty, gui_state_t *st) {
 }
 
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active) {
-    rect(x + 8, y + 10, win_w, win_h, rgb(3, 8, 13));
-    rect(x, y, win_w, win_h, active ? rgb(13, 24, 34) : rgb(12, 18, 25));
-    border(x, y, win_w, win_h, active ? rgb(42, 119, 166) : rgb(47, 72, 88));
-    rect(x, y, win_w, 34, active ? rgb(20, 40, 56) : rgb(17, 28, 39));
-    rect(x + win_w - 30, y + 8, 16, 16, rgb(122, 38, 42));
-    text(x + win_w - 26, y + 12, "x", rgb(250, 220, 220), 1);
-    text(x + 16, y + 9, title, rgb(234, 243, 250), 1);
+    rect(x + 7, y + 8, win_w, win_h, rgb(5, 10, 15));
+    rect(x, y, win_w, win_h, active ? rgb(20, 32, 42) : rgb(18, 27, 36));
+    border(x, y, win_w, win_h, active ? rgb(58, 138, 184) : rgb(70, 92, 108));
+    rect(x + 1, y + 1, win_w - 2, 34, active ? rgb(24, 112, 166) : rgb(94, 120, 136));
+    rect(x + 1, y + 35, win_w - 2, 1, rgb(178, 197, 208));
+    rect(x + win_w - 34, y + 7, 22, 20, active ? rgb(204, 58, 66) : rgb(146, 70, 76));
+    border(x + win_w - 34, y + 7, 22, 20, rgb(112, 42, 48));
+    text(x + win_w - 27, y + 13, "x", rgb(250, 236, 236), 1);
+    text(x + 16, y + 10, title, rgb(244, 250, 255), 1);
 }
 
 static void draw_panel_window(int tx, int ty, int win_w, int w, int h, gui_state_t *st, int panel) {
@@ -1301,7 +1490,9 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
         st->app_mode = win->mode;
         draw_app_window_body(tx, ty, win_w, st, win->mode);
     }
-    text(win_x + 30, win_y + win_h - 34, idx == st->active_window ? st->status : "单击任务栏切换", rgb(132, 196, 232), 1);
+    rect(win_x + 1, win_y + win_h - 31, win_w - 2, 30, rgb(22, 34, 44));
+    rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, rgb(62, 88, 104));
+    text(win_x + 24, win_y + win_h - 22, idx == st->active_window ? st->status : "单击任务栏切换", rgb(168, 190, 204), 1);
 
     st->active = old_active;
     st->app_mode = old_app;
@@ -1335,14 +1526,67 @@ static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, i
 
 static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h);
+    char line[96];
 
-    text(22, 22, "HBOS", rgb(244, 250, 255), 2);
-    text(22, 50, "中文图形桌面", rgb(190, 224, 242), 1);
+    text(22, 18, "HBOS", rgb(244, 250, 255), 2);
+    text(22, 48, "图形桌面", rgb(190, 224, 242), 1);
+    text(140, 20, "系统概览", rgb(230, 240, 246), 2);
+    text(142, 48, "左侧启动栏打开工具，桌面直接显示当前状态", rgb(150, 172, 186), 1);
 
-    draw_icon(24, 98, st->active == PANEL_FILES, "文件", rgb(85, 180, 120));
-    draw_icon(24, 178, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74));
-    draw_icon(24, 258, st->active == PANEL_SYS, "资源", rgb(196, 116, 230));
-    draw_icon(24, 338, st->active == PANEL_APPS, "应用", rgb(23, 147, 209));
+    draw_icon(15, 92, st->active == PANEL_FILES, "文件", rgb(85, 180, 120));
+    draw_icon(15, 162, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74));
+    draw_icon(15, 232, st->active == PANEL_SYS, "资源", rgb(196, 116, 230));
+    draw_icon(15, 302, st->active == PANEL_APPS, "应用", rgb(23, 147, 209));
+
+    uint64_t total = pmm_get_total_mem();
+    uint64_t free = pmm_get_free_mem();
+    uint64_t used = total > free ? total - free : 0;
+    line_u32(line, sizeof(line), "", (uint32_t)(used / 1024), "K used");
+    draw_desktop_tile(142, 88, 150, 74, "内存", line, rgb(196, 116, 230));
+
+    line_u32(line, sizeof(line), "", fs_get_count(), " files");
+    draw_desktop_tile(310, 88, 150, 74, "文件", line, rgb(85, 180, 120));
+
+    line2(line, sizeof(line), "FS: ", fs_backend_name());
+    draw_desktop_tile(478, 88, 190, 74, "文件系统", line, rgb(23, 147, 209));
+
+    line2(line, sizeof(line), "Block: ", block_backend_name());
+    draw_desktop_tile(142, 182, 246, 74, "磁盘", line, rgb(230, 184, 74));
+
+    line_u32(line, sizeof(line), "", (uint32_t)task_get_count(), " tasks");
+    draw_desktop_tile(406, 182, 126, 74, "任务", line, rgb(124, 220, 154));
+
+    line_u32(line, sizeof(line), "", gui_app_count(), " apps");
+    draw_desktop_tile(550, 182, 118, 74, "应用", line, rgb(102, 214, 255));
+
+    rect(142, 282, 250, 126, rgb(25, 38, 48));
+    border(142, 282, 250, 126, rgb(66, 92, 108));
+    text(158, 298, "最近文件", rgb(230, 240, 246), 1);
+    uint32_t count = fs_get_count();
+    if (count == 0) {
+        text(158, 328, "暂无文件", rgb(150, 172, 186), 1);
+        text(158, 352, "按 N 或点文件中新建", rgb(150, 172, 186), 1);
+    } else {
+        uint32_t shown = count > 4 ? 4 : count;
+        for (uint32_t i = 0; i < shown; i++) {
+            file_t *f = fs_get_file(i);
+            if (!f) continue;
+            line[0] = 0;
+            uint32_t pos = 0;
+            append_str(line, sizeof(line), &pos, f->name);
+            append_str(line, sizeof(line), &pos, "  ");
+            append_uint(line, sizeof(line), &pos, f->size);
+            append_str(line, sizeof(line), &pos, "B");
+            text(158, 328 + (int)i * 20, line, rgb(208, 226, 236), 1);
+        }
+    }
+
+    rect(418, 282, 250, 126, rgb(25, 38, 48));
+    border(418, 282, 250, 126, rgb(66, 92, 108));
+    text(434, 298, "快捷操作", rgb(230, 240, 246), 1);
+    text(434, 328, "N 新建文件", rgb(208, 226, 236), 1);
+    text(434, 350, "Enter 打开当前项", rgb(208, 226, 236), 1);
+    text(434, 372, "Tab/Space 切换窗口", rgb(208, 226, 236), 1);
 
     for (int i = 0; i < st->window_count; i++) {
         if (i != st->active_window) draw_one_window(w, h, st, i);
@@ -1376,6 +1620,7 @@ static void gui_select_file(gui_state_t *st, int index) {
     uint32_t count = fs_get_count();
     if (count == 0) {
         st->selected_file = 0;
+        st->last_clicked_file = -1;
         return;
     }
     if (index < 0) index = 0;
@@ -1460,6 +1705,21 @@ static void gui_delete_selected(gui_state_t *st) {
     (void)fs_sync();
 }
 
+static void gui_truncate_selected(gui_state_t *st) {
+    file_t *f = selected_file(st);
+    if (!f) {
+        st->status = "未选择文件";
+        return;
+    }
+    if (fs_truncate_file(f) < 0) {
+        st->status = "清空失败";
+        return;
+    }
+    st->note_loaded = 0;
+    (void)fs_sync();
+    st->status = "文件已清空";
+}
+
 static void gui_install(gui_state_t *st) {
     if (fs_install_disk() < 0) st->status = fs_last_error();
     else st->status = "HBFS 已安装";
@@ -1489,6 +1749,17 @@ static void gui_open_selected_app(gui_state_t *st) {
     st->status = "应用已打开";
 }
 
+static void gui_open_selected_file(gui_state_t *st) {
+    file_t *f = selected_file(st);
+    if (!f) {
+        st->status = "未选择文件";
+        return;
+    }
+    gui_set_note_name(st, f->name);
+    if (gui_open_window(st, GUI_WIN_APP, GUI_APP_NOTES, 0) >= 0)
+        st->status = "已用记事本打开";
+}
+
 static int gui_step_selection(int current, uint32_t count, int steps) {
     if (count == 0) return 0;
     current += steps;
@@ -1515,10 +1786,12 @@ static void handle_wheel(gui_state_t *st, int dz) {
 
 static void handle_action(gui_state_t *st, int action) {
     if (action == 0) gui_create_note(st);
-    else if (action == 1) gui_append_note(st);
-    else if (action == 2) gui_delete_selected(st);
-    else if (action == 3) gui_install(st);
-    else if (action == 4) gui_open_selected_app(st);
+    else if (action == 1) gui_open_selected_file(st);
+    else if (action == 2) gui_append_note(st);
+    else if (action == 3) gui_truncate_selected(st);
+    else if (action == 4) gui_delete_selected(st);
+    else if (action == 5) gui_install(st);
+    else if (action == 6) gui_open_selected_app(st);
 }
 
 static int hit_window_titlebar(int w, int h, const gui_state_t *st, int mx, int my) {
@@ -1554,44 +1827,88 @@ static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
     (void)win_h;
     int panel = win->mode;
     if (panel == PANEL_FILES) {
-        int y = ty + 58;
+        int y = ty + 72;
         if (my >= y && my < y + ACTION_H) {
-            if (mx >= tx && mx < tx + ACTION_W) return 0;
-            if (mx >= tx + 116 && mx < tx + 116 + ACTION_W) return 1;
-            if (mx >= tx + 232 && mx < tx + 232 + ACTION_W) return 2;
+            if (mx >= tx && mx < tx + 76) return 0;
+            if (mx >= tx + 84 && mx < tx + 160) return 1;
+            if (mx >= tx + 168 && mx < tx + 244) return 2;
+            if (mx >= tx + 252 && mx < tx + 328) return 3;
+            if (mx >= tx + 336 && mx < tx + 412) return 4;
         }
-        int list_y = ty + 102;
-        if (mx >= tx - 8 && mx < tx + win_w - 60 && my >= list_y - 5) {
+        int content_w = win_w - 60;
+        int side_w = 118;
+        int main_x = tx + side_w + 12;
+        int detail_w = 184;
+        int main_w = content_w - side_w - detail_w - 24;
+        if (main_w < 260) {
+            detail_w = 152;
+            main_w = content_w - side_w - detail_w - 24;
+        }
+        if (main_w < 220) main_w = 220;
+        int list_y = ty + 146;
+        if (mx >= main_x && mx < main_x + main_w && my >= list_y - 8 && my < list_y - 8 + FILE_LIST_ROWS * FILE_ROW_H) {
             int selected = st->selected_file;
             if (selected < 0) selected = 0;
-            uint32_t start = selected >= 8 ? (uint32_t)selected - 7 : 0;
-            int idx = (my - (list_y - 5)) / 24;
+            uint32_t start = selected >= FILE_LIST_ROWS ? (uint32_t)selected - (FILE_LIST_ROWS - 1) : 0;
+            int idx = (my - (list_y - 8)) / FILE_ROW_H;
             uint32_t file_idx = start + (uint32_t)idx;
-            if (idx >= 0 && idx < 8 && file_idx < fs_get_count()) return FILE_ACTION_BASE + (int)file_idx;
+            if (idx >= 0 && idx < FILE_LIST_ROWS && file_idx < fs_get_count()) return FILE_ACTION_BASE + (int)file_idx;
         }
     } else if (panel == PANEL_DISK) {
         int y = ty + 194;
-        if (mx >= tx && mx < tx + ACTION_W && my >= y && my < y + ACTION_H) return 3;
+        if (mx >= tx && mx < tx + ACTION_W && my >= y && my < y + ACTION_H) return 5;
     } else if (panel == PANEL_APPS) {
-        int y = ty + 58;
-        if (mx >= tx && mx < tx + ACTION_W && my >= y && my < y + ACTION_H) return 4;
-        int list_y = ty + 102;
-        if (mx >= tx - 8 && mx < tx + win_w - 60 && my >= list_y - 5) {
-            int idx = (my - (list_y - 5)) / 28;
-            if (idx >= 0 && idx < 8 && (uint32_t)idx < gui_app_count()) return APP_ACTION_BASE + idx;
+        int y = ty + 42;
+        if (mx >= tx && mx < tx + ACTION_W && my >= y && my < y + ACTION_H) return 6;
+        int card_w = 250;
+        int card_h = 78;
+        for (uint32_t i = 0; i < gui_app_count(); i++) {
+            int col = (int)(i & 1);
+            int row = (int)(i >> 1);
+            int x = tx + col * (card_w + 18);
+            int cy = ty + 88 + row * (card_h + 16);
+            if (mx >= x && mx < x + card_w && my >= cy && my < cy + card_h)
+                return APP_ACTION_BASE + (int)i;
         }
     }
+    return -1;
+}
+
+static int hit_note_file(int w, int h, const gui_state_t *st, int mx, int my) {
+    if (st->active_window < 0 || st->active_window >= st->window_count) return -1;
+    const gui_window_t *win = &st->windows[st->active_window];
+    if (!win->used || win->kind != GUI_WIN_APP || win->mode != GUI_APP_NOTES) return -1;
+
+    int win_x, win_y, win_w, win_h;
+    gui_window_metrics(w, h, win, st->active_window, &win_x, &win_y, &win_w, &win_h);
+    (void)win_w;
+    (void)win_h;
+    int tx = win_x + 30;
+    int ty = win_y + 62;
+    int list_w = 150;
+    int list_y = ty + 112;
+    if (mx < tx || mx >= tx + list_w || my < list_y - 8) return -1;
+
+    uint32_t count = fs_get_count();
+    if (count == 0) return -1;
+    int selected = st->selected_file;
+    if (selected < 0) selected = 0;
+    if ((uint32_t)selected >= count) selected = (int)count - 1;
+    uint32_t start = selected >= NOTE_FILE_ROWS ? (uint32_t)selected - (NOTE_FILE_ROWS - 1) : 0;
+    int idx = (my - (list_y - 8)) / FILE_ROW_H;
+    uint32_t file_idx = start + (uint32_t)idx;
+    if (idx >= 0 && idx < NOTE_FILE_ROWS && file_idx < count) return (int)file_idx;
     return -1;
 }
 
 static int hit_panel_shortcut(int w, int h, int mx, int my) {
     (void)w;
     (void)h;
-    if (mx >= 24 && mx < 106) {
-        if (my >= 98 && my < 166) return PANEL_FILES;
-        if (my >= 178 && my < 246) return PANEL_DISK;
-        if (my >= 258 && my < 326) return PANEL_SYS;
-        if (my >= 338 && my < 406) return PANEL_APPS;
+    if (mx >= 15 && mx < 97) {
+        if (my >= 92 && my < 150) return PANEL_FILES;
+        if (my >= 162 && my < 220) return PANEL_DISK;
+        if (my >= 232 && my < 290) return PANEL_SYS;
+        if (my >= 302 && my < 360) return PANEL_APPS;
     }
     return -1;
 }
@@ -1657,6 +1974,17 @@ static void snake_move(gui_state_t *st, int dx, int dy) {
     }
 }
 
+static int snake_auto_tick(gui_state_t *st) {
+    gui_sync_focus(st);
+    if (st->app_mode != GUI_APP_SNAKE) return 0;
+    if (st->snake_len <= 0) snake_reset(st);
+    uint8_t sec = cmos_second();
+    if (sec == st->snake_last_sec) return 0;
+    st->snake_last_sec = sec;
+    snake_move(st, 0, 0);
+    return 1;
+}
+
 static void handle_app_key(gui_state_t *st, int key) {
     if (key == '\t') {
         gui_focus_next_window(st, 1);
@@ -1689,10 +2017,10 @@ static void handle_app_key(gui_state_t *st, int key) {
         else if (key == GUI_KEY_DOWN && (uint32_t)(st->selected_file + 1) < fs_get_count()) gui_select_file(st, st->selected_file + 1);
     } else if (st->app_mode == GUI_APP_SNAKE) {
         if (key == '\n') snake_reset(st);
-        else if (key == GUI_KEY_LEFT) snake_move(st, -1, 0);
-        else if (key == GUI_KEY_RIGHT) snake_move(st, 1, 0);
-        else if (key == GUI_KEY_UP) snake_move(st, 0, -1);
-        else if (key == GUI_KEY_DOWN) snake_move(st, 0, 1);
+        else if (key == GUI_KEY_LEFT) snake_turn(st, -1, 0);
+        else if (key == GUI_KEY_RIGHT) snake_turn(st, 1, 0);
+        else if (key == GUI_KEY_UP) snake_turn(st, 0, -1);
+        else if (key == GUI_KEY_DOWN) snake_turn(st, 0, 1);
     }
 }
 
@@ -1726,6 +2054,8 @@ static void handle_key(gui_state_t *st, int key) {
     } else if (key == 'a') {
         gui_append_note(st);
         gui_open_panel_window(st, PANEL_FILES);
+    } else if (key == 'c') {
+        if (st->active == PANEL_FILES) gui_truncate_selected(st);
     } else if (key == 'd') {
         gui_delete_selected(st);
         gui_open_panel_window(st, PANEL_FILES);
@@ -1734,8 +2064,10 @@ static void handle_key(gui_state_t *st, int key) {
         gui_open_panel_window(st, PANEL_DISK);
     } else if (key == 'r') {
         gui_open_selected_app(st);
+    } else if (key == 'o') {
+        if (st->active == PANEL_FILES) gui_open_selected_file(st);
     } else if (key == '\n') {
-        if (st->active == PANEL_FILES) gui_append_note(st);
+        if (st->active == PANEL_FILES) gui_open_selected_file(st);
         else if (st->active == PANEL_DISK) gui_install(st);
         else if (st->active == PANEL_APPS) gui_open_selected_app(st);
     }
@@ -1776,6 +2108,7 @@ static void cmd_gui(int argc, char **argv) {
         .clicks = 0,
         .buttons = 0,
         .active_window = -1,
+        .last_clicked_file = -1,
         .status = "就绪",
     };
 
@@ -1894,7 +2227,13 @@ static void cmd_gui(int argc, char **argv) {
                             drag_pending = 0;
                     st.status = "拖动窗口";
                         } else if (st.app_mode != GUI_APP_NONE) {
-                    st.status = "应用内请使用键盘";
+                            int note_file = hit_note_file(w, h, &st, mx, my);
+                            if (note_file >= 0) {
+                                gui_select_file(&st, note_file);
+                                st.status = "已切换编辑文件";
+                            } else {
+                                st.status = "应用内请使用键盘";
+                            }
                         } else {
                     int panel = hit_panel_shortcut(w, h, mx, my);
                     if (panel >= 0) {
@@ -1904,10 +2243,17 @@ static void cmd_gui(int argc, char **argv) {
                         if (action >= FILE_ACTION_BASE) {
                             if (action >= APP_ACTION_BASE) {
                                 st.selected_app = action - APP_ACTION_BASE;
-                                st.status = "已选择应用";
+                                gui_open_selected_app(&st);
                             } else {
-                                gui_select_file(&st, action - FILE_ACTION_BASE);
-                                st.status = "已选择文件";
+                                int file_index = action - FILE_ACTION_BASE;
+                                if (st.last_clicked_file == file_index && st.selected_file == file_index) {
+                                    gui_open_selected_file(&st);
+                                    st.last_clicked_file = -1;
+                                } else {
+                                    gui_select_file(&st, file_index);
+                                    st.last_clicked_file = file_index;
+                                    st.status = "已选择文件";
+                                }
                             }
                         } else if (action >= 0) {
                             handle_action(&st, action);
@@ -1925,6 +2271,9 @@ static void cmd_gui(int argc, char **argv) {
             } else if (mx != old_mx || my != old_my) {
                 draw_gui_frame(&fb, w, h, &st, mx, my);
             }
+        }
+        if (snake_auto_tick(&st)) {
+            draw_gui_frame(&fb, w, h, &st, mx, my);
         }
         task_yield();
     }

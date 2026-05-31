@@ -4,6 +4,7 @@
 #include "../graphics/graphics.h"
 #include "../selftest.h"
 #include "../string.h"
+#include "../sys/stat.h"
 #include "../unistd.h"
 #include "../vfs.h"
 #include "tool.h"
@@ -50,15 +51,13 @@ static void cmd_ls(int argc, char **argv) {
 }
 
 static void cmd_cat(int argc, char **argv) {
-    if (argc < 2) {
-        console_puts("Usage: cat <file>\n");
-        return;
-    }
-
-    int fd = open(argv[1], O_RDONLY);
-    if (fd < 0) {
-        print_errno("cat", argv[1]);
-        return;
+    int fd = STDIN_FILENO;
+    if (argc >= 2) {
+        fd = open(argv[1], O_RDONLY);
+        if (fd < 0) {
+            print_errno("cat", argv[1]);
+            return;
+        }
     }
 
     char buf[128];
@@ -68,7 +67,7 @@ static void cmd_cat(int argc, char **argv) {
         write(STDOUT_FILENO, buf, (size_t)n);
         last = buf[n - 1];
     }
-    close(fd);
+    if (fd != STDIN_FILENO) close(fd);
     if (last != '\n') console_putchar('\n');
 }
 
@@ -88,6 +87,163 @@ static void cmd_rm(int argc, char **argv) {
         return;
     }
     if (unlink(argv[1]) < 0) print_errno("rm", argv[1]);
+}
+
+static int copy_fd(int in_fd, int out_fd) {
+    char buf[256];
+    ssize_t n;
+    while ((n = read(in_fd, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(out_fd, buf + off, (size_t)(n - off));
+            if (w <= 0) return -1;
+            off += w;
+        }
+    }
+    return n < 0 ? -1 : 0;
+}
+
+static void cmd_stat(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("Usage: stat <file>\n");
+        return;
+    }
+    struct stat st;
+    if (stat(argv[1], &st) < 0) {
+        print_errno("stat", argv[1]);
+        return;
+    }
+    console_puts("name: ");
+    console_puts(argv[1]);
+    console_puts("\nsize: ");
+    print_uint((uint32_t)st.st_size);
+    console_puts(" bytes\nmode: ");
+    print_uint((uint32_t)st.st_mode);
+    console_putchar('\n');
+}
+
+static int copy_path(const char *src, const char *dst, const char *cmd) {
+    if (!src || !dst) {
+        return -1;
+    }
+    int in_fd = open(src, O_RDONLY);
+    if (in_fd < 0) {
+        print_errno(cmd, src);
+        return -1;
+    }
+    int out_fd = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0);
+    if (out_fd < 0) {
+        close(in_fd);
+        print_errno(cmd, dst);
+        return -1;
+    }
+    int ok = copy_fd(in_fd, out_fd);
+    close(out_fd);
+    close(in_fd);
+    if (ok < 0) {
+        console_puts(cmd);
+        console_puts(": copy failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+static void cmd_cp(int argc, char **argv) {
+    if (argc < 3) {
+        console_puts("Usage: cp <src> <dst>\n");
+        return;
+    }
+    (void)copy_path(argv[1], argv[2], "cp");
+}
+
+static void cmd_mv(int argc, char **argv) {
+    if (argc < 3) {
+        console_puts("Usage: mv <src> <dst>\n");
+        return;
+    }
+    if (copy_path(argv[1], argv[2], "mv") == 0) {
+        if (unlink(argv[1]) < 0) print_errno("mv", argv[1]);
+    }
+}
+
+static int contains(const char *line, const char *pat) {
+    if (!pat || !*pat) return 1;
+    for (uint32_t i = 0; line[i]; i++) {
+        uint32_t j = 0;
+        while (line[i + j] && pat[j] && line[i + j] == pat[j]) j++;
+        if (!pat[j]) return 1;
+    }
+    return 0;
+}
+
+static void grep_stream(int fd, const char *pat) {
+    char line[256];
+    uint32_t pos = 0;
+    char c;
+    while (read(fd, &c, 1) == 1) {
+        if (pos + 1 < sizeof(line)) line[pos++] = c;
+        if (c == '\n') {
+            line[pos] = 0;
+            if (contains(line, pat)) write(STDOUT_FILENO, line, pos);
+            pos = 0;
+        }
+    }
+    if (pos > 0) {
+        line[pos] = 0;
+        if (contains(line, pat)) {
+            write(STDOUT_FILENO, line, pos);
+            write(STDOUT_FILENO, "\n", 1);
+        }
+    }
+}
+
+static void cmd_grep(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("Usage: grep <text> [file]\n");
+        return;
+    }
+    int fd = STDIN_FILENO;
+    if (argc >= 3) {
+        fd = open(argv[2], O_RDONLY);
+        if (fd < 0) {
+            print_errno("grep", argv[2]);
+            return;
+        }
+    }
+    grep_stream(fd, argv[1]);
+    if (fd != STDIN_FILENO) close(fd);
+}
+
+static void print_hex_byte(uint8_t v) {
+    static const char hex[] = "0123456789abcdef";
+    console_putchar(hex[(v >> 4) & 0xF]);
+    console_putchar(hex[v & 0xF]);
+}
+
+static void cmd_hexdump(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("Usage: hexdump <file>\n");
+        return;
+    }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        print_errno("hexdump", argv[1]);
+        return;
+    }
+    uint8_t buf[16];
+    uint32_t off = 0;
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        print_uint(off);
+        console_puts(": ");
+        for (ssize_t i = 0; i < n; i++) {
+            print_hex_byte(buf[i]);
+            console_putchar(' ');
+        }
+        console_putchar('\n');
+        off += (uint32_t)n;
+    }
+    close(fd);
 }
 
 static void write_args_to_file(const char *cmd, const char *path, int flags, int argc, char **argv) {
@@ -117,6 +273,33 @@ static void cmd_fsinfo(int argc, char **argv) {
     console_puts("\nfiles: ");
     print_uint(vfs_count());
     console_putchar('\n');
+}
+
+static void cmd_fsck(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    fs_check_result_t r;
+    if (fs_check(&r) < 0) {
+        console_puts("fsck: FAIL ");
+        console_puts(r.first_error);
+        console_puts("\nfiles seen: ");
+        print_uint(r.files_seen);
+        console_puts(" recorded: ");
+        print_uint(r.file_count);
+        console_puts(" errors: ");
+        print_uint(r.errors);
+        console_putchar('\n');
+        return;
+    }
+    console_puts("fsck: PASS ");
+    console_puts(fs_backend_name());
+    console_puts(" files=");
+    print_uint(r.files_seen);
+    console_puts(" used=");
+    print_uint(r.used_bytes);
+    console_puts("/");
+    print_uint(r.capacity_bytes);
+    console_puts(" bytes\n");
 }
 
 static void cmd_mount(int argc, char **argv) {
@@ -167,9 +350,15 @@ void tool_file_init(void) {
         {"cat",        CMD_GROUP_FILE, "Print a file",           "cat <file>",                 cmd_cat},
         {"touch",      CMD_GROUP_FILE, "Create an empty file",   "touch <file>",               cmd_touch},
         {"rm",         CMD_GROUP_FILE, "Remove a file",          "rm <file>",                  cmd_rm},
+        {"stat",       CMD_GROUP_FILE, "Show file status",       "stat <file>",                cmd_stat},
+        {"cp",         CMD_GROUP_FILE, "Copy a file",            "cp <src> <dst>",             cmd_cp},
+        {"mv",         CMD_GROUP_FILE, "Move a file",            "mv <src> <dst>",             cmd_mv},
+        {"grep",       CMD_GROUP_FILE, "Search text",            "grep <text> [file]",         cmd_grep},
+        {"hexdump",    CMD_GROUP_FILE, "Show file bytes",        "hexdump <file>",             cmd_hexdump},
         {"writefile",  CMD_GROUP_FILE, "Write text to a file",   "writefile <file> <text...>", cmd_writefile},
         {"appendfile", CMD_GROUP_FILE, "Append text to a file",  "appendfile <file> <text...>",cmd_appendfile},
         {"fsinfo",     CMD_GROUP_FILE, "Show filesystem backend","fsinfo",                    cmd_fsinfo},
+        {"fsck",       CMD_GROUP_FILE, "Check filesystem",       "fsck",                      cmd_fsck},
         {"mount",      CMD_GROUP_FILE, "Mount HBFS ATA disk",    "mount",                     cmd_mount},
         {"mkfs",       CMD_GROUP_FILE, "Format HBFS ATA disk",   "mkfs",                      cmd_mkfs},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},

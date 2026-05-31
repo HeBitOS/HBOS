@@ -36,6 +36,8 @@ typedef struct task {
     // Entry point
     void (*entry)(void *arg);
     void *arg;
+    int exit_status;
+    uint32_t parent_id;
 
     // Link for round-robin list
     struct task *next;
@@ -59,12 +61,15 @@ void task_yield(void);
 
 // Terminate the current task
 void task_exit(void);
+void task_set_exit_status(int status);
+int task_wait(uint32_t id, int *status);
 
 // Get current task ID
 uint32_t task_get_id(void);
 
 // Get current task object
 task_t *task_current(void);
+const task_t *task_get_by_id(uint32_t id);
 
 // Get number of active (non-terminated) tasks
 int task_get_count(void);

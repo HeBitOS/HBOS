@@ -544,6 +544,63 @@ int fs_init(void) {
     return 1;
 }
 
+int fs_check(fs_check_result_t *out) {
+    fs_check_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.capacity_bytes = fs_capacity_bytes();
+    r.file_count = fs.file_count;
+    r.first_error = "ok";
+
+    uint32_t seen_names = 0;
+    for (uint32_t i = 0; i < MAX_FILES; i++) {
+        file_t *f = &fs.files[i];
+        if (!f->used) continue;
+        r.files_seen++;
+        r.used_bytes += f->size;
+
+        if (!f->name[0]) {
+            if (r.errors++ == 0) r.first_error = "empty file name";
+        }
+        if (f->size > f->capacity || f->capacity != RAMFS_MAX_FILE_SIZE) {
+            if (r.errors++ == 0) r.first_error = "invalid file size";
+        }
+        if (f->node.private_data != f || f->node.ops != &ramfs_ops) {
+            if (r.errors++ == 0) r.first_error = "invalid vfs node";
+        }
+        if (f->node.size != f->size) {
+            if (r.errors++ == 0) r.first_error = "vfs size mismatch";
+        }
+        for (uint32_t j = i + 1; j < MAX_FILES; j++) {
+            if (fs.files[j].used && strcmp(f->name, fs.files[j].name) == 0) {
+                if (r.errors++ == 0) r.first_error = "duplicate file name";
+            }
+        }
+        seen_names++;
+    }
+
+    if (seen_names != fs.file_count) {
+        if (r.errors++ == 0) r.first_error = "file count mismatch";
+    }
+
+    if (fs_backend == FS_BACKEND_HBFS) {
+        hbfs_super_t sb;
+        if (hbfs_read_super(&sb) < 0 || !hbfs_validate_super(&sb)) {
+            if (r.errors++ == 0) r.first_error = "invalid hbfs superblock";
+        }
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            if (fs.files[i].used != (hbfs_table[i].used ? 1 : 0)) {
+                if (r.errors++ == 0) r.first_error = "hbfs table mismatch";
+            }
+            if (fs.files[i].used && hbfs_table[i].size != fs.files[i].size) {
+                if (r.errors++ == 0) r.first_error = "hbfs size mismatch";
+            }
+        }
+    }
+
+    if (out) *out = r;
+    return r.errors == 0 ? 0 : -1;
+}
+
 int fs_format_disk(void) {
     fs_error = "ok";
     if (block_init() < 0) return fs_fail("未检测到可写硬盘");

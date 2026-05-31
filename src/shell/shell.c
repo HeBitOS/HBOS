@@ -3,7 +3,12 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
+#include "../fcntl.h"
+#include "../core/task.h"
 #include "../graphics/graphics.h"
+#include "../unistd.h"
+#include "../user/app.h"
+#include "../vfs.h"
 #include "shell.h"
 
 static int strcmp(const char *s1, const char *s2) {
@@ -230,14 +235,156 @@ void cmd_register_external(const char *name, const char *desc,
 int kb_get_key(void) { return get_key(); }
 bool kb_is_numlock(void) { return num_lock; }
 
+typedef struct {
+    int std_fd;
+    int active;
+    int saved_used;
+    vfs_node_t *saved_node;
+    uint32_t saved_offset;
+    int saved_flags;
+} shell_fd_save_t;
+
+static int shell_bind_stdio(int std_fd, int file_fd, shell_fd_save_t *save) {
+    task_t *task = task_current();
+    if (!task || !save || std_fd < 0 || std_fd >= POSIX_MAX_FDS ||
+        file_fd < 0 || file_fd >= POSIX_MAX_FDS || !task->fds[file_fd].used) {
+        return -1;
+    }
+
+    save->std_fd = std_fd;
+    save->active = 1;
+    save->saved_used = task->fds[std_fd].used;
+    save->saved_node = task->fds[std_fd].node;
+    save->saved_offset = task->fds[std_fd].offset;
+    save->saved_flags = task->fds[std_fd].flags;
+    task->fds[std_fd] = task->fds[file_fd];
+    task->fds[file_fd].used = false;
+    return 0;
+}
+
+static void shell_restore_stdio(shell_fd_save_t *save) {
+    if (!save || !save->active) return;
+    close(save->std_fd);
+    task_t *task = task_current();
+    if (task) {
+        task->fds[save->std_fd].used = save->saved_used;
+        task->fds[save->std_fd].node = save->saved_node;
+        task->fds[save->std_fd].offset = save->saved_offset;
+        task->fds[save->std_fd].flags = save->saved_flags;
+    }
+    save->active = 0;
+}
+
+static void shell_print_app_exit(int ret) {
+    console_puts("app exit ");
+    char tmp[16];
+    int n = 0;
+    uint32_t v = (uint32_t)ret;
+    do {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v);
+    while (n--) console_putchar(tmp[n]);
+    console_putchar('\n');
+}
+
+static int shell_execute_argv(int argc, char **argv) {
+    shell_fd_save_t in_save = {0};
+    shell_fd_save_t out_save = {0};
+    if (argc == 0) return 0;
+
+    for (int i = 0; i < argc; i++) {
+        int std_fd = -1;
+        int flags = 0;
+        if (strcmp(argv[i], "<") == 0) {
+            std_fd = STDIN_FILENO;
+            flags = O_RDONLY;
+        } else if (strcmp(argv[i], ">") == 0) {
+            std_fd = STDOUT_FILENO;
+            flags = O_CREAT | O_WRONLY | O_TRUNC;
+        } else if (strcmp(argv[i], ">>") == 0) {
+            std_fd = STDOUT_FILENO;
+            flags = O_CREAT | O_WRONLY | O_APPEND;
+        } else {
+            continue;
+        }
+
+        if (i + 1 >= argc) {
+            console_puts("redirect: missing file\n");
+            return 0;
+        }
+        int fd = open(argv[i + 1], flags, 0);
+        if (fd < 0) {
+            console_puts("redirect: open failed\n");
+            return 0;
+        }
+        shell_fd_save_t *save = std_fd == STDIN_FILENO ? &in_save : &out_save;
+        if (shell_bind_stdio(std_fd, fd, save) < 0) {
+            close(fd);
+            console_puts("redirect: bind failed\n");
+            return 0;
+        }
+        argc = i;
+        break;
+    }
+
+    if (argc == 0) {
+        shell_restore_stdio(&out_save);
+        shell_restore_stdio(&in_save);
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < cmd_count; i++) {
+        if (strcmp(cmd_registry[i]->name, argv[0]) == 0) {
+            cmd_registry[i]->handler(argc, argv);
+            shell_restore_stdio(&out_save);
+            shell_restore_stdio(&in_save);
+            return 0;
+        }
+    }
+
+    if (hbos_app_find(argv[0])) {
+        int ret = hbos_app_run(argv[0], argc, argv);
+        if (ret != 0) shell_print_app_exit(ret);
+        shell_restore_stdio(&out_save);
+        shell_restore_stdio(&in_save);
+        return 0;
+    }
+
+    shell_restore_stdio(&out_save);
+    shell_restore_stdio(&in_save);
+    return -1;
+}
+
 void cmd_execute(const char *line) {
     char buf[CMD_BUF_SIZE]; strcpy(buf, line);
     char *argv[MAX_ARGS]; int argc = parse_line(buf, argv, MAX_ARGS);
     if (argc == 0) return;
     save_history(line);
-    for (uint32_t i = 0; i < cmd_count; i++) {
-        if (strcmp(cmd_registry[i]->name, argv[0]) == 0) { cmd_registry[i]->handler(argc, argv); return; }
+
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "|") != 0) continue;
+        if (i == 0 || i + 1 >= argc) {
+            console_puts("pipe: usage <cmd> | <cmd>\n");
+            return;
+        }
+        argv[i] = ">";
+        argv[i + 1] = "__pipe_tmp";
+        (void)unlink("__pipe_tmp");
+        shell_execute_argv(i + 2, argv);
+
+        char *right[MAX_ARGS];
+        int right_argc = 0;
+        for (int j = i + 2; j < argc && right_argc < MAX_ARGS - 2; j++)
+            right[right_argc++] = argv[j];
+        right[right_argc++] = "<";
+        right[right_argc++] = "__pipe_tmp";
+        shell_execute_argv(right_argc, right);
+        (void)unlink("__pipe_tmp");
+        return;
     }
+
+    if (shell_execute_argv(argc, argv) == 0) return;
     (void)argv;
     console_puts("\x1b[0m\x1b[31mUnknown command.\x1b[0m\n");
     console_puts("\x1b[33mType 'help' for commands\x1b[0m\n");
