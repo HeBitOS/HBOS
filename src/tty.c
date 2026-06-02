@@ -6,9 +6,6 @@
 static tty_t ttys[TTY_MAX];
 static int current_tty = 0;
 
-#define TTY_COLORS \
-    "\x1b[40m\x1b[37m"
-
 static void ringbuf_init(tty_ringbuf_t *rb)
 {
     memset(rb, 0, sizeof(*rb));
@@ -44,11 +41,6 @@ static int ringbuf_available(tty_ringbuf_t *rb)
     return (int)rb->count;
 }
 
-static int ringbuf_free(tty_ringbuf_t *rb)
-{
-    return TTY_BUF_SIZE - (int)rb->count;
-}
-
 static int tty_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count)
 {
     (void)offset;
@@ -81,17 +73,6 @@ void tty_init(void)
         ttys[i].vfs_node = NULL;
     }
     current_tty = 0;
-    console_puts(TTY_COLORS);
-    console_puts("\n\x1b[32m[TTY] ");
-    char buf[8];
-    int n = 0, cnt = TTY_MAX;
-    do { buf[n++] = '0' + (cnt % 10); cnt /= 10; } while (cnt);
-    for (int j = n - 1; j >= 0; j--) console_putchar(buf[j]);
-    console_puts(" virtual terminals ready (Alt+F1-F");
-    n = 0; cnt = TTY_MAX;
-    do { buf[n++] = '0' + (cnt % 10); cnt /= 10; } while (cnt);
-    for (int j = n - 1; j >= 0; j--) console_putchar(buf[j]);
-    console_puts(")\x1b[0m\n");
 }
 
 void tty_switch(int n)
@@ -102,17 +83,6 @@ void tty_switch(int n)
     ttys[current_tty].active = 0;
     current_tty = n;
     ttys[current_tty].active = 1;
-
-    console_clear();
-
-    console_puts("\n\x1b[36m========================================\x1b[0m\n");
-    console_puts("\x1b[33m  Virtual Terminal ");
-    char buf[8];
-    int bn = 0, tn = n + 1;
-    do { buf[bn++] = '0' + (tn % 10); tn /= 10; } while (tn);
-    for (int j = bn - 1; j >= 0; j--) console_putchar(buf[j]);
-    console_puts("\x1b[0m\n");
-    console_puts("\x1b[36m========================================\x1b[0m\n\n");
 }
 
 int tty_current(void)

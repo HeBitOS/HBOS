@@ -3,7 +3,6 @@
 #include "string.h"
 #include "core/cpu.h"
 #include "core/task.h"
-#include "graphics/graphics.h"
 
 static per_cpu_t cpu_data[MAX_CPUS];
 static int cpu_count;
@@ -90,12 +89,7 @@ static void ap_entry(void) {
     lapic_write(LAPIC_TPR, 0);
 
     uint32_t my_id = lapic_get_id();
-    console_puts("\x1b[32m[SMP] AP ");
-    char buf[8];
-    int n = 0, id = my_id;
-    do { buf[n++] = '0' + (id % 10); id /= 10; } while (id);
-    for (int j = n - 1; j >= 0; j--) console_putchar(buf[j]);
-    console_puts(" online\x1b[0m\n");
+    (void)my_id;
 
     cpu_count++;
     for (int i = 0; i < MAX_CPUS; i++) {
@@ -166,16 +160,8 @@ void smp_init(void) {
     lapic_write(LAPIC_TPR, 0);
 
     if (!madt || madt->cpu_count <= 1) {
-        console_puts("\x1b[33m[SMP] No additional CPUs found in MADT, single-core mode\x1b[0m\n");
         return;
     }
-
-    console_puts("\x1b[36m[SMP] Detected ");
-    char cnt[8];
-    int cn = 0, c = madt->cpu_count;
-    do { cnt[cn++] = '0' + (c % 10); c /= 10; } while (c);
-    for (int j = cn - 1; j >= 0; j--) console_putchar(cnt[j]);
-    console_puts(" CPUs in MADT, starting APs...\x1b[0m\n");
 
     uint32_t bsp_id = lapic_get_id();
 
@@ -189,24 +175,6 @@ void smp_init(void) {
 
         if (start_ap(madt->cpus[i].apic_id, cpu_count) == 0) {
             cpu_count++;
-        } else {
-            console_puts("\x1b[33m[SMP] Failed to start AP ");
-            char ab[8];
-            int an = 0, aid = madt->cpus[i].apic_id;
-            do { ab[an++] = '0' + (aid % 10); aid /= 10; } while (aid);
-            for (int j = an - 1; j >= 0; j--) console_putchar(ab[j]);
-            console_puts("\x1b[0m\n");
         }
     }
-
-    int online = 0;
-    for (int i = 0; i < cpu_count; i++) {
-        if (cpu_data[i].online) online++;
-    }
-    console_puts("\x1b[32m[SMP] ");
-    char oc[8];
-    int on = 0, o = online;
-    do { oc[on++] = '0' + (o % 10); o /= 10; } while (o);
-    for (int j = on - 1; j >= 0; j--) console_putchar(oc[j]);
-    console_puts(" CPUs online\x1b[0m\n");
 }

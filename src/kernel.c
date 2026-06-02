@@ -147,7 +147,7 @@ void kmain(void *mbi) {
     shell_init();
     tool_init_all();
 
-    console_puts("\nType 'help' for commands");
+    console_puts("\nType 'help' for commands\n");
     console_puts("请输入 'Help' 以查询命令\n\n");
     serial_print("[KERN] Shell ready\n");
 
