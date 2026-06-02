@@ -1,30 +1,30 @@
-/* HBOS user-space linker script
- *
- * Links ELF64 executables for HBOS. All code/data is placed
- * above 0x400000 to avoid kernel space.
- */
-
+OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(_start)
 
-SECTIONS
-{
+SECTIONS {
     . = 0x400000;
 
-    .text : {
-        *(.text._start)
-        *(.text*)
+    .text ALIGN(0x1000) : {
+        *(.text)
+        *(.text.*)
     }
 
-    .rodata : {
-        *(.rodata*)
+    .rodata ALIGN(0x1000) : {
+        *(.rodata)
+        *(.rodata.*)
     }
 
-    .data : {
-        *(.data*)
+    .data ALIGN(0x1000) : {
+        *(.data)
+        *(.data.*)
     }
 
-    .bss : {
-        *(.bss*)
+    .bss ALIGN(0x1000) : {
         *(COMMON)
+        *(.bss)
+        *(.bss.*)
     }
+
+    . = ALIGN(0x1000);
+    _end = .;
 }

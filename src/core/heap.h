@@ -23,4 +23,7 @@ void kfree(void *ptr);
 // Resize allocated memory
 void *krealloc(void *ptr, size_t new_size);
 
+// Allocate aligned memory on kernel heap
+void *kmalloc_aligned(size_t size, size_t align);
+
 #endif /* HBOS_HEAP_H */

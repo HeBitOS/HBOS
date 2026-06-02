@@ -62,6 +62,13 @@ C_SRCS = \
 	$(SRC_DIR)/ata.c \
 	$(SRC_DIR)/fb.c \
 	$(SRC_DIR)/flanterm.c \
+	$(SRC_DIR)/xhci.c \
+	$(SRC_DIR)/usb_hid.c \
+	$(SRC_DIR)/usb_msc.c \
+	$(SRC_DIR)/smp.c \
+	$(SRC_DIR)/ext2.c \
+	$(SRC_DIR)/fat32.c \
+	$(SRC_DIR)/tty.c \
 	$(SRC_DIR)/graphics/graphics.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
 	$(SRC_DIR)/input/mouse.c \
@@ -84,6 +91,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/disk.c \
 	$(SRC_DIR)/tools/net.c \
 	$(SRC_DIR)/tools/gui.c \
+	$(SRC_DIR)/gui/wm.c \
 	$(APP_SRCS)
 
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -99,13 +107,14 @@ ASM_SRCS = \
 	$(SRC_DIR)/boot.asm \
 	$(SRC_DIR)/core/task_switch.asm \
 	$(SRC_DIR)/core/interrupt_asm.asm \
-	$(SRC_DIR)/graphics/cjk_glyph.asm
+	$(SRC_DIR)/graphics/cjk_glyph.asm \
+	$(SRC_DIR)/smp_trampoline.asm
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-uefi vbox-uefi release smoke run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-uefi vbox-uefi release smoke run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
 
 all: iso
 
@@ -134,7 +143,7 @@ help:
 	@echo "  make run-uefi-headless"
 
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/input $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps
+	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/input $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps $(BUILD_DIR)/gui $(BUILD_DIR)/crypto
 
 # Font generation
 font: $(FONT_BIN)
@@ -146,6 +155,10 @@ $(FONT_BIN): $(FONT_TTF) tools/genhzk.py
 
 # NASM (.asm) — various directories
 $(BUILD_DIR)/boot.o: $(SRC_DIR)/boot.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/smp_trampoline.o: $(SRC_DIR)/smp_trampoline.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -171,6 +184,10 @@ $(BUILD_DIR)/shell/%.o: $(SRC_DIR)/shell/%.c | $(BUILD_DIR)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/input/%.o: $(SRC_DIR)/input/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(BUILD_DIR)/gui/%.o: $(SRC_DIR)/gui/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
@@ -396,6 +413,49 @@ run-uefi-ahci: $(ISO_UEFI) $(DISK_IMG)
 		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(ISO_UEFI) -boot d \
 		-serial stdio -monitor none -vga std -no-reboot
+
+# ============================================================
+# User-space ring3 programs
+# ============================================================
+
+USER_PROG_DIR = $(SRC_DIR)/user/progs
+USER_LIBC_DIR = $(SRC_DIR)/user/libc
+USER_BUILD_DIR = $(BUILD_DIR)/user
+
+USER_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+              -mno-red-zone -O2 -Wall -Wextra \
+              -I$(SRC_DIR)/user/libc -I$(SRC_DIR)/user
+
+USER_LDFLAGS = -m elf_x86_64 -static -nostdlib -T user.ld
+
+USER_LIBC_SRCS = \
+	$(USER_LIBC_DIR)/crt0.c \
+	$(USER_LIBC_DIR)/syscall.c \
+	$(USER_LIBC_DIR)/string.c \
+	$(USER_LIBC_DIR)/stdlib.c \
+	$(USER_LIBC_DIR)/stdio.c
+
+USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+
+USER_PROG_SRCS = $(wildcard $(USER_PROG_DIR)/*.c)
+USER_PROG_BINS = $(USER_PROG_SRCS:$(USER_PROG_DIR)/%.c=$(USER_BUILD_DIR)/%.elf)
+
+$(BUILD_DIR)/user/libc/%.o: $(SRC_DIR)/user/libc/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $@
+
+$(USER_BUILD_DIR)/%.elf: $(USER_PROG_DIR)/%.c $(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $(@D) $(BUILD_DIR)/user/progs
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/user/progs/$*.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/user/progs/$*.o -o $@
+	@echo "✓ user prog: $@"
+
+user-progs: $(USER_PROG_BINS)
+	@echo "✓ All user programs built"
+
+user-progs-clean:
+	rm -rf $(USER_BUILD_DIR) $(BUILD_DIR)/user
+	@echo "✓ User programs cleaned"
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -26,6 +26,7 @@
 #include "selftest.h"
 #include "vfs.h"
 #include "acpi.h"
+#include "smp.h"
 #include "version.h"
 #include "net.h"
 
@@ -109,7 +110,8 @@ void kmain(void *mbi) {
     // PIC 重映射: IRQ0-15 → INT 32-47
     gdt_idt_init();
     pit_init(100);
-    acpi_init(mbi);  // ACPI 解析（用于关机支持的 S5 睡眠状态）
+    acpi_init(mbi);  // ACPI 解析（用于关机支持的 S5 睡眠状态 + MADT CPU 检测）
+    smp_init();     // SMP 多核初始化（启动 AP）
 
     // 设置 TSS ring0 栈指针（中断发生时 CPU 自动切换到内核栈）
     uint64_t rsp;

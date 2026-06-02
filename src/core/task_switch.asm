@@ -12,6 +12,7 @@
 
 global task_switch
 global task_entry_trampoline
+global task_enter_ring3
 extern task_exit
 
 section .text
@@ -58,3 +59,32 @@ task_entry_trampoline:
     call rax            ; call entry(arg)
     call task_exit      ; if entry returns, terminate task
     ; Never reaches here
+
+; ============================================================
+; Ring3 entry trampoline — switches to user mode via iretq
+; Called from task_entry_trampoline as the "entry function"
+; arg (rdi) = pointer to ring3_launch_ctx:
+;   ctx[0] = user_entry (RIP)
+;   ctx[1] = user_stack (RSP)
+; ============================================================
+task_enter_ring3:
+    mov rax, rdi        ; rax = ctx pointer
+
+    ; Build iretq frame for ring3 on kernel stack
+    push 0x23           ; SS = user data selector | RPL=3
+    push qword [rax+8]  ; RSP = user stack pointer
+    pushfq              ; RFLAGS
+    pop rdx
+    or rdx, 0x3202      ; IF=1, IOPL=3, always-set bit
+    push rdx
+    push 0x1B           ; CS = user code selector | RPL=3
+    push qword [rax]    ; RIP = user entry point
+
+    ; Set segment registers for user mode
+    mov ax, 0x23
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    iretq                ; Enter ring3!

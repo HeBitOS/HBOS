@@ -123,16 +123,26 @@ void *krealloc(void *ptr, size_t new_size) {
     if (new_size == 0) { kfree(ptr); return NULL; }
 
     heap_hdr_t *hdr = (heap_hdr_t *)((uint8_t *)ptr - HDR_SIZE);
-    if (hdr->magic != 0x48454150) return NULL;  // 损坏的头部
-    if (hdr->size >= new_size) return ptr;       // 原块足够大
+    if (hdr->magic != 0x48454150) return NULL;
+    if (hdr->size >= new_size) return ptr;
 
     void *new_ptr = kmalloc(new_size);
     if (!new_ptr) return NULL;
 
-    // 复制旧数据到新块
     size_t copy = hdr->size < new_size ? hdr->size : new_size;
     uint8_t *s = (uint8_t *)ptr;
     uint8_t *d = (uint8_t *)new_ptr;
     for (size_t i = 0; i < copy; i++) d[i] = s[i];
     return new_ptr;
+}
+
+void *kmalloc_aligned(size_t size, size_t align) {
+    if (!heap_ready || size == 0) return NULL;
+
+    size_t aligned_size = align_up(size, align);
+    uint8_t *raw = (uint8_t *)kmalloc(aligned_size + align);
+    if (!raw) return NULL;
+
+    uint8_t *aligned = (uint8_t *)(((uintptr_t)raw + align - 1) & ~(uintptr_t)(align - 1));
+    return (void *)aligned;
 }

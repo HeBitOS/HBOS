@@ -242,3 +242,16 @@ void vmm_set_pml4(uint64_t pml4_phys) {
     g_pml4      = (pte_t *)(uintptr_t)pml4_phys;
     __asm__ volatile("mov %0, %%cr3" :: "r"(pml4_phys) : "memory");
 }
+
+void *vmm_map_mmio(uint64_t phys_addr, size_t size) {
+    for (size_t off = 0; off < size; off += PAGE_SIZE) {
+        if (vmm_map_page(phys_addr + off, phys_addr + off,
+                         VMM_P | VMM_W | VMM_CD) != 0)
+            return NULL;
+    }
+    return (void *)(uintptr_t)phys_addr;
+}
+
+uint64_t vmm_virt_to_phys(uint64_t virt_addr) {
+    return vmm_get_phys(virt_addr);
+}

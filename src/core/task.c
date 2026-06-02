@@ -30,6 +30,7 @@
 
 #include "task.h"
 #include "vmm.h"
+#include "../smp.h"
 
 static void task_sig_deliver(task_t *task);
 #include "../signal.h"
@@ -45,6 +46,14 @@ extern void task_switch(uint64_t *prev_rsp, uint64_t *next_rsp);
 
 /** 新任务入口蹦床: pop arg → pop entry → call entry(arg) → task_exit() */
 extern void task_entry_trampoline(void);
+
+/** Ring3 入口蹦床: 构建 iretq 帧并切换到 ring3 */
+extern void task_enter_ring3(void);
+
+typedef struct {
+    uint64_t user_entry;
+    uint64_t user_stack;
+} ring3_launch_ctx_t;
 
 // ============================================================
 // 内部状态
@@ -202,30 +211,110 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
 }
 
 /**
+ * 创建 ring3 用户任务
+ *
+ * 与 task_create 类似，但入口函数为 task_enter_ring3，
+ * 参数为 ring3_launch_ctx_t { user_entry, user_stack }。
+ * 首次调度时，task_entry_trampoline 调用 task_enter_ring3(ctx)，
+ * 后者构建 iretq 帧切换到 ring3 执行用户代码。
+ *
+ * @param name        任务名称
+ * @param user_entry  用户代码入口地址
+ * @param user_stack  用户栈顶地址
+ * @return 任务 ID，-1 表示失败
+ */
+int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack) {
+    if (!user_entry || !user_stack) return -1;
+
+    int idx = -1;
+    int reuse = 0;
+    for (int i = 1; i < task_count; i++) {
+        if (task_pool[i].state == TASK_TERMINATED) {
+            idx = i;
+            reuse = 1;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (task_count >= MAX_TASKS) return -1;
+        idx = task_count;
+    }
+    task_t *tcb = &task_pool[idx];
+
+    tcb->id = next_id++;
+    strncpy(tcb->name, name ? name : "user", TASK_NAME_MAX);
+    tcb->name[TASK_NAME_MAX - 1] = '\0';
+    tcb->state = TASK_READY;
+    tcb->entry = NULL;
+    tcb->arg = NULL;
+    tcb->exit_status = 0;
+    tcb->parent_id = current_task ? current_task->id : 0;
+    tcb->child_id = 0;
+    tcb->stack_base = (uint64_t)task_stacks[idx];
+    tcb->stack_size = TASK_STACK_SIZE;
+    tcb->vm_areas = NULL;
+    tcb->pml4_phys = vmm_create_address_space();
+    memset(tcb->fds, 0, sizeof(tcb->fds));
+    memset(tcb->sig_handler, 0, sizeof(tcb->sig_handler));
+    memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
+    memset(&tcb->sig_blocked, 0, sizeof(tcb->sig_blocked));
+    tcb->sig_exit_code = 0;
+
+    // Allocate ring3_launch_ctx_t on the task's kernel stack
+    uint64_t *sp = (uint64_t *)(tcb->stack_base + tcb->stack_size);
+
+    // Place ctx struct on stack (aligned)
+    sp -= 2; // 2 uint64_t for ring3_launch_ctx_t
+    ring3_launch_ctx_t *ctx = (ring3_launch_ctx_t *)sp;
+    ctx->user_entry = user_entry;
+    ctx->user_stack = user_stack;
+
+    // Build the trampoline frame
+    *--sp = (uint64_t)ctx;                       // arg → rdi
+    *--sp = (uint64_t)task_enter_ring3;          // entry → rax
+    *--sp = (uint64_t)task_entry_trampoline;     // ret target
+    *--sp = 0;  // RBP
+    *--sp = 0;  // RBX
+    *--sp = 0;  // R12
+    *--sp = 0;  // R13
+    *--sp = 0;  // R14
+    *--sp = 0;  // R15
+
+    tcb->rsp = (uint64_t)sp;
+
+    if (!reuse) {
+        tcb->next = task_pool[0].next;
+        task_pool[0].next = tcb;
+        task_count++;
+    }
+    return tcb->id;
+}
+
+/**
  * 让出 CPU — 协作式调度入口
  * 当前任务状态变为 READY，切换到下一个 READY 任务
  */
 void task_yield(void) {
+    smp_sched_lock();
     task_t *prev = current_task;
     task_t *next = sched_next();
 
-    // 没有其他可运行任务 — 继续当前任务
-    if (!next || next == prev) return;
+    if (!next || next == prev) {
+        smp_sched_unlock();
+        return;
+    }
 
-    // 更新状态
     if (prev->state == TASK_RUNNING)
         prev->state = TASK_READY;
     next->state = TASK_RUNNING;
     current_task = next;
 
-    // 切换地址空间
     if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
 
     task_sig_deliver(next);
 
-    // 上下文切换 — 保存 prev 的 RSP，恢复 next 的 RSP
     task_switch(&prev->rsp, &next->rsp);
-    // 执行在此恢复（当此任务被重新调度时）
+    smp_sched_unlock();
 }
 
 /**
@@ -235,13 +324,12 @@ void task_yield(void) {
  */
 void task_exit(void) {
     if (!current_task) return;
+    smp_sched_lock();
     current_task->state = TASK_TERMINATED;
 
-    // 持续尝试切换到其他 READY 任务
     while (1) {
         task_t *next = sched_next();
         if (!next) {
-            // 没有更多任务 — 系统空闲
             console_puts("\n\x1b[31m[KERN] All tasks terminated, halting.\x1b[0m\n");
             while (1) __asm__ volatile("cli; hlt");
         }
@@ -250,8 +338,8 @@ void task_exit(void) {
         current_task = next;
         if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
         task_switch(&prev->rsp, &next->rsp);
-        // 如果回到这里，再试一次
     }
+    smp_sched_unlock();
 }
 
 void task_set_exit_status(int status) {
@@ -462,6 +550,7 @@ void task_preempt_enable(void) {
 void task_schedule(void) {
     if (preempt_count > 0) return;
     if (!current_task || current_task->state == TASK_TERMINATED) return;
+    smp_sched_lock();
     if (current_task->state == TASK_RUNNING)
         current_task->state = TASK_READY;
     task_t *next = current_task->next;
@@ -470,13 +559,17 @@ void task_schedule(void) {
         next = next->next;
         checked++;
     }
-    if (next->state != TASK_READY) return;
+    if (next->state != TASK_READY) {
+        smp_sched_unlock();
+        return;
+    }
     next->state = TASK_RUNNING;
     task_t *prev = current_task;
     current_task = next;
     if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
     task_sig_deliver(next);
     task_switch(&prev->rsp, &next->rsp);
+    smp_sched_unlock();
 }
 
 void pit_init(uint32_t freq_hz) {

@@ -88,6 +88,37 @@ static uint8_t g_slp_typb;
 /** ACPI 初始化是否成功 */
 static int g_ready;
 
+/** MADT 解析结果 */
+static acpi_madt_info_t g_madt;
+
+/** MADT 条目类型 */
+#define MADT_TYPE_LAPIC  0
+#define MADT_TYPE_IOAPIC 1
+#define MADT_TYPE_ISO    2
+#define MADT_TYPE_NMI    4
+
+typedef struct {
+    uint8_t type;
+    uint8_t length;
+} __attribute__((packed)) madt_entry_hdr_t;
+
+typedef struct {
+    uint8_t  type;
+    uint8_t  length;
+    uint8_t  acpi_id;
+    uint8_t  apic_id;
+    uint32_t flags;
+} __attribute__((packed)) madt_lapic_t;
+
+typedef struct {
+    uint8_t  type;
+    uint8_t  length;
+    uint8_t  ioapic_id;
+    uint8_t  reserved;
+    uint32_t ioapic_addr;
+    uint32_t gsi_base;
+} __attribute__((packed)) madt_ioapic_t;
+
 /** 向 I/O 端口写入 16 位值 */
 static inline void outw(uint16_t port, uint16_t val) {
     __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
@@ -119,14 +150,12 @@ static int sig_eq(const char *a, const char *b) {
     return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
 }
 
-/**
- * 在 RSDT (32 位条目) 中查找指定签名的 ACPI 表
+/** 在 RSDT (32 位条目) 中查找指定签名的 ACPI 表
  * @param rsdt  RSDT 指针
  * @param sig   要查找的 4 字节签名
  * @return SDT 头部指针，未找到返回 NULL
  */
 static sdt_header_t *find_table_rsdt(sdt_header_t *rsdt, const char *sig) {
-    if (!rsdt || !sig_eq(rsdt->signature, "RSDT") || rsdt->length < sizeof(*rsdt)) return NULL;
     uint32_t count = (rsdt->length - sizeof(*rsdt)) / 4;
     uint32_t *entry = (uint32_t *)((uint8_t *)rsdt + sizeof(*rsdt));
     for (uint32_t i = 0; i < count; i++) {
@@ -210,6 +239,8 @@ static int parse_s5(sdt_header_t *dsdt, uint8_t *typa, uint8_t *typb) {
     return -1;
 }
 
+static void acpi_parse_madt(sdt_header_t *madt_hdr);
+
 /**
  * 初始化 ACPI 子系统
  * 解析 RSDP → RSDT/XSDT → FADT → DSDT → _S5，提取关机所需的寄存器地址和睡眠类型值
@@ -243,6 +274,52 @@ void acpi_init(void *mbi) {
     g_pm1b_cnt = (uint16_t)facp->pm1b_cnt_blk;
     if (!g_pm1a_cnt) return;
     g_ready = 1;
+
+    sdt_header_t *madt = NULL;
+    if (rsdp->revision >= 2 && rsdp->xsdt_address && rsdp->xsdt_address <= 0xffffffffULL)
+        madt = find_table_xsdt((sdt_header_t *)(uintptr_t)rsdp->xsdt_address, "APIC");
+    if (!madt && rsdp->rsdt_address)
+        madt = find_table_rsdt((sdt_header_t *)(uintptr_t)rsdp->rsdt_address, "APIC");
+    if (madt) acpi_parse_madt(madt);
+}
+
+static void acpi_parse_madt(sdt_header_t *madt_hdr) {
+    memset(&g_madt, 0, sizeof(g_madt));
+    if (!madt_hdr || madt_hdr->length < sizeof(sdt_header_t) + 8) return;
+
+    uint32_t lapic_addr;
+    memcpy(&lapic_addr, (uint8_t *)madt_hdr + sizeof(sdt_header_t), 4);
+    g_madt.lapic_addr = lapic_addr;
+
+    uint8_t *base = (uint8_t *)madt_hdr;
+    uint32_t offset = sizeof(sdt_header_t) + 8;
+    uint32_t end = madt_hdr->length;
+
+    while (offset < end) {
+        uint8_t type = base[offset];
+        uint8_t len = base[offset + 1];
+        if (len < 2 || offset + len > end) break;
+
+        if (type == MADT_TYPE_LAPIC && len >= 8) {
+            madt_lapic_t *lapic = (madt_lapic_t *)(base + offset);
+            if (g_madt.cpu_count < ACPI_MAX_CPUS) {
+                g_madt.cpus[g_madt.cpu_count].acpi_id = lapic->acpi_id;
+                g_madt.cpus[g_madt.cpu_count].apic_id = lapic->apic_id;
+                g_madt.cpus[g_madt.cpu_count].flags  = lapic->flags;
+                g_madt.cpu_count++;
+            }
+        } else if (type == MADT_TYPE_IOAPIC && len >= 12) {
+            madt_ioapic_t *ioapic = (madt_ioapic_t *)(base + offset);
+            int n = g_madt.ioapic_count;
+            if (n < 4) {
+                g_madt.ioapic_id[n]      = ioapic->ioapic_id;
+                g_madt.ioapic_addr[n]    = ioapic->ioapic_addr;
+                g_madt.ioapic_gsi_base[n] = ioapic->gsi_base;
+                g_madt.ioapic_count++;
+            }
+        }
+        offset += len;
+    }
 }
 
 /**
@@ -256,4 +333,8 @@ int acpi_poweroff(void) {
     if (g_pm1b_cnt)
         outw(g_pm1b_cnt, (uint16_t)((g_slp_typb << 10) | ACPI_SLP_EN));
     return 0;
+}
+
+const acpi_madt_info_t *acpi_get_madt(void) {
+    return &g_madt;
 }

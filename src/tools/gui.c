@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../acpi.h"
 #include "../block.h"
 #include "../core/pmm.h"
 #include "../core/task.h"
@@ -11,7 +12,9 @@
 #include "../net.h"
 #include "../string.h"
 #include "../tls.h"
+#include "../unistd.h"
 #include "../user/app.h"
+#include "../gui/wm.h"
 #include "tool.h"
 
 extern void task_yield(void);
@@ -41,22 +44,10 @@ extern void task_yield(void);
 #define SNAKE_W 16
 #define SNAKE_H 10
 #define SNAKE_MAX (SNAKE_W * SNAKE_H)
-#define GUI_MAX_WINDOWS 8
 #define GUI_PAGE_SIZE 4096ULL
 #define FILE_LIST_ROWS 8
 #define FILE_ROW_H 26
 #define NOTE_FILE_ROWS 7
-
-#define GUI_WIN_PANEL 0
-#define GUI_WIN_APP   1
-
-typedef struct {
-    int used;
-    int kind;
-    int mode;
-    int x;
-    int y;
-} gui_window_t;
 
 typedef struct {
     int active;
@@ -89,9 +80,7 @@ typedef struct {
     int win_y;
     int clicks;
     uint8_t buttons;
-    gui_window_t windows[GUI_MAX_WINDOWS];
-    int window_count;
-    int active_window;
+    wm_state_t wm;
     int last_clicked_file;
     char note_buf[NOTE_EDIT_CAP];
     uint32_t note_len;
@@ -123,34 +112,9 @@ static uint32_t gui_app_count(void) {
     return (uint32_t)(sizeof(gui_apps) / sizeof(gui_apps[0]));
 }
 
-static const char *panel_title(int panel) {
-    if (panel == PANEL_FILES) return "文件管理器";
-    if (panel == PANEL_DISK) return "磁盘管理器";
-    if (panel == PANEL_SYS) return "资源管理器";
-    return "应用程序";
-}
-
-static const char *app_title(int mode) {
-    if (mode == GUI_APP_NOTES) return "记事本";
-    if (mode == GUI_APP_CALC) return "计算器";
-    if (mode == GUI_APP_UWC) return "文件统计";
-    if (mode == GUI_APP_SNAKE) return "贪吃蛇";
-    if (mode == GUI_APP_BROWSER) return "浏览器";
-    return "应用窗口";
-}
-
 static file_t *selected_file(gui_state_t *st);
 static void draw_desktop(int w, int h, gui_state_t *st);
 static void gui_sync_focus(gui_state_t *st);
-
-static void default_window_metrics(int w, int h, int *win_x, int *win_y, int *win_w, int *win_h) {
-    *win_w = w > 920 ? 790 : w - 120;
-    *win_h = h > 620 ? 430 : h - 140;
-    *win_x = w > 900 ? 132 : 110;
-    if (*win_x + *win_w > w - 28) *win_x = w - *win_w - 28;
-    if (*win_x < 100) *win_x = 100;
-    *win_y = 42;
-}
 
 static void clamp_window(gui_state_t *st, int w, int h, int win_w, int win_h) {
     if (st->win_x < 4) st->win_x = 4;
@@ -161,33 +125,22 @@ static void clamp_window(gui_state_t *st, int w, int h, int win_w, int win_h) {
     if (st->win_y < 4) st->win_y = 4;
 }
 
-static gui_window_t *gui_active_window(gui_state_t *st) {
-    if (st->active_window < 0 || st->active_window >= st->window_count) return 0;
-    if (!st->windows[st->active_window].used) return 0;
-    return &st->windows[st->active_window];
+static wm_window_t *gui_active_window(gui_state_t *st) {
+    return wm_get_active(&st->wm);
 }
 
-static const char *gui_window_title(const gui_window_t *win) {
-    if (!win || !win->used) return "窗口";
-    if (win->kind == GUI_WIN_PANEL) return panel_title(win->mode);
-    return app_title(win->mode);
+static const char *gui_window_title(const wm_window_t *win) {
+    return wm_window_title((wm_window_t *)win);
 }
 
-static void gui_window_metrics(int w, int h, const gui_window_t *win, int idx,
+static void gui_window_metrics(gui_state_t *st, int w, int h, const wm_window_t *win, int idx,
                                int *win_x, int *win_y, int *win_w, int *win_h) {
-    int def_x = 0;
-    int def_y = 0;
-    default_window_metrics(w, h, &def_x, &def_y, win_w, win_h);
-    *win_x = win && win->x ? win->x : def_x + idx * 24;
-    *win_y = win && win->y ? win->y : def_y + idx * 18;
-    if (*win_x + *win_w > w - 4) *win_x = w - *win_w - 4;
-    if (*win_y + *win_h > h - TASKBAR_H - 4) *win_y = h - TASKBAR_H - *win_h - 4;
-    if (*win_x < 4) *win_x = 4;
-    if (*win_y < 4) *win_y = 4;
+    wm_get_window_rect(&st->wm, idx, win_x, win_y, win_w, win_h);
+    (void)w; (void)h; (void)win;
 }
 
 static void gui_sync_focus(gui_state_t *st) {
-    gui_window_t *win = gui_active_window(st);
+    wm_window_t *win = gui_active_window(st);
     if (!win) {
         st->app_mode = GUI_APP_NONE;
         st->win_x = 0;
@@ -196,7 +149,7 @@ static void gui_sync_focus(gui_state_t *st) {
     }
     st->win_x = win->x;
     st->win_y = win->y;
-    if (win->kind == GUI_WIN_PANEL) {
+    if (win->kind == WM_WIN_PANEL) {
         st->app_mode = GUI_APP_NONE;
         st->active = win->mode;
     } else {
@@ -206,7 +159,7 @@ static void gui_sync_focus(gui_state_t *st) {
 }
 
 static void gui_store_focus(gui_state_t *st) {
-    gui_window_t *win = gui_active_window(st);
+    wm_window_t *win = gui_active_window(st);
     if (!win) return;
     win->x = st->win_x;
     win->y = st->win_y;
@@ -219,65 +172,31 @@ static void gui_set_active_window_pos(gui_state_t *st, int x, int y) {
 }
 
 static void gui_focus_window(gui_state_t *st, int idx) {
-    if (idx < 0 || idx >= st->window_count) return;
-    if (!st->windows[idx].used) return;
-    st->active_window = idx;
+    wm_focus_window(&st->wm, idx);
     gui_sync_focus(st);
 }
 
 static int gui_open_window(gui_state_t *st, int kind, int mode, int unique) {
-    if (unique) {
-        for (int i = 0; i < st->window_count; i++) {
-            if (st->windows[i].used && st->windows[i].kind == kind && st->windows[i].mode == mode) {
-                gui_focus_window(st, i);
-                st->status = "窗口已打开";
-                return i;
-            }
-        }
-    }
-    if (st->window_count >= GUI_MAX_WINDOWS) {
-        st->status = "窗口数量已满";
-        return -1;
-    }
-    int idx = st->window_count++;
-    gui_window_t *win = &st->windows[idx];
-    win->used = 1;
-    win->kind = kind;
-    win->mode = mode;
-    win->x = 130 + (idx % 5) * 28;
-    win->y = 62 + (idx % 5) * 22;
-    gui_focus_window(st, idx);
-    st->status = "窗口已打开";
+    int idx = wm_open_window(&st->wm, kind, mode, unique);
+    if (idx >= 0) gui_sync_focus(st);
+    else st->status = "窗口数量已满";
     return idx;
 }
 
 static void gui_close_window(gui_state_t *st, int idx) {
-    if (idx < 0 || idx >= st->window_count) return;
-    for (int i = idx; i + 1 < st->window_count; i++) st->windows[i] = st->windows[i + 1];
-    st->window_count--;
-    if (st->window_count <= 0) {
-        st->window_count = 0;
-        st->active_window = -1;
-    } else if (st->active_window >= st->window_count) {
-        st->active_window = st->window_count - 1;
-    } else if (st->active_window > idx) {
-        st->active_window--;
-    }
-    st->status = "窗口已关闭";
+    wm_close_window(&st->wm, idx);
     gui_sync_focus(st);
+    st->status = "窗口已关闭";
 }
 
 static void gui_focus_next_window(gui_state_t *st, int dir) {
-    if (st->window_count <= 0) return;
-    int idx = st->active_window;
-    if (idx < 0) idx = 0;
-    else idx = (idx + dir + st->window_count) % st->window_count;
-    gui_focus_window(st, idx);
+    wm_focus_next(&st->wm, dir);
+    gui_sync_focus(st);
     st->status = "已切换窗口";
 }
 
 static void gui_open_panel_window(gui_state_t *st, int panel) {
-    (void)gui_open_window(st, GUI_WIN_PANEL, panel, 1);
+    (void)gui_open_window(st, WM_WIN_PANEL, panel, 1);
 }
 
 static inline uint8_t inb(uint16_t port) {
@@ -658,11 +577,26 @@ static void draw_icon(int x, int y, int active, const char *label, uint32_t colo
     text(x + 42, y + 22, label, rgb(232, 242, 248), 1);
 }
 
-static void draw_cursor(int x, int y) {
-    for (int i = 0; i < 18; i++) rect(x, y + i, 2, 2, rgb(238, 246, 255));
-    for (int i = 0; i < 12; i++) rect(x + i, y + i, 2, 2, rgb(238, 246, 255));
-    rect(x + 5, y + 13, 9, 3, rgb(20, 27, 34));
-    rect(x + 8, y + 15, 4, 7, rgb(20, 27, 34));
+static void draw_cursor(int x, int y, int edge) {
+    uint32_t c = rgb(238, 246, 255);
+    uint32_t d = rgb(20, 27, 34);
+
+    if (edge == WM_EDGE_NONE || edge == WM_EDGE_N || edge == WM_EDGE_S) {
+        for (int i = 0; i < 18; i++) rect(x, y + i, 2, 2, c);
+        for (int i = 0; i < 12; i++) rect(x + i, y + i, 2, 2, c);
+        rect(x + 5, y + 13, 9, 3, d);
+        rect(x + 8, y + 15, 4, 7, d);
+    } else if (edge == WM_EDGE_W || edge == WM_EDGE_E) {
+        for (int i = 0; i < 18; i++) rect(x + 8, y + i, 2, 2, c);
+        for (int i = 0; i < 12; i++) rect(x + 8, y + i, 2, 2, c);
+        rect(x + 2, y + 4, 12, 2, c);
+        rect(x + 2, y + 14, 12, 2, c);
+    } else {
+        for (int i = 0; i < 18; i++) rect(x, y + i, 2, 2, c);
+        for (int i = 0; i < 12; i++) rect(x + i, y + i, 2, 2, c);
+        rect(x + 5, y + 13, 9, 3, d);
+        rect(x + 8, y + 15, 4, 7, d);
+    }
 }
 
 enum {
@@ -1635,15 +1569,27 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     draw_wrapped_text(tx + 12, ty + 158, view_w - 24, 172, st->browser_page, st->browser_scroll);
 }
 
-static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active) {
-    rect(x + 7, y + 8, win_w, win_h, rgb(5, 10, 15));
+static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state) {
     rect(x, y, win_w, win_h, active ? rgb(20, 32, 42) : rgb(18, 27, 36));
     border(x, y, win_w, win_h, active ? rgb(58, 138, 184) : rgb(70, 92, 108));
-    rect(x + 1, y + 1, win_w - 2, 34, active ? rgb(24, 112, 166) : rgb(94, 120, 136));
-    rect(x + 1, y + 35, win_w - 2, 1, rgb(178, 197, 208));
-    rect(x + win_w - 34, y + 7, 22, 20, active ? rgb(204, 58, 66) : rgb(146, 70, 76));
-    border(x + win_w - 34, y + 7, 22, 20, rgb(112, 42, 48));
-    text(x + win_w - 27, y + 13, "x", rgb(250, 236, 236), 1);
+    rect(x + 1, y + 1, win_w - 2, WM_TITLE_H, active ? rgb(24, 112, 166) : rgb(94, 120, 136));
+    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, rgb(178, 197, 208));
+
+    int btn_x = x + win_w - WM_BTN_W - 8;
+    rect(btn_x, y + 7, WM_BTN_W, 20, active ? rgb(204, 58, 66) : rgb(146, 70, 76));
+    border(btn_x, y + 7, WM_BTN_W, 20, rgb(112, 42, 48));
+    text(btn_x + 7, y + 13, "x", rgb(250, 236, 236), 1);
+
+    btn_x -= WM_BTN_W + WM_BTN_GAP;
+    rect(btn_x, y + 7, WM_BTN_W, 20, active ? rgb(58, 68, 76) : rgb(50, 58, 64));
+    border(btn_x, y + 7, WM_BTN_W, 20, rgb(82, 92, 100));
+    text(btn_x + 6, y + 13, state == WM_STATE_MAXIMIZED ? "o" : "[]", rgb(230, 236, 240), 1);
+
+    btn_x -= WM_BTN_W + WM_BTN_GAP;
+    rect(btn_x, y + 7, WM_BTN_W, 20, active ? rgb(58, 68, 76) : rgb(50, 58, 64));
+    border(btn_x, y + 7, WM_BTN_W, 20, rgb(82, 92, 100));
+    text(btn_x + 10, y + 13, "_", rgb(230, 236, 240), 1);
+
     text(x + 16, y + 10, title, rgb(244, 250, 255), 1);
 }
 
@@ -1663,23 +1609,24 @@ static void draw_app_window_body(int tx, int ty, int win_w, gui_state_t *st, int
 }
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
-    gui_window_t *win = &st->windows[idx];
-    if (!win->used) return;
+    wm_window_t *win = wm_get_window(&st->wm, idx);
+    if (!win || win->state == WM_STATE_MINIMIZED) return;
     int old_active = st->active;
     int old_app = st->app_mode;
     int old_x = st->win_x;
     int old_y = st->win_y;
     int win_x, win_y, win_w, win_h;
-    gui_window_metrics(w, h, win, idx, &win_x, &win_y, &win_w, &win_h);
-    draw_window_frame(win_x, win_y, win_w, win_h, gui_window_title(win), idx == st->active_window);
+    gui_window_metrics(st, w, h, win, idx, &win_x, &win_y, &win_w, &win_h);
+    draw_window_frame(win_x, win_y, win_w, win_h, gui_window_title(win),
+                      idx == st->wm.active_window, win->state);
 
     st->win_x = win_x;
     st->win_y = win_y;
-    if (idx == st->active_window) gui_store_focus(st);
+    if (idx == st->wm.active_window) gui_store_focus(st);
 
     int tx = win_x + 30;
     int ty = win_y + 62;
-    if (win->kind == GUI_WIN_PANEL) {
+    if (win->kind == WM_WIN_PANEL) {
         st->active = win->mode;
         st->app_mode = GUI_APP_NONE;
         draw_panel_window(tx, ty, win_w, w, h, st, win->mode);
@@ -1690,7 +1637,9 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     }
     rect(win_x + 1, win_y + win_h - 31, win_w - 2, 30, rgb(22, 34, 44));
     rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, rgb(62, 88, 104));
-    text(win_x + 24, win_y + win_h - 22, idx == st->active_window ? st->status : "单击任务栏切换", rgb(168, 190, 204), 1);
+    text(win_x + 24, win_y + win_h - 22,
+         idx == st->wm.active_window ? st->status : "单击任务栏切换",
+         rgb(168, 190, 204), 1);
 
     st->active = old_active;
     st->app_mode = old_app;
@@ -1701,12 +1650,13 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 static void draw_taskbar_windows(int h, const gui_state_t *st) {
     int x = 118;
     int task_y = h - 36;
-    for (int i = 0; i < st->window_count && x < 610; i++) {
-        const gui_window_t *win = &st->windows[i];
-        if (!win->used) continue;
-        uint32_t color = win->kind == GUI_WIN_PANEL ? rgb(85, 180, 120) : rgb(23, 147, 209);
+    for (int i = 0; i < st->wm.window_count && x < 610; i++) {
+        wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, i);
+        if (!win) continue;
+        uint32_t color = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : rgb(23, 147, 209);
         int width = 104;
-        draw_task_button(x, task_y, width, gui_window_title(win), i == st->active_window, color);
+        draw_task_button(x, task_y, width, gui_window_title(win),
+                         i == st->wm.active_window, color);
         x += width + 8;
     }
 }
@@ -1716,9 +1666,9 @@ static void draw_gui_screen(int w, int h, gui_state_t *st) {
     draw_desktop(w, h, st);
 }
 
-static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my) {
+static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
     draw_gui_screen(w, h, st);
-    draw_cursor(mx, my);
+    draw_cursor(mx, my, edge);
     gui_present_surface(fb);
 }
 
@@ -1786,11 +1736,11 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     text(434, 350, "Enter 打开当前项", rgb(208, 226, 236), 1);
     text(434, 372, "Tab/Space 切换窗口", rgb(208, 226, 236), 1);
 
-    for (int i = 0; i < st->window_count; i++) {
-        if (i != st->active_window) draw_one_window(w, h, st, i);
+    for (int i = 0; i < st->wm.window_count; i++) {
+        if (i != st->wm.active_window) draw_one_window(w, h, st, i);
     }
-    if (st->active_window >= 0 && st->active_window < st->window_count)
-        draw_one_window(w, h, st, st->active_window);
+    if (st->wm.active_window >= 0 && st->wm.active_window < st->wm.window_count)
+        draw_one_window(w, h, st, st->wm.active_window);
 
     draw_taskbar_windows(h, st);
 }
@@ -1940,7 +1890,7 @@ static void gui_open_selected_app(gui_state_t *st) {
         st->status = "未选择应用";
         return;
     }
-    if (gui_open_window(st, GUI_WIN_APP, app->mode, 0) < 0) return;
+    if (gui_open_window(st, WM_WIN_APP, app->mode, 0) < 0) return;
     if (app->mode == GUI_APP_SNAKE) {
         snake_reset(st);
     }
@@ -1954,7 +1904,7 @@ static void gui_open_selected_file(gui_state_t *st) {
         return;
     }
     gui_set_note_name(st, f->name);
-    if (gui_open_window(st, GUI_WIN_APP, GUI_APP_NOTES, 0) >= 0)
+    if (gui_open_window(st, WM_WIN_APP, GUI_APP_NOTES, 0) >= 0)
         st->status = "已用记事本打开";
 }
 
@@ -1993,33 +1943,31 @@ static void handle_action(gui_state_t *st, int action) {
 }
 
 static int hit_window_titlebar(int w, int h, const gui_state_t *st, int mx, int my) {
-    for (int i = st->window_count - 1; i >= 0; i--) {
-        int win_x, win_y, win_w, win_h;
-        gui_window_metrics(w, h, &st->windows[i], i, &win_x, &win_y, &win_w, &win_h);
-        (void)win_h;
-        if (mx >= win_x && mx < win_x + win_w - 40 &&
-            my >= win_y && my < win_y + 34) return i;
-    }
-    return -1;
+    (void)w; (void)h;
+    return wm_hit_titlebar((wm_state_t *)&st->wm, mx, my);
 }
 
 static int hit_window_close(int w, int h, const gui_state_t *st, int mx, int my) {
-    for (int i = st->window_count - 1; i >= 0; i--) {
-        int win_x, win_y, win_w, win_h;
-        gui_window_metrics(w, h, &st->windows[i], i, &win_x, &win_y, &win_w, &win_h);
-        (void)win_h;
-        if (mx >= win_x + win_w - 34 && mx < win_x + win_w - 8 &&
-            my >= win_y + 4 && my < win_y + 30) return i;
-    }
-    return -1;
+    (void)w; (void)h;
+    return wm_hit_close((wm_state_t *)&st->wm, mx, my);
+}
+
+static int hit_window_minimize(int w, int h, const gui_state_t *st, int mx, int my) {
+    (void)w; (void)h;
+    return wm_hit_minimize((wm_state_t *)&st->wm, mx, my);
+}
+
+static int hit_window_maximize(int w, int h, const gui_state_t *st, int mx, int my) {
+    (void)w; (void)h;
+    return wm_hit_maximize((wm_state_t *)&st->wm, mx, my);
 }
 
 static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
-    if (st->active_window < 0 || st->active_window >= st->window_count) return -1;
-    const gui_window_t *win = &st->windows[st->active_window];
-    if (!win->used || win->kind != GUI_WIN_PANEL) return -1;
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return -1;
+    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_PANEL) return -1;
     int win_x, win_y, win_w, win_h;
-    gui_window_metrics(w, h, win, st->active_window, &win_x, &win_y, &win_w, &win_h);
+    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
     int tx = win_x + 30;
     int ty = win_y + 62;
     (void)win_h;
@@ -2073,12 +2021,12 @@ static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
 }
 
 static int hit_note_file(int w, int h, const gui_state_t *st, int mx, int my) {
-    if (st->active_window < 0 || st->active_window >= st->window_count) return -1;
-    const gui_window_t *win = &st->windows[st->active_window];
-    if (!win->used || win->kind != GUI_WIN_APP || win->mode != GUI_APP_NOTES) return -1;
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return -1;
+    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_NOTES) return -1;
 
     int win_x, win_y, win_w, win_h;
-    gui_window_metrics(w, h, win, st->active_window, &win_x, &win_y, &win_w, &win_h);
+    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
     (void)win_w;
     (void)win_h;
     int tx = win_x + 30;
@@ -2112,15 +2060,8 @@ static int hit_panel_shortcut(int w, int h, int mx, int my) {
 }
 
 static int hit_task_window(int h, const gui_state_t *st, int mx, int my) {
-    int x = 118;
-    int task_y = h - 36;
-    if (my < task_y || my >= task_y + 32) return -1;
-    for (int i = 0; i < st->window_count && x < 610; i++) {
-        if (!st->windows[i].used) continue;
-        if (mx >= x && mx < x + 104) return i;
-        x += 112;
-    }
-    return -1;
+    (void)h;
+    return wm_hit_taskbar((wm_state_t *)&st->wm, mx, my);
 }
 
 static void snake_move(gui_state_t *st, int dx, int dy) {
@@ -2243,13 +2184,15 @@ static void handle_key(gui_state_t *st, int key) {
     gui_sync_focus(st);
     if (key == '\t' || key == ' ') {
         gui_focus_next_window(st, 1);
-    } else if (key == GUI_KEY_RIGHT && st->window_count > 0 && st->app_mode == GUI_APP_NONE) {
+    } else if (key == GUI_KEY_RIGHT && st->wm.window_count > 0 && st->app_mode == GUI_APP_NONE) {
+        wm_window_t *win = gui_active_window(st);
         st->active = (st->active + 1) & 3;
-        gui_active_window(st)->mode = st->active;
+        if (win) win->mode = st->active;
         st->status = "已切换面板";
-    } else if (key == GUI_KEY_LEFT && st->window_count > 0 && st->app_mode == GUI_APP_NONE) {
+    } else if (key == GUI_KEY_LEFT && st->wm.window_count > 0 && st->app_mode == GUI_APP_NONE) {
+        wm_window_t *win = gui_active_window(st);
         st->active = (st->active + 3) & 3;
-        gui_active_window(st)->mode = st->active;
+        if (win) win->mode = st->active;
         st->status = "已切换面板";
     } else if (key == GUI_KEY_UP && st->active == PANEL_FILES) {
         if (st->selected_file > 0) gui_select_file(st, st->selected_file - 1);
@@ -2288,6 +2231,29 @@ static void handle_key(gui_state_t *st, int key) {
     }
 }
 
+static void draw_start_menu(gui_state_t *st) {
+    wm_state_t *wm = &st->wm;
+    if (!wm->start_menu_open) return;
+    int mx = wm->menu_x, my = wm->menu_y, mw = wm->menu_w, mh = wm->menu_h;
+    rect(mx, my, mw, mh, rgb(22, 34, 46));
+    border(mx, my, mw, mh, rgb(86, 130, 168));
+    rect(mx + 1, my + 1, mw - 2, 32, rgb(24, 112, 166));
+    text(mx + 16, my + 10, "HBOS 开始菜单", rgb(244, 250, 255), 2);
+
+    static const char *menu_items[] = {
+        "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
+        "记事本", "计算器", "贪吃蛇", "浏览器",
+        "返回 Shell", "关机"
+    };
+    int count = sizeof(menu_items) / sizeof(menu_items[0]);
+    for (int i = 0; i < count; i++) {
+        int iy = my + 40 + i * 28;
+        if (iy + 28 > my + mh) break;
+        rect(mx + 4, iy, mw - 8, 26, rgb(28, 42, 56));
+        text(mx + 16, iy + 8, menu_items[i], rgb(220, 235, 245), 1);
+    }
+}
+
 static void cmd_gui(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -2309,6 +2275,10 @@ static void cmd_gui(int argc, char **argv) {
     int drag_last_draw_x = 0;
     int drag_last_draw_y = 0;
     int drag_pending = 0;
+    int resizing_window = -1;
+    int resize_edge = WM_EDGE_NONE;
+    int resize_orig_x = 0, resize_orig_y = 0, resize_orig_w = 0, resize_orig_h = 0;
+    int cursor_edge = WM_EDGE_NONE;
     gui_state_t st = {
         .active = PANEL_FILES,
         .selected_file = 0,
@@ -2322,10 +2292,19 @@ static void cmd_gui(int argc, char **argv) {
         .snake_score = 0,
         .clicks = 0,
         .buttons = 0,
-        .active_window = -1,
         .last_clicked_file = -1,
         .status = "就绪",
     };
+    wm_init(&st.wm, w, h);
+    wm_set_panel_title(PANEL_FILES, "文件管理器");
+    wm_set_panel_title(PANEL_DISK, "磁盘管理器");
+    wm_set_panel_title(PANEL_SYS, "资源管理器");
+    wm_set_panel_title(PANEL_APPS, "应用程序");
+    wm_set_app_title(GUI_APP_NOTES, "记事本");
+    wm_set_app_title(GUI_APP_CALC, "计算器");
+    wm_set_app_title(GUI_APP_UWC, "文件统计");
+    wm_set_app_title(GUI_APP_SNAKE, "贪吃蛇");
+    wm_set_app_title(GUI_APP_BROWSER, "浏览器");
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";
@@ -2340,12 +2319,12 @@ static void cmd_gui(int argc, char **argv) {
         st.status = "图形缓冲分配失败";
     }
 
-    draw_gui_frame(&fb, w, h, &st, mx, my);
+    draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
     while (1) {
         int key = key_poll();
-        if (key == 27 && st.window_count > 0) {
-            gui_close_window(&st, st.active_window);
-            draw_gui_frame(&fb, w, h, &st, mx, my);
+        if (key == 27 && st.wm.window_count > 0) {
+            gui_close_window(&st, st.wm.active_window);
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
         if (key == 27 || key == 'q') break;
@@ -2353,7 +2332,7 @@ static void cmd_gui(int argc, char **argv) {
             gui_sync_focus(&st);
             if (st.app_mode == GUI_APP_NONE) handle_key(&st, key);
             else handle_app_key(&st, key);
-            draw_gui_frame(&fb, w, h, &st, mx, my);
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
 
         mouse_event_t ev;
@@ -2389,12 +2368,44 @@ static void cmd_gui(int argc, char **argv) {
             }
 
             int left_down = (st.buttons & 1) != 0;
-            if (dragging_window >= 0 && left_down) {
+
+            if (resizing_window >= 0 && left_down) {
+                wm_window_t *rw = wm_get_window(&st.wm, resizing_window);
+                if (rw) {
+                    int dx = mx - resize_orig_x;
+                    int dy = my - resize_orig_y;
+                    int new_x = rw->x, new_y = rw->y;
+                    int new_w = resize_orig_w, new_h = resize_orig_h;
+
+                    if (resize_edge == WM_EDGE_E || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_SE)
+                        new_w = resize_orig_w + dx;
+                    if (resize_edge == WM_EDGE_W || resize_edge == WM_EDGE_NW || resize_edge == WM_EDGE_SW) {
+                        new_w = resize_orig_w - dx;
+                        new_x = resize_orig_x + dx;
+                    }
+                    if (resize_edge == WM_EDGE_S || resize_edge == WM_EDGE_SE || resize_edge == WM_EDGE_SW)
+                        new_h = resize_orig_h + dy;
+                    if (resize_edge == WM_EDGE_N || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_NW) {
+                        new_h = resize_orig_h - dy;
+                        new_y = resize_orig_y + dy;
+                    }
+                    if (new_w < 200) new_w = 200;
+                    if (new_h < 120) new_h = 120;
+                    rw->w = new_w;
+                    rw->h = new_h;
+                    rw->x = new_x;
+                    rw->y = new_y;
+                    redraw = 1;
+                    st.status = "调整窗口大小";
+                }
+            } else if (!left_down) {
+                resizing_window = -1;
+            }
+
+            if (dragging_window >= 0 && left_down && resizing_window < 0) {
                 int win_x, win_y, win_w, win_h;
                 gui_focus_window(&st, dragging_window);
-                gui_window_metrics(w, h, &st.windows[dragging_window], dragging_window, &win_x, &win_y, &win_w, &win_h);
-                (void)win_x;
-                (void)win_y;
+                gui_window_metrics(&st, w, h, NULL, dragging_window, &win_x, &win_y, &win_w, &win_h);
                 gui_set_active_window_pos(&st, mx - drag_off_x, my - drag_off_y);
                 clamp_window(&st, w, h, win_w, win_h);
                 gui_store_focus(&st);
@@ -2416,65 +2427,123 @@ static void cmd_gui(int argc, char **argv) {
                 drag_pending = 0;
             }
 
+            int edge = WM_EDGE_NONE;
+            wm_hit_border(&st.wm, mx, my, &edge);
+            cursor_edge = edge;
+
             if ((st.buttons & 1) && !(last_buttons & 1)) {
                 st.clicks++;
-                int close_idx = hit_window_close(w, h, &st, mx, my);
-                if (close_idx >= 0) {
-                    gui_close_window(&st, close_idx);
+                if (st.wm.start_menu_open) {
+                    int item = wm_hit_start_menu(&st.wm, mx, my);
+                    if (item >= 0) {
+                        wm_close_start_menu(&st.wm);
+                        if (item == 0) gui_open_panel_window(&st, PANEL_FILES);
+                        else if (item == 1) gui_open_panel_window(&st, PANEL_DISK);
+                        else if (item == 2) gui_open_panel_window(&st, PANEL_SYS);
+                        else if (item == 3) gui_open_panel_window(&st, PANEL_APPS);
+                        else if (item == 4) gui_open_window(&st, WM_WIN_APP, GUI_APP_NOTES, 0);
+                        else if (item == 5) gui_open_window(&st, WM_WIN_APP, GUI_APP_CALC, 0);
+                        else if (item == 6) gui_open_window(&st, WM_WIN_APP, GUI_APP_SNAKE, 0);
+                        else if (item == 7) gui_open_window(&st, WM_WIN_APP, GUI_APP_BROWSER, 0);
+                        else if (item == 8) break;
+                        else if (item == 9) { acpi_poweroff(); break; }
+                        redraw = 1;
+                    } else {
+                        wm_close_start_menu(&st.wm);
+                        redraw = 1;
+                    }
                 } else {
-                    int task_idx = hit_task_window(h, &st, mx, my);
-                    if (task_idx >= 0) {
-                        gui_focus_window(&st, task_idx);
-                        st.status = "已切换窗口";
-                    } else {
-                        int title_idx = hit_window_titlebar(w, h, &st, mx, my);
-                        if (title_idx >= 0) {
-                            gui_focus_window(&st, title_idx);
-                    int win_x, win_y, win_w, win_h;
-                            gui_window_metrics(w, h, &st.windows[title_idx], title_idx, &win_x, &win_y, &win_w, &win_h);
-                    (void)win_w;
-                    (void)win_h;
-                            dragging_window = title_idx;
-                    drag_off_x = mx - win_x;
-                    drag_off_y = my - win_y;
-                            drag_last_draw_x = mx;
-                            drag_last_draw_y = my;
-                            drag_pending = 0;
-                    st.status = "拖动窗口";
-                        } else if (st.app_mode != GUI_APP_NONE) {
-                            int note_file = hit_note_file(w, h, &st, mx, my);
-                            if (note_file >= 0) {
-                                gui_select_file(&st, note_file);
-                                st.status = "已切换编辑文件";
-                            } else {
-                                st.status = "应用内请使用键盘";
+                    int close_idx = hit_window_close(w, h, &st, mx, my);
+                    int min_idx = hit_window_minimize(w, h, &st, mx, my);
+                    int max_idx = hit_window_maximize(w, h, &st, mx, my);
+
+                    if (close_idx >= 0) {
+                        gui_close_window(&st, close_idx);
+                    } else if (min_idx >= 0) {
+                        wm_minimize_window(&st.wm, min_idx);
+                        gui_sync_focus(&st);
+                        st.status = "窗口已最小化";
+                    } else if (max_idx >= 0) {
+                        wm_window_t *mw = wm_get_window(&st.wm, max_idx);
+                        if (mw && mw->state == WM_STATE_MAXIMIZED)
+                            wm_restore_window(&st.wm, max_idx);
+                        else
+                            wm_maximize_window(&st.wm, max_idx);
+                        gui_sync_focus(&st);
+                        st.status = "窗口已最大化/还原";
+                    } else if (edge != WM_EDGE_NONE) {
+                        int bidx = wm_hit_border(&st.wm, mx, my, &resize_edge);
+                        if (bidx >= 0) {
+                            wm_focus_window(&st.wm, bidx);
+                            wm_window_t *bw = wm_get_window(&st.wm, bidx);
+                            if (bw) {
+                                resizing_window = bidx;
+                                resize_orig_x = mx;
+                                resize_orig_y = my;
+                                resize_orig_w = bw->w > 0 ? bw->w : (w > 920 ? 790 : w - 120);
+                                resize_orig_h = bw->h > 0 ? bw->h : (h > 620 ? 430 : h - 140);
                             }
-                        } else {
-                    int panel = hit_panel_shortcut(w, h, mx, my);
-                    if (panel >= 0) {
-                                gui_open_panel_window(&st, panel);
+                        }
                     } else {
-                        int action = hit_action(w, h, &st, mx, my);
-                        if (action >= FILE_ACTION_BASE) {
-                            if (action >= APP_ACTION_BASE) {
-                                st.selected_app = action - APP_ACTION_BASE;
-                                gui_open_selected_app(&st);
-                            } else {
-                                int file_index = action - FILE_ACTION_BASE;
-                                if (st.last_clicked_file == file_index && st.selected_file == file_index) {
-                                    gui_open_selected_file(&st);
-                                    st.last_clicked_file = -1;
+                        int task_idx = hit_task_window(h, &st, mx, my);
+                        if (task_idx >= 0) {
+                            wm_window_t *tw = wm_get_window(&st.wm, task_idx);
+                            if (tw && tw->state == WM_STATE_MINIMIZED) {
+                                wm_restore_window(&st.wm, task_idx);
+                            }
+                            gui_focus_window(&st, task_idx);
+                            st.status = "已切换窗口";
+                        } else {
+                            int title_idx = hit_window_titlebar(w, h, &st, mx, my);
+                            if (title_idx >= 0) {
+                                gui_focus_window(&st, title_idx);
+                                int win_x, win_y, win_w, win_h;
+                                gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
+                                dragging_window = title_idx;
+                                drag_off_x = mx - win_x;
+                                drag_off_y = my - win_y;
+                                drag_last_draw_x = mx;
+                                drag_last_draw_y = my;
+                                drag_pending = 0;
+                                st.status = "拖动窗口";
+                            } else if (st.app_mode != GUI_APP_NONE) {
+                                int note_file = hit_note_file(w, h, &st, mx, my);
+                                if (note_file >= 0) {
+                                    gui_select_file(&st, note_file);
+                                    st.status = "已切换编辑文件";
                                 } else {
-                                    gui_select_file(&st, file_index);
-                                    st.last_clicked_file = file_index;
-                                    st.status = "已选择文件";
+                                    st.status = "应用内请使用键盘";
+                                }
+                            } else {
+                                int panel = hit_panel_shortcut(w, h, mx, my);
+                                if (panel >= 0) {
+                                    gui_open_panel_window(&st, panel);
+                                } else if (mx >= 10 && mx < 106 && my >= h - 36 && my <= h) {
+                                    wm_toggle_start_menu(&st.wm);
+                                    st.status = "开始菜单";
+                                } else {
+                                    int action = hit_action(w, h, &st, mx, my);
+                                    if (action >= FILE_ACTION_BASE) {
+                                        if (action >= APP_ACTION_BASE) {
+                                            st.selected_app = action - APP_ACTION_BASE;
+                                            gui_open_selected_app(&st);
+                                        } else {
+                                            int file_index = action - FILE_ACTION_BASE;
+                                            if (st.last_clicked_file == file_index && st.selected_file == file_index) {
+                                                gui_open_selected_file(&st);
+                                                st.last_clicked_file = -1;
+                                            } else {
+                                                gui_select_file(&st, file_index);
+                                                st.last_clicked_file = file_index;
+                                                st.status = "已选择文件";
+                                            }
+                                        }
+                                    } else if (action >= 0) {
+                                        handle_action(&st, action);
+                                    }
                                 }
                             }
-                        } else if (action >= 0) {
-                            handle_action(&st, action);
                         }
-                    }
-                }
                     }
                 }
                 redraw = 1;
@@ -2482,13 +2551,16 @@ static void cmd_gui(int argc, char **argv) {
             last_buttons = st.buttons;
 
             if (redraw) {
-                draw_gui_frame(&fb, w, h, &st, mx, my);
+                draw_start_menu(&st);
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             } else if (mx != old_mx || my != old_my) {
-                draw_gui_frame(&fb, w, h, &st, mx, my);
+                draw_start_menu(&st);
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             }
         }
         if (snake_auto_tick(&st)) {
-            draw_gui_frame(&fb, w, h, &st, mx, my);
+            draw_start_menu(&st);
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         task_yield();
     }

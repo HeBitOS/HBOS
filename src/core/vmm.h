@@ -67,4 +67,10 @@ void vmm_destroy_address_space(uint64_t pml4_phys);
 /** 设置当前 PML4（上下文切换时调用） */
 void vmm_set_pml4(uint64_t pml4_phys);
 
+/** Map MMIO region for device access */
+void *vmm_map_mmio(uint64_t phys_addr, size_t size);
+
+/** Get physical address of a virtual address */
+uint64_t vmm_virt_to_phys(uint64_t virt_addr);
+
 #endif /* HBOS_VMM_H */

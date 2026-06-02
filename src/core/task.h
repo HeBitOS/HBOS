@@ -73,6 +73,12 @@ void task_init(void);
 // Returns task ID, or -1 on failure
 int task_create(const char *name, void (*entry)(void *), void *arg);
 
+// Create a ring3 user task. The task will enter ring3 via iretq.
+// user_entry: virtual address of user code entry point
+// user_stack: initial user stack pointer (top of stack)
+// Returns task ID, or -1 on failure
+int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack);
+
 // Cooperative yield — switch to next ready task
 void task_yield(void);
 

@@ -1,0 +1,83 @@
+#ifndef HBOS_WM_H
+#define HBOS_WM_H
+
+#include <stdint.h>
+
+#define WM_MAX_WINDOWS 16
+#define WM_TASKBAR_H   44
+#define WM_TITLE_H     34
+#define WM_BORDER_W    4
+#define WM_BTN_W       22
+#define WM_BTN_GAP     4
+
+enum {
+    WM_WIN_PANEL = 0,
+    WM_WIN_APP   = 1,
+};
+
+enum {
+    WM_STATE_NORMAL    = 0,
+    WM_STATE_MINIMIZED = 1,
+    WM_STATE_MAXIMIZED = 2,
+};
+
+enum {
+    WM_EDGE_NONE  = -1,
+    WM_EDGE_N     = 0,
+    WM_EDGE_S     = 1,
+    WM_EDGE_E     = 2,
+    WM_EDGE_W     = 3,
+    WM_EDGE_NE    = 4,
+    WM_EDGE_NW    = 5,
+    WM_EDGE_SE    = 6,
+    WM_EDGE_SW    = 7,
+};
+
+typedef struct {
+    int used;
+    int kind;
+    int mode;
+    int state;
+    int x, y;
+    int w, h;
+    int prev_x, prev_y, prev_w, prev_h;
+} wm_window_t;
+
+typedef struct {
+    wm_window_t windows[WM_MAX_WINDOWS];
+    int window_count;
+    int active_window;
+    int z_order[WM_MAX_WINDOWS];
+    int start_menu_open;
+    int menu_x, menu_y, menu_w, menu_h;
+    int desk_w, desk_h;
+} wm_state_t;
+
+void wm_init(wm_state_t *wm, int desk_w, int desk_h);
+void wm_set_panel_title(int panel, const char *title);
+void wm_set_app_title(int mode, const char *title);
+int  wm_open_window(wm_state_t *wm, int kind, int mode, int unique);
+void wm_close_window(wm_state_t *wm, int idx);
+void wm_focus_window(wm_state_t *wm, int idx);
+void wm_focus_next(wm_state_t *wm, int dir);
+void wm_move_window(wm_state_t *wm, int idx, int x, int y);
+void wm_resize_window(wm_state_t *wm, int idx, int w, int h);
+void wm_minimize_window(wm_state_t *wm, int idx);
+void wm_maximize_window(wm_state_t *wm, int idx);
+void wm_restore_window(wm_state_t *wm, int idx);
+void wm_toggle_start_menu(wm_state_t *wm);
+void wm_close_start_menu(wm_state_t *wm);
+
+wm_window_t *wm_get_window(wm_state_t *wm, int idx);
+wm_window_t *wm_get_active(wm_state_t *wm);
+const char  *wm_window_title(wm_window_t *win);
+void         wm_get_window_rect(wm_state_t *wm, int idx, int *x, int *y, int *w, int *h);
+int          wm_hit_titlebar(wm_state_t *wm, int mx, int my);
+int          wm_hit_close(wm_state_t *wm, int mx, int my);
+int          wm_hit_minimize(wm_state_t *wm, int mx, int my);
+int          wm_hit_maximize(wm_state_t *wm, int mx, int my);
+int          wm_hit_border(wm_state_t *wm, int mx, int my, int *edge);
+int          wm_hit_taskbar(wm_state_t *wm, int mx, int my);
+int          wm_hit_start_menu(wm_state_t *wm, int mx, int my);
+
+#endif

@@ -28,38 +28,10 @@
 #endif
 #define PAGE_MASK (~(PAGE_SIZE - 1))
 
-typedef struct {
-    uint64_t entry;
-    char   **argv;
-    char   **envp;
-    int      argc;
-} elf_launch_ctx_t;
-
-static elf_launch_ctx_t g_ctx;
-
 static int count_strs(char *const ss[]) {
     int n = 0;
     if (ss) while (ss[n]) n++;
     return n;
-}
-
-/**
- * ELF 新任务入口 — 跳转到 ELF entry point
- *
- * 在协作式内核中，任务函数签名是 void (*)(void*)，arg 通过 rdi 传入。
- * 我们需要 set rdi = argc, rsi = argv 然后 call entry。
- */
-__attribute__((naked))
-static void elf_task_entry(void) {
-    __asm__ volatile(
-        "movq (%0), %%rdi\n"
-        "movq 8(%0), %%rsi\n"
-        "call *16(%0)\n"
-        :
-        : "r"(&g_ctx)
-        : "rdi", "rsi", "memory"
-    );
-    task_exit();
 }
 
 int elf64_load_and_exec(const uint8_t *data, size_t size,
@@ -149,15 +121,9 @@ int elf64_load_and_exec(const uint8_t *data, size_t size,
         stack[2 + argc + i] = (uint64_t)(uintptr_t)env_strs[i];
     stack[2 + argc + envc] = 0;
 
-    uint64_t *arg_ptr = &stack[1];
-    uint64_t *env_ptr = &stack[2 + argc];
+    uint64_t user_rsp = (uint64_t)(uintptr_t)stack;
 
-    g_ctx.entry = ehdr->e_entry;
-    g_ctx.argc  = argc;
-    g_ctx.argv  = (char **)(arg_ptr);
-    g_ctx.envp  = (char **)(env_ptr);
-
-    int new_id = task_create("elf_app", (void (*)(void *))(uintptr_t)elf_task_entry, NULL);
+    int new_id = task_create_ring3("elf_app", ehdr->e_entry, user_rsp);
     if (new_id < 0) return -1;
 
     task_exit();
