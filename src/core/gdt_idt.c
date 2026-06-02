@@ -306,13 +306,18 @@ void isr_handler(isr_regs_t *regs) {
 void irq_handler(isr_regs_t *regs) {
     uint8_t irq = (uint8_t)(regs->int_no - IRQ_BASE);
 
-    // Spurious IRQ7 / IRQ15
     if (irq == 7 || irq == 15) {
         pic_send_eoi(irq);
         return;
     }
 
-    // Placeholder: send EOI (will be extended for keyboard/timer)
+    if (irq == 0) {
+        pic_send_eoi(0);
+        extern void task_schedule(void);
+        task_schedule();
+        return;
+    }
+
     pic_send_eoi(irq);
 }
 

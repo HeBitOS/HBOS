@@ -8,7 +8,9 @@
 #include "../graphics/font_cjk.h"
 #include "../graphics/graphics.h"
 #include "../input/mouse.h"
+#include "../net.h"
 #include "../string.h"
+#include "../tls.h"
 #include "../user/app.h"
 #include "tool.h"
 
@@ -27,12 +29,15 @@ extern void task_yield(void);
 #define GUI_APP_CALC  1
 #define GUI_APP_UWC   2
 #define GUI_APP_SNAKE 3
+#define GUI_APP_BROWSER 4
 
 #define ACTION_W 116
 #define ACTION_H 28
 #define GUI_MOUSE_POLL_BUDGET 16
 #define TASKBAR_H 44
 #define NOTE_EDIT_CAP 512
+#define BROWSER_URL_CAP 160
+#define BROWSER_PAGE_CAP 2048
 #define SNAKE_W 16
 #define SNAKE_H 10
 #define SNAKE_MAX (SNAKE_W * SNAKE_H)
@@ -92,6 +97,11 @@ typedef struct {
     uint32_t note_len;
     int note_loaded;
     char note_name[MAX_FILENAME];
+    char browser_url[BROWSER_URL_CAP];
+    char browser_page[BROWSER_PAGE_CAP];
+    uint32_t browser_page_len;
+    int browser_loaded;
+    int browser_scroll;
     const char *status;
 } gui_state_t;
 
@@ -106,6 +116,7 @@ static const gui_app_t gui_apps[] = {
     {"计算器", "方向键调整数值", GUI_APP_CALC},
     {"文件统计", "统计选中文件行数和字节", GUI_APP_UWC},
     {"贪吃蛇", "方向键移动", GUI_APP_SNAKE},
+    {"浏览器", "打开 HTTP/HTTPS 网页", GUI_APP_BROWSER},
 };
 
 static uint32_t gui_app_count(void) {
@@ -124,6 +135,7 @@ static const char *app_title(int mode) {
     if (mode == GUI_APP_CALC) return "计算器";
     if (mode == GUI_APP_UWC) return "文件统计";
     if (mode == GUI_APP_SNAKE) return "贪吃蛇";
+    if (mode == GUI_APP_BROWSER) return "浏览器";
     return "应用窗口";
 }
 
@@ -1059,7 +1071,8 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         uint32_t accent = app->mode == GUI_APP_NOTES ? rgb(85, 180, 120) :
                           app->mode == GUI_APP_CALC ? rgb(23, 147, 209) :
                           app->mode == GUI_APP_UWC ? rgb(244, 194, 82) :
-                                                     rgb(124, 220, 154);
+                          app->mode == GUI_APP_SNAKE ? rgb(124, 220, 154) :
+                                                        rgb(78, 192, 236);
         rect(x, y, card_w, card_h, (int)i == selected ? rgb(32, 58, 74) : rgb(24, 36, 46));
         rect(x, y, 6, card_h, accent);
         border(x, y, card_w, card_h, (int)i == selected ? rgb(80, 152, 192) : rgb(66, 92, 108));
@@ -1438,6 +1451,190 @@ static void draw_snake_app(int tx, int ty, gui_state_t *st) {
     }
 }
 
+static const char *gui_parse_url(const char *url, int *https, char *host, uint32_t host_cap,
+                                 uint16_t *port, const char **path) {
+    const char *p = url;
+    *https = 0;
+    *port = 80;
+    if (strncmp(p, "https://", 8) == 0) {
+        p += 8;
+        *https = 1;
+        *port = 443;
+    } else if (strncmp(p, "http://", 7) == 0) {
+        p += 7;
+    } else if (!strstr(p, "://")) {
+        *https = 1;
+        *port = 443;
+    } else {
+        return "仅支持 http:// 和 https://";
+    }
+    uint32_t n = 0;
+    while (*p && *p != '/') {
+        if (n + 1 >= host_cap) return "主机名太长";
+        if (*p == ':') {
+            uint32_t v = 0;
+            p++;
+            if (*p < '0' || *p > '9') return "端口错误";
+            while (*p >= '0' && *p <= '9') {
+                v = v * 10 + (uint32_t)(*p++ - '0');
+                if (v == 0 || v > 65535) return "端口错误";
+            }
+            *port = (uint16_t)v;
+            break;
+        }
+        host[n++] = *p++;
+    }
+    while (*p && *p != '/') return "URL 格式错误";
+    host[n] = 0;
+    if (!n) return "缺少主机名";
+    *path = *p ? p : "/";
+    return 0;
+}
+
+static const char *http_body_ptr(const char *buf) {
+    const char *p = strstr(buf, "\r\n\r\n");
+    return p ? p + 4 : buf;
+}
+
+static void browser_text_from_html(const char *html, char *out, uint32_t cap, uint32_t *out_len) {
+    uint32_t pos = 0;
+    int tag = 0;
+    int space = 1;
+    for (uint32_t i = 0; html[i] && pos + 1 < cap; i++) {
+        char c = html[i];
+        if (c == '<') {
+            tag = 1;
+            if (!space && pos + 1 < cap) {
+                out[pos++] = '\n';
+                space = 1;
+            }
+            continue;
+        }
+        if (tag) {
+            if (c == '>') tag = 0;
+            continue;
+        }
+        if (c == '&') {
+            if (strncmp(html + i, "&amp;", 5) == 0) { c = '&'; i += 4; }
+            else if (strncmp(html + i, "&lt;", 4) == 0) { c = '<'; i += 3; }
+            else if (strncmp(html + i, "&gt;", 4) == 0) { c = '>'; i += 3; }
+        }
+        if (c == '\r') continue;
+        if (c == '\n' || c == '\t') c = ' ';
+        if (c == ' ') {
+            if (space) continue;
+            space = 1;
+        } else {
+            space = 0;
+        }
+        out[pos++] = c;
+    }
+    out[pos] = 0;
+    if (out_len) *out_len = pos;
+}
+
+static void browser_init(gui_state_t *st) {
+    if (st->browser_loaded) return;
+    strcpy(st->browser_url, "https://example.com/");
+    strcpy(st->browser_page, "输入网址后按 Enter 加载。当前 HTTPS 支持 TLS 1.3 + ChaCha20-Poly1305；部分网站会自动尝试 HTTP。");
+    st->browser_page_len = (uint32_t)strlen(st->browser_page);
+    st->browser_scroll = 0;
+    st->browser_loaded = 1;
+}
+
+static void browser_load(gui_state_t *st) {
+    browser_init(st);
+    char host[96];
+    const char *path = "/";
+    uint16_t port = 80;
+    int https = 0;
+    const char *err = gui_parse_url(st->browser_url, &https, host, sizeof(host), &port, &path);
+    if (err) {
+        strcpy(st->browser_page, err);
+        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        st->status = "浏览器 URL 错误";
+        return;
+    }
+    st->status = "浏览器加载中";
+    if (!net_primary()->dhcp_ok && net_dhcp() < 0) {
+        line2(st->browser_page, BROWSER_PAGE_CAP, "网络未配置: ", net_last_error());
+        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        st->status = "浏览器网络失败";
+        return;
+    }
+    uint32_t ip = 0;
+    if (net_dns_resolve(host, &ip) < 0) {
+        line2(st->browser_page, BROWSER_PAGE_CAP, "DNS 失败: ", net_last_error());
+        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        st->status = "浏览器 DNS 失败";
+        return;
+    }
+    static char response[8192];
+    uint32_t len = 0;
+    int ok = https ? tls_https_get(host, ip, port, path, response, sizeof(response), &len)
+                   : net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
+    const char *tls_error = https ? tls_last_error() : "";
+    if (ok < 0 && https) {
+        port = 80;
+        ok = net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
+        if (ok == 0) st->status = "HTTPS 失败，已用 HTTP 回退";
+    }
+    if (ok < 0) {
+        line2(st->browser_page, BROWSER_PAGE_CAP, "加载失败: ", https ? tls_error : net_last_error());
+        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        st->status = "浏览器加载失败";
+        return;
+    }
+    browser_text_from_html(http_body_ptr(response), st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
+    st->browser_scroll = 0;
+    if (!https || strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
+        st->status = "浏览器加载完成";
+}
+
+static void draw_wrapped_text(int x, int y, int w, int h, const char *body, int scroll) {
+    char line[96];
+    uint32_t line_pos = 0;
+    int max_cols = w / 8;
+    if (max_cols < 16) max_cols = 16;
+    if (max_cols > 90) max_cols = 90;
+    int current_line = 0;
+    int drawn = 0;
+    int max_lines = h / 18;
+    for (uint32_t i = 0;; i++) {
+        char c = body[i];
+        int flush = c == 0 || c == '\n' || line_pos >= (uint32_t)max_cols;
+        if (!flush && c) line[line_pos++] = c;
+        if (flush) {
+            line[line_pos] = 0;
+            if (current_line >= scroll && drawn < max_lines) {
+                text(x, y + drawn * 18, line, rgb(218, 230, 238), 1);
+                drawn++;
+            }
+            current_line++;
+            line_pos = 0;
+            if (c == 0 || drawn >= max_lines) break;
+            if (c != '\n') i--;
+        }
+    }
+}
+
+static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
+    browser_init(st);
+    int view_w = win_w - 72;
+    if (view_w < 320) view_w = 320;
+    text(tx, ty, "浏览器", rgb(78, 192, 236), 1);
+    text(tx, ty + 30, "编辑地址后按 Enter 加载，方向键滚动", rgb(148, 162, 174), 1);
+    rect(tx, ty + 58, view_w, 32, rgb(6, 14, 22));
+    border(tx, ty + 58, view_w, 32, rgb(78, 192, 236));
+    text(tx + 10, ty + 68, st->browser_url, rgb(232, 242, 248), 1);
+    rect(tx + view_w - 12, ty + 68, 6, 14, rgb(78, 192, 236));
+    draw_small_button(tx, ty + 104, 96, "Enter 加载", rgb(78, 192, 236));
+    text(tx + 112, ty + 112, st->status ? st->status : "浏览器就绪", rgb(168, 190, 204), 1);
+    rect(tx, ty + 146, view_w, 196, rgb(4, 9, 14));
+    border(tx, ty + 146, view_w, 196, rgb(50, 74, 90));
+    draw_wrapped_text(tx + 12, ty + 158, view_w - 24, 172, st->browser_page, st->browser_scroll);
+}
+
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active) {
     rect(x + 7, y + 8, win_w, win_h, rgb(5, 10, 15));
     rect(x, y, win_w, win_h, active ? rgb(20, 32, 42) : rgb(18, 27, 36));
@@ -1462,6 +1659,7 @@ static void draw_app_window_body(int tx, int ty, int win_w, gui_state_t *st, int
     else if (mode == GUI_APP_CALC) draw_calc_app(tx, ty, st);
     else if (mode == GUI_APP_UWC) draw_uwc_app(tx, ty, st);
     else if (mode == GUI_APP_SNAKE) draw_snake_app(tx, ty, st);
+    else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, st);
 }
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
@@ -2021,6 +2219,23 @@ static void handle_app_key(gui_state_t *st, int key) {
         else if (key == GUI_KEY_RIGHT) snake_turn(st, 1, 0);
         else if (key == GUI_KEY_UP) snake_turn(st, 0, -1);
         else if (key == GUI_KEY_DOWN) snake_turn(st, 0, 1);
+    } else if (st->app_mode == GUI_APP_BROWSER) {
+        browser_init(st);
+        if (key == '\n') browser_load(st);
+        else if (key == GUI_KEY_BACKSPACE) {
+            uint32_t n = (uint32_t)strlen(st->browser_url);
+            if (n) st->browser_url[n - 1] = 0;
+        } else if (key == GUI_KEY_UP) {
+            if (st->browser_scroll > 0) st->browser_scroll--;
+        } else if (key == GUI_KEY_DOWN) {
+            st->browser_scroll++;
+        } else if (key >= 32 && key <= 126) {
+            uint32_t n = (uint32_t)strlen(st->browser_url);
+            if (n + 1 < BROWSER_URL_CAP) {
+                st->browser_url[n] = (char)key;
+                st->browser_url[n + 1] = 0;
+            }
+        }
     }
 }
 

@@ -55,4 +55,16 @@ uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags);
 // Get current PML4 physical address
 uint64_t vmm_get_pml4(void);
 
+/** 为子进程创建独立的地址空间 — 复制内核映射 */
+uint64_t vmm_create_address_space(void);
+
+/** 完整复制地址空间（fork 使用） */
+uint64_t vmm_clone_address_space(uint64_t src_pml4);
+
+/** 销毁地址空间 */
+void vmm_destroy_address_space(uint64_t pml4_phys);
+
+/** 设置当前 PML4（上下文切换时调用） */
+void vmm_set_pml4(uint64_t pml4_phys);
+
 #endif /* HBOS_VMM_H */

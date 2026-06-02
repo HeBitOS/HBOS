@@ -30,6 +30,13 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
+static void serial_mirror_char(char c) {
+    if (c == '\n') serial_mirror_char('\r');
+    int wait = 100000;
+    while (!(inb(0x3F8 + 5) & 0x20) && --wait);
+    if (wait > 0) outb(0x3F8, (uint8_t)c);
+}
+
 struct mb2_tag { uint32_t type, size; };
 struct mb2_tag_framebuffer {
     uint32_t type, size;
@@ -412,6 +419,7 @@ void console_write(const char *str, uint64_t len) {
             if ((uint8_t)str[i] >= 0x80) { has_high = 1; break; }
         }
         if (!has_high) {
+            for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
             flanterm_write(g_term, str, len);
             flanterm_flush(g_term);
         } else {
@@ -421,6 +429,7 @@ void console_write(const char *str, uint64_t len) {
             }
         }
     } else {
+        for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
         vga_write_fallback(str, len);
     }
 }
@@ -434,6 +443,7 @@ void console_puts(const char *str) {
 
 void console_putchar(char c) {
     if (!g_initialized) return;
+    serial_mirror_char(c);
 
     if (g_term) {
         // Framebuffer mode: UTF-8 decoding with CJK rendering

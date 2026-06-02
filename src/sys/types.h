@@ -15,5 +15,8 @@ typedef uint64_t ino_t;
 typedef uint32_t nlink_t;
 typedef int64_t time_t;
 typedef uint64_t useconds_t;
+typedef uint64_t clock_t;
+typedef int32_t key_t;
+typedef int32_t socklen_t;
 
 #endif

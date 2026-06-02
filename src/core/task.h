@@ -4,6 +4,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../fd.h"
+#include "../signal.h"
+
+typedef struct vm_area {
+    uint64_t start;
+    uint64_t end;
+    struct vm_area *next;
+} vm_area_t;
 
 // ============================================================
 // Cooperative Multitasking / Threading Framework
@@ -38,11 +45,21 @@ typedef struct task {
     void *arg;
     int exit_status;
     uint32_t parent_id;
+    uint32_t child_id;
 
     // Link for round-robin list
     struct task *next;
 
     fd_entry_t fds[POSIX_MAX_FDS];
+
+    vm_area_t *vm_areas;
+
+    uint64_t pml4_phys;
+
+    void (*sig_handler[_NSIG])(int);
+    sigset_t sig_pending;
+    sigset_t sig_blocked;
+    int sig_exit_code;
 } task_t;
 
 // ============================================================
@@ -63,6 +80,10 @@ void task_yield(void);
 void task_exit(void);
 void task_set_exit_status(int status);
 int task_wait(uint32_t id, int *status);
+int task_kill(uint32_t id, int sig);
+
+// Fork current task (clone with same context)
+int task_fork(void);
 
 // Get current task ID
 uint32_t task_get_id(void);
@@ -79,5 +100,11 @@ const task_t *task_get_active(uint32_t index);
 
 // List all tasks (for debug)
 void task_list_all(void);
+
+// Preemptive scheduling
+void task_schedule(void);
+void task_preempt_enable(void);
+void task_preempt_disable(void);
+void pit_init(uint32_t freq_hz);
 
 #endif /* HBOS_TASK_H */

@@ -92,6 +92,14 @@ static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
+static int serial_get_key(void) {
+    if (!(inb(0x3F8 + 5) & 1)) return 0;
+    uint8_t c = inb(0x3F8);
+    if (c == '\r') return '\n';
+    if (c == 0x7F) return '\b';
+    return c;
+}
+
 static bool kb_wait_input_clear(void) {
     int timeout = 100000;
     while ((inb(0x64) & 2) && --timeout);
@@ -130,6 +138,8 @@ static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')',
 static int get_key(void) {
     while (1) {
         console_cursor_blink();
+        int serial_key = serial_get_key();
+        if (serial_key) return serial_key;
         uint8_t status = inb(0x64);
         if (status & 1) {
             uint8_t sc = inb(0x60);
@@ -362,29 +372,80 @@ void cmd_execute(const char *line) {
     if (argc == 0) return;
     save_history(line);
 
+    int bg = 0;
+    if (argc > 0 && strcmp(argv[argc - 1], "&") == 0) {
+        bg = 1;
+        argc--;
+        argv[argc] = NULL;
+    }
+
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "|") != 0) continue;
         if (i == 0 || i + 1 >= argc) {
             console_puts("pipe: usage <cmd> | <cmd>\n");
             return;
         }
-        argv[i] = ">";
-        argv[i + 1] = "__pipe_tmp";
-        (void)unlink("__pipe_tmp");
-        shell_execute_argv(i + 2, argv);
 
-        char *right[MAX_ARGS];
+        int pipefd[2];
+        if (pipe(pipefd) < 0) {
+            console_puts("pipe: failed to create pipe\n");
+            return;
+        }
+
+        argv[i] = NULL;
+        char *left_cmd[MAX_ARGS];
+        int left_argc = 0;
+        for (int j = 0; j < i && left_argc < MAX_ARGS - 1; j++)
+            left_cmd[left_argc++] = argv[j];
+        left_cmd[left_argc] = NULL;
+
+        char *right_cmd[MAX_ARGS];
         int right_argc = 0;
-        for (int j = i + 2; j < argc && right_argc < MAX_ARGS - 2; j++)
-            right[right_argc++] = argv[j];
-        right[right_argc++] = "<";
-        right[right_argc++] = "__pipe_tmp";
-        shell_execute_argv(right_argc, right);
-        (void)unlink("__pipe_tmp");
+        for (int j = i + 1; j < argc && right_argc < MAX_ARGS - 1; j++)
+            right_cmd[right_argc++] = argv[j];
+        right_cmd[right_argc] = NULL;
+
+        task_t *task = task_current();
+        shell_fd_save_t out_save = {0};
+        shell_bind_stdio(STDOUT_FILENO, pipefd[1], &out_save);
+        (void)task;
+
+        shell_execute_argv(left_argc, left_cmd);
+
+        shell_restore_stdio(&out_save);
+        close(pipefd[1]);
+
+        shell_fd_save_t in_save = {0};
+        shell_bind_stdio(STDIN_FILENO, pipefd[0], &in_save);
+
+        shell_execute_argv(right_argc, right_cmd);
+
+        shell_restore_stdio(&in_save);
+        close(pipefd[0]);
         return;
     }
 
-    if (shell_execute_argv(argc, argv) == 0) return;
+    if (!bg) {
+        if (shell_execute_argv(argc, argv) == 0) return;
+    } else {
+        extern int hbos_app_spawn(const char *, int, char **);
+        if (!hbos_app_find(argv[0])) {
+            console_puts("\x1b[0m\x1b[31mUnknown command.\x1b[0m\n");
+            console_puts("\x1b[33mType 'help' for commands\x1b[0m\n");
+            return;
+        }
+        int tid = hbos_app_spawn(argv[0], argc, argv);
+        if (tid >= 0) {
+            console_puts("[bg] task ");
+            char tmp[16];
+            int n = 0, v = tid;
+            do { tmp[n++] = '0' + (v % 10); v /= 10; } while (v);
+            while (n--) console_putchar(tmp[n]);
+            console_putchar('\n');
+        }
+        return;
+    }
+
     (void)argv;
     console_puts("\x1b[0m\x1b[31mUnknown command.\x1b[0m\n");
     console_puts("\x1b[33mType 'help' for commands\x1b[0m\n");

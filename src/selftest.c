@@ -10,35 +10,10 @@
 #include "user/app.h"
 #include "user/syscall.h"
 
-static inline void serial_outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
-static inline uint8_t serial_inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
-static void selftest_serial_putc(char c) {
-    while (!(serial_inb(0x3F8 + 5) & 0x20));
-    serial_outb(0x3F8, (uint8_t)c);
-}
-
-static void selftest_serial_puts(const char *s) {
-    while (*s) {
-        if (*s == '\n') selftest_serial_putc('\r');
-        selftest_serial_putc(*s++);
-    }
-}
-
 static int selftest_fail(const char *name) {
     console_puts("[SELFTEST] POSIX/ramfs: FAIL ");
     console_puts(name);
     console_putchar('\n');
-    selftest_serial_puts("[SELFTEST] POSIX/ramfs: FAIL ");
-    selftest_serial_puts(name);
-    selftest_serial_puts("\n");
     return -1;
 }
 
@@ -110,6 +85,5 @@ int selftest_run(void) {
     CHECK("app registry", hbos_app_find("hello") != NULL);
 
     console_puts("[SELFTEST] POSIX/ramfs: PASS\n");
-    selftest_serial_puts("[SELFTEST] POSIX/ramfs: PASS\n");
     return 0;
 }

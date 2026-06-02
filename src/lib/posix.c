@@ -4,6 +4,7 @@
 
 #include "../errno.h"
 #include "../fcntl.h"
+#include "../fd.h"
 #include "../stdlib.h"
 #include "../string.h"
 #include "../sys/stat.h"
@@ -61,6 +62,21 @@ ssize_t write(int fd, const void *buf, size_t count) {
     if (fd == STDOUT_FILENO || fd == STDERR_FILENO) {
         fd_entry_t *redir = fd_get_redirectable(fd);
         if (redir) {
+            if (redir->type == FD_PIPE && redir->pipe) {
+                pipe_t *p = redir->pipe;
+                uint32_t written = 0;
+                while (written < count) {
+                    if (p->count >= PIPE_BUF_SIZE) {
+                        task_yield();
+                        continue;
+                    }
+                    p->buf[p->write_pos] = ((const uint8_t *)buf)[written];
+                    p->write_pos = (p->write_pos + 1) % PIPE_BUF_SIZE;
+                    p->count++;
+                    written++;
+                }
+                return (ssize_t)written;
+            }
             uint32_t offset = (redir->flags & O_APPEND) ? redir->node->size : redir->offset;
             int written = vfs_write(redir->node, offset, buf, (uint32_t)count);
             if (written < 0) return set_errno(ENOSPC);
@@ -75,6 +91,23 @@ ssize_t write(int fd, const void *buf, size_t count) {
 
     fd_entry_t *ent = fd_get(fd);
     if (!ent) return set_errno(EBADF);
+
+    if (ent->type == FD_PIPE && ent->pipe) {
+        pipe_t *p = ent->pipe;
+        uint32_t written = 0;
+        while (written < count) {
+            if (p->count >= PIPE_BUF_SIZE) {
+                task_yield();
+                continue;
+            }
+            p->buf[p->write_pos] = ((const uint8_t *)buf)[written];
+            p->write_pos = (p->write_pos + 1) % PIPE_BUF_SIZE;
+            p->count++;
+            written++;
+        }
+        return (ssize_t)written;
+    }
+
     if ((ent->flags & O_ACCMODE) == O_RDONLY) return set_errno(EBADF);
 
     uint32_t offset = (ent->flags & O_APPEND) ? ent->node->size : ent->offset;
@@ -89,6 +122,23 @@ ssize_t read(int fd, void *buf, size_t count) {
     if (fd == STDIN_FILENO) {
         fd_entry_t *redir = fd_get_redirectable(fd);
         if (redir) {
+            if (redir->type == FD_PIPE && redir->pipe) {
+                pipe_t *p = redir->pipe;
+                uint32_t got = 0;
+                while (got < count) {
+                    if (p->count == 0) {
+                        if (p->ref_count < 2) break;
+                        task_yield();
+                        continue;
+                    }
+                    ((uint8_t *)buf)[got] = p->buf[p->read_pos];
+                    p->read_pos = (p->read_pos + 1) % PIPE_BUF_SIZE;
+                    p->count--;
+                    got++;
+                    if (p->count == 0) break;
+                }
+                return (ssize_t)got;
+            }
             int got_i = vfs_read(redir->node, redir->offset, buf, (uint32_t)count);
             if (got_i < 0) return set_errno(EIO);
             uint32_t got = (uint32_t)got_i;
@@ -108,6 +158,25 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     fd_entry_t *ent = fd_get(fd);
     if (!ent) return set_errno(EBADF);
+
+    if (ent->type == FD_PIPE && ent->pipe) {
+        pipe_t *p = ent->pipe;
+        uint32_t got = 0;
+        while (got < count) {
+            if (p->count == 0) {
+                if (p->ref_count < 2) break;
+                task_yield();
+                continue;
+            }
+            ((uint8_t *)buf)[got] = p->buf[p->read_pos];
+            p->read_pos = (p->read_pos + 1) % PIPE_BUF_SIZE;
+            p->count--;
+            got++;
+            if (p->count == 0) break;
+        }
+        return (ssize_t)got;
+    }
+
     if ((ent->flags & O_ACCMODE) == O_WRONLY) return set_errno(EBADF);
 
     int got_i = vfs_read(ent->node, ent->offset, buf, (uint32_t)count);
@@ -121,19 +190,31 @@ int close(int fd) {
     if (fd >= STDIN_FILENO && fd <= STDERR_FILENO) {
         fd_entry_t *redir = fd_get_redirectable(fd);
         if (redir) {
+            if (redir->type == FD_PIPE && redir->pipe) {
+                pipe_t *p = redir->pipe;
+                p->ref_count--;
+                if (p->ref_count <= 0) kfree(p);
+            }
             redir->used = false;
             redir->node = NULL;
             redir->offset = 0;
             redir->flags = 0;
+            redir->pipe = NULL;
         }
         return 0;
     }
     fd_entry_t *ent = fd_get(fd);
     if (ent) {
+        if (ent->type == FD_PIPE && ent->pipe) {
+            pipe_t *p = ent->pipe;
+            p->ref_count--;
+            if (p->ref_count <= 0) kfree(p);
+        }
         ent->used = false;
         ent->node = NULL;
         ent->offset = 0;
         ent->flags = 0;
+        ent->pipe = NULL;
         return 0;
     }
     return set_errno(EBADF);
@@ -236,6 +317,45 @@ pid_t getpid(void) {
 }
 
 pid_t getppid(void) {
+    return 0;
+}
+
+int pipe(int pipefd[2]) {
+    if (!pipefd) return set_errno(EFAULT);
+    fd_entry_t *fds = fd_table();
+    if (!fds) return set_errno(EBADF);
+
+    int r_fd = -1, w_fd = -1;
+    for (int i = 3; i < POSIX_MAX_FDS; i++) {
+        if (!fds[i].used) { r_fd = i; break; }
+    }
+    if (r_fd < 0) return set_errno(EMFILE);
+    for (int i = r_fd + 1; i < POSIX_MAX_FDS; i++) {
+        if (!fds[i].used) { w_fd = i; break; }
+    }
+    if (w_fd < 0) return set_errno(EMFILE);
+
+    pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
+    if (!p) return set_errno(ENOMEM);
+    memset(p, 0, sizeof(pipe_t));
+    p->ref_count = 2;
+
+    fds[r_fd].used = true;
+    fds[r_fd].type = FD_PIPE;
+    fds[r_fd].node = NULL;
+    fds[r_fd].offset = 0;
+    fds[r_fd].flags = O_RDONLY;
+    fds[r_fd].pipe = p;
+
+    fds[w_fd].used = true;
+    fds[w_fd].type = FD_PIPE;
+    fds[w_fd].node = NULL;
+    fds[w_fd].offset = 0;
+    fds[w_fd].flags = O_WRONLY;
+    fds[w_fd].pipe = p;
+
+    pipefd[0] = r_fd;
+    pipefd[1] = w_fd;
     return 0;
 }
 

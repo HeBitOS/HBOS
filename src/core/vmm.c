@@ -197,3 +197,48 @@ uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags) {
 
 /** 获取当前 PML4 表的物理地址 */
 uint64_t vmm_get_pml4(void) { return g_pml4_phys; }
+
+/**
+ * 创建新的地址空间（独立 PML4，仅共享内核映射）
+ * 复制 master PML4 的内核半区（索引 256-511，即 0xFFFF800000000000 以上）
+ * 用户半区（索引 0-255）初始为空
+ * @return 新 PML4 的物理地址，失败返回 0
+ */
+uint64_t vmm_create_address_space(void) {
+    if (!g_pml4_phys) return 0;
+    uint64_t new_p4_phys = pmm_alloc_page();
+    if (!new_p4_phys) return 0;
+    pte_t *new_p4 = (pte_t *)(uintptr_t)new_p4_phys;
+    pte_t *src_p4  = g_pml4;
+    for (int i = 0; i < 256; i++) new_p4[i] = 0;
+    for (int i = 256; i < 512; i++) new_p4[i] = src_p4[i];
+    return new_p4_phys;
+}
+
+/**
+ * 完整复制地址空间（fork 使用）
+ * 复制 src PML4 的所有条目（用户+内核），共享物理页
+ * @return 新 PML4 物理地址
+ */
+uint64_t vmm_clone_address_space(uint64_t src_p4_phys) {
+    if (!src_p4_phys) return 0;
+    uint64_t new_p4_phys = pmm_alloc_page();
+    if (!new_p4_phys) return 0;
+    pte_t *new_p4 = (pte_t *)(uintptr_t)new_p4_phys;
+    pte_t *src_p4 = (pte_t *)(uintptr_t)src_p4_phys;
+    for (int i = 0; i < 512; i++) new_p4[i] = src_p4[i];
+    return new_p4_phys;
+}
+
+/** 销毁地址空间 */
+void vmm_destroy_address_space(uint64_t pml4_phys) {
+    if (!pml4_phys) return;
+    pmm_free_page(pml4_phys);
+}
+
+/** 加载新 PML4 到 CR3 */
+void vmm_set_pml4(uint64_t pml4_phys) {
+    g_pml4_phys = pml4_phys;
+    g_pml4      = (pte_t *)(uintptr_t)pml4_phys;
+    __asm__ volatile("mov %0, %%cr3" :: "r"(pml4_phys) : "memory");
+}

@@ -1,6 +1,7 @@
 #include "../graphics/graphics.h"
 #include "../net.h"
 #include "../string.h"
+#include "../tls.h"
 #include "../vfs.h"
 #include "tool.h"
 
@@ -31,6 +32,16 @@ static void print_uint(uint32_t v) {
         buf[n++] = (char)('0' + (v % 10));
         v /= 10;
     } while (v);
+    while (n--) console_putchar(buf[n]);
+}
+
+static void print_uint64(uint64_t v) {
+    char buf[21];
+    int n = 0;
+    do {
+        buf[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v && n < (int)sizeof(buf));
     while (n--) console_putchar(buf[n]);
 }
 
@@ -88,6 +99,20 @@ static void cmd_netinfo(int argc, char **argv) {
 
     console_puts("  link: ");
     console_puts(dev->link_ready ? "ready\n" : "down/unsupported\n");
+    console_puts("  rx: packets=");
+    print_uint64(dev->rx_packets);
+    console_puts(" bytes=");
+    print_uint64(dev->rx_bytes);
+    console_puts(" dropped=");
+    print_uint64(dev->rx_dropped);
+    console_putchar('\n');
+    console_puts("  tx: packets=");
+    print_uint64(dev->tx_packets);
+    console_puts(" bytes=");
+    print_uint64(dev->tx_bytes);
+    console_puts(" errors=");
+    print_uint64(dev->tx_errors);
+    console_putchar('\n');
     if (dev->dhcp_ok) {
         console_puts("  ip: "); print_ip(dev->ip);
         console_puts("  mask: "); print_ip(dev->netmask);
@@ -101,7 +126,9 @@ static void cmd_dhcp(int argc, char **argv) {
     (void)argc;
     (void)argv;
     if (net_dhcp() < 0) {
-        console_puts("dhcp: failed\n");
+        console_puts("dhcp: ");
+        console_puts(net_last_error());
+        console_putchar('\n');
         return;
     }
     const net_device_t *dev = net_primary();
@@ -114,6 +141,70 @@ static void cmd_dhcp(int argc, char **argv) {
     console_putchar('\n');
 }
 
+static void print_config(const net_device_t *dev) {
+    console_puts("ip=");
+    print_ip(dev->ip);
+    console_puts(" mask=");
+    print_ip(dev->netmask);
+    console_puts(" gw=");
+    print_ip(dev->gateway);
+    console_puts(" dns=");
+    print_ip(dev->dns);
+    console_putchar('\n');
+}
+
+static void cmd_ifconfig(int argc, char **argv) {
+    const net_device_t *dev = net_primary();
+    if (argc == 1) {
+        if (!dev->present) {
+            console_puts("ifconfig: no ethernet controller\n");
+            return;
+        }
+        console_puts("eth0 ");
+        console_puts(dev->link_ready ? "UP " : "DOWN ");
+        if (dev->mac_valid) {
+            console_puts("mac ");
+            print_mac(dev->mac);
+            console_putchar(' ');
+        }
+        if (dev->dhcp_ok) print_config(dev);
+        else console_puts("not configured\n");
+        console_puts("      RX packets ");
+        print_uint64(dev->rx_packets);
+        console_puts(" bytes ");
+        print_uint64(dev->rx_bytes);
+        console_puts("  TX packets ");
+        print_uint64(dev->tx_packets);
+        console_puts(" bytes ");
+        print_uint64(dev->tx_bytes);
+        console_putchar('\n');
+        return;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "dhcp") == 0) {
+        cmd_dhcp(argc, argv);
+        return;
+    }
+
+    if (argc != 5) {
+        console_puts("Usage: ifconfig | ifconfig dhcp | ifconfig <ip> <mask> <gw> <dns>\n");
+        return;
+    }
+
+    uint32_t ip = net_parse_ipv4(argv[1]);
+    uint32_t mask = net_parse_ipv4(argv[2]);
+    uint32_t gw = net_parse_ipv4(argv[3]);
+    uint32_t dns = net_parse_ipv4(argv[4]);
+    if (!ip || !mask || net_configure(ip, mask, gw, dns) < 0) {
+        console_puts("ifconfig: ");
+        console_puts(net_last_error());
+        console_putchar('\n');
+        return;
+    }
+    console_puts("ifconfig: ok ");
+    print_config(net_primary());
+}
+
 static void cmd_ping(int argc, char **argv) {
     if (argc < 2) {
         console_puts("Usage: ping <ip|host>\n");
@@ -121,14 +212,19 @@ static void cmd_ping(int argc, char **argv) {
     }
     uint32_t ip;
     if (net_dns_resolve(argv[1], &ip) < 0) {
-        console_puts("ping: resolve failed\n");
+        console_puts("ping: ");
+        console_puts(net_last_error());
+        console_putchar('\n');
         return;
     }
     console_puts("PING ");
     print_ip(ip);
     console_puts(": ");
     if (net_ping(ip, 1000) == 0) console_puts("reply\n");
-    else console_puts("timeout\n");
+    else {
+        console_puts(net_last_error());
+        console_putchar('\n');
+    }
 }
 
 static void cmd_dns(int argc, char **argv) {
@@ -138,7 +234,9 @@ static void cmd_dns(int argc, char **argv) {
     }
     uint32_t ip;
     if (net_dns_resolve(argv[1], &ip) < 0) {
-        console_puts("dns: failed\n");
+        console_puts("dns: ");
+        console_puts(net_last_error());
+        console_putchar('\n');
         return;
     }
     console_puts(argv[1]);
@@ -147,13 +245,19 @@ static void cmd_dns(int argc, char **argv) {
     console_putchar('\n');
 }
 
+static void cmd_nslookup(int argc, char **argv) {
+    cmd_dns(argc, argv);
+}
+
 static void cmd_nettest(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
     console_puts("[nettest] dhcp... ");
     if (net_dhcp() < 0) {
-        console_puts("FAIL\n");
+        console_puts("FAIL ");
+        console_puts(net_last_error());
+        console_putchar('\n');
         return;
     }
     console_puts("OK\n");
@@ -169,7 +273,12 @@ static void cmd_nettest(int argc, char **argv) {
 
     if (dev->gateway) {
         console_puts("[nettest] ping gateway... ");
-        console_puts(net_ping(dev->gateway, 1000) == 0 ? "OK\n" : "FAIL\n");
+        if (net_ping(dev->gateway, 1000) == 0) console_puts("OK\n");
+        else {
+            console_puts("FAIL ");
+            console_puts(net_last_error());
+            console_putchar('\n');
+        }
     }
 
     if (dev->dns) {
@@ -180,7 +289,9 @@ static void cmd_nettest(int argc, char **argv) {
             print_ip(ip);
             console_putchar('\n');
         } else {
-            console_puts("FAIL\n");
+            console_puts("FAIL ");
+            console_puts(net_last_error());
+            console_putchar('\n');
         }
     }
 }
@@ -201,7 +312,8 @@ static const char *parse_url(const char *url, const char **host, uint16_t *port,
     const char *p = url;
     *port = 80;
     if (strncmp(p, "http://", 7) == 0) p += 7;
-    else if (strstr(p, "://")) return "only http:// is supported";
+    else if (strncmp(p, "https://", 8) == 0) { p += 8; *port = 443; }
+    else if (strstr(p, "://")) return "only http:// and https:// are supported";
 
     uint32_t n = 0;
     while (*p && *p != '/') {
@@ -234,77 +346,251 @@ static const char *http_body(const char *buf) {
     return body ? body + 4 : buf;
 }
 
+static int http_status_code(const char *buf) {
+    if (strncmp(buf, "HTTP/", 5) != 0) return 0;
+    const char *p = strchr(buf, ' ');
+    if (!p) return 0;
+    p++;
+    int code = 0;
+    while (*p >= '0' && *p <= '9') code = code * 10 + (*p++ - '0');
+    return code;
+}
+
+static const char *http_header_value(const char *buf, const char *name) {
+    uint32_t name_len = (uint32_t)strlen(name);
+    const char *p = strstr(buf, "\r\n");
+    if (!p) return 0;
+    p += 2;
+    while (*p && !(p[0] == '\r' && p[1] == '\n')) {
+        const char *line_end = strstr(p, "\r\n");
+        if (!line_end) return 0;
+        if (strncmp(p, name, name_len) == 0 && p[name_len] == ':') {
+            p += name_len + 1;
+            while (*p == ' ' || *p == '\t') p++;
+            return p;
+        }
+        p = line_end + 2;
+    }
+    return 0;
+}
+
+static uint32_t copy_header_value(char *dst, uint32_t cap, const char *value) {
+    if (!value || cap == 0) return 0;
+    uint32_t n = 0;
+    while (value[n] && !(value[n] == '\r' && value[n + 1] == '\n') && n + 1 < cap) {
+        dst[n] = value[n];
+        n++;
+    }
+    dst[n] = 0;
+    return n;
+}
+
+static void copy_url_basename(char *dst, uint32_t cap, const char *url) {
+    const char *end = url + strlen(url);
+    while (end > url && (end[-1] == '/' || end[-1] == '?' || end[-1] == '#')) end--;
+    const char *p = end;
+    while (p > url && p[-1] != '/') p--;
+    if (!*p || strstr(p, "://")) p = "index.html";
+
+    uint32_t n = 0;
+    while (p[n] && p + n < end && p[n] != '?' && p[n] != '#' && n + 1 < cap) {
+        dst[n] = p[n];
+        n++;
+    }
+    if (n == 0) {
+        const char *fallback = "index.html";
+        while (fallback[n] && n + 1 < cap) {
+            dst[n] = fallback[n];
+            n++;
+        }
+    }
+    dst[n] = 0;
+}
+
+static int http_fetch(const char *method, const char *url, char *response,
+                      uint32_t response_cap, uint32_t *len) {
+    int https = strncmp(url, "https://", 8) == 0;
+    char current[160];
+    uint32_t n = 0;
+    while (url[n] && n + 1 < sizeof(current)) {
+        current[n] = url[n];
+        n++;
+    }
+    current[n] = 0;
+
+    for (int hop = 0; hop < 4; hop++) {
+        char host_buf[96];
+        const char *host;
+        const char *path;
+        uint16_t port;
+        if (parse_url(current, &host, &port, &path, host_buf, sizeof(host_buf)))
+            return -1;
+
+        uint32_t ip;
+        if (net_dns_resolve(host, &ip) < 0) return -1;
+        if (https) {
+            if (strcmp(method, "HEAD") == 0) method = "GET";
+            if (tls_https_get(host, ip, port, path, response, response_cap, len) < 0)
+                return -1;
+        } else {
+            if (net_http_request(method, host, ip, port, path, response, response_cap, len) < 0)
+                return -1;
+        }
+
+        int code = http_status_code(response);
+        if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308)
+            return 0;
+
+        const char *loc = http_header_value(response, "Location");
+        char next[160];
+        if (copy_header_value(next, sizeof(next), loc) == 0) return 0;
+
+        if (strncmp(next, "http://", 7) == 0) {
+            https = 0;
+            strcpy(current, next);
+        } else if (strncmp(next, "https://", 8) == 0) {
+            if (!https) {
+                return 0;
+            }
+            https = 1;
+            strcpy(current, next);
+        } else if (next[0] == '/') {
+            uint32_t pos = 0;
+            const char *prefix = https ? "https://" : "http://";
+            for (const char *p = prefix; *p && pos + 1 < sizeof(current); p++) current[pos++] = *p;
+            for (const char *p = host; *p && pos + 1 < sizeof(current); p++) current[pos++] = *p;
+            if (port != 80 && pos + 8 < sizeof(current)) {
+                current[pos++] = ':';
+                char digits[6];
+                uint16_t tmp = port;
+                int d = 0;
+                do { digits[d++] = (char)('0' + (tmp % 10)); tmp /= 10; } while (tmp);
+                while (d-- && pos + 1 < sizeof(current)) current[pos++] = digits[d];
+            }
+            for (const char *p = next; *p && pos + 1 < sizeof(current); p++) current[pos++] = *p;
+            current[pos] = 0;
+        } else {
+            return 0;
+        }
+        if (code == 303) method = "GET";
+    }
+    return 0;
+}
+
+static void print_http_headers(const char *buf) {
+    const char *end = strstr(buf, "\r\n\r\n");
+    if (!end) {
+        console_puts(buf);
+        return;
+    }
+    uint32_t len = (uint32_t)(end - buf);
+    console_write(buf, len);
+    console_putchar('\n');
+}
+
+static void print_curl_response(const char *buf) {
+    const char *body = http_body(buf);
+    if (body[0]) {
+        print_http_body(buf);
+        return;
+    }
+    int code = http_status_code(buf);
+    if (code >= 300 && code < 400) {
+        print_http_headers(buf);
+        const char *loc = http_header_value(buf, "Location");
+        if (loc) {
+            char value[160];
+            copy_header_value(value, sizeof(value), loc);
+            console_puts("redirect: ");
+            console_puts(value);
+            console_putchar('\n');
+            if (strncmp(value, "https://", 8) == 0)
+                console_puts("https: tls handshake/decrypt is still being implemented\n");
+        }
+        return;
+    }
+    print_http_headers(buf);
+}
+
 static void cmd_curl(int argc, char **argv) {
     if (argc < 2) {
-        console_puts("Usage: curl http://host/path\n");
+        console_puts("Usage: curl [-I] http[s]://host[:port]/path\n");
         return;
     }
-    char host_buf[96];
-    const char *host;
-    const char *path;
-    uint16_t port;
-    const char *err = parse_url(argv[1], &host, &port, &path, host_buf, sizeof(host_buf));
-    if (err) {
-        console_puts("curl: ");
-        console_puts(err);
-        console_putchar('\n');
-        return;
+    int headers_only = 0;
+    int url_arg = 1;
+    if (strcmp(argv[1], "-I") == 0) {
+        headers_only = 1;
+        url_arg = 2;
     }
-    uint32_t ip;
-    if (net_dns_resolve(host, &ip) < 0) {
-        console_puts("curl: resolve failed\n");
+    if (argc <= url_arg) {
+        console_puts("Usage: curl [-I] http[s]://host[:port]/path\n");
         return;
     }
     static char response[8192];
     uint32_t len = 0;
-    if (net_http_get(host, ip, port, path, response, sizeof(response), &len) < 0) {
-        console_puts("curl: request failed\n");
+    if (http_fetch(headers_only ? "HEAD" : "GET", argv[url_arg],
+                   response, sizeof(response), &len) < 0) {
+        console_puts("curl: ");
+        console_puts(strncmp(argv[url_arg], "https://", 8) == 0 ? tls_last_error() : net_last_error());
+        console_putchar('\n');
         return;
     }
-    print_http_body(response);
+    if (headers_only) print_http_headers(response);
+    else print_curl_response(response);
+    if (headers_only)
+        console_puts("(curl -I shows headers only; use curl URL for body)\n");
 }
 
 static void cmd_wget(int argc, char **argv) {
     if (argc < 2) {
-        console_puts("Usage: wget [-S] http://host[:port]/path [file]\n");
+        console_puts("Usage: wget [-S] [-O file] http[s]://host[:port]/path [file]\n");
         return;
     }
     int show_headers = 0;
-    int url_arg = 1;
-    if (strcmp(argv[1], "-S") == 0) {
-        show_headers = 1;
-        url_arg = 2;
+    const char *out_name = 0;
+    const char *url = 0;
+    int print_stdout = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-S") == 0) {
+            show_headers = 1;
+        } else if (strcmp(argv[i], "-O") == 0) {
+            if (i + 1 >= argc) {
+                console_puts("wget: missing -O file\n");
+                return;
+            }
+            out_name = argv[++i];
+            if (strcmp(out_name, "-") == 0) print_stdout = 1;
+        } else if (!url) {
+            url = argv[i];
+        } else if (!out_name) {
+            out_name = argv[i];
+        } else {
+            console_puts("Usage: wget [-S] [-O file] http[s]://host[:port]/path [file]\n");
+            return;
+        }
     }
-    if (argc <= url_arg) {
-        console_puts("Usage: wget [-S] http://host[:port]/path [file]\n");
-        return;
-    }
-    char host_buf[96];
-    const char *host;
-    const char *path;
-    uint16_t port;
-    const char *err = parse_url(argv[url_arg], &host, &port, &path, host_buf, sizeof(host_buf));
-    if (err) {
-        console_puts("wget: ");
-        console_puts(err);
-        console_putchar('\n');
-        return;
-    }
-    uint32_t ip;
-    if (net_dns_resolve(host, &ip) < 0) {
-        console_puts("wget: resolve failed\n");
+    if (!url) {
+        console_puts("Usage: wget [-S] [-O file] http[s]://host[:port]/path [file]\n");
         return;
     }
     static char response[8192];
     uint32_t len = 0;
-    if (net_http_get(host, ip, port, path, response, sizeof(response), &len) < 0) {
-        console_puts("wget: request failed\n");
+    if (http_fetch("GET", url, response, sizeof(response), &len) < 0) {
+        console_puts("wget: ");
+        console_puts(strncmp(url, "https://", 8) == 0 ? tls_last_error() : net_last_error());
+        console_putchar('\n');
         return;
     }
     const char *payload = show_headers ? response : http_body(response);
     uint32_t payload_len = (uint32_t)strlen(payload);
-    if (argc > url_arg + 1) {
-        const char *file = argv[url_arg + 1];
+    char inferred[64];
+    if (!out_name && !print_stdout) {
+        copy_url_basename(inferred, sizeof(inferred), url);
+        out_name = inferred;
+    }
+    if (out_name && !print_stdout) {
+        const char *file = out_name;
         vfs_node_t *node = vfs_lookup(file);
         if (!node) node = vfs_create(file);
         if (!node || vfs_truncate(node) < 0 || vfs_write(node, 0, payload, payload_len) < 0) {
@@ -313,6 +599,9 @@ static void cmd_wget(int argc, char **argv) {
         }
         console_puts("saved ");
         console_puts(file);
+        console_puts(" (HTTP ");
+        print_uint((uint32_t)http_status_code(response));
+        console_putchar(')');
         console_putchar('\n');
     } else {
         console_puts(payload);
@@ -324,11 +613,13 @@ void tool_net_init(void) {
     static const command_t cmds[] = {
         {"netinfo", CMD_GROUP_DEBUG, "Show network controller info", "netinfo", cmd_netinfo},
         {"dhcp", CMD_GROUP_SYSTEM, "Configure network with DHCP", "dhcp", cmd_dhcp},
+        {"ifconfig", CMD_GROUP_SYSTEM, "Show or configure IPv4", "ifconfig | ifconfig dhcp | ifconfig <ip> <mask> <gw> <dns>", cmd_ifconfig},
         {"nettest", CMD_GROUP_SYSTEM, "Run DHCP/gateway/DNS checks", "nettest", cmd_nettest},
         {"ping", CMD_GROUP_SYSTEM, "Send one ICMP echo request", "ping <ip|host>", cmd_ping},
         {"dns", CMD_GROUP_SYSTEM, "Resolve a host name", "dns <host>", cmd_dns},
-        {"curl", CMD_GROUP_SYSTEM, "HTTP GET and print body", "curl http://host[:port]/path", cmd_curl},
-        {"wget", CMD_GROUP_SYSTEM, "HTTP GET and print/save body", "wget [-S] http://host[:port]/path [file]", cmd_wget},
+        {"nslookup", CMD_GROUP_SYSTEM, "Resolve a host name", "nslookup <host>", cmd_nslookup},
+        {"curl", CMD_GROUP_SYSTEM, "HTTP(S) GET/HEAD", "curl [-I] http[s]://host[:port]/path", cmd_curl},
+        {"wget", CMD_GROUP_SYSTEM, "HTTP(S) GET and print/save body", "wget [-S] [-O file] http[s]://host[:port]/path [file]", cmd_wget},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

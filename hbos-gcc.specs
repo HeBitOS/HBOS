@@ -1,0 +1,24 @@
+# HBOS Cross-Compilation GCC Specs File
+# Usage: gcc -specs=hbos-gcc.specs -o prog prog.c
+#
+# This file customizes the compiler behavior:
+# - Force position-independent code (PIE) — HBOS loads at arbitrary address
+# - Use custom linker script
+# - Link against HBOS libc
+
+*self_spec:
++ %{!shared:%{!r:-static -nostdlib}}
+
+*cc1:
++ -ffreestanding -fno-stack-protector -fno-builtin
+
+*link_command:
+%(old_link) -m elf_x86_64 -T user.ld -L user/lib
+
+*lib:
+-lc
+
+*startfile:
+user/lib/crt0.o
+
+*endfile:

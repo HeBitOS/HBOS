@@ -125,7 +125,7 @@ static void cmd_help(int argc, char **argv) {
     console_puts("\n\x1b[33mHBOS Help\x1b[0m\n");
     PUTS_CN("\x1b[33mHBOS 帮助\x1b[0m\n");
     console_puts("Commands: list | help <command> | exit\n");
-    PUTS_CN("命令：list | help <命令> | exit\n");
+    PUTS_CN("命令：list 以列出命令清单| help <命令> | exit\n");
     console_putchar('\n');
 
     char line[64]; int pos;

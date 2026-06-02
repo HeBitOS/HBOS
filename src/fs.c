@@ -1,67 +1,78 @@
+/**
+ * @file fs.c
+ * @brief HBFS 文件系统实现，支持 ramfs（内存文件系统）和 HBFS（磁盘文件系统）两种后端，
+ *        包含 MBR/GPT 分区表解析
+ */
 #include "block.h"
 #include "fs.h"
 #include "string.h"
 
-#define HBFS_MAGIC 0x3146534248ULL /* "HBFS1" little-endian-ish marker */
-#define HBFS_VERSION 1
-#define HBFS_DEFAULT_START_LBA 2048
-#define HBFS_TABLE_SECTORS 8
-#define HBFS_FILE_SECTORS (RAMFS_MAX_FILE_SIZE / BLOCK_SECTOR_SIZE)
-#define HBFS_PARTITION_TYPE 0xEB
-#define GPT_ENTRY_SIZE 128
-#define GPT_ENTRY_COUNT 128
-#define GPT_ENTRY_SECTORS 32
+#define HBFS_MAGIC 0x3146534248ULL /**< HBFS 魔数，对应 "HBFS1" 的小端标记 */
+#define HBFS_VERSION 1             /**< HBFS 版本号 */
+#define HBFS_DEFAULT_START_LBA 2048 /**< HBFS 默认起始 LBA 地址（1MiB 对齐） */
+#define HBFS_TABLE_SECTORS 8       /**< 文件表占用的扇区数 */
+#define HBFS_FILE_SECTORS (RAMFS_MAX_FILE_SIZE / BLOCK_SECTOR_SIZE) /**< 单文件占用的扇区数 */
+#define HBFS_PARTITION_TYPE 0xEB   /**< HBFS 分区类型码（MBR） */
+#define GPT_ENTRY_SIZE 128         /**< GPT 分区项大小（字节） */
+#define GPT_ENTRY_COUNT 128        /**< GPT 最大分区项数 */
+#define GPT_ENTRY_SECTORS 32       /**< GPT 分区项区域占用的扇区数 */
 
+/** 文件系统后端类型枚举 */
 typedef enum {
-    FS_BACKEND_RAM = 0,
-    FS_BACKEND_HBFS,
+    FS_BACKEND_RAM = 0, /**< 内存文件系统后端 */
+    FS_BACKEND_HBFS,    /**< 磁盘文件系统后端 */
 } fs_backend_t;
 
+/** HBFS 超级块结构，存储在分区第一个扇区 */
 typedef struct {
-    uint64_t magic;
-    uint32_t version;
-    uint32_t start_lba;
-    uint32_t max_files;
-    uint32_t max_file_size;
-    uint32_t table_lba;
-    uint32_t table_sectors;
-    uint32_t data_lba;
-    uint32_t file_sectors;
-    uint8_t reserved[BLOCK_SECTOR_SIZE - 40];
+    uint64_t magic;               /**< 魔数，用于标识 HBFS 文件系统 */
+    uint32_t version;             /**< 文件系统版本号 */
+    uint32_t start_lba;           /**< 分区起始 LBA 地址 */
+    uint32_t max_files;           /**< 最大文件数 */
+    uint32_t max_file_size;       /**< 单文件最大容量（字节） */
+    uint32_t table_lba;           /**< 文件表起始 LBA 地址 */
+    uint32_t table_sectors;       /**< 文件表占用扇区数 */
+    uint32_t data_lba;            /**< 数据区起始 LBA 地址 */
+    uint32_t file_sectors;        /**< 单文件占用扇区数 */
+    uint8_t reserved[BLOCK_SECTOR_SIZE - 40]; /**< 保留填充，对齐到一个扇区 */
 } __attribute__((packed)) hbfs_super_t;
 
+/** HBFS 文件表项结构，每个文件对应一个表项 */
 typedef struct {
-    uint8_t used;
-    uint8_t type;
-    uint16_t reserved0;
-    uint32_t size;
-    char name[MAX_FILENAME];
-    uint8_t reserved1[24];
+    uint8_t used;                 /**< 是否被占用（0=空闲, 1=已使用） */
+    uint8_t type;                 /**< 文件类型（0=文件, 1=目录） */
+    uint16_t reserved0;           /**< 保留字段 */
+    uint32_t size;                /**< 文件大小（字节） */
+    char name[MAX_FILENAME];      /**< 文件名 */
+    uint8_t reserved1[24];        /**< 保留字段，对齐到 64 字节 */
 } __attribute__((packed)) hbfs_entry_t;
 
 // 全局文件系统实例
-static filesystem_t fs;
-static fs_backend_t fs_backend = FS_BACKEND_RAM;
-static uint8_t ramfs_storage[MAX_FILES][RAMFS_MAX_FILE_SIZE];
-static hbfs_entry_t hbfs_table[MAX_FILES];
-static uint32_t hbfs_start_lba = HBFS_DEFAULT_START_LBA;
-static uint32_t hbfs_total_sectors = 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS;
-static const char *fs_error = "ok";
+static filesystem_t fs;           /**< 全局文件系统实例 */
+static fs_backend_t fs_backend = FS_BACKEND_RAM; /**< 当前文件系统后端类型 */
+static uint8_t ramfs_storage[MAX_FILES][RAMFS_MAX_FILE_SIZE]; /**< ramfs 模式下的文件数据存储区 */
+static hbfs_entry_t hbfs_table[MAX_FILES]; /**< HBFS 文件表 */
+static uint32_t hbfs_start_lba = HBFS_DEFAULT_START_LBA; /**< HBFS 分区起始 LBA */
+static uint32_t hbfs_total_sectors = 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS; /**< HBFS 分区总扇区数 */
+static const char *fs_error = "ok"; /**< 最近一次错误描述 */
 
-static int ramfs_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);
-static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count);
-static int ramfs_vfs_truncate(vfs_node_t *node);
-static int ramfs_vfs_unlink(vfs_node_t *node);
+static int ramfs_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);   /**< ramfs VFS 读取操作 */
+static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count); /**< ramfs VFS 写入操作 */
+static int ramfs_vfs_truncate(vfs_node_t *node); /**< ramfs VFS 截断操作 */
+static int ramfs_vfs_unlink(vfs_node_t *node);   /**< ramfs VFS 删除操作 */
 
+/** 设置错误信息并返回失败 */
 static int fs_fail(const char *msg) {
     fs_error = msg;
     return -1;
 }
 
+/** 获取最近一次错误描述 */
 const char *fs_last_error(void) {
     return fs_error;
 }
 
+/** ramfs VFS 操作函数表 */
 static const vfs_ops_t ramfs_ops = {
     .read = ramfs_vfs_read,
     .write = ramfs_vfs_write,
@@ -69,22 +80,32 @@ static const vfs_ops_t ramfs_ops = {
     .unlink = ramfs_vfs_unlink,
 };
 
+/** 计算 HBFS 文件表的起始 LBA 地址 */
 static uint32_t hbfs_table_lba(void) {
     return hbfs_start_lba + 1;
 }
 
+/** 计算 HBFS 数据区的起始 LBA 地址 */
 static uint32_t hbfs_data_lba(void) {
     return hbfs_start_lba + 1 + HBFS_TABLE_SECTORS;
 }
 
+/** 计算 HBFS 所需的总扇区数 */
 static uint32_t hbfs_needed_sectors(void) {
     return 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS;
 }
 
+/** 获取 HBFS 所需的最小扇区数（对外接口） */
 uint32_t fs_min_sectors(void) {
     return hbfs_needed_sectors();
 }
 
+/**
+ * 规范化文件路径：去除前导 '/'，检查非法字符和长度
+ * @param path 原始路径
+ * @param out  输出缓冲区，存放规范化后的文件名
+ * @return 成功返回 out 指针，失败返回 NULL
+ */
 static const char *normalize_path(const char *path, char *out) {
     if (!path) return NULL;
     while (*path == '/') path++;
@@ -101,6 +122,7 @@ static const char *normalize_path(const char *path, char *out) {
     return out;
 }
 
+/** 重置文件系统为 ramfs 模式，初始化所有文件槽位 */
 static void fs_reset_ram(void) {
     fs.file_count = 0;
     fs.total_sectors = 0;
@@ -127,6 +149,7 @@ static void fs_reset_ram(void) {
     }
 }
 
+/** 填充 HBFS 超级块结构 */
 static void hbfs_fill_super(hbfs_super_t *sb) {
     memset(sb, 0, sizeof(*sb));
     sb->magic = HBFS_MAGIC;
@@ -140,16 +163,22 @@ static void hbfs_fill_super(hbfs_super_t *sb) {
     sb->file_sectors = HBFS_FILE_SECTORS;
 }
 
+/** 从磁盘读取 HBFS 超级块 */
 static int hbfs_read_super(hbfs_super_t *sb) {
     return block_read_sector(hbfs_start_lba, (uint8_t *)sb);
 }
 
+/** 将超级块写入磁盘 */
 static int hbfs_write_super(void) {
     hbfs_super_t sb;
     hbfs_fill_super(&sb);
     return block_write_sector(hbfs_start_lba, (const uint8_t *)&sb);
 }
 
+/**
+ * 验证超级块内容是否与当前配置一致
+ * @return 1 表示有效，0 表示无效
+ */
 static int hbfs_validate_super(const hbfs_super_t *sb) {
     return sb->magic == HBFS_MAGIC &&
            sb->version == HBFS_VERSION &&
@@ -161,10 +190,12 @@ static int hbfs_validate_super(const hbfs_super_t *sb) {
            sb->file_sectors == HBFS_FILE_SECTORS;
 }
 
+/** 计算指定槽位中指定扇区的绝对 LBA 地址 */
 static uint32_t hbfs_file_lba(uint32_t slot, uint32_t sector) {
     return hbfs_data_lba() + slot * HBFS_FILE_SECTORS + sector;
 }
 
+/** 将内存中的文件表同步写入磁盘 */
 static int hbfs_sync_table(void) {
     uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
     const uint8_t *table = (const uint8_t *)hbfs_table;
@@ -176,6 +207,7 @@ static int hbfs_sync_table(void) {
     return 0;
 }
 
+/** 从磁盘加载文件表到内存 */
 static int hbfs_load_table(void) {
     uint8_t *table = (uint8_t *)hbfs_table;
     for (uint32_t s = 0; s < HBFS_TABLE_SECTORS; s++) {
@@ -185,6 +217,7 @@ static int hbfs_load_table(void) {
     return 0;
 }
 
+/** 根据 HBFS 文件表重建内存中的文件结构 */
 static void hbfs_rebuild_files_from_table(void) {
     fs.file_count = 0;
     for (uint32_t i = 0; i < MAX_FILES; i++) {
@@ -214,6 +247,7 @@ static void hbfs_rebuild_files_from_table(void) {
     }
 }
 
+/** 更新指定文件的 HBFS 文件表项并同步到磁盘 */
 static int hbfs_update_entry(file_t *f) {
     if (!f || f->disk_slot >= MAX_FILES) return -1;
     hbfs_entry_t *e = &hbfs_table[f->disk_slot];
@@ -227,6 +261,14 @@ static int hbfs_update_entry(file_t *f) {
     return hbfs_sync_table();
 }
 
+/**
+ * 从磁盘读取文件数据
+ * @param f      目标文件
+ * @param offset 读取偏移量（字节）
+ * @param buf    输出缓冲区
+ * @param count  请求读取的字节数
+ * @return 实际读取的字节数
+ */
 static uint32_t hbfs_read_data(file_t *f, uint32_t offset, void *buf, uint32_t count) {
     if (!f || !f->used || !buf) return 0;
     if (offset >= f->size) return 0;
@@ -250,6 +292,14 @@ static uint32_t hbfs_read_data(file_t *f, uint32_t offset, void *buf, uint32_t c
     return done;
 }
 
+/**
+ * 向磁盘写入文件数据
+ * @param f      目标文件
+ * @param offset 写入偏移量（字节）
+ * @param buf    输入数据缓冲区
+ * @param count  写入字节数
+ * @return 成功返回写入字节数，失败返回 -1
+ */
 static int hbfs_write_data(file_t *f, uint32_t offset, const void *buf, uint32_t count) {
     if (!f || !f->used || (!buf && count)) return -1;
     if (offset > f->capacity || count > f->capacity - offset) return -1;
@@ -285,6 +335,7 @@ static int hbfs_write_data(file_t *f, uint32_t offset, const void *buf, uint32_t
     return (int)count;
 }
 
+/** 以小端序写入 32 位无符号整数 */
 static void put_le32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)(v & 0xFF);
     p[1] = (uint8_t)((v >> 8) & 0xFF);
@@ -292,6 +343,7 @@ static void put_le32(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)((v >> 24) & 0xFF);
 }
 
+/** 以小端序读取 32 位无符号整数 */
 static uint32_t get_le32(const uint8_t *p) {
     return (uint32_t)p[0] |
            ((uint32_t)p[1] << 8) |
@@ -299,10 +351,12 @@ static uint32_t get_le32(const uint8_t *p) {
            ((uint32_t)p[3] << 24);
 }
 
+/** 以小端序读取 64 位无符号整数 */
 static uint64_t get_le64(const uint8_t *p) {
     return (uint64_t)get_le32(p) | ((uint64_t)get_le32(p + 4) << 32);
 }
 
+/** 比较两个 16 字节 GUID 是否相等 */
 static int guid_eq(const uint8_t *a, const uint8_t *b) {
     for (uint32_t i = 0; i < 16; i++) {
         if (a[i] != b[i]) return 0;
@@ -310,16 +364,17 @@ static int guid_eq(const uint8_t *a, const uint8_t *b) {
     return 1;
 }
 
+/** 将 GPT 分区类型 GUID 转换为 MBR 分区类型码 */
 static uint8_t gpt_type_to_mbr_type(const uint8_t *guid) {
-    static const uint8_t esp_guid[16] = {
+    static const uint8_t esp_guid[16] = {   /**< EFI 系统分区 GUID */
         0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
         0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b
     };
-    static const uint8_t hbfs_guid[16] = {
+    static const uint8_t hbfs_guid[16] = {  /**< HBFS 分区 GUID */
         0x53, 0x46, 0x42, 0x48, 0x00, 0x00, 0x00, 0x40,
         0x80, 0x00, 0x48, 0x42, 0x4f, 0x53, 0x00, 0x01
     };
-    static const uint8_t zero_guid[16] = {0};
+    static const uint8_t zero_guid[16] = {0}; /**< 全零 GUID（未使用分区） */
 
     if (guid_eq(guid, zero_guid)) return 0;
     if (guid_eq(guid, esp_guid)) return 0xEF;
@@ -327,6 +382,13 @@ static uint8_t gpt_type_to_mbr_type(const uint8_t *guid) {
     return 0xEE;
 }
 
+/**
+ * 读取 GPT 分区项，解析分区信息
+ * @param out          输出分区信息数组（最多 4 项）
+ * @param hbfs_start   输出 HBFS 分区起始 LBA（可选）
+ * @param hbfs_sectors 输出 HBFS 分区扇区数（可选）
+ * @return 成功返回 0，失败返回 -1
+ */
 static int read_gpt_entries(fs_partition_info_t out[4], uint32_t *hbfs_start, uint32_t *hbfs_sectors) {
     uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
     if (block_read_sector(1, sector) < 0) return -1;
@@ -375,6 +437,12 @@ static int read_gpt_entries(fs_partition_info_t out[4], uint32_t *hbfs_start, ui
     return shown > 0 ? 0 : -1;
 }
 
+/**
+ * 在 MBR 分区表中查找 HBFS 分区
+ * @param start   输出分区起始 LBA
+ * @param sectors 输出分区扇区数
+ * @return 成功返回 0，未找到返回 -1
+ */
 static int hbfs_find_mbr_partition(uint32_t *start, uint32_t *sectors) {
     uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
     if (block_read_sector(0, mbr) < 0) return -1;
@@ -396,6 +464,11 @@ static int hbfs_find_mbr_partition(uint32_t *start, uint32_t *sectors) {
     return -1;
 }
 
+/**
+ * 读取磁盘分区表信息（支持 MBR 和 GPT）
+ * @param out 输出分区信息数组（最多 4 项）
+ * @return 成功返回 0，失败返回 -1
+ */
 int fs_read_partitions(fs_partition_info_t out[4]) {
     if (!out) return -1;
     for (uint32_t i = 0; i < 4; i++) {
@@ -429,6 +502,7 @@ int fs_read_partitions(fs_partition_info_t out[4]) {
     return 0;
 }
 
+/** 填写 MBR 分区表项 */
 static void write_mbr_entry(uint8_t *e, uint8_t bootable, uint8_t type,
                             uint32_t start, uint32_t sectors) {
     e[0] = bootable ? 0x80 : 0x00;
@@ -439,6 +513,7 @@ static void write_mbr_entry(uint8_t *e, uint8_t bootable, uint8_t type,
     put_le32(e + 12, sectors);
 }
 
+/** 判断两个 LBA 范围是否重叠 */
 static int ranges_overlap(uint32_t a_start, uint32_t a_count,
                           uint32_t b_start, uint32_t b_count) {
     uint64_t a_end = (uint64_t)a_start + a_count;
@@ -446,6 +521,7 @@ static int ranges_overlap(uint32_t a_start, uint32_t a_count,
     return a_start < b_end && b_start < a_end;
 }
 
+/** 将 HBFS 分区信息写入 MBR 分区表 */
 static int hbfs_write_mbr_partition(uint32_t start, uint32_t sectors) {
     uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
     if (block_read_sector(0, mbr) < 0 || mbr[510] != 0x55 || mbr[511] != 0xAA) {
@@ -479,10 +555,17 @@ static int hbfs_write_mbr_partition(uint32_t start, uint32_t sectors) {
     return block_write_sector(0, mbr);
 }
 
+/** 将 value 向上对齐到 align 的整数倍 */
 static uint32_t align_up(uint32_t value, uint32_t align) {
     return (value + align - 1) & ~(align - 1);
 }
 
+/**
+ * 自动选择 HBFS 安装范围
+ * @param start   输出选定的起始 LBA
+ * @param sectors 输出选定的扇区数
+ * @return 成功返回 0，失败返回 -1
+ */
 static int hbfs_choose_install_range(uint32_t *start, uint32_t *sectors) {
     uint32_t total = block_sector_count();
     uint32_t min = hbfs_needed_sectors();
@@ -517,6 +600,7 @@ static int hbfs_choose_install_range(uint32_t *start, uint32_t *sectors) {
     return 0;
 }
 
+/** 检查 HBFS 分区范围是否有效 */
 static int hbfs_range_valid(uint32_t start, uint32_t sectors) {
     uint32_t total = block_sector_count();
     if (start < 2048) return 0;
@@ -526,6 +610,7 @@ static int hbfs_range_valid(uint32_t start, uint32_t sectors) {
     return 1;
 }
 
+/** 在指定范围内格式化 HBFS 文件系统 */
 static int hbfs_format_range(uint32_t start, uint32_t sectors) {
     if (!hbfs_range_valid(start, sectors)) return fs_fail("HBFS 分区范围无效");
     hbfs_start_lba = start;
@@ -544,6 +629,11 @@ int fs_init(void) {
     return 1;
 }
 
+/**
+ * 检查文件系统一致性
+ * @param out 输出检查结果
+ * @return 无错误返回 0，有错误返回 -1
+ */
 int fs_check(fs_check_result_t *out) {
     fs_check_result_t r;
     memset(&r, 0, sizeof(r));
@@ -601,6 +691,7 @@ int fs_check(fs_check_result_t *out) {
     return r.errors == 0 ? 0 : -1;
 }
 
+/** 格式化磁盘，使用默认或已有的分区范围 */
 int fs_format_disk(void) {
     fs_error = "ok";
     if (block_init() < 0) return fs_fail("未检测到可写硬盘");
@@ -610,6 +701,7 @@ int fs_format_disk(void) {
     return hbfs_format_range(start, sectors);
 }
 
+/** 在磁盘上安装 HBFS 文件系统（自动选择分区范围） */
 int fs_install_disk(void) {
     fs_error = "ok";
     if (block_init() < 0) return fs_fail("未检测到可写硬盘");
@@ -621,6 +713,7 @@ int fs_install_disk(void) {
     return fs_install_disk_at(start, sectors);
 }
 
+/** 在指定 LBA 范围安装 HBFS 文件系统（含写入 MBR 分区表） */
 int fs_install_disk_at(uint32_t start, uint32_t sectors) {
     fs_error = "ok";
     if (block_init() < 0) return fs_fail("未检测到可写硬盘");
@@ -629,6 +722,7 @@ int fs_install_disk_at(uint32_t start, uint32_t sectors) {
     return hbfs_format_range(start, sectors);
 }
 
+/** 挂载磁盘上的 HBFS 文件系统 */
 int fs_mount_disk(void) {
     if (block_init() < 0) return -1;
     uint32_t start = HBFS_DEFAULT_START_LBA;
@@ -649,15 +743,18 @@ int fs_mount_disk(void) {
     return 0;
 }
 
+/** 将文件表同步到磁盘（仅 HBFS 模式有效） */
 int fs_sync(void) {
     if (fs_backend != FS_BACKEND_HBFS) return 0;
     return hbfs_sync_table();
 }
 
+/** 判断当前后端是否为磁盘文件系统 */
 int fs_is_disk(void) {
     return fs_backend == FS_BACKEND_HBFS;
 }
 
+/** 获取当前后端名称字符串 */
 const char *fs_backend_name(void) {
     static char name[16];
     if (fs_backend != FS_BACKEND_HBFS) return "ramfs";
@@ -672,18 +769,22 @@ const char *fs_backend_name(void) {
     return name;
 }
 
+/** 获取 HBFS 分区起始 LBA */
 uint32_t fs_disk_start_lba(void) {
     return hbfs_start_lba;
 }
 
+/** 获取 HBFS 分区总扇区数 */
 uint32_t fs_disk_total_sectors(void) {
     return hbfs_total_sectors;
 }
 
+/** 获取文件系统总容量（字节） */
 uint32_t fs_capacity_bytes(void) {
     return MAX_FILES * RAMFS_MAX_FILE_SIZE;
 }
 
+/** 获取已使用字节数 */
 uint32_t fs_used_bytes(void) {
     uint32_t used = 0;
     for (uint32_t i = 0; i < MAX_FILES; i++) {
@@ -708,6 +809,7 @@ file_t *fs_find_file(const char *name) {
     return NULL;
 }
 
+/** 创建文件（若同名文件已存在则返回已有文件） */
 file_t *fs_create_file(const char *name) {
     char norm[MAX_FILENAME];
     if (!normalize_path(name, norm)) return NULL;
@@ -741,6 +843,7 @@ file_t *fs_create_file(const char *name) {
     return NULL;
 }
 
+/** 删除指定名称的文件 */
 int fs_delete_file(const char *name) {
     file_t *f = fs_find_file(name);
     if (!f) return -1;
@@ -754,6 +857,7 @@ int fs_delete_file(const char *name) {
     return 0;
 }
 
+/** 截断文件，将大小清零 */
 int fs_truncate_file(file_t *f) {
     if (!f || !f->used) return -1;
     f->size = 0;
@@ -762,6 +866,7 @@ int fs_truncate_file(file_t *f) {
     return 0;
 }
 
+/** 读取文件数据，根据后端类型分派到 ramfs 或 HBFS 读取 */
 uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count) {
     if (fs_backend == FS_BACKEND_HBFS)
         return hbfs_read_data(f, offset, buf, count);
@@ -773,6 +878,7 @@ uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count
     return count;
 }
 
+/** 写入文件数据，根据后端类型分派到 ramfs 或 HBFS 写入 */
 int fs_write_file_data(file_t *f, uint32_t offset, const void *buf, uint32_t count) {
     if (fs_backend == FS_BACKEND_HBFS)
         return hbfs_write_data(f, offset, buf, count);
@@ -787,10 +893,12 @@ int fs_write_file_data(file_t *f, uint32_t offset, const void *buf, uint32_t cou
     return (int)count;
 }
 
+/** 获取已使用的文件数 */
 uint32_t fs_get_count(void) {
     return fs.file_count;
 }
 
+/** 按索引获取文件（跳过未使用的槽位） */
 file_t *fs_get_file(uint32_t index) {
     uint32_t seen = 0;
     for (uint32_t i = 0; i < MAX_FILES; i++) {
@@ -801,16 +909,19 @@ file_t *fs_get_file(uint32_t index) {
     return NULL;
 }
 
+/** 按索引获取 VFS 节点 */
 vfs_node_t *fs_get_node(uint32_t index) {
     file_t *f = fs_get_file(index);
     return f ? &f->node : NULL;
 }
 
+/** ramfs VFS 读取操作回调 */
 static int ramfs_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count) {
     if (!node) return -1;
     return (int)fs_read_file_data((file_t *)node->private_data, offset, buf, count);
 }
 
+/** ramfs VFS 写入操作回调 */
 static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count) {
     if (!node) return -1;
     int ret = fs_write_file_data((file_t *)node->private_data, offset, buf, count);
@@ -818,6 +929,7 @@ static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, u
     return ret;
 }
 
+/** ramfs VFS 截断操作回调 */
 static int ramfs_vfs_truncate(vfs_node_t *node) {
     if (!node) return -1;
     int ret = fs_truncate_file((file_t *)node->private_data);
@@ -825,9 +937,109 @@ static int ramfs_vfs_truncate(vfs_node_t *node) {
     return ret;
 }
 
+/** ramfs VFS 删除操作回调 */
 static int ramfs_vfs_unlink(vfs_node_t *node) {
     if (!node) return -1;
     return fs_delete_file(node->name);
+}
+
+int fs_mkdir(const char *name) {
+    char norm[MAX_FILENAME];
+    if (!normalize_path(name, norm)) return -1;
+    file_t *existing = fs_find_file(norm);
+    if (existing) return -1;
+
+    for (uint32_t i = 0; i < MAX_FILES; i++) {
+        file_t *f = &fs.files[i];
+        if (f->used) continue;
+        strcpy(f->name, norm);
+        f->size = 0;
+        f->capacity = 0;
+        f->data = NULL;
+        f->node.type = VFS_NODE_DIR;
+        f->node.size = 0;
+        f->node.capacity = 0;
+        f->node.private_data = f;
+        f->node.ops = &ramfs_ops;
+        strcpy(f->node.name, norm);
+        f->disk_slot = i;
+        f->used = 1;
+        f->type = 1;
+        fs.file_count++;
+        if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0) {
+            f->used = 0;
+            fs.file_count--;
+            return -1;
+        }
+        return 0;
+    }
+    return -1;
+}
+
+int fs_rmdir(const char *name) {
+    file_t *f = fs_find_file(name);
+    if (!f || f->type != 1) return -1;
+
+    for (uint32_t i = 0; i < MAX_FILES; i++) {
+        if (!fs.files[i].used) continue;
+        if (&fs.files[i] == f) continue;
+        size_t dlen = strlen(f->name);
+        if (strncmp(fs.files[i].name, f->name, dlen) == 0 &&
+            fs.files[i].name[dlen] == '/')
+            return -1;
+    }
+
+    return fs_delete_file(name);
+}
+
+static uint32_t fs_readdir_skip;
+
+int fs_opendir(const char *name) {
+    char norm[MAX_FILENAME];
+    if (!normalize_path(name, norm)) return -1;
+    file_t *f = fs_find_file(norm);
+    if (!f || f->type != 1) return -1;
+    fs_readdir_skip = 0;
+    return 0;
+}
+
+int fs_readdir(const char *name, char *out_name, uint32_t *out_type) {
+    if (!out_name || !out_type) return -1;
+    char norm[MAX_FILENAME];
+    const char *dir_name = "";
+    if (name && name[0] && !(name[0] == '/' && name[1] == '\0')) {
+        if (!normalize_path(name, norm)) return -1;
+        dir_name = norm;
+    }
+
+    size_t dlen = strlen(dir_name);
+
+    for (uint32_t i = fs_readdir_skip; i < MAX_FILES; i++) {
+        if (!fs.files[i].used) continue;
+        const char *fname = fs.files[i].name;
+
+        if (dlen > 0) {
+            if (strncmp(fname, dir_name, dlen) != 0 || fname[dlen] != '/')
+                continue;
+            fname += dlen + 1;
+        }
+
+        if (strchr(fname, '/')) continue;
+
+        strncpy(out_name, fname, VFS_MAX_NAME);
+        out_name[VFS_MAX_NAME - 1] = '\0';
+        *out_type = fs.files[i].type;
+        fs_readdir_skip = i + 1;
+        return 0;
+    }
+
+    return -1;
+}
+
+int fs_closedir(const char *name) {
+    (void)name;
+    fs_readdir_skip = 0;
+    return 0;
 }
 
 // 读取文件

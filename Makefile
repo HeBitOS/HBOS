@@ -48,8 +48,13 @@ C_SRCS = \
 	$(SRC_DIR)/selftest.c \
 	$(SRC_DIR)/acpi.c \
 	$(SRC_DIR)/syscall.c \
+	$(SRC_DIR)/elf.c \
+	$(SRC_DIR)/devfs.c \
+	$(SRC_DIR)/rtc.c \
+	$(SRC_DIR)/ipc.c \
 	$(SRC_DIR)/pci.c \
 	$(SRC_DIR)/net.c \
+	$(SRC_DIR)/tls.c \
 	$(SRC_DIR)/block.c \
 	$(SRC_DIR)/ahci.c \
 	$(SRC_DIR)/fs.c \
@@ -64,6 +69,9 @@ C_SRCS = \
 	$(SRC_DIR)/core/task.c \
 	$(SRC_DIR)/lib/posix.c \
 	$(SRC_DIR)/lib/string.c \
+	$(SRC_DIR)/crypto/sha256.c \
+	$(SRC_DIR)/crypto/x25519.c \
+	$(SRC_DIR)/crypto/chacha20_poly1305.c \
 	$(SRC_DIR)/user/app_runtime.c \
 	$(SRC_DIR)/user/syscall.c \
 	$(SRC_DIR)/tools/help.c \

@@ -99,9 +99,7 @@ void kmain(void *mbi) {
 
     // CJK 渲染测试 — 验证中文字体加载和 framebuffer 直接像素绘制
     console_puts("\x1b[33m");
-    console_puts("[CJK] 你好，世界！Hello World!\n");
-    console_puts("[CJK] 操作系统内核测试\n");
-    console_puts("[CJK] 汉字显示 一二三四五\n");
+    console_puts("[CJK] 测试渲染\n");
     console_puts("\x1b[0m");
     console_puts("\n");
 
@@ -110,6 +108,7 @@ void kmain(void *mbi) {
     // IDT（中断描述符表）: 32 个 CPU 异常 + 16 个 IRQ + int 0x80 系统调用
     // PIC 重映射: IRQ0-15 → INT 32-47
     gdt_idt_init();
+    pit_init(100);
     acpi_init(mbi);  // ACPI 解析（用于关机支持的 S5 睡眠状态）
 
     // 设置 TSS ring0 栈指针（中断发生时 CPU 自动切换到内核栈）
@@ -146,7 +145,8 @@ void kmain(void *mbi) {
     shell_init();
     tool_init_all();
 
-    console_puts("\nType 'help' for commands\n\n");
+    console_puts("\nType 'help' for commands");
+    console_puts("请输入 'Help' 以查询命令\n\n");
     serial_print("[KERN] Shell ready\n");
 
     shell_run();  // 永不返回

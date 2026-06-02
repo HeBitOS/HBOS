@@ -29,6 +29,10 @@
 #include <stdbool.h>
 
 #include "task.h"
+#include "vmm.h"
+
+static void task_sig_deliver(task_t *task);
+#include "../signal.h"
 #include "../string.h"
 #include "../graphics/graphics.h"
 
@@ -54,30 +58,6 @@ static uint32_t next_id = 0;                 /**< 下一个任务 ID */
 /** 预分配的栈空间: 16 个任务 × 8KB = 128KB */
 static char task_stacks[MAX_TASKS][TASK_STACK_SIZE]
     __attribute__((aligned(16)));
-
-// ============================================================
-// 内部辅助函数
-// ============================================================
-
-/** 安全字符串复制（限制最大长度） */
-static void t_strncpy(char *dst, const char *src, int max_len) {
-    if (max_len <= 0) return;
-    int i = 0;
-    if (src) {
-        while (src[i] && i < max_len - 1) {
-            dst[i] = src[i];
-            i++;
-        }
-    }
-    dst[i] = '\0';
-}
-
-/** 字符串长度 */
-static int t_strlen(const char *s) {
-    int n = 0;
-    while (*s++) n++;
-    return n;
-}
 
 // ============================================================
 // 调度器 — 轮转选择下一个 READY 任务
@@ -114,17 +94,25 @@ static task_t *sched_next(void) {
 void task_init(void) {
     task_t *main_task = &task_pool[0];
     main_task->id = next_id++;
-    t_strncpy(main_task->name, "main", TASK_NAME_MAX);
+    strncpy(main_task->name, "main", TASK_NAME_MAX);
+    main_task->name[TASK_NAME_MAX - 1] = '\0';
     main_task->state = TASK_RUNNING;
     main_task->rsp = 0;  // 首次 task_yield 时保存
     main_task->entry = NULL;
     main_task->arg = NULL;
     main_task->exit_status = 0;
     main_task->parent_id = 0;
+    main_task->child_id = 0;
     main_task->next = main_task;  // 循环链表（单元素）
     main_task->stack_base = (uint64_t)task_stacks[0];
     main_task->stack_size = TASK_STACK_SIZE;
+    main_task->vm_areas = NULL;
+    main_task->pml4_phys = vmm_get_pml4();
     memset(main_task->fds, 0, sizeof(main_task->fds));
+    memset(main_task->sig_handler, 0, sizeof(main_task->sig_handler));
+    memset(&main_task->sig_pending, 0, sizeof(main_task->sig_pending));
+    memset(&main_task->sig_blocked, 0, sizeof(main_task->sig_blocked));
+    main_task->sig_exit_code = 0;
 
     current_task = main_task;
     task_count = 1;
@@ -169,15 +157,23 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     task_t *tcb = &task_pool[idx];
 
     tcb->id = next_id++;
-    t_strncpy(tcb->name, name ? name : "task", TASK_NAME_MAX);
+    strncpy(tcb->name, name ? name : "task", TASK_NAME_MAX);
+    tcb->name[TASK_NAME_MAX - 1] = '\0';
     tcb->state = TASK_READY;
     tcb->entry = entry;
     tcb->arg = arg;
     tcb->exit_status = 0;
     tcb->parent_id = current_task ? current_task->id : 0;
+    tcb->child_id = 0;
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
+    tcb->vm_areas = NULL;
+    tcb->pml4_phys = vmm_create_address_space();
     memset(tcb->fds, 0, sizeof(tcb->fds));
+    memset(tcb->sig_handler, 0, sizeof(tcb->sig_handler));
+    memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
+    memset(&tcb->sig_blocked, 0, sizeof(tcb->sig_blocked));
+    tcb->sig_exit_code = 0;
 
     // ---- 构建初始栈帧 ----
     // 从栈顶向下填充（栈向低地址增长）
@@ -222,6 +218,11 @@ void task_yield(void) {
     next->state = TASK_RUNNING;
     current_task = next;
 
+    // 切换地址空间
+    if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
+
+    task_sig_deliver(next);
+
     // 上下文切换 — 保存 prev 的 RSP，恢复 next 的 RSP
     task_switch(&prev->rsp, &next->rsp);
     // 执行在此恢复（当此任务被重新调度时）
@@ -247,6 +248,7 @@ void task_exit(void) {
         next->state = TASK_RUNNING;
         task_t *prev = current_task;
         current_task = next;
+        if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
         task_switch(&prev->rsp, &next->rsp);
         // 如果回到这里，再试一次
     }
@@ -290,6 +292,108 @@ task_t *task_current(void) {
     return current_task;
 }
 
+/**
+ * 向指定任务发送信号
+ * SIGKILL(9) 和 SIGTERM(15) 直接终止任务，
+ * 其他信号记录到 pending 掩码中，由任务下次 yield 时处理。
+ * @param id  目标任务 ID
+ * @param sig 信号编号
+ * @return 0 成功，-1 失败
+ */
+int task_kill(uint32_t id, int sig) {
+    if (sig <= 0 || sig >= _NSIG) return -1;
+
+    task_t *target = NULL;
+    for (int i = 0; i < task_count; i++) {
+        if (task_pool[i].id == id) {
+            target = &task_pool[i];
+            break;
+        }
+    }
+    if (!target || target->state == TASK_TERMINATED) return -1;
+
+    if (sig == SIGKILL || sig == SIGTERM) {
+        target->sig_exit_code = (sig == SIGKILL) ? 9 : 15;
+        if (target == current_task) {
+            task_exit();
+            return 0;
+        }
+        target->state = TASK_TERMINATED;
+        return 0;
+    }
+
+    target->sig_pending.sig[sig / 64] |= (1ULL << (sig % 64));
+    return 0;
+}
+
+/**
+ * 简化版 fork: 克隆当前任务
+ * 创建新任务，复制 fd 表和信号处理器，相同的入口函数。
+ * 父任务返回子任务 ID，子任务在首次调度时返回 0。
+ * @return 父进程返回子进程 ID，子进程返回 0，失败返回 -1
+ */
+int task_fork(void) {
+    if (!current_task) return -1;
+
+    int idx = -1;
+    int reuse = 0;
+    for (int i = 1; i < task_count; i++) {
+        if (task_pool[i].state == TASK_TERMINATED) {
+            idx = i;
+            reuse = 1;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (task_count >= MAX_TASKS) return -1;
+        idx = task_count;
+    }
+
+    task_t *child = &task_pool[idx];
+    child->id = next_id++;
+    strncpy(child->name, current_task->name, TASK_NAME_MAX);
+    child->name[TASK_NAME_MAX - 1] = '\0';
+    child->state = TASK_READY;
+    child->entry = current_task->entry;
+    child->arg = current_task->arg;
+    child->exit_status = 0;
+    child->parent_id = current_task->id;
+    child->child_id = 0;
+    child->stack_base = (uint64_t)task_stacks[idx];
+    child->stack_size = TASK_STACK_SIZE;
+    child->vm_areas = NULL;
+
+    child->pml4_phys = current_task->pml4_phys ?
+        vmm_clone_address_space(current_task->pml4_phys) : 0;
+
+    memcpy(child->fds, current_task->fds, sizeof(child->fds));
+    memcpy(child->sig_handler, current_task->sig_handler, sizeof(child->sig_handler));
+    memset(&child->sig_pending, 0, sizeof(child->sig_pending));
+    memset(&child->sig_blocked, 0, sizeof(child->sig_blocked));
+    child->sig_exit_code = 0;
+
+    uint64_t *sp = (uint64_t *)(child->stack_base + child->stack_size);
+    *--sp = (uint64_t)current_task->entry;
+    *--sp = (uint64_t)current_task->arg;
+    *--sp = (uint64_t)task_entry_trampoline;
+    *--sp = 0;  // RBP
+    *--sp = 0;  // RBX
+    *--sp = 0;  // R12
+    *--sp = 0;  // R13
+    *--sp = 0;  // R14
+    *--sp = 0;  // R15
+    child->rsp = (uint64_t)sp;
+
+    if (!reuse) {
+        child->next = task_pool[0].next;
+        task_pool[0].next = child;
+        task_count++;
+    }
+
+    current_task->child_id = child->id;
+    return child->id;
+}
+
 /** 获取活跃任务数（不含 TERMINATED） */
 int task_get_count(void) {
     int c = 0;
@@ -327,7 +431,7 @@ void task_list_all(void) {
 
         // 打印名称
         console_puts(t->name);
-        int pad = 20 - t_strlen(t->name);
+        int pad = 20 - (int)strlen(t->name);
         for (int p = 0; p < pad; p++) console_putchar(' ');
 
         // 打印状态
@@ -343,4 +447,78 @@ void task_list_all(void) {
         console_putchar('\n');
     }
     console_puts("\n");
+}
+
+static volatile int preempt_count = 0;
+
+void task_preempt_disable(void) {
+    preempt_count++;
+}
+
+void task_preempt_enable(void) {
+    if (preempt_count > 0) preempt_count--;
+}
+
+void task_schedule(void) {
+    if (preempt_count > 0) return;
+    if (!current_task || current_task->state == TASK_TERMINATED) return;
+    if (current_task->state == TASK_RUNNING)
+        current_task->state = TASK_READY;
+    task_t *next = current_task->next;
+    int checked = 0;
+    while (next->state != TASK_READY && checked < task_count) {
+        next = next->next;
+        checked++;
+    }
+    if (next->state != TASK_READY) return;
+    next->state = TASK_RUNNING;
+    task_t *prev = current_task;
+    current_task = next;
+    if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
+    task_sig_deliver(next);
+    task_switch(&prev->rsp, &next->rsp);
+}
+
+void pit_init(uint32_t freq_hz) {
+    uint32_t divisor = 1193182 / freq_hz;
+    if (divisor < 1) divisor = 1;
+    if (divisor > 65535) divisor = 65535;
+    __asm__ volatile("outb %0, %1" :: "a"((uint8_t)0x36), "Nd"(0x43));
+    __asm__ volatile("outb %0, %1" :: "a"((uint8_t)(divisor & 0xFF)), "Nd"(0x40));
+    __asm__ volatile("outb %0, %1" :: "a"((uint8_t)((divisor >> 8) & 0xFF)), "Nd"(0x40));
+}
+
+void task_sig_deliver(task_t *task) {
+    if (!task) return;
+    for (int sig = 1; sig < _NSIG; sig++) {
+        int word = sig / 64;
+        int bit = sig % 64;
+        if (!(task->sig_pending.sig[word] & (1ULL << bit))) continue;
+        if (task->sig_blocked.sig[word] & (1ULL << bit)) continue;
+
+        task->sig_pending.sig[word] &= ~(1ULL << bit);
+
+        if (sig == SIGKILL || sig == SIGSTOP || sig == SIGCONT) {
+            if (sig == SIGKILL) {
+                task->sig_exit_code = 9;
+                task->state = TASK_TERMINATED;
+            }
+            return;
+        }
+
+        void (*handler)(int) = task->sig_handler[sig];
+        if (handler == SIG_DFL || handler == NULL) {
+            if (sig == SIGINT || sig == SIGTERM || sig == SIGQUIT ||
+                sig == SIGILL || sig == SIGSEGV || sig == SIGFPE ||
+                sig == SIGBUS || sig == SIGABRT || sig == SIGPIPE) {
+                task->sig_exit_code = sig;
+                task->state = TASK_TERMINATED;
+            }
+            return;
+        } else if (handler == SIG_IGN) {
+            return;
+        } else {
+            handler(sig);
+        }
+    }
 }
