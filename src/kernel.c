@@ -91,11 +91,6 @@ void kmain(void *mbi) {
     graphics_init(mbi);
     console_clear();
 
-    // 启动横幅
-    console_puts("      " HBOS_VERSION_NAME "\n");
-    console_write("       64-bit Operating System\n", 31);
-    console_write("========================================\n\n", 41);
-
     // ---- Phase 2: CPU 异常/中断基础设施 ----
     // GDT（全局描述符表）: ring0/ring3 代码段和数据段 + TSS
     // IDT（中断描述符表）: 32 个 CPU 异常 + 16 个 IRQ + int 0x80 系统调用
