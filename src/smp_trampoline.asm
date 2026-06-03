@@ -71,7 +71,6 @@ ap_protected:
     ; Far jump to 64-bit long mode
     jmp 0x08:(ap_longmode - ap_trampoline_start + 0x8000)
 
-default abs
 bits 64
 ap_longmode:
     ; Set up 64-bit segments

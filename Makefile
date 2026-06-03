@@ -81,6 +81,7 @@ C_SRCS = \
 	$(SRC_DIR)/crypto/chacha20_poly1305.c \
 	$(SRC_DIR)/user/app_runtime.c \
 	$(SRC_DIR)/user/syscall.c \
+	$(SRC_DIR)/user/ldso.c \
 	$(SRC_DIR)/tools/help.c \
 	$(SRC_DIR)/tools/system.c \
 	$(SRC_DIR)/tools/debug.c \
@@ -92,6 +93,8 @@ C_SRCS = \
 	$(SRC_DIR)/tools/net.c \
 	$(SRC_DIR)/tools/gui.c \
 	$(SRC_DIR)/gui/wm.c \
+	$(SRC_DIR)/gui/compositor.c \
+	$(SRC_DIR)/gpu.c \
 	$(APP_SRCS)
 
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -433,7 +436,10 @@ USER_LIBC_SRCS = \
 	$(USER_LIBC_DIR)/syscall.c \
 	$(USER_LIBC_DIR)/string.c \
 	$(USER_LIBC_DIR)/stdlib.c \
-	$(USER_LIBC_DIR)/stdio.c
+	$(USER_LIBC_DIR)/stdio.c \
+	$(USER_LIBC_DIR)/socket.c \
+	$(USER_LIBC_DIR)/dlfcn.c \
+	$(USER_LIBC_DIR)/unistd.c
 
 USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
