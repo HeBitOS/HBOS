@@ -92,17 +92,9 @@ void kmain(void *mbi) {
     console_clear();
 
     // 启动横幅
-    console_write("\n", 1);
-    console_write("========================================\n", 41);
     console_puts("      " HBOS_VERSION_NAME "\n");
     console_write("       64-bit Operating System\n", 31);
     console_write("========================================\n\n", 41);
-
-    // CJK 渲染测试 — 验证中文字体加载和 framebuffer 直接像素绘制
-    console_puts("\x1b[33m");
-    console_puts("[CJK] 测试渲染\n");
-    console_puts("\x1b[0m");
-    console_puts("\n");
 
     // ---- Phase 2: CPU 异常/中断基础设施 ----
     // GDT（全局描述符表）: ring0/ring3 代码段和数据段 + TSS
@@ -147,8 +139,6 @@ void kmain(void *mbi) {
     shell_init();
     tool_init_all();
 
-    console_puts("\nType 'help' for commands\n");
-    console_puts("请输入 'Help' 以查询命令\n\n");
     serial_print("[KERN] Shell ready\n");
 
     shell_run();  // 永不返回
