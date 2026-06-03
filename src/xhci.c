@@ -524,6 +524,9 @@ int xhci_get_device_desc(int idx, usb_device_desc_t *desc) {
 int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           uint8_t bRequest, uint16_t wValue,
                           uint16_t wIndex, void *data, uint16_t wLength) {
+    (void)wIndex;
+    (void)data;
+    (void)wLength;
     if (!xhci.initialized || slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
     if (!xhci.slot_enabled[slot_id]) return -1;
 
