@@ -213,6 +213,53 @@ static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
 
+static void rect(int x, int y, int w, int h, uint32_t color);
+
+static uint8_t clamp8(int v) {
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
+
+static uint32_t rgb_mix(uint32_t c1, uint32_t c2, int t) {
+    if (t < 0) t = 0;
+    if (t > 255) t = 255;
+    uint8_t r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
+    uint8_t r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
+    uint8_t r = (uint8_t)(r1 + ((int)r2 - (int)r1) * t / 255);
+    uint8_t g = (uint8_t)(g1 + ((int)g2 - (int)g1) * t / 255);
+    uint8_t b = (uint8_t)(b1 + ((int)b2 - (int)b1) * t / 255);
+    return rgb(r, g, b);
+}
+
+static uint32_t rgb_lift(uint32_t c, int d) {
+    int r = (int)((c >> 16) & 0xFF) + d;
+    int g = (int)((c >> 8) & 0xFF) + d;
+    int b = (int)(c & 0xFF) + d;
+    return rgb(clamp8(r), clamp8(g), clamp8(b));
+}
+
+static void vgradient(int x, int y, int w, int h, uint32_t top, uint32_t bottom) {
+    if (w <= 0 || h <= 0) return;
+    for (int i = 0; i < h; i++) {
+        rect(x, y + i, w, 1, rgb_mix(top, bottom, (i * 255) / (h > 1 ? h - 1 : 1)));
+    }
+}
+
+static void hgradient(int x, int y, int w, int h, uint32_t left, uint32_t right) {
+    if (w <= 0 || h <= 0) return;
+    for (int i = 0; i < w; i++) {
+        rect(x + i, y, 1, h, rgb_mix(left, right, (i * 255) / (w > 1 ? w - 1 : 1)));
+    }
+}
+
+static void soft_shadow(int x, int y, int w, int h) {
+    rect(x + 2, y + h, w, 2, rgb(8, 14, 22));
+    rect(x + 4, y + h + 2, w - 4, 1, rgb(14, 22, 30));
+    rect(x + w, y + 2, 2, h, rgb(8, 14, 22));
+    rect(x + w + 2, y + 4, 1, h - 4, rgb(14, 22, 30));
+}
+
 static uint32_t *g_gui_surface = 0;
 static uint32_t g_gui_surface_pitch = 0;
 static int g_gui_surface_w = 0;
@@ -429,6 +476,25 @@ static void text(int x, int y, const char *s, uint32_t color, int scale) {
     }
 }
 
+static void text_clipped(int x, int y, int max_x, const char *s, uint32_t color, int scale) {
+    if (!s || max_x <= x) return;
+    utf8_state_t utf8;
+    utf8_init(&utf8);
+    while (*s) {
+        uint32_t cp = 0;
+        int ok = utf8_feed(&utf8, (uint8_t)*s++, &cp);
+        if (ok < 0) continue;
+        if (ok == 0) cp = '?';
+
+        int advance = draw_text_codepoint(x, y, cp, color, scale);
+        if (x + advance > max_x) {
+            rect(x, y, max_x - x + 1, 7 * scale + scale, rgb(18, 27, 36));
+            break;
+        }
+        x += advance;
+    }
+}
+
 static void append_char(char *buf, uint32_t cap, uint32_t *pos, char c) {
     if (*pos + 1 >= cap) return;
     buf[(*pos)++] = c;
@@ -545,36 +611,55 @@ static int clamp_delta(int v) {
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
-    rect(x, y, ACTION_W, ACTION_H, rgb(16, 30, 42));
+    vgradient(x, y, ACTION_W, ACTION_H, rgb_lift(color, 40), rgb_lift(color, -20));
+    rect(x, y, ACTION_W, 1, rgb_lift(color, 90));
+    rect(x, y + ACTION_H - 1, ACTION_W, 1, rgb_lift(color, -50));
     rect(x, y, 4, ACTION_H, color);
-    rect(x + 4, y + ACTION_H - 2, ACTION_W - 4, 2, rgb(6, 12, 18));
-    border(x, y, ACTION_W, ACTION_H, rgb(82, 118, 140));
-    text(x + 13, y + 10, label, rgb(244, 250, 255), 1);
+    border(x, y, ACTION_W, ACTION_H, rgb(8, 14, 22));
+    text(x + 13, y + 10, label, rgb(252, 254, 255), 1);
 }
 
 static void draw_small_button(int x, int y, int w, const char *label, uint32_t color) {
-    rect(x, y, w, ACTION_H, rgb(16, 30, 42));
+    vgradient(x, y, w, ACTION_H, rgb_lift(color, 40), rgb_lift(color, -20));
+    rect(x, y, w, 1, rgb_lift(color, 90));
+    rect(x, y + ACTION_H - 1, w, 1, rgb_lift(color, -50));
     rect(x, y, 4, ACTION_H, color);
-    rect(x + 4, y + ACTION_H - 2, w - 4, 2, rgb(6, 12, 18));
-    border(x, y, w, ACTION_H, rgb(82, 118, 140));
-    text(x + 13, y + 10, label, rgb(244, 250, 255), 1);
+    border(x, y, w, ACTION_H, rgb(8, 14, 22));
+    text(x + 13, y + 10, label, rgb(252, 254, 255), 1);
 }
 
 static void draw_task_button(int x, int y, int w, const char *label, int active, uint32_t color) {
-    rect(x, y, w, 32, active ? rgb(30, 50, 67) : rgb(14, 22, 31));
+    if (active) {
+        vgradient(x, y, w, 32, rgb_lift(color, 30), rgb_lift(color, -30));
+        rect(x, y, w, 1, rgb_lift(color, 80));
+    } else {
+        vgradient(x, y, w, 32, rgb(28, 38, 50), rgb(14, 20, 28));
+        rect(x, y, w, 1, rgb(46, 64, 82));
+    }
+    rect(x, y + 31, w, 1, active ? rgb_lift(color, -40) : rgb(6, 10, 16));
     rect(x, y, 4, 32, color);
-    border(x, y, w, 32, active ? rgb(23, 147, 209) : rgb(50, 67, 80));
-    text(x + 12, y + 8, label, rgb(226, 236, 244), 1);
+    border(x, y, w, 32, active ? rgb_lift(color, 40) : rgb(20, 28, 36));
+    text_clipped(x + 12, y + 11, x + w - 12, label,
+                 active ? rgb(248, 252, 255) : rgb(196, 208, 220), 1);
 }
 
 static void draw_icon(int x, int y, int active, const char *label, uint32_t color) {
-    uint32_t base = active ? rgb(32, 86, 116) : rgb(21, 48, 64);
-    rect(x, y, 82, 58, base);
-    rect(x, y, 4, 58, active ? color : rgb(58, 82, 96));
-    border(x, y, 82, 58, active ? rgb(176, 218, 244) : rgb(50, 76, 92));
-    rect(x + 14, y + 12, 20, 20, color);
-    rect(x + 18, y + 16, 12, 12, rgb(238, 246, 252));
-    text(x + 42, y + 22, label, rgb(232, 242, 248), 1);
+    if (active) {
+        vgradient(x, y, 82, 58, rgb_lift(color, 18), rgb_lift(color, -22));
+        rect(x, y, 82, 1, rgb_lift(color, 70));
+    } else {
+        vgradient(x, y, 82, 58, rgb(28, 40, 54), rgb(14, 22, 32));
+        rect(x, y, 82, 1, rgb(46, 66, 86));
+    }
+    rect(x, y + 57, 82, 1, rgb(6, 10, 16));
+    rect(x, y, 4, 58, color);
+    border(x, y, 82, 58, active ? rgb_lift(color, 50) : rgb(22, 32, 44));
+    int gx = x + 14, gy = y + 12;
+    vgradient(gx, gy, 22, 22, rgb_lift(color, 30), rgb_lift(color, -10));
+    border(gx, gy, 22, 22, rgb_lift(color, -30));
+    rect(gx + 5, gy + 7, 12, 8, rgb(240, 248, 252));
+    text_clipped(x + 42, y + 22, x + 78, label,
+                 active ? rgb(248, 252, 255) : rgb(190, 204, 216), 1);
 }
 
 static void draw_cursor(int x, int y, int edge) {
@@ -714,28 +799,49 @@ static int key_poll(void) {
 
 static void draw_wallpaper(int w, int h) {
     char line[32];
-    rect(0, 0, w, h, rgb(18, 27, 36));
-    rect(0, 0, 112, h - TASKBAR_H, rgb(12, 22, 31));
-    rect(112, 0, w - 112, 62, rgb(22, 34, 44));
-    rect(112, 61, w - 112, 1, rgb(58, 82, 98));
-    rect(0, h - TASKBAR_H, w, TASKBAR_H, rgb(16, 27, 37));
-    rect(0, h - TASKBAR_H - 1, w, 1, rgb(90, 130, 154));
-    rect(10, h - 36, 96, 30, rgb(27, 116, 166));
-    border(10, h - 36, 96, 30, rgb(176, 218, 244));
-    text(26, h - 27, "开始", rgb(244, 250, 255), 1);
+    int tb_y = h - TASKBAR_H;
+    vgradient(0, 0, w, tb_y, rgb(24, 38, 58), rgb(12, 18, 28));
+    int sb_x = 112;
+    vgradient(0, 0, sb_x, tb_y, rgb(16, 24, 36), rgb(8, 14, 22));
+    rect(sb_x - 1, 0, 1, tb_y, rgb(58, 86, 110));
+    rect(sb_x, 0, 1, tb_y, rgb(38, 58, 76));
+
+    int dot = 0;
+    for (int yy = 84; yy < tb_y - 20; yy += 28) {
+        for (int xx = 140; xx < w - 30; xx += 28) {
+            uint8_t v = (uint8_t)(36 + ((xx * 7 + yy * 3 + dot) & 31));
+            rect(xx, yy, 2, 2, rgb(v, v, (uint8_t)(v + 6)));
+            dot++;
+        }
+    }
+
+    vgradient(0, tb_y, w, TASKBAR_H, rgb(22, 32, 44), rgb(14, 22, 32));
+    rect(0, tb_y - 1, w, 1, rgb(70, 100, 130));
+    rect(0, tb_y, w, 1, rgb(38, 56, 76));
+
+    hgradient(8, h - 38, 100, 32, rgb(46, 138, 196), rgb(22, 92, 150));
+    rect(8, h - 38, 100, 1, rgb(112, 196, 240));
+    rect(8, h - 7, 100, 1, rgb(10, 30, 48));
+    rect(8, h - 6, 100, 1, rgb(16, 42, 64));
+    border(8, h - 38, 100, 32, rgb(20, 60, 92));
+    text(28, h - 28, "开始", rgb(248, 252, 255), 1);
+
     time_line(line, sizeof(line));
-    rect(w - 96, h - 36, 86, 30, rgb(22, 38, 50));
-    border(w - 96, h - 36, 86, 30, rgb(58, 86, 104));
-    text(w - 82, h - 27, line, rgb(224, 238, 246), 1);
+    rect(w - 102, h - 38, 94, 32, rgb(20, 30, 42));
+    rect(w - 102, h - 38, 94, 1, rgb(60, 84, 104));
+    rect(w - 102, h - 7, 94, 1, rgb(8, 14, 22));
+    border(w - 102, h - 38, 94, 32, rgb(36, 52, 70));
+    text(w - 88, h - 28, line, rgb(218, 234, 246), 1);
 }
 
 static void draw_desktop_tile(int x, int y, int w, int h, const char *title,
                               const char *value, uint32_t accent) {
-    rect(x, y, w, h, rgb(25, 38, 48));
-    rect(x, y, 5, h, accent);
-    border(x, y, w, h, rgb(66, 92, 108));
-    text(x + 16, y + 12, title, rgb(154, 176, 190), 1);
-    text(x + 16, y + 36, value, rgb(232, 240, 246), 1);
+    vgradient(x, y, w, h, rgb(34, 48, 60), rgb(20, 30, 40));
+    rect(x, y, w, 1, rgb(58, 82, 102));
+    rect(x, y + h - 1, w, 1, rgb(8, 14, 22));
+    rect(x, y, 4, h, accent);
+    text(x + 16, y + 14, title, rgb(168, 196, 214), 1);
+    text(x + 16, y + 38, value, rgb(238, 246, 252), 1);
 }
 
 static void draw_usage_bar(int x, int y, int w, int h, uint32_t used, uint32_t total, uint32_t color) {
@@ -773,10 +879,11 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     text(tx, ty, "文件管理器", rgb(124, 220, 154), 1);
     line_u32(line, sizeof(line), "文件: ", fs_get_count(), " / 64");
     text(tx + 112, ty + 2, line, rgb(168, 188, 202), 1);
-    rect(tx, ty + 30, content_w, 30, rgb(9, 18, 27));
-    rect(tx + 1, ty + 31, content_w - 2, 8, rgb(17, 34, 48));
-    border(tx, ty + 30, content_w, 30, rgb(66, 91, 108));
-    text(tx + 12, ty + 40, "根目录 /", rgb(230, 238, 245), 1);
+    vgradient(tx, ty + 30, content_w, 30, rgb(34, 48, 64), rgb(20, 30, 42));
+    rect(tx, ty + 30, content_w, 1, rgb(58, 86, 110));
+    rect(tx, ty + 59, content_w, 1, rgb(8, 14, 22));
+    border(tx, ty + 30, content_w, 30, rgb(50, 72, 92));
+    text(tx + 12, ty + 42, "根目录 /", rgb(238, 246, 252), 1);
 
     draw_small_button(tx, ty + 72, 76, "新建", rgb(85, 180, 120));
     draw_small_button(tx + 84, ty + 72, 76, "打开", rgb(23, 147, 209));
@@ -784,31 +891,32 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     draw_small_button(tx + 252, ty + 72, 76, "清空", rgb(244, 194, 82));
     draw_small_button(tx + 336, ty + 72, 76, "删除", rgb(234, 82, 82));
 
-    rect(tx, ty + 114, side_w, 206, rgb(11, 23, 32));
-    border(tx, ty + 114, side_w, 206, rgb(53, 78, 94));
+    vgradient(tx, ty + 114, side_w, 206, rgb(22, 30, 40), rgb(14, 20, 28));
+    border(tx, ty + 114, side_w, 206, rgb(50, 72, 92));
+    rect(tx, ty + 114, side_w, 1, rgb(58, 86, 110));
     text(tx + 14, ty + 128, "位置", rgb(194, 226, 242), 1);
-    rect(tx + 10, ty + 154, side_w - 20, 28, rgb(28, 66, 88));
+    vgradient(tx + 10, ty + 154, side_w - 20, 28, rgb(38, 76, 104), rgb(22, 50, 70));
     rect(tx + 10, ty + 154, 3, 28, rgb(85, 180, 120));
     text(tx + 22, ty + 164, "根目录", rgb(244, 250, 255), 1);
     text(tx + 22, ty + 202, "文档", rgb(132, 150, 162), 1);
     text(tx + 22, ty + 232, "系统", rgb(132, 150, 162), 1);
     text(tx + 14, ty + 286, "滚轮切换", rgb(122, 142, 156), 1);
 
-    rect(main_x, ty + 114, main_w, 206, rgb(24, 35, 44));
-    border(main_x, ty + 114, main_w, 206, rgb(68, 96, 112));
-    rect(main_x, ty + 114, main_w, 26, rgb(32, 48, 60));
-    rect(main_x, ty + 139, main_w, 1, rgb(72, 100, 116));
-    text(main_x + 14, ty + 122, "名称", rgb(208, 226, 236), 1);
-    text(main_x + main_w - 166, ty + 122, "类型", rgb(208, 226, 236), 1);
-    text(main_x + main_w - 82, ty + 122, "大小", rgb(208, 226, 236), 1);
+    vgradient(main_x, ty + 114, main_w, 206, rgb(28, 40, 52), rgb(18, 26, 36));
+    border(main_x, ty + 114, main_w, 206, rgb(58, 86, 110));
+    vgradient(main_x, ty + 114, main_w, 26, rgb(40, 60, 78), rgb(24, 36, 48));
+    rect(main_x, ty + 139, main_w, 1, rgb(70, 100, 116));
+    text(main_x + 14, ty + 122, "名称", rgb(218, 232, 240), 1);
+    text(main_x + main_w - 166, ty + 122, "类型", rgb(218, 232, 240), 1);
+    text(main_x + main_w - 82, ty + 122, "大小", rgb(218, 232, 240), 1);
 
     int list_y = ty + 146;
     uint32_t count = fs_get_count();
     if (count == 0) {
         text(main_x + 18, list_y + 18, "暂无文件", rgb(190, 208, 218), 1);
         text(main_x + 18, list_y + 42, "点击新建或按 N 创建", rgb(148, 168, 180), 1);
-        rect(detail_x, ty + 114, detail_w, 206, rgb(11, 23, 32));
-        border(detail_x, ty + 114, detail_w, 206, rgb(53, 78, 94));
+        vgradient(detail_x, ty + 114, detail_w, 206, rgb(22, 30, 40), rgb(14, 20, 28));
+        border(detail_x, ty + 114, detail_w, 206, rgb(50, 72, 92));
         text(detail_x + 12, ty + 130, "详细信息", rgb(194, 226, 242), 1);
         text(detail_x + 12, ty + 164, "未选择文件", rgb(148, 162, 174), 1);
         return;
@@ -825,19 +933,19 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         file_t *f = fs_get_file(file_idx);
         if (!f) continue;
         int y = list_y + (int)i * FILE_ROW_H;
-        if ((i & 1) == 1) rect(main_x + 1, y - 8, main_w - 2, FILE_ROW_H, rgb(29, 43, 54));
+        if ((i & 1) == 1) rect(main_x + 1, y - 8, main_w - 2, FILE_ROW_H, rgb(30, 44, 56));
         if ((int)file_idx == selected) {
-            rect(main_x + 6, y - 7, main_w - 12, 24, rgb(24, 122, 170));
-            rect(main_x + 6, y - 7, 4, 24, rgb(85, 180, 120));
+            vgradient(main_x + 6, y - 7, main_w - 12, 24, rgb(28, 130, 180), rgb(18, 90, 130));
+            rect(main_x + 6, y - 7, 4, 24, rgb(124, 220, 154));
         }
         rect(main_x + 16, y - 2, 18, 14, rgb(244, 194, 82));
         rect(main_x + 20, y - 7, 18, 7, rgb(230, 184, 74));
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, f->name);
-        uint32_t row_fg = (int)file_idx == selected ? rgb(248, 252, 255) : rgb(218, 232, 240);
+        uint32_t row_fg = (int)file_idx == selected ? rgb(252, 254, 255) : rgb(218, 232, 240);
         uint32_t meta_fg = (int)file_idx == selected ? rgb(228, 244, 252) : rgb(150, 170, 182);
-        text(main_x + 48, y, line, row_fg, 1);
+        text_clipped(main_x + 48, y, main_x + main_w - 130, line, row_fg, 1);
         text(main_x + main_w - 126, y, f->type ? "目录" : "文件", meta_fg, 1);
         line_u32(line, sizeof(line), "", f->size, "B");
         text(main_x + main_w - 64, y, line, meta_fg, 1);
@@ -845,13 +953,14 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
 
     file_t *f = fs_get_file((uint32_t)selected);
     if (f) {
-        rect(detail_x, ty + 114, detail_w, 206, rgb(11, 23, 32));
-        border(detail_x, ty + 114, detail_w, 206, rgb(53, 78, 94));
-        rect(detail_x, ty + 114, detail_w, 30, rgb(18, 36, 48));
-        text(detail_x + 12, ty + 124, "详细信息", rgb(194, 226, 242), 1);
+        vgradient(detail_x, ty + 114, detail_w, 206, rgb(22, 30, 40), rgb(14, 20, 28));
+        border(detail_x, ty + 114, detail_w, 206, rgb(50, 72, 92));
+        vgradient(detail_x, ty + 114, detail_w, 30, rgb(34, 50, 66), rgb(20, 30, 42));
+        rect(detail_x, ty + 143, detail_w, 1, rgb(8, 14, 22));
+        text(detail_x + 12, ty + 124, "详细信息", rgb(218, 232, 240), 1);
         rect(detail_x + 12, ty + 156, 30, 24, rgb(244, 194, 82));
         rect(detail_x + 17, ty + 150, 28, 8, rgb(230, 184, 74));
-        text(detail_x + 52, ty + 160, f->name, rgb(238, 246, 255), 1);
+        text_clipped(detail_x + 52, ty + 160, detail_x + detail_w - 12, f->name, rgb(238, 246, 255), 1);
         line_u32(line, sizeof(line), "大小: ", f->size, "B");
         text(detail_x + 12, ty + 194, line, rgb(210, 221, 230), 1);
         line_u32(line, sizeof(line), "容量: ", f->capacity, "B");
@@ -885,8 +994,10 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
             }
         }
 
-        rect(tx, ty + 330, content_w, 28, rgb(9, 18, 27));
-        border(tx, ty + 330, content_w, 28, rgb(53, 78, 94));
+        vgradient(tx, ty + 330, content_w, 28, rgb(28, 40, 54), rgb(16, 24, 34));
+        rect(tx, ty + 330, content_w, 1, rgb(50, 72, 92));
+        rect(tx, ty + 357, content_w, 1, rgb(8, 14, 22));
+        border(tx, ty + 330, content_w, 28, rgb(46, 66, 86));
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, "已选择: ");
@@ -894,7 +1005,7 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         append_str(line, sizeof(line), &pos, "  ");
         append_uint(line, sizeof(line), &pos, f->size);
         append_str(line, sizeof(line), &pos, "B  再次点击/Enter 打开编辑");
-        text(tx + 12, ty + 340, line, rgb(210, 221, 230), 1);
+        text_clipped(tx + 12, ty + 340, tx + content_w - 12, line, rgb(216, 232, 244), 1);
     }
     if (count > FILE_LIST_ROWS) {
         uint32_t pos = 0;
@@ -1007,21 +1118,29 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
                           app->mode == GUI_APP_UWC ? rgb(244, 194, 82) :
                           app->mode == GUI_APP_SNAKE ? rgb(124, 220, 154) :
                                                         rgb(78, 192, 236);
-        rect(x, y, card_w, card_h, (int)i == selected ? rgb(32, 58, 74) : rgb(24, 36, 46));
-        rect(x, y, 6, card_h, accent);
-        border(x, y, card_w, card_h, (int)i == selected ? rgb(80, 152, 192) : rgb(66, 92, 108));
-        rect(x + 20, y + 18, 34, 34, accent);
-        rect(x + 26, y + 24, 22, 22, rgb(28, 40, 50));
         if ((int)i == selected) {
-            rect(x + card_w - 26, y + 12, 10, 10, rgb(36, 126, 176));
+            vgradient(x, y, card_w, card_h, rgb_lift(accent, 8), rgb_lift(accent, -28));
+            border(x, y, card_w, card_h, rgb_lift(accent, 50));
+        } else {
+            vgradient(x, y, card_w, card_h, rgb(32, 44, 56), rgb(20, 30, 40));
+            border(x, y, card_w, card_h, rgb(46, 66, 84));
+        }
+        rect(x, y, card_w, 1, (int)i == selected ? rgb_lift(accent, 80) : rgb(56, 78, 98));
+        rect(x, y, 6, card_h, accent);
+        rect(x, y + card_h - 1, card_w, 1, rgb(6, 10, 16));
+        vgradient(x + 20, y + 18, 34, 34, rgb_lift(accent, 24), rgb_lift(accent, -16));
+        border(x + 20, y + 18, 34, 34, rgb_lift(accent, -30));
+        rect(x + 28, y + 26, 18, 18, rgb(14, 22, 32));
+        if ((int)i == selected) {
+            rect(x + card_w - 30, y + card_h - 22, 14, 6, accent);
         }
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, app->name);
-        text(x + 70, y + 18, line, rgb(230, 240, 246), 1);
-        text(x + 70, y + 42, app->description, rgb(156, 176, 188), 1);
+        text_clipped(x + 70, y + 18, x + card_w - 12, line, rgb(238, 246, 252), 1);
+        text_clipped(x + 70, y + 42, x + card_w - 12, app->description, rgb(168, 188, 202), 1);
     }
-    text(tx, ty + 286, "方向键选择  Enter 打开  鼠标点击卡片选择", rgb(94, 112, 124), 1);
+    text(tx, ty + 286, "方向键选择  Enter 打开  鼠标点击卡片选择", rgb(132, 150, 166), 1);
 }
 
 static uint32_t count_file_lines(file_t *f) {
@@ -1102,9 +1221,11 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     text(tx, ty + 40, "选择左侧文件后直接编辑，输入会自动保存", rgb(148, 162, 174), 1);
     char line[96];
 
-    rect(tx, ty + 70, list_w, 222, rgb(8, 18, 27));
-    border(tx, ty + 70, list_w, 222, rgb(43, 64, 78));
-    text(tx + 12, ty + 82, "文件", rgb(190, 224, 242), 1);
+    vgradient(tx, ty + 70, list_w, 222, rgb(22, 30, 40), rgb(14, 20, 28));
+    border(tx, ty + 70, list_w, 222, rgb(46, 66, 84));
+    rect(tx, ty + 70, list_w, 1, rgb(58, 86, 110));
+    text(tx + 12, ty + 82, "文件", rgb(194, 226, 242), 1);
+    rect(tx + 12, ty + 100, list_w - 24, 1, rgb(50, 72, 92));
     uint32_t count = fs_get_count();
     if (count == 0) {
         text(tx + 12, ty + 112, "暂无文件", rgb(148, 162, 174), 1);
@@ -1121,16 +1242,22 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
             file_t *f = fs_get_file(file_idx);
             if (!f) continue;
             int y = ty + 112 + (int)i * FILE_ROW_H;
-            if ((int)file_idx == selected) rect(tx + 8, y - 6, list_w - 16, 24, rgb(24, 60, 86));
-            text(tx + 18, y, f->name, rgb(220, 230, 238), 1);
+            if ((int)file_idx == selected) {
+                vgradient(tx + 8, y - 6, list_w - 16, 24, rgb(28, 80, 116), rgb(16, 50, 78));
+                rect(tx + 8, y - 6, 3, 24, rgb(124, 220, 154));
+            }
+            text_clipped(tx + 18, y, tx + list_w - 12, f->name,
+                         (int)file_idx == selected ? rgb(252, 254, 255) : rgb(210, 222, 234), 1);
         }
     }
 
     line2(line, sizeof(line), "文件: ", gui_note_name(st));
-    text(edit_x, ty + 70, line, rgb(210, 221, 230), 1);
+    text_clipped(edit_x, ty + 70, edit_x + edit_w, line, rgb(210, 221, 230), 1);
     line_u32(line, sizeof(line), "大小: ", st->note_len, "B");
     text(edit_x, ty + 92, line, rgb(210, 221, 230), 1);
-    rect(edit_x, ty + 118, edit_w, 174, rgb(5, 10, 16));
+    vgradient(edit_x, ty + 118, edit_w, 174, rgb(8, 14, 22), rgb(2, 6, 12));
+    rect(edit_x, ty + 118, edit_w, 1, rgb(28, 56, 36));
+    rect(edit_x, ty + 291, edit_w, 1, rgb(8, 14, 22));
     border(edit_x, ty + 118, edit_w, 174, rgb(85, 180, 120));
     int x = edit_x + 8;
     int y = ty + 126;
@@ -1149,14 +1276,17 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
 
-        int advance = draw_text_codepoint(x, y, cp, rgb(220, 230, 238), 1);
+        int advance = draw_text_codepoint(x, y, cp, rgb(228, 238, 246), 1);
         x += advance;
         if (x > edit_x + edit_w - 16) {
             x = edit_x + 8;
             y += 18;
         }
     }
-    if (y < ty + 280) rect(x, y + 12, 8, 2, rgb(124, 220, 154));
+    if (y < ty + 280) {
+        rect(x, y + 12, 2, 12, rgb(124, 220, 154));
+        rect(x + 2, y + 12, 6, 2, rgb(124, 220, 154));
+    }
 }
 
 static void calc_clear(gui_state_t *st) {
@@ -1257,10 +1387,13 @@ static void draw_calc_app(int tx, int ty, gui_state_t *st) {
     line[0] = 0;
     if (st->calc_error) append_str(line, sizeof(line), &pos, "ERROR");
     else append_int(line, sizeof(line), &pos, st->calc_value);
-    rect(tx, ty + 88, 300, 74, rgb(5, 10, 16));
-    border(tx, ty + 88, 300, 74, rgb(23, 147, 209));
+    vgradient(tx, ty + 88, 300, 74, rgb(8, 14, 22), rgb(2, 6, 12));
+    rect(tx, ty + 88, 300, 1, rgb(38, 90, 130));
+    rect(tx, ty + 161, 300, 1, rgb(8, 14, 22));
+    border(tx, ty + 88, 300, 74, rgb(48, 132, 196));
     text(tx + 18, ty + 98, st->calc_just_evaluated ? "结果" : "当前", rgb(132, 196, 232), 1);
-    text(tx + 22, ty + 126, line, rgb(235, 242, 250), 2);
+    text_clipped(tx + 22, ty + 126, tx + 290, line,
+                 st->calc_error ? rgb(232, 88, 96) : rgb(235, 242, 250), 2);
 
     pos = 0;
     line[0] = 0;
@@ -1286,14 +1419,16 @@ static void draw_calc_app(int tx, int ty, gui_state_t *st) {
     }
     text(tx, ty + 184, line, rgb(210, 221, 230), 1);
 
-    rect(tx, ty + 216, 36, 24, rgb(18, 38, 52));
-    rect(tx + 42, ty + 216, 36, 24, rgb(18, 38, 52));
-    rect(tx + 84, ty + 216, 36, 24, rgb(18, 38, 52));
-    rect(tx + 126, ty + 216, 36, 24, rgb(18, 38, 52));
-    text(tx + 12, ty + 224, "+", rgb(235, 242, 250), 1);
-    text(tx + 54, ty + 224, "-", rgb(235, 242, 250), 1);
-    text(tx + 96, ty + 224, "*", rgb(235, 242, 250), 1);
-    text(tx + 138, ty + 224, "/", rgb(235, 242, 250), 1);
+    static const char *ops = "+-*/";
+    for (int i = 0; i < 4; i++) {
+        int ox = tx + i * 42;
+        vgradient(ox, ty + 216, 36, 24, rgb(48, 68, 86), rgb(24, 38, 52));
+        rect(ox, ty + 216, 36, 1, rgb(70, 100, 120));
+        rect(ox, ty + 239, 36, 1, rgb(8, 14, 22));
+        border(ox, ty + 216, 36, 24, rgb(28, 50, 68));
+        char s[2] = {ops[i], 0};
+        text(ox + 14, ty + 224, s, rgb(238, 244, 250), 1);
+    }
 }
 
 static void draw_uwc_app(int tx, int ty, gui_state_t *st) {
@@ -1570,27 +1705,49 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
 }
 
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state) {
-    rect(x, y, win_w, win_h, active ? rgb(20, 32, 42) : rgb(18, 27, 36));
-    border(x, y, win_w, win_h, active ? rgb(58, 138, 184) : rgb(70, 92, 108));
-    rect(x + 1, y + 1, win_w - 2, WM_TITLE_H, active ? rgb(24, 112, 166) : rgb(94, 120, 136));
-    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, rgb(178, 197, 208));
+    uint32_t body = active ? rgb(28, 38, 50) : rgb(22, 30, 40);
+    uint32_t title_top = active ? rgb(48, 132, 196) : rgb(82, 102, 122);
+    uint32_t title_bot = active ? rgb(22, 92, 150) : rgb(58, 76, 94);
+    uint32_t border_c = active ? rgb(70, 156, 200) : rgb(58, 78, 96);
+    uint32_t hl = active ? rgb(120, 200, 240) : rgb(96, 116, 136);
+
+    vgradient(x + 1, y + 1, win_w - 2, WM_TITLE_H, title_top, title_bot);
+    rect(x, y, win_w, 1, hl);
+    rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, rgb(8, 14, 22));
+    rect(x, y + WM_TITLE_H, win_w, 1, active ? rgb(38, 116, 172) : rgb(34, 50, 68));
+    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, rgb(40, 56, 72));
+
+    rect(x, y + WM_TITLE_H + 2, win_w, win_h - WM_TITLE_H - 3, body);
+    rect(x, y + win_h - 1, win_w, 1, rgb(8, 14, 22));
+    rect(x, y, 1, win_h, rgb_lift(body, 12));
+    rect(x + win_w - 1, y, 1, win_h, rgb_lift(body, -10));
+    border(x, y, win_w, win_h, border_c);
 
     int btn_x = x + win_w - WM_BTN_W - 8;
-    rect(btn_x, y + 7, WM_BTN_W, 20, active ? rgb(204, 58, 66) : rgb(146, 70, 76));
-    border(btn_x, y + 7, WM_BTN_W, 20, rgb(112, 42, 48));
-    text(btn_x + 7, y + 13, "x", rgb(250, 236, 236), 1);
+    int btn_y = y + 7;
+    vgradient(btn_x, btn_y, WM_BTN_W, 20, rgb(232, 92, 100), rgb(176, 48, 56));
+    rect(btn_x, btn_y, WM_BTN_W, 1, rgb(248, 132, 138));
+    rect(btn_x, btn_y + 19, WM_BTN_W, 1, rgb(110, 28, 36));
+    border(btn_x, btn_y, WM_BTN_W, 20, rgb(80, 22, 28));
+    text(btn_x + 7, btn_y + 6, "x", rgb(252, 240, 240), 1);
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    rect(btn_x, y + 7, WM_BTN_W, 20, active ? rgb(58, 68, 76) : rgb(50, 58, 64));
-    border(btn_x, y + 7, WM_BTN_W, 20, rgb(82, 92, 100));
-    text(btn_x + 6, y + 13, state == WM_STATE_MAXIMIZED ? "o" : "[]", rgb(230, 236, 240), 1);
+    uint32_t nb_top = active ? rgb(94, 110, 124) : rgb(70, 82, 96);
+    uint32_t nb_bot = active ? rgb(58, 70, 84) : rgb(42, 52, 64);
+    vgradient(btn_x, btn_y, WM_BTN_W, 20, nb_top, nb_bot);
+    rect(btn_x, btn_y, WM_BTN_W, 1, rgb_lift(nb_top, 30));
+    rect(btn_x, btn_y + 19, WM_BTN_W, 1, rgb_lift(nb_bot, -30));
+    border(btn_x, btn_y, WM_BTN_W, 20, rgb(20, 28, 38));
+    text(btn_x + 6, btn_y + 6, state == WM_STATE_MAXIMIZED ? "o" : "[]", rgb(238, 244, 248), 1);
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    rect(btn_x, y + 7, WM_BTN_W, 20, active ? rgb(58, 68, 76) : rgb(50, 58, 64));
-    border(btn_x, y + 7, WM_BTN_W, 20, rgb(82, 92, 100));
-    text(btn_x + 10, y + 13, "_", rgb(230, 236, 240), 1);
+    vgradient(btn_x, btn_y, WM_BTN_W, 20, nb_top, nb_bot);
+    rect(btn_x, btn_y, WM_BTN_W, 1, rgb_lift(nb_top, 30));
+    rect(btn_x, btn_y + 19, WM_BTN_W, 1, rgb_lift(nb_bot, -30));
+    border(btn_x, btn_y, WM_BTN_W, 20, rgb(20, 28, 38));
+    text(btn_x + 10, btn_y + 6, "_", rgb(238, 244, 248), 1);
 
-    text(x + 16, y + 10, title, rgb(244, 250, 255), 1);
+    text_clipped(x + 16, y + 11, x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16, title, rgb(252, 254, 255), 1);
 }
 
 static void draw_panel_window(int tx, int ty, int win_w, int w, int h, gui_state_t *st, int panel) {
@@ -1625,7 +1782,7 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     if (idx == st->wm.active_window) gui_store_focus(st);
 
     int tx = win_x + 30;
-    int ty = win_y + 62;
+    int ty = win_y + 42;
     if (win->kind == WM_WIN_PANEL) {
         st->active = win->mode;
         st->app_mode = GUI_APP_NONE;
@@ -1635,11 +1792,12 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
         st->app_mode = win->mode;
         draw_app_window_body(tx, ty, win_w, st, win->mode);
     }
-    rect(win_x + 1, win_y + win_h - 31, win_w - 2, 30, rgb(22, 34, 44));
-    rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, rgb(62, 88, 104));
+    vgradient(win_x + 1, win_y + win_h - 31, win_w - 2, 30, rgb(28, 40, 54), rgb(16, 24, 34));
+    rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, rgb(58, 86, 110));
+    rect(win_x + 1, win_y + win_h - 1, win_w - 2, 1, rgb(8, 14, 22));
     text(win_x + 24, win_y + win_h - 22,
          idx == st->wm.active_window ? st->status : "单击任务栏切换",
-         rgb(168, 190, 204), 1);
+         rgb(190, 212, 226), 1);
 
     st->active = old_active;
     st->app_mode = old_app;
@@ -1676,10 +1834,13 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h);
     char line[96];
 
-    text(22, 18, "HBOS", rgb(244, 250, 255), 2);
-    text(22, 48, "图形桌面", rgb(190, 224, 242), 1);
-    text(140, 20, "系统概览", rgb(230, 240, 246), 2);
-    text(142, 48, "左侧启动栏打开工具，桌面直接显示当前状态", rgb(150, 172, 186), 1);
+    vgradient(126, 12, w - 138, 60, rgb(34, 48, 64), rgb(22, 32, 44));
+    border(126, 12, w - 138, 60, rgb(60, 92, 116));
+    rect(126, 12, w - 138, 1, rgb(78, 112, 138));
+    rect(127, 71, w - 140, 1, rgb(10, 18, 28));
+    rect(126, 13, 4, 58, rgb(48, 132, 196));
+    text(146, 22, "系统概览", rgb(240, 248, 252), 2);
+    text(148, 52, "左侧启动栏打开工具，桌面直接显示当前状态", rgb(176, 200, 216), 1);
 
     draw_icon(15, 92, st->active == PANEL_FILES, "文件", rgb(85, 180, 120));
     draw_icon(15, 162, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74));
@@ -1707,13 +1868,16 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     line_u32(line, sizeof(line), "", gui_app_count(), " apps");
     draw_desktop_tile(550, 182, 118, 74, "应用", line, rgb(102, 214, 255));
 
-    rect(142, 282, 250, 126, rgb(25, 38, 48));
-    border(142, 282, 250, 126, rgb(66, 92, 108));
-    text(158, 298, "最近文件", rgb(230, 240, 246), 1);
+    vgradient(142, 282, 250, 126, rgb(34, 48, 64), rgb(22, 32, 44));
+    border(142, 282, 250, 126, rgb(60, 92, 116));
+    rect(142, 282, 250, 1, rgb(78, 112, 138));
+    rect(143, 407, 248, 1, rgb(10, 18, 28));
+    rect(142, 282, 4, 126, rgb(85, 180, 120));
+    text(160, 298, "最近文件", rgb(240, 248, 252), 1);
     uint32_t count = fs_get_count();
     if (count == 0) {
-        text(158, 328, "暂无文件", rgb(150, 172, 186), 1);
-        text(158, 352, "按 N 或点文件中新建", rgb(150, 172, 186), 1);
+        text(160, 330, "暂无文件", rgb(168, 188, 202), 1);
+        text(160, 354, "按 N 或点文件中新建", rgb(168, 188, 202), 1);
     } else {
         uint32_t shown = count > 4 ? 4 : count;
         for (uint32_t i = 0; i < shown; i++) {
@@ -1725,16 +1889,19 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
             append_str(line, sizeof(line), &pos, "  ");
             append_uint(line, sizeof(line), &pos, f->size);
             append_str(line, sizeof(line), &pos, "B");
-            text(158, 328 + (int)i * 20, line, rgb(208, 226, 236), 1);
+            text_clipped(160, 328 + (int)i * 20, 380, line, rgb(216, 232, 244), 1);
         }
     }
 
-    rect(418, 282, 250, 126, rgb(25, 38, 48));
-    border(418, 282, 250, 126, rgb(66, 92, 108));
-    text(434, 298, "快捷操作", rgb(230, 240, 246), 1);
-    text(434, 328, "N 新建文件", rgb(208, 226, 236), 1);
-    text(434, 350, "Enter 打开当前项", rgb(208, 226, 236), 1);
-    text(434, 372, "Tab/Space 切换窗口", rgb(208, 226, 236), 1);
+    vgradient(418, 282, 250, 126, rgb(34, 48, 64), rgb(22, 32, 44));
+    border(418, 282, 250, 126, rgb(60, 92, 116));
+    rect(418, 282, 250, 1, rgb(78, 112, 138));
+    rect(419, 407, 248, 1, rgb(10, 18, 28));
+    rect(418, 282, 4, 126, rgb(23, 147, 209));
+    text(436, 298, "快捷操作", rgb(240, 248, 252), 1);
+    text(436, 328, "N 新建文件", rgb(216, 232, 244), 1);
+    text(436, 350, "Enter 打开当前项", rgb(216, 232, 244), 1);
+    text(436, 372, "Tab/Space 切换窗口", rgb(216, 232, 244), 1);
 
     for (int i = 0; i < st->wm.window_count; i++) {
         if (i != st->wm.active_window) draw_one_window(w, h, st, i);
@@ -1969,7 +2136,7 @@ static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
     int win_x, win_y, win_w, win_h;
     gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
     int tx = win_x + 30;
-    int ty = win_y + 62;
+    int ty = win_y + 42;
     (void)win_h;
     int panel = win->mode;
     if (panel == PANEL_FILES) {
@@ -2030,7 +2197,7 @@ static int hit_note_file(int w, int h, const gui_state_t *st, int mx, int my) {
     (void)win_w;
     (void)win_h;
     int tx = win_x + 30;
-    int ty = win_y + 62;
+    int ty = win_y + 42;
     int list_w = 150;
     int list_y = ty + 112;
     if (mx < tx || mx >= tx + list_w || my < list_y - 8) return -1;
@@ -2235,10 +2402,14 @@ static void draw_start_menu(gui_state_t *st) {
     wm_state_t *wm = &st->wm;
     if (!wm->start_menu_open) return;
     int mx = wm->menu_x, my = wm->menu_y, mw = wm->menu_w, mh = wm->menu_h;
-    rect(mx, my, mw, mh, rgb(22, 34, 46));
-    border(mx, my, mw, mh, rgb(86, 130, 168));
-    rect(mx + 1, my + 1, mw - 2, 32, rgb(24, 112, 166));
-    text(mx + 16, my + 10, "HBOS 开始菜单", rgb(244, 250, 255), 2);
+
+    soft_shadow(mx, my, mw, mh);
+    vgradient(mx, my, mw, mh, rgb(34, 46, 60), rgb(20, 30, 42));
+    border(mx, my, mw, mh, rgb(70, 110, 150));
+    rect(mx + 1, my + 1, mw - 2, 1, rgb_lift(rgb(70, 110, 150), 30));
+    vgradient(mx + 1, my + 2, mw - 2, 30, rgb(48, 132, 196), rgb(22, 92, 150));
+    rect(mx + 1, my + 32, mw - 2, 1, rgb(10, 30, 50));
+    text(mx + 16, my + 11, "HBOS 开始", rgb(252, 254, 255), 2);
 
     static const char *menu_items[] = {
         "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
@@ -2248,9 +2419,12 @@ static void draw_start_menu(gui_state_t *st) {
     int count = sizeof(menu_items) / sizeof(menu_items[0]);
     for (int i = 0; i < count; i++) {
         int iy = my + 40 + i * 28;
-        if (iy + 28 > my + mh) break;
-        rect(mx + 4, iy, mw - 8, 26, rgb(28, 42, 56));
-        text(mx + 16, iy + 8, menu_items[i], rgb(220, 235, 245), 1);
+        if (iy + 26 > my + mh) break;
+        vgradient(mx + 4, iy, mw - 8, 26, rgb(38, 52, 68), rgb(24, 34, 46));
+        rect(mx + 4, iy, mw - 8, 1, rgb(60, 84, 104));
+        rect(mx + 4, iy + 25, mw - 8, 1, rgb(10, 18, 26));
+        rect(mx + 4, iy, 3, 26, rgb(48, 132, 196));
+        text(mx + 16, iy + 8, menu_items[i], rgb(230, 240, 250), 1);
     }
 }
 

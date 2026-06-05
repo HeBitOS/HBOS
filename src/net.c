@@ -1036,15 +1036,20 @@ int net_dns_resolve(const char *name, uint32_t *out_ip) {
     uint32_t len = 12 + (uint32_t)qn;
     *(uint16_t *)(msg + len) = htons(1); len += 2;
     *(uint16_t *)(msg + len) = htons(1); len += 2;
-    dns_wait_t w = {id, 0, 0};
-    send_udp_raw(mac, primary.ip, primary.dns, next_port++, DNS_PORT, msg, (uint16_t)len);
-    for (int i = 0; i < 8 && !w.found; i++) net_poll(dns_cb, &w, 80000);
-    if (!w.found) {
-        set_error("dns timeout");
-        return -1;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (next_port < 49152) next_port = 49152;
+        uint16_t sport = next_port++;
+        dns_wait_t w = {id, 0, 0};
+        send_udp_raw(mac, primary.ip, primary.dns, sport, DNS_PORT, msg, (uint16_t)len);
+        for (int i = 0; i < 8 && !w.found; i++) net_poll(dns_cb, &w, 80000);
+        if (w.found) {
+            *out_ip = w.ip;
+            return 0;
+        }
     }
-    *out_ip = w.ip;
-    return 0;
+    set_error("dns timeout");
+    return -1;
 }
 
 /**
@@ -1165,6 +1170,7 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
     uint32_t next_hop;
     if (net_route_next_hop(ip, &next_hop) < 0) return -1;
     if (arp_resolve(next_hop, conn->mac) < 0) return -1;
+    if (next_port < 49152) next_port = 49152;
     conn->sport = next_port++;
     conn->dport = port;
     conn->peer = ip;

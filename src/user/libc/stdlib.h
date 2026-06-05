@@ -7,8 +7,6 @@
 #define EXIT_FAILURE 1
 #define RAND_MAX 32767
 
-extern char **environ;
-
 void *malloc(size_t size);
 void  free(void *ptr);
 void *calloc(size_t nmemb, size_t size);
@@ -27,10 +25,5 @@ void  srand(unsigned int seed);
 
 int   abs(int n);
 long  labs(long n);
-
-char *getenv(const char *name);
-int   setenv(const char *name, const char *value, int overwrite);
-int   putenv(char *string);
-int   unsetenv(const char *name);
 
 #endif

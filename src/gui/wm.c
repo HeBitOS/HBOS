@@ -275,7 +275,8 @@ int wm_hit_minimize(wm_state_t *wm, int mx, int my) {
         int wx, wy, ww, wh;
         wm_get_window_rect(wm, i, &wx, &wy, &ww, &wh);
         (void)wh;
-        if (mx >= wx + ww - WM_BTN_W * 2 - 16 && mx < wx + ww - WM_BTN_W - 16 &&
+        if (mx >= wx + ww - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 8 &&
+            mx <  wx + ww - WM_BTN_W * 2 - WM_BTN_GAP * 2 - 8 &&
             my >= wy + 4 && my < wy + WM_TITLE_H - 4) return i;
     }
     return -1;
@@ -287,7 +288,8 @@ int wm_hit_maximize(wm_state_t *wm, int mx, int my) {
         int wx, wy, ww, wh;
         wm_get_window_rect(wm, i, &wx, &wy, &ww, &wh);
         (void)wh;
-        if (mx >= wx + ww - WM_BTN_W * 3 - 24 && mx < wx + ww - WM_BTN_W * 2 - 24 &&
+        if (mx >= wx + ww - WM_BTN_W * 2 - WM_BTN_GAP - 8 &&
+            mx <  wx + ww - WM_BTN_W - WM_BTN_GAP - 8 &&
             my >= wy + 4 && my < wy + WM_TITLE_H - 4) return i;
     }
     return -1;
