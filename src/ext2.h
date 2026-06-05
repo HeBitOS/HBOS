@@ -119,6 +119,7 @@ typedef struct {
     int mounted;
 } ext2_fs_t;
 
+/* Read */
 int ext2_mount(uint32_t partition_lba, ext2_fs_t *fs);
 int ext2_read_inode(ext2_fs_t *fs, uint32_t inode_num, ext2_inode_t *inode);
 int ext2_read_block(ext2_fs_t *fs, uint32_t block, uint8_t *buf);
@@ -129,5 +130,18 @@ int ext2_readdir(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t index,
 int ext2_lookup(ext2_fs_t *fs, ext2_inode_t *dir_inode,
                 const char *name, uint32_t *out_inode);
 int ext2_path_to_inode(ext2_fs_t *fs, const char *path, uint32_t *out_inode);
+
+/* Write */
+int ext2_write_block(ext2_fs_t *fs, uint32_t block, const uint8_t *buf);
+int ext2_write_inode(ext2_fs_t *fs, uint32_t inode_num, const ext2_inode_t *inode);
+uint32_t ext2_alloc_block(ext2_fs_t *fs);
+int ext2_free_block(ext2_fs_t *fs, uint32_t block);
+uint32_t ext2_alloc_inode(ext2_fs_t *fs);
+int ext2_free_inode(ext2_fs_t *fs, uint32_t inode_num);
+int ext2_write_file(ext2_fs_t *fs, uint32_t inode_num,
+                    uint32_t offset, const uint8_t *buf, uint32_t count);
+int ext2_create_file(ext2_fs_t *fs, uint32_t dir_ino, const char *name, uint8_t file_type);
+int ext2_unlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name);
+int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num);
 
 #endif

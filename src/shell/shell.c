@@ -9,6 +9,7 @@
 #include "../unistd.h"
 #include "../user/app.h"
 #include "../vfs.h"
+#include "../fs.h"
 #include "shell.h"
 
 static int strcmp(const char *s1, const char *s2) {
@@ -193,6 +194,7 @@ static int get_key(void) {
                     continue;
                 }
             }
+            if (sc == 0x0F) return '\t';
             if (sc < 128) {
                 char c = scancode_map[sc]; if (c == 0) continue;
                 if (c >= 'a' && c <= 'z') { if (shift_pressed ^ caps_lock) c = c - 'a' + 'A'; }
@@ -519,6 +521,86 @@ static void line_delete(char *line, int *len, int *pos) {
     line_redraw_tail(line, *len, *pos, p, 1);
 }
 
+static int sh_strlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static int sh_strncmp(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (a[i] != b[i]) return a[i] - b[i];
+        if (!a[i]) return 0;
+    }
+    return 0;
+}
+
+static void tab_complete(char *line, int *len, int *pos) {
+    /* Find the start of the current token */
+    int tok_start = 0;
+    for (int i = 0; i < *pos; i++)
+        if (line[i] == ' ') tok_start = i + 1;
+
+    int prefix_len = *pos - tok_start;
+    const char *prefix = line + tok_start;
+    int is_cmd = (tok_start == 0);
+
+    char matches[32][CMD_BUF_SIZE];
+    int mc = 0;
+
+    if (is_cmd) {
+        uint32_t cnt = cmd_get_count();
+        const command_t **list = cmd_get_list();
+        for (uint32_t i = 0; i < cnt && mc < 32; i++) {
+            if (sh_strncmp(list[i]->name, prefix, prefix_len) == 0)
+                strcpy(matches[mc++], list[i]->name);
+        }
+    } else {
+        uint32_t cnt = fs_get_count();
+        for (uint32_t i = 0; i < cnt && mc < 32; i++) {
+            vfs_node_t *n = fs_get_node(i);
+            if (!n || !n->name[0]) continue;
+            if (sh_strncmp(n->name, prefix, prefix_len) == 0)
+                strcpy(matches[mc++], n->name);
+        }
+    }
+
+    if (mc == 0) return;
+
+    if (mc == 1) {
+        /* Single match: replace token with completion */
+        int new_len = tok_start + sh_strlen(matches[0]);
+        if (new_len + 1 >= CMD_BUF_SIZE) return;
+        /* Erase from tok_start to pos */
+        int erase = *pos - tok_start;
+        for (int i = 0; i < erase; i++) { console_putchar('\b'); console_putchar(' '); console_putchar('\b'); }
+        /* Insert completion */
+        for (int i = 0; i < sh_strlen(matches[0]); i++) {
+            line[tok_start + i] = matches[0][i];
+            console_putchar(matches[0][i]);
+        }
+        if (is_cmd && new_len < CMD_BUF_SIZE - 2) {
+            line[new_len] = ' ';
+            console_putchar(' ');
+            new_len++;
+        }
+        /* Redraw remainder of old line (erasing it) */
+        int old_tail = *len - *pos;
+        for (int i = 0; i < old_tail; i++) console_putchar(' ');
+        for (int i = 0; i < old_tail; i++) console_putchar('\b');
+        line[new_len] = 0;
+        *len = new_len;
+        *pos = new_len;
+    } else {
+        /* Multiple matches: print on next line, redraw prompt + input */
+        console_putchar('\n');
+        for (int i = 0; i < mc; i++) {
+            console_puts(matches[i]);
+            console_puts("  ");
+        }
+        console_putchar('\n');
+        shell_print_prompt();
+        for (int i = 0; i < *len; i++) console_putchar(line[i]);
+        /* Reposition cursor */
+        if (*pos < *len) cursor_left_n(*len - *pos);
+    }
+}
+
 void shell_run(void) {
     char cmd_line[CMD_BUF_SIZE];
     char history_draft[CMD_BUF_SIZE];
@@ -602,6 +684,10 @@ void shell_run(void) {
             } else if (c == KEY_END) {
                 ensure_live_input();
                 while (cmd_pos < cmd_len) { console_putchar(cmd_line[cmd_pos]); cmd_pos++; }
+
+            } else if (c == '\t') {
+                ensure_live_input();
+                tab_complete(cmd_line, &cmd_len, &cmd_pos);
 
             } else if (c == KEY_INSERT) {
                 // Insert key — no action for now
