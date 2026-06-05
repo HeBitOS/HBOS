@@ -13,6 +13,7 @@
 #include "../string.h"
 #include "../tls.h"
 #include "../unistd.h"
+#include "../api/hal.h"
 #include "../user/app.h"
 #include "../gui/wm.h"
 #include "tool.h"
@@ -2428,6 +2429,44 @@ static void draw_start_menu(gui_state_t *st) {
     }
 }
 
+static void draw_splash(const fb_info_t *fb, int w, int h) {
+    int sw = 460, sh = 220;
+    int sx = (w - sw) / 2, sy = (h - sh) / 2;
+
+    soft_shadow(sx, sy, sw, sh);
+    vgradient(sx, sy, sw, sh, rgb(36, 52, 72), rgb(18, 28, 42));
+    vgradient(sx + 1, sy + 1, sw - 2, 38, rgb(52, 140, 204), rgb(26, 100, 162));
+    rect(sx, sy, sw, 1, rgb(130, 210, 248));
+    rect(sx, sy + 38, sw, 1, rgb(10, 26, 44));
+    border(sx, sy, sw, sh, rgb(72, 120, 162));
+    rect(sx + 1, sy + 39, sw - 2, 1, rgb(44, 64, 86));
+
+    text(sx + 20, sy + 10, "HBOS", rgb(252, 254, 255), 2);
+    text(sx + 100, sy + 14, "v0.1 beta2", rgb(180, 220, 245), 1);
+
+    vgradient(sx + 16, sy + 58, 54, 54, rgb(60, 150, 210), rgb(28, 90, 150));
+    border(sx + 16, sy + 58, 54, 54, rgb(28, 72, 110));
+    rect(sx + 22, sy + 74, 42, 6, rgb(248, 252, 255));
+    rect(sx + 22, sy + 84, 26, 6, rgb(180, 220, 245));
+    rect(sx + 22, sy + 94, 34, 6, rgb(130, 190, 230));
+
+    text(sx + 88, sy + 62, "欢迎使用 HBOS！", rgb(240, 250, 255), 1);
+    text(sx + 88, sy + 84, "64位 x86_64 操作系统", rgb(160, 196, 220), 1);
+    text(sx + 88, sy + 106, "BIOS / UEFI 双启动", rgb(140, 180, 208), 1);
+
+    rect(sx + 16, sy + 132, sw - 32, 1, rgb(44, 66, 88));
+    text(sx + 20, sy + 146, "gui / startx   图形界面", rgb(136, 180, 208), 1);
+    text(sx + 20, sy + 166, "help           命令列表", rgb(136, 180, 208), 1);
+    text(sx + 240, sy + 146, "net / http     网络工具", rgb(136, 180, 208), 1);
+    text(sx + 240, sy + 166, "ls / cat       文件系统", rgb(136, 180, 208), 1);
+
+    rect(sx + 1, sy + sh - 26, sw - 2, 1, rgb(30, 48, 66));
+    vgradient(sx + 1, sy + sh - 25, sw - 2, 24, rgb(24, 36, 50), rgb(16, 26, 38));
+    text(sx + sw / 2 - 72, sy + sh - 16, "按任意键继续...", rgb(100, 140, 170), 1);
+
+    gui_present_surface(fb);
+}
+
 static void cmd_gui(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -2491,6 +2530,14 @@ static void cmd_gui(int argc, char **argv) {
         gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
     } else {
         st.status = "图形缓冲分配失败";
+    }
+
+    draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+
+    draw_splash(&fb, w, h);
+    for (int _t = 0; _t < 30; _t++) {
+        if (key_poll()) break;
+        sys_mdelay(100);
     }
 
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
