@@ -92,6 +92,7 @@ typedef struct {
     int browser_loaded;
     int browser_scroll;
     const char *status;
+    int splash_ticks;
 } gui_state_t;
 
 typedef struct {
@@ -214,6 +215,7 @@ static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void rect(int x, int y, int w, int h, uint32_t color);
+static void draw_splash_window(int w, int h, int ticks);
 
 static uint8_t clamp8(int v) {
     if (v < 0) return 0;
@@ -1822,6 +1824,8 @@ static void draw_taskbar_windows(int h, const gui_state_t *st) {
 static void draw_gui_screen(int w, int h, gui_state_t *st) {
     gui_sync_focus(st);
     draw_desktop(w, h, st);
+    if (st->splash_ticks > 0)
+        draw_splash_window(w, h, st->splash_ticks);
 }
 
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
@@ -2428,42 +2432,47 @@ static void draw_start_menu(gui_state_t *st) {
     }
 }
 
-static void draw_splash(const fb_info_t *fb, int w, int h) {
-    int sw = 460, sh = 220;
+static void draw_splash_window(int w, int h, int ticks) {
+    int sw = 440, sh = 200;
     int sx = (w - sw) / 2, sy = (h - sh) / 2;
+    int title_h = WM_TITLE_H;
 
     soft_shadow(sx, sy, sw, sh);
-    vgradient(sx, sy, sw, sh, rgb(36, 52, 72), rgb(18, 28, 42));
-    vgradient(sx + 1, sy + 1, sw - 2, 38, rgb(52, 140, 204), rgb(26, 100, 162));
+
+    vgradient(sx + 1, sy + 1, sw - 2, title_h, rgb(52, 140, 204), rgb(24, 96, 158));
     rect(sx, sy, sw, 1, rgb(130, 210, 248));
-    rect(sx, sy + 38, sw, 1, rgb(10, 26, 44));
-    border(sx, sy, sw, sh, rgb(72, 120, 162));
-    rect(sx + 1, sy + 39, sw - 2, 1, rgb(44, 64, 86));
+    rect(sx, sy + title_h, sw, 1, rgb(10, 26, 44));
+    rect(sx + 1, sy + title_h + 1, sw - 2, sh - title_h - 2, rgb(26, 38, 52));
+    rect(sx, sy + sh - 1, sw, 1, rgb(8, 14, 22));
+    rect(sx, sy, 1, sh, rgb(80, 136, 176));
+    rect(sx + sw - 1, sy, 1, sh, rgb(20, 40, 60));
+    border(sx, sy, sw, sh, rgb(56, 110, 158));
 
-    text(sx + 20, sy + 10, "HBOS", rgb(252, 254, 255), 2);
-    text(sx + 100, sy + 14, "v0.1 beta2", rgb(180, 220, 245), 1);
+    text_clipped(sx + 14, sy + 10, sx + sw - 20, "HBOS  v0.1 beta2", rgb(252, 254, 255), 1);
 
-    vgradient(sx + 16, sy + 58, 54, 54, rgb(60, 150, 210), rgb(28, 90, 150));
-    border(sx + 16, sy + 58, 54, 54, rgb(28, 72, 110));
-    rect(sx + 22, sy + 74, 42, 6, rgb(248, 252, 255));
-    rect(sx + 22, sy + 84, 26, 6, rgb(180, 220, 245));
-    rect(sx + 22, sy + 94, 34, 6, rgb(130, 190, 230));
+    int bx = sx + 16, by = sy + title_h + 18;
+    vgradient(bx, by, 48, 48, rgb(56, 148, 214), rgb(22, 84, 148));
+    border(bx, by, 48, 48, rgb(22, 68, 110));
+    rect(bx + 6, by + 18, 36, 5, rgb(248, 252, 255));
+    rect(bx + 6, by + 26, 22, 5, rgb(180, 222, 245));
+    rect(bx + 6, by + 34, 30, 5, rgb(130, 192, 232));
 
-    text(sx + 88, sy + 62, "欢迎使用 HBOS！", rgb(240, 250, 255), 1);
-    text(sx + 88, sy + 84, "64位 x86_64 操作系统", rgb(160, 196, 220), 1);
-    text(sx + 88, sy + 106, "BIOS / UEFI 双启动", rgb(140, 180, 208), 1);
+    text(sx + 80, sy + title_h + 22, "欢迎使用 HBOS！", rgb(240, 250, 255), 1);
+    text(sx + 80, sy + title_h + 44, "64 位 x86_64 操作系统", rgb(154, 194, 220), 1);
+    text(sx + 80, sy + title_h + 64, "BIOS / UEFI 双启动  协作式多任务", rgb(120, 168, 202), 1);
 
-    rect(sx + 16, sy + 132, sw - 32, 1, rgb(44, 66, 88));
-    text(sx + 20, sy + 146, "gui / startx   图形界面", rgb(136, 180, 208), 1);
-    text(sx + 20, sy + 166, "help           命令列表", rgb(136, 180, 208), 1);
-    text(sx + 240, sy + 146, "net / http     网络工具", rgb(136, 180, 208), 1);
-    text(sx + 240, sy + 166, "ls / cat       文件系统", rgb(136, 180, 208), 1);
+    rect(sx + 16, sy + title_h + 94, sw - 32, 1, rgb(38, 60, 80));
+    text(sx + 20, sy + title_h + 106, "help  命令列表      gui  图形界面", rgb(128, 172, 204), 1);
+    text(sx + 20, sy + title_h + 124, "ls / cat  文件      net / http  网络", rgb(128, 172, 204), 1);
 
-    rect(sx + 1, sy + sh - 26, sw - 2, 1, rgb(30, 48, 66));
-    vgradient(sx + 1, sy + sh - 25, sw - 2, 24, rgb(24, 36, 50), rgb(16, 26, 38));
-    text(sx + sw / 2 - 72, sy + sh - 16, "按任意键继续...", rgb(100, 140, 170), 1);
-
-    gui_present_surface(fb);
+    int bar_w = sw - 32;
+    int filled = ticks > 0 ? bar_w * ticks / 90 : 0;
+    rect(sx + 16, sy + sh - 22, bar_w, 8, rgb(14, 22, 32));
+    if (filled > 0) {
+        hgradient(sx + 16, sy + sh - 22, filled, 8, rgb(48, 132, 196), rgb(22, 80, 140));
+    }
+    border(sx + 16, sy + sh - 22, bar_w, 8, rgb(30, 50, 70));
+    text(sx + 20, sy + sh - 12, "点击任意位置关闭", rgb(80, 120, 152), 1);
 }
 
 static void cmd_gui(int argc, char **argv) {
@@ -2531,17 +2540,15 @@ static void cmd_gui(int argc, char **argv) {
         st.status = "图形缓冲分配失败";
     }
 
-    draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
-
-    draw_splash(&fb, w, h);
-    for (int _t = 0; _t < 30; _t++) {
-        if (key_poll()) break;
-        for (volatile int _d = 0; _d < 2000000; _d++) __asm__ volatile("pause");
-    }
-
+    st.splash_ticks = 90;
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
     while (1) {
         int key = key_poll();
+        if (st.splash_ticks > 0 && key) {
+            st.splash_ticks = 0;
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         if (key == 27 && st.wm.window_count > 0) {
             gui_close_window(&st, st.wm.active_window);
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
@@ -2588,6 +2595,13 @@ static void cmd_gui(int argc, char **argv) {
             }
 
             int left_down = (st.buttons & 1) != 0;
+
+            if (st.splash_ticks > 0 && left_down) {
+                st.splash_ticks = 0;
+                redraw = 1;
+            }
+
+            if (st.splash_ticks > 0) goto skip_input;
 
             if (resizing_window >= 0 && left_down) {
                 wm_window_t *rw = wm_get_window(&st.wm, resizing_window);
@@ -2769,6 +2783,7 @@ static void cmd_gui(int argc, char **argv) {
                 redraw = 1;
             }
             last_buttons = st.buttons;
+            skip_input:;
 
             if (redraw) {
                 draw_start_menu(&st);
@@ -2780,6 +2795,10 @@ static void cmd_gui(int argc, char **argv) {
         }
         if (snake_auto_tick(&st)) {
             draw_start_menu(&st);
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
+        if (st.splash_ticks > 0) {
+            st.splash_ticks--;
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         task_yield();
