@@ -13,7 +13,6 @@
 #include "../string.h"
 #include "../tls.h"
 #include "../unistd.h"
-#include "../api/hal.h"
 #include "../user/app.h"
 #include "../gui/wm.h"
 #include "tool.h"
@@ -2537,7 +2536,7 @@ static void cmd_gui(int argc, char **argv) {
     draw_splash(&fb, w, h);
     for (int _t = 0; _t < 30; _t++) {
         if (key_poll()) break;
-        sys_mdelay(100);
+        for (volatile int _d = 0; _d < 2000000; _d++) __asm__ volatile("pause");
     }
 
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
