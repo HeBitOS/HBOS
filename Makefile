@@ -93,7 +93,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/net.c \
 	$(SRC_DIR)/tools/gui.c \
 	$(SRC_DIR)/tools/editor.c \
-	$(SRC_DIR)/tools/basic.c \
+	$(SRC_DIR)/tools/cc.c \
 	$(SRC_DIR)/gui/wm.c \
 	$(SRC_DIR)/gui/compositor.c \
 	$(SRC_DIR)/gpu.c \
