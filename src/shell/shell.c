@@ -453,8 +453,52 @@ void cmd_unalias(int argc, char **argv) {
     }
 }
 
+/* ── Environment variables ──────────────────────────────────── */
+#define MAX_ENV 32
+#define ENV_VAL_LEN 128
+typedef struct { char name[32]; char value[ENV_VAL_LEN]; } env_var_t;
+static env_var_t env_vars[MAX_ENV];
+static int env_count;
+
+static const char *env_get(const char *name) {
+    for (int i = 0; i < env_count; i++)
+        if (strcmp(env_vars[i].name, name) == 0) return env_vars[i].value;
+    return NULL;
+}
+
+static void env_set(const char *name, const char *value) {
+    int slot = env_count;
+    for (int i = 0; i < env_count; i++)
+        if (strcmp(env_vars[i].name, name) == 0) { slot = i; break; }
+    if (slot >= MAX_ENV) return;
+    uint32_t nl = 0; while (name[nl] && nl < 31) { env_vars[slot].name[nl] = name[nl]; nl++; }
+    env_vars[slot].name[nl] = '\0';
+    uint32_t vl = 0; while (value[vl] && vl < ENV_VAL_LEN - 1) { env_vars[slot].value[vl] = value[vl]; vl++; }
+    env_vars[slot].value[vl] = '\0';
+    if (slot == env_count) env_count++;
+}
+
 void cmd_execute(const char *line) {
-    char buf[CMD_BUF_SIZE]; strcpy(buf, line);
+    /* Expand $VAR references */
+    char expanded[CMD_BUF_SIZE];
+    uint32_t ep = 0;
+    const char *s = line;
+    while (*s && ep < CMD_BUF_SIZE - 1) {
+        if (*s == '$' && ((s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z') || s[1] == '_')) {
+            s++;
+            char varname[32]; int vi = 0;
+            while (((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '_') && vi < 31)
+                varname[vi++] = *s++;
+            varname[vi] = '\0';
+            const char *val = env_get(varname);
+            if (val) { while (*val && ep < CMD_BUF_SIZE - 1) expanded[ep++] = *val++; }
+        } else {
+            expanded[ep++] = *s++;
+        }
+    }
+    expanded[ep] = '\0';
+
+    char buf[CMD_BUF_SIZE]; strcpy(buf, expanded);
     char *argv[MAX_ARGS]; int argc = parse_line(buf, argv, MAX_ARGS);
     if (argc == 0) return;
     save_history(line);
@@ -710,6 +754,43 @@ static void tab_complete(char *line, int *len, int *pos) {
 }
 
 static volatile int shell_exit_flag;
+
+void cmd_export(int argc, char **argv) {
+    if (argc == 1) {
+        for (int i = 0; i < env_count; i++) {
+            console_puts(env_vars[i].name);
+            console_putchar('=');
+            console_puts(env_vars[i].value);
+            console_putchar('\n');
+        }
+        return;
+    }
+    char *eq = argv[1];
+    while (*eq && *eq != '=') eq++;
+    if (*eq != '=') { console_puts("Usage: export NAME=VALUE\n"); return; }
+    *eq = '\0';
+    env_set(argv[1], eq + 1);
+}
+
+void cmd_env(int argc, char **argv) {
+    (void)argc; (void)argv;
+    for (int i = 0; i < env_count; i++) {
+        console_puts(env_vars[i].name);
+        console_putchar('=');
+        console_puts(env_vars[i].value);
+        console_putchar('\n');
+    }
+}
+
+void cmd_unset(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: unset <name>\n"); return; }
+    for (int i = 0; i < env_count; i++) {
+        if (strcmp(env_vars[i].name, argv[1]) == 0) {
+            env_vars[i] = env_vars[--env_count];
+            return;
+        }
+    }
+}
 
 void cmd_exit(int argc, char **argv) {
     (void)argc; (void)argv;

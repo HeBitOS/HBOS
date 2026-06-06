@@ -269,6 +269,9 @@ static void cmd_uname(int argc, char **argv) {
 extern void cmd_alias(int argc, char **argv);
 extern void cmd_unalias(int argc, char **argv);
 extern void cmd_exit(int argc, char **argv);
+extern void cmd_export(int argc, char **argv);
+extern void cmd_env(int argc, char **argv);
+extern void cmd_unset(int argc, char **argv);
 
 static void cmd_type(int argc, char **argv) {
     if (argc < 2) { console_puts("Usage: type <command>\n"); return; }
@@ -313,6 +316,9 @@ void tool_system_init(void) {
         {"unalias", CMD_GROUP_SYSTEM, "Remove command alias",  "unalias <name>", cmd_unalias},
         {"exit",    CMD_GROUP_SYSTEM, "Exit the shell",       "exit", cmd_exit},
         {"type",    CMD_GROUP_SYSTEM, "Show command type",    "type <cmd>", cmd_type},
+        {"export",  CMD_GROUP_SYSTEM, "Set environment var",  "export NAME=VAL", cmd_export},
+        {"env",     CMD_GROUP_SYSTEM, "Show environment vars","env", cmd_env},
+        {"unset",   CMD_GROUP_SYSTEM, "Remove env variable",  "unset <name>", cmd_unset},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
