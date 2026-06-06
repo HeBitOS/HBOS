@@ -570,6 +570,65 @@ static void cmd_uniq(int argc, char **argv) {
     close(fd);
 }
 
+static void cmd_head(int argc, char **argv) {
+    int n = 10;
+    const char *file = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] >= '0' && argv[i][1] <= '9') {
+            n = 0; const char *s = argv[i] + 1;
+            while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
+        } else file = argv[i];
+    }
+    if (!file) { console_puts("Usage: head [-n] <file>\n"); return; }
+    int fd = open(file, O_RDONLY);
+    if (fd < 0) { print_errno("head", file); return; }
+    char c; int lines = 0;
+    while (read(fd, &c, 1) == 1) {
+        console_putchar(c);
+        if (c == '\n' && ++lines >= n) break;
+    }
+    close(fd);
+}
+
+static void cmd_tail(int argc, char **argv) {
+    int n = 10;
+    const char *file = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] >= '0' && argv[i][1] <= '9') {
+            n = 0; const char *s = argv[i] + 1;
+            while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
+        } else file = argv[i];
+    }
+    if (!file) { console_puts("Usage: tail [-n] <file>\n"); return; }
+    int fd = open(file, O_RDONLY);
+    if (fd < 0) { print_errno("tail", file); return; }
+    /* Ring buffer of last N lines */
+    #define TAIL_MAX 64
+    static char ring[TAIL_MAX][256];
+    int ridx = 0, rcount = 0;
+    int li = 0;
+    char c;
+    while (read(fd, &c, 1) == 1) {
+        if (c == '\n') {
+            ring[ridx][li] = '\0';
+            ridx = (ridx + 1) % TAIL_MAX;
+            if (rcount < TAIL_MAX) rcount++;
+            li = 0;
+        } else {
+            if (li < 254) ring[ridx][li++] = c;
+        }
+    }
+    if (li > 0) { ring[ridx][li] = '\0'; ridx = (ridx + 1) % TAIL_MAX; if (rcount < TAIL_MAX) rcount++; }
+    close(fd);
+    int start = rcount < n ? 0 : ridx - n;
+    if (start < 0) start += TAIL_MAX;
+    for (int i = 0; i < (rcount < n ? rcount : n); i++) {
+        int idx = (start + i) % TAIL_MAX;
+        console_puts(ring[idx]);
+        console_putchar('\n');
+    }
+}
+
 extern void cmd_edit(int argc, char **argv);
 
 void tool_file_init(void) {
@@ -599,6 +658,8 @@ void tool_file_init(void) {
         {"wc",         CMD_GROUP_FILE, "Count lines/words/bytes", "wc <file>",                cmd_wc},
         {"sort",       CMD_GROUP_FILE, "Sort file lines",        "sort <file>",              cmd_sort},
         {"uniq",       CMD_GROUP_FILE, "Remove duplicate lines",  "uniq <file>",             cmd_uniq},
+        {"head",       CMD_GROUP_FILE, "Show first N lines",      "head [-n] <file>",        cmd_head},
+        {"tail",       CMD_GROUP_FILE, "Show last N lines",       "tail [-n] <file>",        cmd_tail},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
