@@ -246,12 +246,51 @@ void cmd_edit(int argc, char **argv) {
             break;
         }
 
-        if (c == '\n') {
+        /* Arrow keys and navigation */
+        if (c == 0x100) { /* KEY_UP */
+            if (cursor_y > 0) {
+                cursor_y--;
+                if ((uint32_t)cursor_x > line_len[cursor_y])
+                    cursor_x = (int)line_len[cursor_y];
+            }
+        } else if (c == 0x101) { /* KEY_DOWN */
+            if ((uint32_t)cursor_y + 1 < line_count) {
+                cursor_y++;
+                if ((uint32_t)cursor_x > line_len[cursor_y])
+                    cursor_x = (int)line_len[cursor_y];
+            }
+        } else if (c == 0x102) { /* KEY_LEFT */
+            if (cursor_x > 0) cursor_x--;
+            else if (cursor_y > 0) {
+                cursor_y--;
+                cursor_x = (int)line_len[cursor_y];
+            }
+        } else if (c == 0x103) { /* KEY_RIGHT */
+            if ((uint32_t)cursor_x < line_len[cursor_y]) cursor_x++;
+            else if ((uint32_t)cursor_y + 1 < line_count) {
+                cursor_y++;
+                cursor_x = 0;
+            }
+        } else if (c == 0x106) { /* KEY_HOME */
+            cursor_x = 0;
+        } else if (c == 0x107) { /* KEY_END */
+            cursor_x = (int)line_len[cursor_y];
+        } else if (c == 0x104) { /* KEY_PGUP */
+            cursor_y -= EDIT_SCR_LINES - 2;
+            if (cursor_y < 0) cursor_y = 0;
+            if ((uint32_t)cursor_x > line_len[cursor_y])
+                cursor_x = (int)line_len[cursor_y];
+        } else if (c == 0x105) { /* KEY_PGDN */
+            cursor_y += EDIT_SCR_LINES - 2;
+            if ((uint32_t)cursor_y >= line_count) cursor_y = (int)(line_count - 1);
+            if ((uint32_t)cursor_x > line_len[cursor_y])
+                cursor_x = (int)line_len[cursor_y];
+        } else if (c == 0x109) { /* KEY_DELETE */
+            editor_delete();
+        } else if (c == '\n') {
             editor_insert_newline();
         } else if (c == '\b' || c == 0x7F) {
             editor_backspace();
-        } else if (c == 0x1B) {
-            /* Extended key - already handled by get_key returning KEY_* */
         } else if (c >= ' ' && c <= '~') {
             editor_insert_char((char)c);
         }
