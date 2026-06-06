@@ -83,6 +83,33 @@ static void cmd_clear(int argc, char **argv) {
     (void)argc; (void)argv; console_clear();
 }
 
+static void cmd_ps(int argc, char **argv) {
+    (void)argc; (void)argv;
+    extern void task_list_all(void);
+    task_list_all();
+}
+
+static void cmd_kill(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: kill <pid> [signal]\n"); return; }
+    /* Parse PID */
+    uint32_t pid = 0;
+    const char *s = argv[1];
+    while (*s >= '0' && *s <= '9') { pid = pid * 10 + (uint32_t)(*s - '0'); s++; }
+    int sig = 15; /* SIGTERM default */
+    if (argc >= 3) {
+        sig = 0; s = argv[2];
+        while (*s >= '0' && *s <= '9') { sig = sig * 10 + (*s - '0'); s++; }
+    }
+    extern int task_kill(uint32_t id, int sig);
+    if (task_kill(pid, sig) < 0) {
+        console_puts("kill: failed (pid ");
+        char buf[16]; int n = 0; uint32_t v = pid;
+        do { buf[n++] = '0' + v % 10; v /= 10; } while (v);
+        while (n--) console_putchar(buf[n]);
+        console_puts(")\n");
+    }
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
@@ -93,6 +120,8 @@ void tool_system_init(void) {
         {"version", CMD_GROUP_SYSTEM, "Show version info",   "version", cmd_version},
         {"about",   CMD_GROUP_SYSTEM, "Show HBOS overview",  "about",   cmd_about},
         {"clear",   CMD_GROUP_SYSTEM, "Clear the screen",    "clear",   cmd_clear},
+        {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
+        {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
