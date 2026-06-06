@@ -101,6 +101,36 @@ static int serial_get_key(void) {
     return c;
 }
 
+static void kb_controller_init(void) {
+    /* Disable both PS/2 devices */
+    outb(0x64, 0xAD);
+    outb(0x64, 0xA7);
+    /* Flush output buffer */
+    for (int i = 0; i < 16; i++) { inb(0x60); int t = 1000; while (t--) __asm__ volatile("pause"); }
+    /* Self-test */
+    outb(0x64, 0xAA);
+    {
+        int t = 100000; while (!(inb(0x64) & 1) && t--) __asm__ volatile("pause");
+        if (t > 0) inb(0x60); /* read result, expect 0x55 */
+    }
+    /* Enable first PS/2 port */
+    outb(0x64, 0xAE);
+    /* Reset keyboard */
+    outb(0x60, 0xFF);
+    {
+        int t = 100000;
+        while (!(inb(0x64) & 1) && t--) __asm__ volatile("pause");
+        if (t > 0) { inb(0x60); inb(0x60); } /* flush AA/FA */
+    }
+    /* Enable scanning */
+    outb(0x60, 0xF4);
+    {
+        int t = 100000;
+        while (!(inb(0x64) & 1) && t--) __asm__ volatile("pause");
+        if (t > 0) inb(0x60); /* read ACK */
+    }
+}
+
 static bool kb_wait_input_clear(void) {
     int timeout = 100000;
     while ((inb(0x64) & 2) && --timeout);
@@ -606,6 +636,8 @@ void shell_run(void) {
     char history_draft[CMD_BUF_SIZE];
     int cmd_len = 0, cmd_pos = 0;
     bool browsing_history = false;
+
+    kb_controller_init();
 
     console_puts(
         "\x1b[34m"
