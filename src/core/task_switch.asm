@@ -19,7 +19,8 @@ section .text
 bits 64
 
 task_switch:
-    ; Save callee-saved registers onto current task's stack
+    ; Save callee-saved registers + RFLAGS onto current task's stack
+    pushfq              ; Save RFLAGS (IF state)
     push rbp
     push rbx
     push r12
@@ -33,13 +34,14 @@ task_switch:
     ; Load next task's RSP from *next_rsp (rsi points to &next->rsp)
     mov rsp, [rsi]
 
-    ; Restore callee-saved registers of next task
+    ; Restore callee-saved registers + RFLAGS of next task
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     pop rbp
+    popfq               ; Restore RFLAGS (restores IF)
 
     ; Return to where next task yielded (return address on its stack)
     ret

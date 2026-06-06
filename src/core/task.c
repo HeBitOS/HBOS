@@ -191,6 +191,7 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     *--sp = (uint64_t)entry;                   // 最高地址槽位
     *--sp = (uint64_t)arg;
     *--sp = (uint64_t)task_entry_trampoline;   // ret 跳转目标
+    *--sp = 0x202;         // RFLAGS (IF=1, reserved bit 1)
     *--sp = 0;  // RBP
     *--sp = 0;  // RBX
     *--sp = 0;  // R12
@@ -273,6 +274,7 @@ int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack
     *--sp = (uint64_t)ctx;                       // arg → rdi
     *--sp = (uint64_t)task_enter_ring3;          // entry → rax
     *--sp = (uint64_t)task_entry_trampoline;     // ret target
+    *--sp = 0x202;         // RFLAGS (IF=1)
     *--sp = 0;  // RBP
     *--sp = 0;  // RBX
     *--sp = 0;  // R12
@@ -464,6 +466,7 @@ int task_fork(void) {
     *--sp = (uint64_t)current_task->entry;
     *--sp = (uint64_t)current_task->arg;
     *--sp = (uint64_t)task_entry_trampoline;
+    *--sp = 0x202;         // RFLAGS (IF=1)
     *--sp = 0;  // RBP
     *--sp = 0;  // RBX
     *--sp = 0;  // R12
