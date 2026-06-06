@@ -1014,7 +1014,7 @@ static void cmd_cc(int argc, char **argv) {
 /* ── Registration ───────────────────────────────────────────── */
 void tool_cc_init(void) {
     static const command_t cmds[] = {
-        {"cc", CMD_GROUP_USER, "C interpreter", "cc [file.c]", cmd_cc},
+        {"gcc", CMD_GROUP_USER, "C/C++ compiler", "gcc [file.c]", cmd_cc},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
