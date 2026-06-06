@@ -48,6 +48,88 @@ static const char *group_cn(int g) {
     }
 }
 
+static const char *cmd_detail(const char *name) {
+    if (strcmp(name, "ls") == 0) return
+        "  List files in the current directory.\n"
+        "  Directories shown in blue with / suffix.\n"
+        "  Example: ls\n";
+    if (strcmp(name, "cd") == 0) return
+        "  Change the current working directory.\n"
+        "  Use '..' to go up one level. No args returns to /.\n"
+        "  Example: cd documents  cd ..  cd /\n";
+    if (strcmp(name, "pwd") == 0) return
+        "  Print the current working directory path.\n"
+        "  Example: pwd\n";
+    if (strcmp(name, "mkdir") == 0) return
+        "  Create a new directory.\n"
+        "  Example: mkdir projects\n";
+    if (strcmp(name, "rmdir") == 0) return
+        "  Remove an empty directory.\n"
+        "  Example: rmdir old_dir\n";
+    if (strcmp(name, "cat") == 0) return
+        "  Display the contents of a file.\n"
+        "  Example: cat readme.txt\n";
+    if (strcmp(name, "edit") == 0) return
+        "  Open a file in the TUI text editor.\n"
+        "  Ctrl+S to save, Ctrl+Q to quit.\n"
+        "  Arrow keys, Home/End, PageUp/Down supported.\n"
+        "  Example: edit notes.txt\n";
+    if (strcmp(name, "touch") == 0) return
+        "  Create an empty file if it doesn't exist.\n"
+        "  Example: touch hello.txt\n";
+    if (strcmp(name, "rm") == 0) return
+        "  Delete a file.\n"
+        "  Example: rm old_file.txt\n";
+    if (strcmp(name, "cp") == 0) return
+        "  Copy a file from source to destination.\n"
+        "  Example: cp file.txt backup.txt\n";
+    if (strcmp(name, "mv") == 0) return
+        "  Move/rename a file.\n"
+        "  Example: mv old.txt new.txt\n";
+    if (strcmp(name, "ps") == 0) return
+        "  List all running tasks with ID, name, and state.\n"
+        "  States: RUNNING, READY, BLOCKED, TERMINATED\n"
+        "  Example: ps\n";
+    if (strcmp(name, "kill") == 0) return
+        "  Send a signal to a task by PID.\n"
+        "  Default signal is 15 (SIGTERM).\n"
+        "  Example: kill 3  kill 5 9\n";
+    if (strcmp(name, "gui") == 0) return
+        "  Start the graphical desktop environment.\n"
+        "  Press ESC or Q to exit back to shell.\n"
+        "  Mouse and keyboard supported.\n"
+        "  Example: gui\n";
+    if (strcmp(name, "writefile") == 0) return
+        "  Write text to a file (creates or overwrites).\n"
+        "  Example: writefile test.txt hello world\n";
+    if (strcmp(name, "appendfile") == 0) return
+        "  Append text to the end of a file.\n"
+        "  Example: appendfile log.txt new entry\n";
+    if (strcmp(name, "hexdump") == 0) return
+        "  Display file contents in hexadecimal.\n"
+        "  Example: hexdump boot.bin\n";
+    if (strcmp(name, "stat") == 0) return
+        "  Show file metadata (name, size, mode).\n"
+        "  Example: stat myfile.txt\n";
+    if (strcmp(name, "help") == 0) return
+        "  Show help. Without args lists all commands.\n"
+        "  With a command name shows detailed help.\n"
+        "  Example: help ls  help edit\n";
+    if (strcmp(name, "clear") == 0) return
+        "  Clear the terminal screen.\n"
+        "  Example: clear\n";
+    if (strcmp(name, "reboot") == 0) return
+        "  Reboot the system immediately.\n"
+        "  Example: reboot\n";
+    if (strcmp(name, "history") == 0) return
+        "  Show previously entered commands.\n"
+        "  Example: history\n";
+    if (strcmp(name, "diskmgr") == 0) return
+        "  Show disk partitions, usage, and filesystem info.\n"
+        "  Example: diskmgr\n";
+    return NULL;
+}
+
 static void print_cmd_help(const char *name) {
     const command_t **list = cmd_get_list();
     uint32_t cnt = cmd_get_count();
@@ -61,6 +143,8 @@ static void print_cmd_help(const char *name) {
             if (cn) { PUTS_CN("\n  \x1b[36m中文:\x1b[0m "); PUTS_CN(cn); }
             console_puts("\n  \x1b[36mUsage:\x1b[0m "); console_puts(list[i]->usage);
             console_puts("\n");
+            const char *detail = cmd_detail(name);
+            if (detail) console_puts(detail);
             return;
         }
     }
