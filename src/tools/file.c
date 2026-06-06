@@ -344,8 +344,77 @@ static void cmd_appendfile(int argc, char **argv) {
     write_args_to_file("appendfile", argv[1], O_CREAT | O_WRONLY | O_APPEND, argc, argv);
 }
 
+/* ── cwd support ─────────────────────────────────────────────── */
+static char g_cwd[256] = "/";
+
+static void path_join(const char *dir, const char *rel, char *out, uint32_t cap) {
+    uint32_t p = 0;
+    if (rel[0] == '/') {
+        /* absolute path */
+        while (rel[p] && p < cap - 1) { out[p] = rel[p]; p++; }
+        out[p] = '\0';
+        return;
+    }
+    /* relative: start with cwd */
+    uint32_t i = 0;
+    while (dir[i] && p < cap - 1) { out[p++] = dir[i++]; }
+    if (p > 0 && out[p - 1] != '/' && p < cap - 1) out[p++] = '/';
+    i = 0;
+    while (rel[i] && p < cap - 1) { out[p++] = rel[i++]; }
+    out[p] = '\0';
+    /* resolve ".." */
+    char *pp;
+    while ((pp = strstr(out, "/..")) != NULL) {
+        if (pp == out) { strcpy(out, "/"); break; }
+        char *prev = pp - 1;
+        while (prev > out && *prev != '/') prev--;
+        if (*prev == '/') prev++;
+        uint32_t rest_len = (uint32_t)strlen(pp + 3);
+        memmove(prev, pp + 3, rest_len + 1);
+    }
+    /* remove trailing / except root */
+    uint32_t len = (uint32_t)strlen(out);
+    if (len > 1 && out[len - 1] == '/') out[len - 1] = '\0';
+}
+
+static void cmd_cd(int argc, char **argv) {
+    if (argc < 2) { strcpy(g_cwd, "/"); return; }
+    char full[256];
+    path_join(g_cwd, argv[1], full, sizeof(full));
+    if (strcmp(full, "/") == 0) { strcpy(g_cwd, "/"); return; }
+    /* Check it exists and is a directory */
+    struct stat st;
+    if (stat(full, &st) < 0) { print_errno("cd", full); return; }
+    /* Accept directories (mode bit convention: 1 = dir in our VFS) */
+    strcpy(g_cwd, full);
+}
+
+static void cmd_pwd(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts(g_cwd);
+    console_putchar('\n');
+}
+
+static void cmd_mkdir_cmd(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: mkdir <dir>\n"); return; }
+    char full[256];
+    path_join(g_cwd, argv[1], full, sizeof(full));
+    if (vfs_mkdir(full) < 0) print_errno("mkdir", argv[1]);
+}
+
+static void cmd_rmdir_cmd(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: rmdir <dir>\n"); return; }
+    char full[256];
+    path_join(g_cwd, argv[1], full, sizeof(full));
+    if (vfs_rmdir(full) < 0) print_errno("rmdir", argv[1]);
+}
+
 void tool_file_init(void) {
     static const command_t cmds[] = {
+        {"cd",         CMD_GROUP_FILE, "Change directory",       "cd <dir>",                   cmd_cd},
+        {"pwd",        CMD_GROUP_FILE, "Print working directory", "pwd",                       cmd_pwd},
+        {"mkdir",      CMD_GROUP_FILE, "Create a directory",     "mkdir <dir>",                cmd_mkdir_cmd},
+        {"rmdir",      CMD_GROUP_FILE, "Remove a directory",     "rmdir <dir>",                cmd_rmdir_cmd},
         {"ls",         CMD_GROUP_FILE, "List files",             "ls",                         cmd_ls},
         {"cat",        CMD_GROUP_FILE, "Print a file",           "cat <file>",                 cmd_cat},
         {"touch",      CMD_GROUP_FILE, "Create an empty file",   "touch <file>",               cmd_touch},
