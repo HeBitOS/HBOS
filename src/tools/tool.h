@@ -28,6 +28,7 @@ void tool_ata_init(void);
 void tool_disk_init(void);
 void tool_gui_init(void);
 void tool_net_init(void);
+void tool_basic_init(void);
 
 // 聚合初始化 — 注册所有内建工具
 static inline void tool_init_all(void) {
@@ -41,6 +42,7 @@ static inline void tool_init_all(void) {
     tool_disk_init();
     tool_gui_init();
     tool_net_init();
+    tool_basic_init();
 }
 
 #endif /* HBOS_TOOL_H */
