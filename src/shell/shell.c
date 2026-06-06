@@ -490,7 +490,12 @@ void shell_init(void) {
     // All commands are registered by tool_init_all() in kernel.c
 }
 
-void shell_print_prompt(void) { console_puts("\x1b[32mhbos\x1b[0m# "); }
+void shell_print_prompt(void) {
+    extern char g_cwd[];
+    console_puts("\x1b[32mhbos\x1b[0m:");
+    console_puts(g_cwd);
+    console_puts("# ");
+}
 
 // Scrollback APIs
 void console_scroll_up(int lines);

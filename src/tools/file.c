@@ -37,16 +37,27 @@ static void print_errno(const char *cmd, const char *path) {
 }
 
 static void cmd_ls(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    (void)argc; (void)argv;
     uint32_t count = vfs_count();
     for (uint32_t i = 0; i < count; i++) {
         vfs_node_t *node = vfs_get(i);
-        if (!node) continue;
+        if (!node || !node->name[0]) continue;
+        if (node->type == VFS_NODE_DIR) console_puts("\x1b[34m");
+        else console_puts("\x1b[0m");
         console_puts(node->name);
-        console_puts("  ");
-        print_uint(node->size);
-        console_puts(" bytes\n");
+        if (node->type == VFS_NODE_DIR) console_puts("/");
+        console_puts("\x1b[0m");
+        /* Padding to align sizes */
+        uint32_t nlen = 0; while (node->name[nlen]) nlen++;
+        if (node->type == VFS_NODE_DIR) nlen++;
+        for (uint32_t p = nlen; p < 24; p++) console_putchar(' ');
+        if (node->type == VFS_NODE_FILE) {
+            print_uint(node->size);
+            console_puts(" B");
+        } else {
+            console_puts("<DIR>");
+        }
+        console_putchar('\n');
     }
 }
 
