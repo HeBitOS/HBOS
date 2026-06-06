@@ -494,6 +494,49 @@ static void cmd_wc(int argc, char **argv) {
     console_puts(argv[1]); console_putchar('\n');
 }
 
+static void cmd_sort(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: sort <file>\n"); return; }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) { print_errno("sort", argv[1]); return; }
+    /* Read entire file into buffer */
+    static char sort_buf[4096];
+    uint32_t total = 0;
+    ssize_t n;
+    while ((n = read(fd, sort_buf + total, sizeof(sort_buf) - total - 1)) > 0)
+        total += (uint32_t)n;
+    close(fd);
+    sort_buf[total] = '\0';
+    /* Parse lines */
+    #define MAX_SORT_LINES 256
+    static char *lines[MAX_SORT_LINES];
+    uint32_t lc = 0;
+    char *p = sort_buf;
+    while (*p && lc < MAX_SORT_LINES) {
+        lines[lc++] = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = '\0'; p++; }
+    }
+    /* Simple insertion sort */
+    for (uint32_t i = 1; i < lc; i++) {
+        char *key = lines[i];
+        int32_t j = (int32_t)i - 1;
+        while (j >= 0) {
+            /* Compare */
+            const char *a = lines[j], *b = key;
+            while (*a && *a == *b) { a++; b++; }
+            if ((unsigned char)*a <= (unsigned char)*b) break;
+            lines[j + 1] = lines[j];
+            j--;
+        }
+        lines[j + 1] = key;
+    }
+    /* Print sorted */
+    for (uint32_t i = 0; i < lc; i++) {
+        console_puts(lines[i]);
+        console_putchar('\n');
+    }
+}
+
 extern void cmd_edit(int argc, char **argv);
 
 void tool_file_init(void) {
@@ -521,6 +564,7 @@ void tool_file_init(void) {
         {"edit",       CMD_GROUP_FILE, "Edit a file (TUI editor)","edit <file>",               cmd_edit},
         {"find",       CMD_GROUP_FILE, "Find files by name",     "find [pattern]",            cmd_find},
         {"wc",         CMD_GROUP_FILE, "Count lines/words/bytes", "wc <file>",                cmd_wc},
+        {"sort",       CMD_GROUP_FILE, "Sort file lines",        "sort <file>",              cmd_sort},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
