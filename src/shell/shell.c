@@ -709,6 +709,13 @@ static void tab_complete(char *line, int *len, int *pos) {
     }
 }
 
+static volatile int shell_exit_flag;
+
+void cmd_exit(int argc, char **argv) {
+    (void)argc; (void)argv;
+    shell_exit_flag = 1;
+}
+
 void shell_run(void) {
     char cmd_line[CMD_BUF_SIZE];
     char history_draft[CMD_BUF_SIZE];
@@ -732,6 +739,10 @@ void shell_run(void) {
     );
 
     while (1) {
+        if (shell_exit_flag) {
+            console_puts("\x1b[33mShell exited.\x1b[0m\n");
+            return;
+        }
         shell_print_prompt();
         cmd_len = 0; cmd_pos = 0; hist_idx = hist_count;
         history_draft[0] = 0;

@@ -268,6 +268,7 @@ static void cmd_uname(int argc, char **argv) {
 
 extern void cmd_alias(int argc, char **argv);
 extern void cmd_unalias(int argc, char **argv);
+extern void cmd_exit(int argc, char **argv);
 
 void tool_system_init(void) {
     static const command_t cmds[] = {
@@ -286,6 +287,7 @@ void tool_system_init(void) {
         {"uname",   CMD_GROUP_SYSTEM, "Show system identity",  "uname", cmd_uname},
         {"alias",   CMD_GROUP_SYSTEM, "Create command alias",  "alias name=cmd", cmd_alias},
         {"unalias", CMD_GROUP_SYSTEM, "Remove command alias",  "unalias <name>", cmd_unalias},
+        {"exit",    CMD_GROUP_SYSTEM, "Exit the shell",       "exit", cmd_exit},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
