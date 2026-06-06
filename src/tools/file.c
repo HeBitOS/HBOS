@@ -62,21 +62,33 @@ static void cmd_ls(int argc, char **argv) {
 }
 
 static void cmd_cat(int argc, char **argv) {
+    int show_nums = 0;
+    const char *file = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-n") == 0) show_nums = 1;
+        else file = argv[i];
+    }
     int fd = STDIN_FILENO;
-    if (argc >= 2) {
-        fd = open(argv[1], O_RDONLY);
-        if (fd < 0) {
-            print_errno("cat", argv[1]);
-            return;
-        }
+    if (file) {
+        fd = open(file, O_RDONLY);
+        if (fd < 0) { print_errno("cat", file); return; }
     }
 
     char buf[128];
     char last = '\n';
+    int line = 1;
     ssize_t n;
     while ((n = read(fd, buf, sizeof(buf))) > 0) {
-        write(STDOUT_FILENO, buf, (size_t)n);
-        last = buf[n - 1];
+        for (ssize_t i = 0; i < n; i++) {
+            if (show_nums && last == '\n') {
+                char nb[8]; int ni = 0; int v = line++;
+                do { nb[ni++] = '0' + v % 10; v /= 10; } while (v);
+                while (ni > 0) console_putchar(nb[--ni]);
+                console_puts("  ");
+            }
+            console_putchar(buf[i]);
+            last = buf[i];
+        }
     }
     if (fd != STDIN_FILENO) close(fd);
     if (last != '\n') console_putchar('\n');
