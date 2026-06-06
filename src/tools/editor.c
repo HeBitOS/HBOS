@@ -14,6 +14,7 @@
 
 #include "../fcntl.h"
 #include "../graphics/graphics.h"
+#include "../shell/shell.h"
 #include "../string.h"
 #include "../unistd.h"
 #include "tool.h"
@@ -217,7 +218,7 @@ void cmd_edit(int argc, char **argv) {
     editor_draw_screen();
 
     while (1) {
-        int c = get_key();
+        int c = kb_get_key();
         if (c == 0) continue;
 
         /* Ctrl+S = save */
@@ -238,7 +239,7 @@ void cmd_edit(int argc, char **argv) {
                 console_puts(";1H");
                 console_puts("\x1b[7m Save before quit? Y/N \x1b[0m");
                 while (1) {
-                    c = get_key();
+                    c = kb_get_key();
                     if (c == 'y' || c == 'Y') { editor_save(); break; }
                     if (c == 'n' || c == 'N' || c == 'q' || c == 0x11) break;
                 }
