@@ -629,6 +629,56 @@ static void cmd_tail(int argc, char **argv) {
     }
 }
 
+static void cmd_guess(int argc, char **argv) {
+    (void)argc; (void)argv;
+    /* Simple LCG random using RTC or counter */
+    extern uint8_t cmos_read(uint8_t reg);
+    uint32_t seed = (uint32_t)cmos_read(0x00) | ((uint32_t)cmos_read(0x02) << 8) |
+                    ((uint32_t)cmos_read(0x04) << 16);
+    seed = seed * 1103515245 + 12345;
+    int target = (int)((seed >> 16) % 100) + 1;
+
+    console_puts("\x1b[33m=== 猜数字游戏 ===\x1b[0m\n");
+    console_puts("我想了一个 1~100 的数字，猜猜看！\n\n");
+
+    int attempts = 0;
+    char buf[32];
+    while (1) {
+        console_puts("你的猜测: ");
+        /* Read a line */
+        int bi = 0;
+        while (1) {
+            extern int get_key(void);
+            int c = get_key();
+            if (c == '\n') { console_putchar('\n'); break; }
+            if (c == '\b' || c == 0x7F) {
+                if (bi > 0) { bi--; console_putchar('\b'); console_putchar(' '); console_putchar('\b'); }
+            } else if (c >= '0' && c <= '9' && bi < 30) {
+                buf[bi++] = (char)c;
+                console_putchar((char)c);
+            }
+        }
+        buf[bi] = '\0';
+        if (bi == 0) continue;
+        int guess = 0;
+        for (int i = 0; i < bi; i++) guess = guess * 10 + (buf[i] - '0');
+        attempts++;
+
+        if (guess == target) {
+            console_puts("\x1b[32m正确！\x1b[0m 你用了 ");
+            char nb[8]; int ni = 0; int v = attempts;
+            do { nb[ni++] = '0' + v % 10; v /= 10; } while (v);
+            while (ni--) console_putchar(nb[ni]);
+            console_puts(" 次猜中。\n");
+            break;
+        } else if (guess < target) {
+            console_puts("太小了！\n");
+        } else {
+            console_puts("太大了！\n");
+        }
+    }
+}
+
 extern void cmd_edit(int argc, char **argv);
 
 void tool_file_init(void) {
@@ -660,6 +710,7 @@ void tool_file_init(void) {
         {"uniq",       CMD_GROUP_FILE, "Remove duplicate lines",  "uniq <file>",             cmd_uniq},
         {"head",       CMD_GROUP_FILE, "Show first N lines",      "head [-n] <file>",        cmd_head},
         {"tail",       CMD_GROUP_FILE, "Show last N lines",       "tail [-n] <file>",        cmd_tail},
+        {"guess",      CMD_GROUP_FILE, "Number guessing game",    "guess",                   cmd_guess},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
