@@ -4,6 +4,7 @@
  *        包含 MBR/GPT 分区表解析
  */
 #include "block.h"
+#include "ext2.h"
 #include "fs.h"
 #include "string.h"
 
@@ -21,6 +22,7 @@
 typedef enum {
     FS_BACKEND_RAM = 0, /**< 内存文件系统后端 */
     FS_BACKEND_HBFS,    /**< 磁盘文件系统后端 */
+    FS_BACKEND_EXT2,    /**< EXT2 文件系统后端 */
 } fs_backend_t;
 
 /** HBFS 超级块结构，存储在分区第一个扇区 */
@@ -61,6 +63,13 @@ static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, u
 static int ramfs_vfs_truncate(vfs_node_t *node); /**< ramfs VFS 截断操作 */
 static int ramfs_vfs_unlink(vfs_node_t *node);   /**< ramfs VFS 删除操作 */
 
+static ext2_fs_t ext2_fs; /**< EXT2 文件系统实例 */
+static int ext2_try_mount(void);
+static int ext2_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);
+static int ext2_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count);
+static int ext2_vfs_truncate(vfs_node_t *node);
+static int ext2_vfs_unlink(vfs_node_t *node);
+
 /** 设置错误信息并返回失败 */
 static int fs_fail(const char *msg) {
     fs_error = msg;
@@ -78,6 +87,13 @@ static const vfs_ops_t ramfs_ops = {
     .write = ramfs_vfs_write,
     .truncate = ramfs_vfs_truncate,
     .unlink = ramfs_vfs_unlink,
+};
+
+static const vfs_ops_t ext2_ops = {
+    .read = ext2_vfs_read,
+    .write = ext2_vfs_write,
+    .truncate = ext2_vfs_truncate,
+    .unlink = ext2_vfs_unlink,
 };
 
 /** 计算 HBFS 文件表的起始 LBA 地址 */
@@ -259,6 +275,93 @@ static int hbfs_update_entry(file_t *f) {
         strcpy(e->name, f->name);
     }
     return hbfs_sync_table();
+}
+
+/** 从 EXT2 根目录读取文件条目并填充 fs.files[] */
+static void ext2_rebuild_files(void) {
+    fs.file_count = 0;
+    ext2_inode_t root;
+    if (ext2_read_inode(&ext2_fs, EXT2_ROOT_INO, &root) < 0) return;
+    uint32_t idx = 0;
+    char name[64];
+    uint32_t type;
+    while (idx < MAX_FILES && ext2_readdir(&ext2_fs, &root, idx, name, &type) == 0) {
+        if (name[0] == '.' || idx >= MAX_FILES) { idx++; continue; }
+        file_t *f = &fs.files[fs.file_count];
+        uint32_t ino;
+        if (ext2_lookup(&ext2_fs, &root, name, &ino) < 0) { idx++; continue; }
+        ext2_inode_t inode;
+        if (ext2_read_inode(&ext2_fs, ino, &inode) < 0) { idx++; continue; }
+        if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG &&
+            (inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) { idx++; continue; }
+        uint32_t nlen = 0; while (name[nlen] && nlen < MAX_FILENAME - 1) nlen++;
+        memcpy(f->name, name, nlen); f->name[nlen] = '\0';
+        f->size = inode.i_size;
+        f->capacity = inode.i_size > RAMFS_MAX_FILE_SIZE ? inode.i_size : RAMFS_MAX_FILE_SIZE;
+        f->data = NULL;
+        f->disk_slot = ino;
+        f->used = 1;
+        f->type = (type == 1) ? 1 : 0;
+        f->node.type = f->type ? VFS_NODE_DIR : VFS_NODE_FILE;
+        f->node.size = f->size;
+        f->node.capacity = f->capacity;
+        f->node.private_data = f;
+        f->node.ops = &ext2_ops;
+        memcpy(f->node.name, f->name, nlen + 1);
+        fs.file_count++;
+        idx++;
+    }
+}
+
+/** EXT2 VFS 读取操作 */
+static int ext2_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count) {
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used || !buf) return 0;
+    if (offset >= f->size) return 0;
+    uint32_t avail = f->size - offset;
+    if (count > avail) count = avail;
+    ext2_inode_t inode;
+    if (ext2_read_inode(&ext2_fs, f->disk_slot, &inode) < 0) return 0;
+    return ext2_read_file(&ext2_fs, &inode, offset, (uint8_t *)buf, count);
+}
+
+/** EXT2 VFS 写入操作 */
+static int ext2_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count) {
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used || (!buf && count)) return -1;
+    int ret = ext2_write_file(&ext2_fs, f->disk_slot, offset, (const uint8_t *)buf, count);
+    if (ret > 0) {
+        ext2_inode_t inode;
+        if (ext2_read_inode(&ext2_fs, f->disk_slot, &inode) == 0) {
+            f->size = inode.i_size;
+            f->node.size = inode.i_size;
+        }
+    }
+    return ret;
+}
+
+/** EXT2 VFS 截断操作 */
+static int ext2_vfs_truncate(vfs_node_t *node) {
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used) return -1;
+    int ret = ext2_truncate(&ext2_fs, f->disk_slot);
+    if (ret == 0) { f->size = 0; f->node.size = 0; }
+    return ret;
+}
+
+/** EXT2 VFS 删除操作 */
+static int ext2_vfs_unlink(vfs_node_t *node) {
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used) return -1;
+    int ret = ext2_unlink(&ext2_fs, EXT2_ROOT_INO, f->name);
+    if (ret == 0) {
+        f->used = 0;
+        f->name[0] = '\0';
+        f->node.name[0] = '\0';
+        f->node.size = 0;
+        if (fs.file_count > 0) fs.file_count--;
+    }
+    return ret;
 }
 
 /**
@@ -625,7 +728,13 @@ static int hbfs_format_range(uint32_t start, uint32_t sectors) {
 // 文件系统初始化
 int fs_init(void) {
     fs_reset_ram();
-    (void)fs_mount_disk();
+    if (fs_mount_disk() < 0) {
+        if (ext2_try_mount() == 0) {
+            fs_backend = FS_BACKEND_EXT2;
+            ext2_rebuild_files();
+            fs.total_sectors = block_sector_count();
+        }
+    }
     return 1;
 }
 
@@ -743,6 +852,22 @@ int fs_mount_disk(void) {
     return 0;
 }
 
+/** 尝试挂载 EXT2 分区（扫描 MBR 中类型 0x83 的分区） */
+static int ext2_try_mount(void) {
+    uint8_t mbr[512] __attribute__((aligned(2)));
+    if (block_read_sector(0, mbr) < 0) return -1;
+    for (int i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        uint8_t type = e[4];
+        if (type != 0x83) continue;
+        uint32_t p_start = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
+                           ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+        if (p_start == 0) continue;
+        if (ext2_mount(p_start, &ext2_fs) == 0) return 0;
+    }
+    return -1;
+}
+
 /** 将文件表同步到磁盘（仅 HBFS 模式有效） */
 int fs_sync(void) {
     if (fs_backend != FS_BACKEND_HBFS) return 0;
@@ -751,12 +876,13 @@ int fs_sync(void) {
 
 /** 判断当前后端是否为磁盘文件系统 */
 int fs_is_disk(void) {
-    return fs_backend == FS_BACKEND_HBFS;
+    return fs_backend == FS_BACKEND_HBFS || fs_backend == FS_BACKEND_EXT2;
 }
 
 /** 获取当前后端名称字符串 */
 const char *fs_backend_name(void) {
     static char name[16];
+    if (fs_backend == FS_BACKEND_EXT2) return "ext2";
     if (fs_backend != FS_BACKEND_HBFS) return "ramfs";
     const char *blk = block_backend_name();
     name[0] = 'h'; name[1] = 'b'; name[2] = 'f'; name[3] = 's'; name[4] = '/';
@@ -816,6 +942,31 @@ file_t *fs_create_file(const char *name) {
     file_t *existing = fs_find_file(norm);
     if (existing) return existing;
 
+    if (fs_backend == FS_BACKEND_EXT2) {
+        int ino = ext2_create_file(&ext2_fs, EXT2_ROOT_INO, norm, 1);
+        if (ino < 0) return NULL;
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            file_t *f = &fs.files[i];
+            if (f->used) continue;
+            strcpy(f->name, norm);
+            f->size = 0;
+            f->capacity = RAMFS_MAX_FILE_SIZE;
+            f->data = NULL;
+            f->node.type = VFS_NODE_FILE;
+            f->node.size = 0;
+            f->node.capacity = RAMFS_MAX_FILE_SIZE;
+            f->node.private_data = f;
+            f->node.ops = &ext2_ops;
+            strcpy(f->node.name, norm);
+            f->disk_slot = (uint32_t)ino;
+            f->used = 1;
+            f->type = 0;
+            fs.file_count++;
+            return f;
+        }
+        return NULL;
+    }
+
     for (uint32_t i = 0; i < MAX_FILES; i++) {
         file_t *f = &fs.files[i];
         if (f->used) continue;
@@ -847,6 +998,9 @@ file_t *fs_create_file(const char *name) {
 int fs_delete_file(const char *name) {
     file_t *f = fs_find_file(name);
     if (!f) return -1;
+    if (fs_backend == FS_BACKEND_EXT2) {
+        return ext2_vfs_unlink(&f->node);
+    }
     f->used = 0;
     f->name[0] = '\0';
     f->size = 0;
@@ -860,6 +1014,9 @@ int fs_delete_file(const char *name) {
 /** 截断文件，将大小清零 */
 int fs_truncate_file(file_t *f) {
     if (!f || !f->used) return -1;
+    if (fs_backend == FS_BACKEND_EXT2) {
+        return ext2_vfs_truncate(&f->node);
+    }
     f->size = 0;
     f->node.size = 0;
     if (fs_backend == FS_BACKEND_HBFS) return hbfs_update_entry(f);
@@ -870,6 +1027,8 @@ int fs_truncate_file(file_t *f) {
 uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count) {
     if (fs_backend == FS_BACKEND_HBFS)
         return hbfs_read_data(f, offset, buf, count);
+    if (fs_backend == FS_BACKEND_EXT2)
+        return (uint32_t)ext2_vfs_read(&f->node, offset, buf, count);
     if (!f || !f->used || !buf) return 0;
     if (offset >= f->size) return 0;
     uint32_t available = f->size - offset;
@@ -882,6 +1041,8 @@ uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count
 int fs_write_file_data(file_t *f, uint32_t offset, const void *buf, uint32_t count) {
     if (fs_backend == FS_BACKEND_HBFS)
         return hbfs_write_data(f, offset, buf, count);
+    if (fs_backend == FS_BACKEND_EXT2)
+        return ext2_vfs_write(&f->node, offset, buf, count);
     if (!f || !f->used || (!buf && count)) return -1;
     if (offset > f->capacity || count > f->capacity - offset) return -1;
     memcpy(f->data + offset, buf, count);

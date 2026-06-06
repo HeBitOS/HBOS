@@ -78,6 +78,7 @@ static void print_partition_line(uint32_t idx, const fs_partition_info_t *p, uin
     if (p->type == 0x0C) console_puts(" FAT32 ");
     else if (p->type == 0xEF) console_puts(" ESP   ");
     else if (p->type == 0xEB) console_puts(" HBFS  ");
+    else if (p->type == 0x83) console_puts(" EXT2  ");
     else console_puts("       ");
     console_puts(" start=");
     print_uint(p->start_lba);
@@ -85,7 +86,7 @@ static void print_partition_line(uint32_t idx, const fs_partition_info_t *p, uin
     print_sectors_mib(p->sectors);
     console_puts(" ");
     usage_bar(p->sectors, disk_sectors, 18);
-    if (p->type == 0xEB && p->start_lba == fs_disk_start_lba()) console_puts(" \x1b[36mmounted\x1b[0m");
+    if ((p->type == 0xEB || p->type == 0x83) && p->start_lba == fs_disk_start_lba()) console_puts(" \x1b[36mmounted\x1b[0m");
     console_putchar('\n');
 }
 
