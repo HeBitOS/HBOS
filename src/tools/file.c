@@ -420,6 +420,8 @@ static void cmd_rmdir_cmd(int argc, char **argv) {
     if (vfs_rmdir(full) < 0) print_errno("rmdir", argv[1]);
 }
 
+extern void cmd_edit(int argc, char **argv);
+
 void tool_file_init(void) {
     static const command_t cmds[] = {
         {"cd",         CMD_GROUP_FILE, "Change directory",       "cd <dir>",                   cmd_cd},
@@ -441,6 +443,7 @@ void tool_file_init(void) {
         {"fsck",       CMD_GROUP_FILE, "Check filesystem",       "fsck",                      cmd_fsck},
         {"mount",      CMD_GROUP_FILE, "Mount HBFS ATA disk",    "mount",                     cmd_mount},
         {"mkfs",       CMD_GROUP_FILE, "Format HBFS ATA disk",   "mkfs",                      cmd_mkfs},
+        {"edit",       CMD_GROUP_FILE, "Edit a file (TUI editor)","edit <file>",               cmd_edit},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
