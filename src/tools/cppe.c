@@ -163,6 +163,17 @@ static void cppe_insert_char(char c) {
 
 static void cppe_insert_newline(void) {
     if (E.data_len >= CPPE_MAX_SIZE - 1) return;
+
+    /* Auto-indent: copy leading whitespace from current line */
+    char *cur_line = cppe_line(E.cy);
+    int indent = 0;
+    while (indent < E.line_len[E.cy] && (cur_line[indent] == ' ' || cur_line[indent] == '\t'))
+        indent++;
+
+    /* Extra indent after { */
+    int extra = 0;
+    if (E.cx > 0 && cur_line[E.cx - 1] == '{') extra = CPPE_TAB_WIDTH;
+
     int off = E.line_off[E.cy] + E.cx;
     for (int i = E.data_len; i > off; i--) E.data[i] = E.data[i - 1];
     E.data[off] = '\n';
@@ -170,6 +181,17 @@ static void cppe_insert_newline(void) {
     E.data[E.data_len] = '\0';
     E.cy++;
     E.cx = 0;
+
+    /* Insert indent */
+    for (int i = 0; i < indent + extra && E.data_len < CPPE_MAX_SIZE - 1; i++) {
+        int off2 = E.line_off[E.cy] + E.cx;
+        for (int j = E.data_len; j > off2; j--) E.data[j] = E.data[j - 1];
+        E.data[off2] = ' ';
+        E.data_len++;
+        E.cx++;
+    }
+    E.data[E.data_len] = '\0';
+
     E.dirty = 1;
     E.modified = 1;
     cppe_rebuild_lines();
@@ -258,6 +280,30 @@ static void cppe_clamp_cursor(void) {
 }
 
 /* ── Drawing ────────────────────────────────────────────────── */
+/* ── Syntax highlighting helpers ─────────────────────────────── */
+static int is_keyword(const char *s, int len) {
+    /* Check against C/C++ keywords */
+    static const char *kws[] = {
+        "int", "void", "char", "float", "double", "return", "if", "else",
+        "while", "for", "do", "switch", "case", "break", "continue",
+        "class", "public", "private", "new", "delete", "this",
+        "struct", "enum", "typedef", "const", "static", "extern",
+        "include", "define", "NULL", "true", "false",
+        NULL
+    };
+    for (int k = 0; kws[k]; k++) {
+        int klen = 0; while (kws[k][klen]) klen++;
+        if (klen == len) {
+            int match = 1;
+            for (int i = 0; i < len; i++) {
+                if (s[i] != kws[k][i]) { match = 0; break; }
+            }
+            if (match) return 1;
+        }
+    }
+    return 0;
+}
+
 static void cppe_draw_line(int row, int lidx) {
     cppe_goto(row, 1);
     /* Line number */
@@ -269,15 +315,98 @@ static void cppe_draw_line(int row, int lidx) {
     cppe_putc(' ');
     cppe_reset();
 
-    /* Line content */
+    /* Line content with syntax highlighting */
     if (lidx < E.line_count) {
         char *line = cppe_line(lidx);
         int len = E.line_len[lidx];
-        for (int i = 0; i < len && i < E.term_cols - 6; i++)
-            cppe_putc(line[i]);
-        /* Clear rest */
-        for (int i = len; i < E.term_cols - 6; i++)
-            cppe_putc(' ');
+        int col = 0;
+        int i = 0;
+        while (i < len && col < E.term_cols - 6) {
+            /* Comments: // */
+            if (line[i] == '/' && i + 1 < len && line[i + 1] == '/') {
+                cppe_set_color(32); /* green */
+                while (i < len && col < E.term_cols - 6) { cppe_putc(line[i]); i++; col++; }
+                cppe_reset();
+                break;
+            }
+            /* String literals */
+            if (line[i] == '"') {
+                cppe_set_color(33); /* yellow */
+                cppe_putc(line[i]); i++; col++;
+                while (i < len && line[i] != '"' && col < E.term_cols - 6) {
+                    if (line[i] == '\\' && i + 1 < len) { cppe_putc(line[i]); i++; col++; }
+                    cppe_putc(line[i]); i++; col++;
+                }
+                if (i < len) { cppe_putc(line[i]); i++; col++; }
+                cppe_reset();
+                continue;
+            }
+            /* Single-char strings */
+            if (line[i] == '\'') {
+                cppe_set_color(33);
+                cppe_putc(line[i]); i++; col++;
+                while (i < len && line[i] != '\'' && col < E.term_cols - 6) {
+                    cppe_putc(line[i]); i++; col++;
+                }
+                if (i < len) { cppe_putc(line[i]); i++; col++; }
+                cppe_reset();
+                continue;
+            }
+            /* Preprocessor: # */
+            if (line[i] == '#') {
+                cppe_set_color(35); /* magenta */
+                while (i < len && col < E.term_cols - 6) { cppe_putc(line[i]); i++; col++; }
+                cppe_reset();
+                break;
+            }
+            /* Numbers */
+            if (line[i] >= '0' && line[i] <= '9') {
+                cppe_set_color(36); /* cyan */
+                while (i < len && ((line[i] >= '0' && line[i] <= '9') || line[i] == 'x' || line[i] == 'X') && col < E.term_cols - 6) {
+                    cppe_putc(line[i]); i++; col++;
+                }
+                cppe_reset();
+                continue;
+            }
+            /* Identifiers / keywords */
+            if ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') || line[i] == '_') {
+                int start = i;
+                while (i < len && ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') ||
+                       (line[i] >= '0' && line[i] <= '9') || line[i] == '_')) i++;
+                int wlen = i - start;
+                if (is_keyword(line + start, wlen)) {
+                    cppe_set_color(34); /* blue for keywords */
+                } else {
+                    cppe_reset(); /* default */
+                }
+                for (int j = start; j < i && col < E.term_cols - 6; j++) { cppe_putc(line[j]); col++; }
+                cppe_reset();
+                continue;
+            }
+            /* Brackets/parens — highlight matching */
+            if (line[i] == '(' || line[i] == ')' || line[i] == '[' || line[i] == ']' ||
+                line[i] == '{' || line[i] == '}') {
+                cppe_set_color(31); /* red for brackets */
+                cppe_putc(line[i]); i++; col++;
+                cppe_reset();
+                continue;
+            }
+            /* Operators */
+            if (line[i] == '+' || line[i] == '-' || line[i] == '*' || line[i] == '/' ||
+                line[i] == '=' || line[i] == '!' || line[i] == '<' || line[i] == '>' ||
+                line[i] == '&' || line[i] == '|' || line[i] == '%') {
+                cppe_set_color(37); /* white for operators */
+                cppe_putc(line[i]); i++; col++;
+                cppe_reset();
+                continue;
+            }
+            /* Default */
+            cppe_reset();
+            cppe_putc(line[i]); i++; col++;
+        }
+        /* Clear rest of line */
+        for (int j = col; j < E.term_cols - 6; j++) cppe_putc(' ');
+        cppe_reset();
     } else {
         cppe_set_color(90);
         cppe_putc('~');
@@ -563,7 +692,15 @@ static void cppe_run(void) {
         } else if (c == '\b' || c == 0x7F) {
             cppe_backspace();
         } else if (c >= ' ' && c <= '~') {
+            /* Bracket auto-completion */
+            char close = 0;
+            if (c == '(') close = ')';
+            else if (c == '[') close = ']';
+            else if (c == '{') close = '}';
             cppe_insert_char((char)c);
+            if (close) cppe_insert_char(close);
+            /* Move cursor back one so it's between the brackets */
+            if (close && E.cx > 0) E.cx--;
         }
     }
     cppe_clear();

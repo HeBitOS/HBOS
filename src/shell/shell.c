@@ -166,6 +166,7 @@ static void kb_set_leds(void) {
 
 static const char scancode_map[128] = {0,0,'1','2','3','4','5','6','7','8','9','0','-','=','\b',0,'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '};
 static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')','_','+','\b',0,'Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A','S','D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C','V','B','N','M','<','>','?',0,'*',0,' '};
+static int ctrl_pressed = 0; /**< Ctrl键状态 */
 
 int get_key(void) {
     while (1) {
@@ -196,6 +197,8 @@ int get_key(void) {
             }
             if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; continue; }
             if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; continue; }
+            if (sc == 0x1D) { ctrl_pressed = 1; continue; } /* Ctrl press */
+            if (sc == 0x9D) { ctrl_pressed = 0; continue; } /* Ctrl release */
             if (sc == 0x3A) { caps_lock = !caps_lock; kb_set_leds(); continue; }
             if (sc == 0x45) { num_lock = !num_lock; kb_set_leds(); continue; }
             if (sc & 0x80) continue;
@@ -230,6 +233,8 @@ int get_key(void) {
             if (sc == 0x0F) return '\t';
             if (sc < 128) {
                 char c = scancode_map[sc]; if (c == 0) continue;
+                /* Ctrl+letter → control code (0x01..0x1A) */
+                if (ctrl_pressed && c >= 'a' && c <= 'z') return (char)(c - 'a' + 1);
                 if (c >= 'a' && c <= 'z') { if (shift_pressed ^ caps_lock) c = c - 'a' + 'A'; }
                 else { if (shift_pressed) c = shift_map[sc]; }
                 return c;
