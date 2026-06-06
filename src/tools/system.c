@@ -171,6 +171,71 @@ static void cmd_status(int argc, char **argv) {
     console_puts(" driver\n");
 }
 
+static void cmd_top(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts("\x1b[33m=== HBOS Top ===\x1b[0m  (refreshing, press Q to quit)\n\n");
+
+    while (1) {
+        /* Check for quit key */
+        extern int serial_get_key(void);
+        int k = serial_get_key();
+        if (k == 'q' || k == 'Q') break;
+
+        /* Move cursor to top of content (ANSI: save/restore not needed, just rewrite) */
+        console_puts("\x1b[2J\x1b[H"); /* clear + home */
+
+        console_puts("\x1b[33m=== HBOS Top ===\x1b[0m\n\n");
+
+        /* Memory */
+        uint64_t total = pmm_get_total_mem();
+        uint64_t free = pmm_get_free_mem();
+        uint64_t used = total > free ? total - free : 0;
+        console_puts("\x1b[36mMemory:\x1b[0m ");
+        print_uint64(used / 1024); console_puts("K / ");
+        print_uint64(total / 1024); console_puts("K  (");
+        print_uint((uint32_t)(total ? used * 100 / total : 0));
+        console_puts("%)\n");
+
+        /* Tasks */
+        console_puts("\x1b[36mTasks:\x1b[0m  ");
+        print_uint((uint32_t)task_get_count());
+        console_puts(" active  ");
+        console_puts(fs_backend_name());
+        console_puts("  ");
+        console_puts(block_backend_name());
+        console_puts("\n\n");
+
+        /* Task table */
+        console_puts("\x1b[36m  ID  Name                 State    \x1b[0m\n");
+        console_puts("  --- -------------------- ----------\n");
+        int cnt = task_get_count();
+        for (int i = 0; i < cnt; i++) {
+            const task_t *t = task_get_active((uint32_t)i);
+            if (!t) break;
+            console_puts("  ");
+            char buf[8]; int bi = 0; int id = (int)t->id;
+            do { buf[bi++] = '0' + id % 10; id /= 10; } while (id);
+            while (bi > 0) console_putchar(buf[--bi]);
+            console_puts("   ");
+            console_puts(t->name);
+            int pad = 20 - (int)strlen(t->name);
+            for (int p = 0; p < pad; p++) console_putchar(' ');
+            switch (t->state) {
+                case TASK_RUNNING:   console_puts("\x1b[32mRUNNING\x1b[0m  "); break;
+                case TASK_READY:     console_puts("READY    "); break;
+                case TASK_BLOCKED:   console_puts("\x1b[31mBLOCKED\x1b[0m  "); break;
+                default:             console_puts("UNKNOWN  "); break;
+            }
+            console_putchar('\n');
+        }
+
+        console_puts("\n\x1b[90mPress Q to quit\x1b[0m\n");
+
+        /* Simple delay */
+        for (volatile int d = 0; d < 5000000; d++) __asm__ volatile("pause");
+    }
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
@@ -184,6 +249,7 @@ void tool_system_init(void) {
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},
+        {"top",     CMD_GROUP_SYSTEM, "Real-time task monitor","top",   cmd_top},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
