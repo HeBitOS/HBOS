@@ -454,6 +454,22 @@ static void cmd_rmdir_cmd(int argc, char **argv) {
     if (vfs_rmdir(full) < 0) print_errno("rmdir", argv[1]);
 }
 
+static void cmd_find(int argc, char **argv) {
+    const char *pattern = (argc >= 2) ? argv[1] : "";
+    uint32_t count = fs_get_count();
+    for (uint32_t i = 0; i < count; i++) {
+        file_t *f = fs_get_file(i);
+        if (!f || !f->used || !f->name[0]) continue;
+        if (pattern[0] == '\0' || strstr(f->name, pattern)) {
+            if (f->type) console_puts("\x1b[34m");
+            console_puts(f->name);
+            if (f->type) console_puts("/");
+            console_puts("\x1b[0m");
+            console_putchar('\n');
+        }
+    }
+}
+
 extern void cmd_edit(int argc, char **argv);
 
 void tool_file_init(void) {
@@ -479,6 +495,7 @@ void tool_file_init(void) {
         {"mount",      CMD_GROUP_FILE, "Mount HBFS ATA disk",    "mount",                     cmd_mount},
         {"mkfs",       CMD_GROUP_FILE, "Format HBFS ATA disk",   "mkfs",                      cmd_mkfs},
         {"edit",       CMD_GROUP_FILE, "Edit a file (TUI editor)","edit <file>",               cmd_edit},
+        {"find",       CMD_GROUP_FILE, "Find files by name",     "find [pattern]",            cmd_find},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
