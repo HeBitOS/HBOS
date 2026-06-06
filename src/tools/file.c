@@ -286,6 +286,40 @@ static void cmd_fsinfo(int argc, char **argv) {
     console_putchar('\n');
 }
 
+static void cmd_df(int argc, char **argv) {
+    (void)argc; (void)argv;
+    extern uint32_t block_sector_count(void);
+    extern const char *block_backend_name(void);
+
+    uint32_t total_sectors = block_sector_count();
+    uint32_t file_count = fs_get_count();
+
+    console_puts("\x1b[33mFilesystem      Size   Used  Avail  Use%  Files  Backend\x1b[0m\n");
+    console_puts("hbos            ");
+    print_uint(total_sectors / 2048);
+    console_puts("M  ");
+    /* Estimate used from file sizes */
+    uint32_t used_bytes = 0;
+    for (uint32_t i = 0; i < file_count; i++) {
+        file_t *f = fs_get_file(i);
+        if (f && f->used) used_bytes += f->size;
+    }
+    uint32_t used_mb = used_bytes / (1024 * 1024);
+    uint32_t total_mb = total_sectors / 2048;
+    print_uint(used_mb);
+    console_puts("M  ");
+    print_uint(total_mb > used_mb ? total_mb - used_mb : 0);
+    console_puts("M  ");
+    print_uint(total_mb ? used_mb * 100 / total_mb : 0);
+    console_puts("%  ");
+    print_uint(file_count);
+    console_puts("      ");
+    console_puts(fs_backend_name());
+    console_puts("+");
+    console_puts(block_backend_name());
+    console_putchar('\n');
+}
+
 static void cmd_fsck(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -440,6 +474,7 @@ void tool_file_init(void) {
         {"writefile",  CMD_GROUP_FILE, "Write text to a file",   "writefile <file> <text...>", cmd_writefile},
         {"appendfile", CMD_GROUP_FILE, "Append text to a file",  "appendfile <file> <text...>",cmd_appendfile},
         {"fsinfo",     CMD_GROUP_FILE, "Show filesystem backend","fsinfo",                    cmd_fsinfo},
+        {"df",         CMD_GROUP_FILE, "Show disk usage",       "df",                         cmd_df},
         {"fsck",       CMD_GROUP_FILE, "Check filesystem",       "fsck",                      cmd_fsck},
         {"mount",      CMD_GROUP_FILE, "Mount HBFS ATA disk",    "mount",                     cmd_mount},
         {"mkfs",       CMD_GROUP_FILE, "Format HBFS ATA disk",   "mkfs",                      cmd_mkfs},
