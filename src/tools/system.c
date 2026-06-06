@@ -236,6 +236,17 @@ static void cmd_top(int argc, char **argv) {
     }
 }
 
+static void cmd_uname(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts("HBOS ");
+    console_puts(HBOS_VERSION_NAME);
+    console_puts(" x86_64 ");
+    console_puts(fs_backend_name());
+    console_puts(" ");
+    console_puts(block_backend_name());
+    console_putchar('\n');
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
@@ -250,6 +261,7 @@ void tool_system_init(void) {
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},
         {"top",     CMD_GROUP_SYSTEM, "Real-time task monitor","top",   cmd_top},
+        {"uname",   CMD_GROUP_SYSTEM, "Show system identity",  "uname", cmd_uname},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
