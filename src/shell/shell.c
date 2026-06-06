@@ -479,6 +479,19 @@ static void env_set(const char *name, const char *value) {
 }
 
 void cmd_execute(const char *line) {
+    /* Handle !n history expansion */
+    if (line[0] == '!' && line[1] >= '0' && line[1] <= '9') {
+        int n = 0; const char *p = line + 1;
+        while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
+        if (n > 0 && n <= hist_count) {
+            console_puts(history[n - 1]);
+            console_putchar('\n');
+            line = history[n - 1];
+        } else {
+            console_puts("!: event not found\n");
+            return;
+        }
+    }
     /* Expand $VAR references */
     char expanded[CMD_BUF_SIZE];
     uint32_t ep = 0;
