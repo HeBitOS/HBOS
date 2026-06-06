@@ -798,10 +798,25 @@ static void parse_program(void) {
     }
 }
 
-/* ── REPL mode ──────────────────────────────────────────────── */
+/* ── REPL with full line editing ────────────────────────────── */
+static void repl_redraw(const char *line, int len, int pos_cur, int prompt_len) {
+    /* Move cursor to start of input (after prompt) */
+    for (int i = 0; i < len + prompt_len; i++) console_putchar('\b');
+    /* Redraw prompt + line */
+    console_puts("c> ");
+    for (int i = 0; i < len; i++) console_putchar(line[i]);
+    /* Clear any leftover chars */
+    for (int i = len; i < len + 4; i++) console_putchar(' ');
+    for (int i = 0; i < len + 4; i++) console_putchar('\b');
+    /* Position cursor at edit position */
+    int tail = len - pos_cur;
+    for (int i = 0; i < tail; i++) console_putchar('\b');
+}
+
 static void cc_repl(void) {
     console_puts("HBOS C Interpreter v1.0\n");
-    console_puts("Type C code, empty line to execute, 'quit' to exit\n\n");
+    console_puts("Type C code, end with ; or } to execute, 'quit' to exit\n");
+    console_puts("Arrow keys, Home/End, Insert supported\n\n");
 
     char line[256];
     int src_pos = 0;
@@ -809,15 +824,43 @@ static void cc_repl(void) {
 
     while (1) {
         console_puts("c> ");
-        int li = 0;
+        int li = 0;    /* line length */
+        int cur = 0;   /* cursor position within line */
+
         while (1) {
             int c = kb_get_key();
-            if (c == '\n' || c == '\r') { console_putchar('\n'); break; }
-            if (c == '\b' || c == 0x7F) {
-                if (li > 0) { li--; console_putchar('\b'); console_putchar(' '); console_putchar('\b'); }
+            if (c == '\n' || c == '\r') {
+                console_putchar('\n');
+                break;
+            }
+            if (c == 0x102) { /* KEY_LEFT */
+                if (cur > 0) { cur--; console_putchar('\b'); }
+            } else if (c == 0x103) { /* KEY_RIGHT */
+                if (cur < li) { console_putchar(line[cur]); cur++; }
+            } else if (c == 0x106) { /* KEY_HOME */
+                while (cur > 0) { cur--; console_putchar('\b'); }
+            } else if (c == 0x107) { /* KEY_END */
+                while (cur < li) { console_putchar(line[cur]); cur++; }
+            } else if (c == 0x109) { /* KEY_DELETE */
+                if (cur < li) {
+                    for (int i = cur; i < li - 1; i++) line[i] = line[i + 1];
+                    li--;
+                    repl_redraw(line, li, cur, 3);
+                }
+            } else if (c == '\b' || c == 0x7F) { /* Backspace */
+                if (cur > 0) {
+                    for (int i = cur - 1; i < li - 1; i++) line[i] = line[i + 1];
+                    li--;
+                    cur--;
+                    repl_redraw(line, li, cur, 3);
+                }
             } else if (c >= ' ' && c <= '~' && li < 254) {
-                line[li++] = (char)c;
-                console_putchar((char)c);
+                /* Insert at cursor position */
+                for (int i = li; i > cur; i--) line[i] = line[i - 1];
+                line[cur] = (char)c;
+                li++;
+                cur++;
+                repl_redraw(line, li, cur, 3);
             }
         }
         line[li] = '\0';
