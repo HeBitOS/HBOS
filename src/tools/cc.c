@@ -1,6 +1,6 @@
 /**
  * @file cc.c
- * @brief HBOS C 解释器 — 支持C语言子集，直接执行C代码
+ * @brief HBOS C/C++ 解释器 — 支持C/C++语言子集，直接执行代码
  *
  * 支持的C特性:
  *   int 变量声明与赋值
@@ -12,11 +12,16 @@
  *   算术/比较/逻辑运算
  *   字符串字面量
  *   数组 (int arr[N])
- *   #include 不存在（无预处理器）
+ *   #include "file" 头文件包含
+ *
+ * 支持的C++特性:
+ *   class 定义 (public/private)
+ *   new/delete 动态内存
+ *   this 指针
  *
  * 用法:
- *   cc <file.c>        — 执行C文件
- *   cc                  — 进入交互式REPL
+ *   cc <file>        — 执行C/C++文件
+ *   cc                — 进入交互式REPL
  */
 
 #include "../fcntl.h"
@@ -27,24 +32,27 @@
 #include "tool.h"
 
 /* ── Limits ─────────────────────────────────────────────────── */
-#define CC_MAX_SRC      8192
-#define CC_MAX_FUNCS    32
-#define CC_MAX_VARS     128
-#define CC_MAX_STACK    256
-#define CC_MAX_CALL     16
-#define CC_MAX_ARGS     8
-#define CC_MAX_NAME     24
-#define CC_MAX_STRING   256
+#define CC_MAX_SRC      16384
+#define CC_MAX_FUNCS    64
+#define CC_MAX_VARS     256
+#define CC_MAX_STACK    512
+#define CC_MAX_CALL     32
+#define CC_MAX_ARGS     16
+#define CC_MAX_NAME     32
+#define CC_MAX_STRING   512
+#define CC_MAX_INCLUDE  8
 
 /* ── Token types ────────────────────────────────────────────── */
 enum {
     T_EOF = 0, T_NUM, T_STR, T_IDENT,
-    T_INT, T_VOID, T_RETURN, T_IF, T_ELSE, T_WHILE, T_FOR,
+    T_INT, T_VOID, T_CHAR, T_RETURN, T_IF, T_ELSE, T_WHILE, T_FOR,
     T_PRINTF, T_BREAK, T_CONTINUE,
+    T_CLASS, T_PUBLIC, T_PRIVATE, T_NEW, T_DELETE, T_THIS,
     T_EQ /* == */, T_NE /* != */, T_LE /* <= */, T_GE /* >= */,
     T_AND /* && */, T_OR /* || */,
     T_PLUS_EQ /* += */, T_MINUS_EQ /* -= */,
     T_PLUS_PLUS /* ++ */, T_MINUS_MINUS /* -- */,
+    T_ARROW /* -> */,
 };
 
 /* ── Source and tokenizer ───────────────────────────────────── */
@@ -55,6 +63,71 @@ static int tok_type;
 static int tok_num;   /* numeric value for T_NUM */
 static char tok_str[CC_MAX_STRING]; /* string/identifier value */
 static int tok_line;
+static int include_depth; /* #include nesting depth */
+
+/* ── #include preprocessor ──────────────────────────────────── */
+static int cc_load_file(const char *path, char *buf, int cap) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    int n = 0;
+    ssize_t r;
+    while ((r = read(fd, buf + n, (size_t)(cap - n - 1))) > 0) n += (int)r;
+    close(fd);
+    buf[n] = '\0';
+    return n;
+}
+
+static void cc_preprocess(char *code, int *len) {
+    /* Simple #include "file" expansion */
+    char expanded[CC_MAX_SRC];
+    int ep = 0;
+    int i = 0;
+    while (i < *len && ep < CC_MAX_SRC - 1) {
+        if (code[i] == '#' && include_depth < CC_MAX_INCLUDE) {
+            /* Check for #include */
+            int j = i + 1;
+            while (j < *len && (code[j] == ' ' || code[j] == '\t')) j++;
+            if (j + 7 < *len && code[j] == 'i' && code[j + 1] == 'n' &&
+                code[j + 2] == 'c' && code[j + 3] == 'l' && code[j + 4] == 'u' &&
+                code[j + 5] == 'd' && code[j + 6] == 'e') {
+                j += 7;
+                while (j < *len && (code[j] == ' ' || code[j] == '\t')) j++;
+                if (j < *len && code[j] == '"') {
+                    j++;
+                    char path[128]; int pi = 0;
+                    while (j < *len && code[j] != '"' && code[j] != '\n' && pi < 127)
+                        path[pi++] = code[j++];
+                    path[pi] = '\0';
+                    /* Skip to end of line */
+                    while (j < *len && code[j] != '\n') j++;
+                    if (code[j] == '\n') j++;
+                    /* Load included file */
+                    include_depth++;
+                    char inc_buf[CC_MAX_SRC];
+                    int inc_len = cc_load_file(path, inc_buf, CC_MAX_SRC);
+                    if (inc_len > 0) {
+                        cc_preprocess(inc_buf, &inc_len);
+                        if (ep + inc_len < CC_MAX_SRC) {
+                            memcpy(expanded + ep, inc_buf, (size_t)inc_len);
+                            ep += inc_len;
+                        }
+                    }
+                    include_depth--;
+                    i = j;
+                    continue;
+                }
+            }
+            /* Not #include, skip the line */
+            while (i < *len && code[i] != '\n') i++;
+            if (i < *len) i++;
+            continue;
+        }
+        expanded[ep++] = code[i++];
+    }
+    expanded[ep] = '\0';
+    memcpy(code, expanded, (size_t)(ep + 1));
+    *len = ep;
+}
 
 static void cc_error(const char *msg) {
     console_puts("\x1b[31mcc error\x1b[0m line ");
@@ -126,23 +199,32 @@ static int next_tok(void) {
         while (pos < src_len && is_alnum(src[pos]) && si < CC_MAX_NAME - 1)
             tok_str[si++] = src[pos++];
         tok_str[si] = '\0';
-        /* Keywords */
-        if (si == 3 && tok_str[0] == 'i' && tok_str[1] == 'n' && tok_str[2] == 't') { tok_type = T_INT; return T_INT; }
-        if (si == 4 && tok_str[0] == 'v' && tok_str[1] == 'o' && tok_str[2] == 'i' && tok_str[3] == 'd') { tok_type = T_VOID; return T_VOID; }
-        if (si == 6 && tok_str[0] == 'r' && tok_str[1] == 'e' && tok_str[2] == 't') { tok_type = T_RETURN; return T_RETURN; }
-        if (si == 2 && tok_str[0] == 'i' && tok_str[1] == 'f') { tok_type = T_IF; return T_IF; }
-        if (si == 4 && tok_str[0] == 'e' && tok_str[1] == 'l') { tok_type = T_ELSE; return T_ELSE; }
-        if (si == 5 && tok_str[0] == 'w' && tok_str[1] == 'h') { tok_type = T_WHILE; return T_WHILE; }
-        if (si == 3 && tok_str[0] == 'f' && tok_str[1] == 'o' && tok_str[2] == 'r') { tok_type = T_FOR; return T_FOR; }
-        if (si == 5 && tok_str[0] == 'p' && tok_str[1] == 'r') { tok_type = T_PRINTF; return T_PRINTF; }
-        if (si == 5 && tok_str[0] == 'b' && tok_str[1] == 'r') { tok_type = T_BREAK; return T_BREAK; }
-        if (si == 8 && tok_str[0] == 'c' && tok_str[1] == 'o') { tok_type = T_CONTINUE; return T_CONTINUE; }
+        /* Keywords — use strcmp for clarity */
+        if (strcmp(tok_str, "int") == 0) { tok_type = T_INT; return T_INT; }
+        if (strcmp(tok_str, "void") == 0) { tok_type = T_VOID; return T_VOID; }
+        if (strcmp(tok_str, "char") == 0) { tok_type = T_CHAR; return T_CHAR; }
+        if (strcmp(tok_str, "return") == 0) { tok_type = T_RETURN; return T_RETURN; }
+        if (strcmp(tok_str, "if") == 0) { tok_type = T_IF; return T_IF; }
+        if (strcmp(tok_str, "else") == 0) { tok_type = T_ELSE; return T_ELSE; }
+        if (strcmp(tok_str, "while") == 0) { tok_type = T_WHILE; return T_WHILE; }
+        if (strcmp(tok_str, "for") == 0) { tok_type = T_FOR; return T_FOR; }
+        if (strcmp(tok_str, "printf") == 0) { tok_type = T_PRINTF; return T_PRINTF; }
+        if (strcmp(tok_str, "break") == 0) { tok_type = T_BREAK; return T_BREAK; }
+        if (strcmp(tok_str, "continue") == 0) { tok_type = T_CONTINUE; return T_CONTINUE; }
+        /* C++ keywords */
+        if (strcmp(tok_str, "class") == 0) { tok_type = T_CLASS; return T_CLASS; }
+        if (strcmp(tok_str, "public") == 0) { tok_type = T_PUBLIC; return T_PUBLIC; }
+        if (strcmp(tok_str, "private") == 0) { tok_type = T_PRIVATE; return T_PRIVATE; }
+        if (strcmp(tok_str, "new") == 0) { tok_type = T_NEW; return T_NEW; }
+        if (strcmp(tok_str, "delete") == 0) { tok_type = T_DELETE; return T_DELETE; }
+        if (strcmp(tok_str, "this") == 0) { tok_type = T_THIS; return T_THIS; }
         tok_type = T_IDENT;
         return T_IDENT;
     }
 
     /* Multi-char operators */
     pos++;
+    if (c == '-' && src[pos] == '>') { pos++; tok_type = T_ARROW; return T_ARROW; }
     if (c == '=' && src[pos] == '=') { pos++; tok_type = T_EQ; return T_EQ; }
     if (c == '!' && src[pos] == '=') { pos++; tok_type = T_NE; return T_NE; }
     if (c == '<' && src[pos] == '=') { pos++; tok_type = T_LE; return T_LE; }
@@ -917,6 +999,10 @@ static void cmd_cc(int argc, char **argv) {
         src_len += (int)n;
     close(fd);
     src[src_len] = '\0';
+
+    /* Preprocess #include */
+    include_depth = 0;
+    cc_preprocess(src, &src_len);
 
     /* Parse and execute */
     pos = 0;
