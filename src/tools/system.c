@@ -1,5 +1,10 @@
 #include "../graphics/graphics.h"
 #include "../acpi.h"
+#include "../block.h"
+#include "../core/pmm.h"
+#include "../core/task.h"
+#include "../fs.h"
+#include "../net.h"
 #include "../string.h"
 #include "../unistd.h"
 #include "../version.h"
@@ -110,6 +115,62 @@ static void cmd_kill(int argc, char **argv) {
     }
 }
 
+static void print_uint(uint32_t v) {
+    char buf[16]; int n = 0;
+    do { buf[n++] = '0' + v % 10; v /= 10; } while (v);
+    while (n--) console_putchar(buf[n]);
+}
+
+static void print_uint64(uint64_t v) {
+    char buf[24]; int n = 0;
+    do { buf[n++] = '0' + (char)(v % 10); v /= 10; } while (v);
+    while (n--) console_putchar(buf[n]);
+}
+
+static void cmd_status(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    console_puts("\x1b[33m=== HBOS System Status ===\x1b[0m\n\n");
+
+    /* Memory */
+    uint64_t total = pmm_get_total_mem();
+    uint64_t free = pmm_get_free_mem();
+    uint64_t used = total > free ? total - free : 0;
+    console_puts("\x1b[36mMemory:\x1b[0m  ");
+    print_uint64(used / 1024); console_puts(" KB used / ");
+    print_uint64(total / 1024); console_puts(" KB total  (");
+    print_uint((uint32_t)(total ? used * 100 / total : 0));
+    console_puts("%)\n");
+
+    /* Tasks */
+    console_puts("\x1b[36mTasks:\x1b[0m    ");
+    print_uint((uint32_t)task_get_count());
+    console_puts(" active\n");
+
+    /* Filesystem */
+    console_puts("\x1b[36mFS:\x1b[0m       ");
+    console_puts(fs_backend_name());
+    console_puts("  ");
+    print_uint(fs_get_count());
+    console_puts(" files\n");
+
+    /* Block device */
+    extern const char *block_backend_name(void);
+    extern uint32_t block_sector_count(void);
+    console_puts("\x1b[36mBlock:\x1b[0m    ");
+    console_puts(block_backend_name());
+    console_puts("  ");
+    print_uint(block_sector_count());
+    console_puts(" sectors (");
+    print_uint(block_sector_count() / 2048);
+    console_puts(" MB)\n");
+
+    /* Network — check via ping */
+    console_puts("\x1b[36mNetwork:\x1b[0m  ");
+    console_puts(net_driver_name(0));
+    console_puts(" driver\n");
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
@@ -122,6 +183,7 @@ void tool_system_init(void) {
         {"clear",   CMD_GROUP_SYSTEM, "Clear the screen",    "clear",   cmd_clear},
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
+        {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
