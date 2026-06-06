@@ -10,6 +10,7 @@
 #include "../user/app.h"
 #include "../vfs.h"
 #include "../fs.h"
+#include "../usb_hid.h"
 #include "shell.h"
 
 static int strcmp(const char *s1, const char *s2) {
@@ -171,6 +172,8 @@ static int get_key(void) {
         console_cursor_blink();
         int serial_key = serial_get_key();
         if (serial_key) return serial_key;
+        int usb_key = usb_kbd_getc();
+        if (usb_key) return usb_key;
         uint8_t status = inb(0x64);
         if (status & 1) {
             uint8_t sc = inb(0x60);
@@ -638,6 +641,7 @@ void shell_run(void) {
     bool browsing_history = false;
 
     kb_controller_init();
+    usb_kbd_init();
 
     console_puts(
         "\x1b[34m"

@@ -590,10 +590,69 @@ int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
 }
 
 int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
-    if (!xhci.initialized) return -1;
-    (void)slot_id;
-    (void)ep_addr;
-    (void)data;
-    (void)len;
+    if (!xhci.initialized || !data || !len) return -1;
+    if (slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
+    if (!xhci.slot_enabled[slot_id]) return -1;
+
+    int ep_id = (ep_addr & 0x0F) * 2 + 1; /* EP index: ep_num*2 + dir (IN=1) */
+
+    uint64_t ring_phys;
+    uint64_t *ring = xhci_alloc_transfer_ring(&ring_phys);
+    if (!ring) return -1;
+
+    /* Data buffer for the transfer */
+    uint64_t data_phys;
+    void *data_buf = xhci_alloc_aligned(len, &data_phys);
+    if (!data_buf) { kfree((void *)ring); return -1; }
+    memset(data_buf, 0, len);
+
+    /* Build a Normal TRB pointing to the data buffer */
+    xhci_trb_t *trb = (xhci_trb_t *)ring;
+    trb->param0 = (uint32_t)(data_phys & 0xFFFFFFFF);
+    trb->param1 = (uint32_t)(data_phys >> 32);
+    trb->param2 = len | (TRB_NORMAL << 10) | TRB_IOC;
+    trb->cycle = 1;
+
+    /* Configure the interrupt endpoint with this transfer ring */
+    int ret = xhci_configure_endpoint(slot_id, ep_id, 1, 64, 0, ring_phys);
+    if (ret < 0) { kfree(data_buf); kfree((void *)ring); return -1; }
+
+    /* Ring the doorbell to kick off the transfer */
+    xhci_ring_doorbell(slot_id, ep_id);
+
+    /* Poll for completion event */
+    for (int i = 0; i < 2000000; i++) {
+        uint32_t evt_idx = xhci.event_ring_idx;
+        xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[evt_idx];
+        if ((evt->cycle & 1) != xhci.event_ring_cycle) continue;
+        uint32_t evt_type = (evt->param2 >> 10) & 0x3F;
+        if (evt_type == TRB_EV_TRANSFER) {
+            int code = (evt->param1 >> 24) & 0xFF;
+            /* Advance event ring */
+            xhci.event_ring_idx++;
+            if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
+                xhci.event_ring_idx = 0;
+                xhci.event_ring_cycle ^= 1;
+            }
+            if (code == 1 || code == 0x26) {
+                memcpy(data, data_buf, len);
+                kfree(data_buf);
+                kfree((void *)ring);
+                return (int)len;
+            }
+            kfree(data_buf);
+            kfree((void *)ring);
+            return -code;
+        }
+        /* Consume non-matching events */
+        xhci.event_ring_idx++;
+        if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
+            xhci.event_ring_idx = 0;
+            xhci.event_ring_cycle ^= 1;
+        }
+    }
+
+    kfree(data_buf);
+    kfree((void *)ring);
     return -1;
 }

@@ -36,5 +36,7 @@ int hid_device_count(void);
 int hid_get_keyboard_report(int idx, hid_kbd_report_t *report);
 int hid_get_mouse_report(int idx, hid_mouse_report_t *report);
 void hid_poll(void);
+int usb_kbd_init(void);
+int usb_kbd_getc(void);
 
 #endif
