@@ -129,13 +129,51 @@ static const char *normalize_path(const char *path, char *out) {
 
     uint32_t i = 0;
     while (path[i]) {
-        if (path[i] == '/') return NULL;
         if (i >= MAX_FILENAME - 1) return NULL;
         out[i] = path[i];
         i++;
     }
     out[i] = '\0';
     return out;
+}
+
+/** 从完整路径中提取文件名（最后一个 / 之后的部分） */
+static const char *path_basename(const char *path) {
+    const char *last = path;
+    while (*path) { if (*path == '/') last = path + 1; path++; }
+    return last;
+}
+
+/** 提取父目录 inode 号（EXT2 后端专用），文件名写入 name_out */
+static uint32_t ext2_resolve_parent(const char *full_path, char *name_out) {
+    if (!full_path || !name_out) return 0;
+    /* 复制路径以便分割 */
+    char tmp[256];
+    uint32_t len = 0;
+    while (full_path[len] && len < 255) { tmp[len] = full_path[len]; len++; }
+    tmp[len] = '\0';
+
+    /* 找到最后一个 / */
+    int last_slash = -1;
+    for (uint32_t i = 0; i < len; i++) if (tmp[i] == '/') last_slash = (int)i;
+
+    if (last_slash <= 0) {
+        /* 无 / 或以 / 开头 → 父目录是 root */
+        const char *base = path_basename(full_path);
+        uint32_t blen = 0; while (base[blen] && blen < MAX_FILENAME - 1) { name_out[blen] = base[blen]; blen++; }
+        name_out[blen] = '\0';
+        return EXT2_ROOT_INO;
+    }
+
+    /* 分割: tmp[0..last_slash-1] = 目录路径, tmp[last_slash+1..] = 文件名 */
+    tmp[last_slash] = '\0';
+    const char *base = &tmp[last_slash + 1];
+    uint32_t blen = 0; while (base[blen] && blen < MAX_FILENAME - 1) { name_out[blen] = base[blen]; blen++; }
+    name_out[blen] = '\0';
+
+    uint32_t dir_ino = 0;
+    if (ext2_path_to_inode(&ext2_fs, tmp, &dir_ino) < 0) return 0;
+    return dir_ino;
 }
 
 /** 重置文件系统为 ramfs 模式，初始化所有文件槽位 */
@@ -353,7 +391,10 @@ static int ext2_vfs_truncate(vfs_node_t *node) {
 static int ext2_vfs_unlink(vfs_node_t *node) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used) return -1;
-    int ret = ext2_unlink(&ext2_fs, EXT2_ROOT_INO, f->name);
+    char basename[MAX_FILENAME];
+    uint32_t parent = ext2_resolve_parent(f->name, basename);
+    if (!parent) return -1;
+    int ret = ext2_unlink(&ext2_fs, parent, basename);
     if (ret == 0) {
         f->used = 0;
         f->name[0] = '\0';
@@ -943,7 +984,10 @@ file_t *fs_create_file(const char *name) {
     if (existing) return existing;
 
     if (fs_backend == FS_BACKEND_EXT2) {
-        int ino = ext2_create_file(&ext2_fs, EXT2_ROOT_INO, norm, 1);
+        char basename[MAX_FILENAME];
+        uint32_t parent = ext2_resolve_parent(norm, basename);
+        if (!parent) return NULL;
+        int ino = ext2_create_file(&ext2_fs, parent, basename, 1);
         if (ino < 0) return NULL;
         for (uint32_t i = 0; i < MAX_FILES; i++) {
             file_t *f = &fs.files[i];
@@ -999,7 +1043,18 @@ int fs_delete_file(const char *name) {
     file_t *f = fs_find_file(name);
     if (!f) return -1;
     if (fs_backend == FS_BACKEND_EXT2) {
-        return ext2_vfs_unlink(&f->node);
+        char basename[MAX_FILENAME];
+        uint32_t parent = ext2_resolve_parent(f->name, basename);
+        if (!parent) return -1;
+        int ret = ext2_unlink(&ext2_fs, parent, basename);
+        if (ret == 0) {
+            f->used = 0;
+            f->name[0] = '\0';
+            f->node.name[0] = '\0';
+            f->node.size = 0;
+            if (fs.file_count > 0) fs.file_count--;
+        }
+        return ret;
     }
     f->used = 0;
     f->name[0] = '\0';
@@ -1109,6 +1164,34 @@ int fs_mkdir(const char *name) {
     if (!normalize_path(name, norm)) return -1;
     file_t *existing = fs_find_file(norm);
     if (existing) return -1;
+
+    if (fs_backend == FS_BACKEND_EXT2) {
+        char basename[MAX_FILENAME];
+        uint32_t parent = ext2_resolve_parent(norm, basename);
+        if (!parent) return -1;
+        int ino = ext2_mkdir(&ext2_fs, parent, basename);
+        if (ino < 0) return -1;
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            file_t *f = &fs.files[i];
+            if (f->used) continue;
+            strcpy(f->name, norm);
+            f->size = 0;
+            f->capacity = 0;
+            f->data = NULL;
+            f->node.type = VFS_NODE_DIR;
+            f->node.size = 0;
+            f->node.capacity = 0;
+            f->node.private_data = f;
+            f->node.ops = &ext2_ops;
+            strcpy(f->node.name, norm);
+            f->disk_slot = (uint32_t)ino;
+            f->used = 1;
+            f->type = 1;
+            fs.file_count++;
+            return 0;
+        }
+        return -1;
+    }
 
     for (uint32_t i = 0; i < MAX_FILES; i++) {
         file_t *f = &fs.files[i];

@@ -143,5 +143,6 @@ int ext2_write_file(ext2_fs_t *fs, uint32_t inode_num,
 int ext2_create_file(ext2_fs_t *fs, uint32_t dir_ino, const char *name, uint8_t file_type);
 int ext2_unlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name);
 int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num);
+int ext2_mkdir(ext2_fs_t *fs, uint32_t parent_ino, const char *name);
 
 #endif

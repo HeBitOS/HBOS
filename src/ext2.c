@@ -614,3 +614,62 @@ int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num)
     inode.i_blocks = 0;
     return ext2_write_inode(fs, inode_num, &inode);
 }
+
+/* ── Directory creation (mkdir) ─────────────────────────────── */
+
+int ext2_mkdir(ext2_fs_t *fs, uint32_t parent_ino, const char *name)
+{
+    if (!fs || !fs->mounted || !name || !parent_ino) return -1;
+    uint32_t name_len = (uint32_t)strlen(name);
+    if (name_len == 0 || name_len > 255) return -1;
+
+    /* Create the new directory inode */
+    uint32_t new_ino = ext2_create_file(fs, parent_ino, name, 2);
+    if (!new_ino) return -1;
+
+    /* Allocate a block for the new directory's . and .. entries */
+    uint32_t new_blk = ext2_alloc_block(fs);
+    if (!new_blk) return -1;
+
+    uint8_t block_buf[4096] __attribute__((aligned(2)));
+    memset(block_buf, 0, fs->block_size);
+
+    /* "." entry — points to self */
+    ext2_dir_entry_t *dot = (ext2_dir_entry_t *)block_buf;
+    dot->inode = new_ino;
+    dot->name_len = 1;
+    dot->file_type = 2; /* directory */
+    dot->name[0] = '.';
+    uint32_t dot_real = (sizeof(ext2_dir_entry_t) + 1 + 3u) & ~3u;
+
+    /* ".." entry — points to parent */
+    ext2_dir_entry_t *dotdot = (ext2_dir_entry_t *)(block_buf + dot_real);
+    dotdot->inode = parent_ino;
+    dotdot->name_len = 2;
+    dotdot->file_type = 2;
+    dotdot->name[0] = '.';
+    dotdot->name[1] = '.';
+    dotdot->rec_len = (uint16_t)(fs->block_size - dot_real);
+
+    dot->rec_len = (uint16_t)dot_real;
+
+    if (ext2_write_block(fs, new_blk, block_buf) < 0) return -1;
+
+    /* Update the new inode to point to this block */
+    ext2_inode_t new_inode;
+    if (ext2_read_inode(fs, new_ino, &new_inode) < 0) return -1;
+    new_inode.i_block[0] = new_blk;
+    new_inode.i_size = fs->block_size;
+    new_inode.i_blocks = fs->block_size / 512;
+    new_inode.i_links_count = 2; /* . + parent link */
+    ext2_write_inode(fs, new_ino, &new_inode);
+
+    /* Increment parent's link count (for "..") */
+    ext2_inode_t parent_inode;
+    if (ext2_read_inode(fs, parent_ino, &parent_inode) == 0) {
+        parent_inode.i_links_count++;
+        ext2_write_inode(fs, parent_ino, &parent_inode);
+    }
+
+    return (int)new_ino;
+}
