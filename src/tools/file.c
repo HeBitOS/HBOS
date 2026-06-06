@@ -402,7 +402,7 @@ static void cmd_appendfile(int argc, char **argv) {
 }
 
 /* ── cwd support ─────────────────────────────────────────────── */
-static char g_cwd[256] = "/";
+char g_cwd[256] = "/";
 
 static void path_join(const char *dir, const char *rel, char *out, uint32_t cap) {
     uint32_t p = 0;

@@ -551,7 +551,7 @@ static uint8_t bcd_to_bin(uint8_t v) {
     return (uint8_t)((v & 0x0f) + ((v >> 4) * 10));
 }
 
-static uint8_t cmos_read(uint8_t reg) {
+uint8_t cmos_read(uint8_t reg) {
     outb(0x70, reg);
     return inb(0x71);
 }

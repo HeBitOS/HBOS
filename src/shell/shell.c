@@ -70,7 +70,7 @@ static int parse_line(char *line, char **argv, int max_args) {
     return argc;
 }
 
-static int get_key(void);
+int get_key(void);
 void task_yield(void);
 // ============================================================
 // Keyboard driver — PS/2 scancode set 1
@@ -94,7 +94,7 @@ static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-static int serial_get_key(void) {
+int serial_get_key(void) {
     if (!(inb(0x3F8 + 5) & 1)) return 0;
     uint8_t c = inb(0x3F8);
     if (c == '\r') return '\n';
@@ -167,7 +167,7 @@ static void kb_set_leds(void) {
 static const char scancode_map[128] = {0,0,'1','2','3','4','5','6','7','8','9','0','-','=','\b',0,'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '};
 static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')','_','+','\b',0,'Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A','S','D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C','V','B','N','M','<','>','?',0,'*',0,' '};
 
-static int get_key(void) {
+int get_key(void) {
     while (1) {
         console_cursor_blink();
         int serial_key = serial_get_key();
@@ -407,7 +407,7 @@ typedef struct { char name[32]; char value[128]; } alias_t;
 static alias_t aliases[MAX_ALIASES];
 static int alias_count;
 
-static const char *alias_lookup(const char *name) {
+const char *alias_lookup(const char *name) {
     for (int i = 0; i < alias_count; i++)
         if (strcmp(aliases[i].name, name) == 0) return aliases[i].value;
     return NULL;
