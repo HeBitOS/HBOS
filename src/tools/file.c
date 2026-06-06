@@ -537,6 +537,39 @@ static void cmd_sort(int argc, char **argv) {
     }
 }
 
+static void cmd_uniq(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: uniq <file>\n"); return; }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) { print_errno("uniq", argv[1]); return; }
+    char prev[256] = {0};
+    char line[256];
+    ssize_t n;
+    int li = 0;
+    while ((n = read(fd, &line[li], 1)) > 0) {
+        if (line[li] == '\n') {
+            line[li] = '\0';
+            if (strcmp(line, prev) != 0) {
+                console_puts(line);
+                console_putchar('\n');
+                uint32_t j = 0;
+                while (line[j] && j < 255) { prev[j] = line[j]; j++; }
+                prev[j] = '\0';
+            }
+            li = 0;
+        } else {
+            if (li < 254) li++;
+        }
+    }
+    if (li > 0) {
+        line[li] = '\0';
+        if (strcmp(line, prev) != 0) {
+            console_puts(line);
+            console_putchar('\n');
+        }
+    }
+    close(fd);
+}
+
 extern void cmd_edit(int argc, char **argv);
 
 void tool_file_init(void) {
@@ -565,6 +598,7 @@ void tool_file_init(void) {
         {"find",       CMD_GROUP_FILE, "Find files by name",     "find [pattern]",            cmd_find},
         {"wc",         CMD_GROUP_FILE, "Count lines/words/bytes", "wc <file>",                cmd_wc},
         {"sort",       CMD_GROUP_FILE, "Sort file lines",        "sort <file>",              cmd_sort},
+        {"uniq",       CMD_GROUP_FILE, "Remove duplicate lines",  "uniq <file>",             cmd_uniq},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
