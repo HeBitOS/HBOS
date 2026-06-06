@@ -251,7 +251,8 @@ typedef struct {
 
 typedef struct {
     char name[CC_MAX_NAME];
-    int  body_start;    /* position in src after '{' */
+    int  body_start;    /* position in src of '{' */
+    int  body_end;      /* position in src of matching '}' */
     char param_names[CC_MAX_ARGS][CC_MAX_NAME];
     int  param_count;
 } cc_func_t;
@@ -402,11 +403,11 @@ static int parse_primary(void) {
                     int vi = var_alloc(fn->param_names[i]);
                     if (vi >= 0) vars[vi].value = args[i];
                 }
-                /* Execute body */
-                int save = pos;
+                /* Execute body — pos at '{', parse_block will handle it */
+                int saved_pos = pos;
                 pos = fn->body_start;
                 int ret = parse_block();
-                pos = save;
+                pos = saved_pos;
                 /* Restore scope */
                 var_count = saved_var_count;
                 return ret;
@@ -615,26 +616,27 @@ static int parse_stmt(void) {
     if (tok_type == T_WHILE) {
         next_tok();
         if (tok_type == '(') next_tok();
-        int cond_start = pos;
+        /* Save the source position of the condition start */
+        int cond_src = pos;
         int cond = parse_expr();
         if (tok_type == ')') next_tok();
-        int body_start = pos;
+        /* Save the source position of the body start */
+        int body_src = pos;
 
         int old_break = break_target;
         int old_continue = continue_target;
         break_target = -1;
-        continue_target = cond_start;
+        continue_target = -1;
 
         while (cond) {
-            pos = body_start;
+            /* Re-parse body from source */
+            pos = body_src;
             parse_stmt();
-            pos = cond_start;
-            tok_line = 0; /* reset line counter for tokenizer */
+            /* Re-parse condition from source */
+            pos = cond_src;
             cond = parse_expr();
             if (tok_type == ')') next_tok();
         }
-        /* Skip body if condition false */
-        pos = body_start;
 
         break_target = old_break;
         continue_target = old_continue;
@@ -647,47 +649,43 @@ static int parse_stmt(void) {
         if (tok_type == '(') next_tok();
 
         /* Init */
-        if (tok_type != ';') {
-            parse_expr();
-        }
+        if (tok_type != ';') parse_expr();
         if (tok_type == ';') next_tok();
 
-        int cond_pos = pos;
-        /* Condition */
+        /* Save condition source position */
+        int cond_src = pos;
         int cond = 1;
-        if (tok_type != ';') {
-            cond = parse_expr();
-        }
+        if (tok_type != ';') cond = parse_expr();
         if (tok_type == ';') next_tok();
 
-        int update_pos = pos;
-        /* Update - skip for now, will re-parse */
+        /* Save update source position */
+        int update_src = pos;
+        /* Skip update expression */
         if (tok_type != ')') {
             while (tok_type != ')' && tok_type != T_EOF) next_tok();
         }
         if (tok_type == ')') next_tok();
 
-        int body_start = pos;
+        /* Save body source position */
+        int body_src = pos;
 
         int old_break = break_target;
         int old_continue = continue_target;
         break_target = -1;
-        continue_target = update_pos;
+        continue_target = -1;
 
         while (cond) {
-            pos = body_start;
+            /* Execute body */
+            pos = body_src;
             parse_stmt();
             /* Execute update */
-            pos = update_pos;
-            tok_line = 0;
-            if (tok_type != ')') parse_expr();
+            pos = update_src;
+            if (pos < src_len && src[pos] != ')') parse_expr();
             /* Re-evaluate condition */
-            pos = cond_pos;
-            tok_line = 0;
+            pos = cond_src;
             cond = parse_expr();
             if (tok_type == ';') next_tok();
         }
-        pos = body_start;
 
         break_target = old_break;
         continue_target = old_continue;
@@ -826,20 +824,27 @@ static void parse_program(void) {
 
     while (tok_type != T_EOF) {
         /* Function definition: int name(params) { ... } */
-        if (tok_type == T_INT || tok_type == T_VOID) {
+        if (tok_type == T_INT || tok_type == T_VOID || tok_type == T_CHAR) {
             next_tok();
-            if (tok_type != T_IDENT) { cc_error("expected func name"); return; }
+            if (tok_type != T_IDENT) { cc_error("expected func name"); next_tok(); continue; }
             char fname[CC_MAX_NAME];
             strcpy(fname, tok_str);
             next_tok();
-            if (tok_type != '(') { cc_error("expected ("); return; }
-            next_tok();
+
+            /* If not '(' then it's a global variable declaration */
+            if (tok_type != '(') {
+                /* Skip to end of statement */
+                while (tok_type != ';' && tok_type != T_EOF) next_tok();
+                if (tok_type == ';') next_tok();
+                continue;
+            }
+            next_tok(); /* skip '(' */
 
             cc_func_t fn;
             strcpy(fn.name, fname);
             fn.param_count = 0;
             while (tok_type != ')' && tok_type != T_EOF) {
-                if (tok_type == T_INT) next_tok();
+                if (tok_type == T_INT || tok_type == T_CHAR || tok_type == T_VOID) next_tok();
                 if (tok_type == T_IDENT && fn.param_count < CC_MAX_ARGS) {
                     strcpy(fn.param_names[fn.param_count++], tok_str);
                     next_tok();
@@ -848,18 +853,19 @@ static void parse_program(void) {
             }
             if (tok_type == ')') next_tok();
 
-            /* Skip to '{' */
+            /* Record body start position */
             if (tok_type == '{') {
-                next_tok();
-                fn.body_start = pos;
-                /* Find matching '}' */
+                fn.body_start = pos; /* position at '{' in source */
+                /* Find matching '}' using raw source scanning */
                 int depth = 1;
-                while (depth > 0 && pos < src_len) {
-                    if (src[pos] == '{') depth++;
-                    else if (src[pos] == '}') depth--;
-                    if (depth > 0) pos++;
+                int scan = pos + 1;
+                while (depth > 0 && scan < src_len) {
+                    if (src[scan] == '{') depth++;
+                    else if (src[scan] == '}') depth--;
+                    if (depth > 0) scan++;
                 }
-                if (tok_type == '}') next_tok();
+                fn.body_end = scan; /* position at '}' */
+                pos = scan + 1; /* skip past '}' */
 
                 if (func_count < CC_MAX_FUNCS) {
                     funcs[func_count++] = fn;
@@ -868,11 +874,13 @@ static void parse_program(void) {
                 /* If main(), execute it */
                 if (strcmp(fname, "main") == 0) {
                     var_count = 0;
-                    int save = pos;
+                    int saved_pos = pos;
                     pos = fn.body_start;
                     parse_block();
-                    pos = save;
+                    pos = saved_pos;
                 }
+                /* Re-sync tokenizer */
+                next_tok();
             }
         } else {
             next_tok();
@@ -896,9 +904,9 @@ static void repl_redraw(const char *line, int len, int pos_cur, int prompt_len) 
 }
 
 static void cc_repl(void) {
-    console_puts("HBOS C Interpreter v1.0\n");
-    console_puts("Type C code, end with ; or } to execute, 'quit' to exit\n");
-    console_puts("Arrow keys, Home/End, Insert supported\n\n");
+    console_puts("\x1b[33mHBOS GCC v1.0\x1b[0m — C/C++ Compiler\n");
+    console_puts("Type C code, end with ; or } to execute\n");
+    console_puts("'quit' to exit, 'run' to execute accumulated code\n\n");
 
     char line[256];
     int src_pos = 0;
