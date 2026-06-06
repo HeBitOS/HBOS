@@ -56,11 +56,30 @@ static void cmd_credits(int argc, char **argv) {
 }
 
 static void cmd_echo(int argc, char **argv) {
-    for (int i = 1; i < argc; i++) {
-        if (i > 1) write(STDOUT_FILENO, " ", 1);
-        write(STDOUT_FILENO, argv[i], strlen(argv[i]));
+    int raw = 0;
+    int start = 1;
+    if (argc >= 2 && strcmp(argv[1], "-e") == 0) { raw = 1; start = 2; }
+    for (int i = start; i < argc; i++) {
+        if (i > start) console_putchar(' ');
+        const char *s = argv[i];
+        if (raw) {
+            while (*s) {
+                if (*s == '\\' && s[1]) {
+                    s++;
+                    if (*s == 'n') console_putchar('\n');
+                    else if (*s == 't') console_putchar('\t');
+                    else if (*s == '\\') console_putchar('\\');
+                    else { console_putchar('\\'); console_putchar(*s); }
+                } else {
+                    console_putchar(*s);
+                }
+                s++;
+            }
+        } else {
+            console_puts(s);
+        }
     }
-    write(STDOUT_FILENO, "\n", 1);
+    console_putchar('\n');
 }
 
 static void cmd_version(int argc, char **argv) {
