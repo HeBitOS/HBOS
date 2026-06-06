@@ -270,6 +270,30 @@ extern void cmd_alias(int argc, char **argv);
 extern void cmd_unalias(int argc, char **argv);
 extern void cmd_exit(int argc, char **argv);
 
+static void cmd_type(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: type <command>\n"); return; }
+    extern const char *alias_lookup(const char *name);
+    const char *av = alias_lookup(argv[1]);
+    if (av) {
+        console_puts(argv[1]);
+        console_puts(" is aliased to '");
+        console_puts(av);
+        console_puts("'\n");
+        return;
+    }
+    const command_t **list = cmd_get_list();
+    uint32_t cnt = cmd_get_count();
+    for (uint32_t i = 0; i < cnt; i++) {
+        if (strcmp(list[i]->name, argv[1]) == 0) {
+            console_puts(argv[1]);
+            console_puts(" is a shell builtin\n");
+            return;
+        }
+    }
+    console_puts(argv[1]);
+    console_puts(": not found\n");
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
@@ -288,6 +312,7 @@ void tool_system_init(void) {
         {"alias",   CMD_GROUP_SYSTEM, "Create command alias",  "alias name=cmd", cmd_alias},
         {"unalias", CMD_GROUP_SYSTEM, "Remove command alias",  "unalias <name>", cmd_unalias},
         {"exit",    CMD_GROUP_SYSTEM, "Exit the shell",       "exit", cmd_exit},
+        {"type",    CMD_GROUP_SYSTEM, "Show command type",    "type <cmd>", cmd_type},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
