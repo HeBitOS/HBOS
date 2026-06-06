@@ -470,6 +470,30 @@ static void cmd_find(int argc, char **argv) {
     }
 }
 
+static void cmd_wc(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: wc <file>\n"); return; }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) { print_errno("wc", argv[1]); return; }
+    uint32_t lines = 0, words = 0, chars = 0;
+    int in_word = 0;
+    char buf[256];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        chars += (uint32_t)n;
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] == '\n') lines++;
+            if (buf[i] == ' ' || buf[i] == '\n' || buf[i] == '\t') in_word = 0;
+            else if (!in_word) { words++; in_word = 1; }
+        }
+    }
+    close(fd);
+    console_puts("  ");
+    print_uint(lines); console_puts("  ");
+    print_uint(words); console_puts("  ");
+    print_uint(chars); console_puts("  ");
+    console_puts(argv[1]); console_putchar('\n');
+}
+
 extern void cmd_edit(int argc, char **argv);
 
 void tool_file_init(void) {
@@ -496,6 +520,7 @@ void tool_file_init(void) {
         {"mkfs",       CMD_GROUP_FILE, "Format HBFS ATA disk",   "mkfs",                      cmd_mkfs},
         {"edit",       CMD_GROUP_FILE, "Edit a file (TUI editor)","edit <file>",               cmd_edit},
         {"find",       CMD_GROUP_FILE, "Find files by name",     "find [pattern]",            cmd_find},
+        {"wc",         CMD_GROUP_FILE, "Count lines/words/bytes", "wc <file>",                cmd_wc},
         {"selftest",   CMD_GROUP_DEBUG,"Run kernel selftests",    "selftest",                   cmd_selftest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
