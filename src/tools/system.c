@@ -266,6 +266,9 @@ static void cmd_uname(int argc, char **argv) {
     console_putchar('\n');
 }
 
+extern void cmd_alias(int argc, char **argv);
+extern void cmd_unalias(int argc, char **argv);
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
@@ -281,6 +284,8 @@ void tool_system_init(void) {
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},
         {"top",     CMD_GROUP_SYSTEM, "Real-time task monitor","top",   cmd_top},
         {"uname",   CMD_GROUP_SYSTEM, "Show system identity",  "uname", cmd_uname},
+        {"alias",   CMD_GROUP_SYSTEM, "Create command alias",  "alias name=cmd", cmd_alias},
+        {"unalias", CMD_GROUP_SYSTEM, "Remove command alias",  "unalias <name>", cmd_unalias},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

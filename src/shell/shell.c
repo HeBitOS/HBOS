@@ -401,11 +401,81 @@ static int shell_execute_argv(int argc, char **argv) {
     return -1;
 }
 
+/* ── Alias support ─────────────────────────────────────────────── */
+#define MAX_ALIASES 32
+typedef struct { char name[32]; char value[128]; } alias_t;
+static alias_t aliases[MAX_ALIASES];
+static int alias_count;
+
+static const char *alias_lookup(const char *name) {
+    for (int i = 0; i < alias_count; i++)
+        if (strcmp(aliases[i].name, name) == 0) return aliases[i].value;
+    return NULL;
+}
+
+void cmd_alias(int argc, char **argv) {
+    if (argc == 1) {
+        for (int i = 0; i < alias_count; i++) {
+            console_puts(aliases[i].name);
+            console_putchar('=');
+            console_puts(aliases[i].value);
+            console_putchar('\n');
+        }
+        return;
+    }
+    if (argc < 3) { console_puts("Usage: alias name=command\n"); return; }
+    /* Parse name=value */
+    char *eq = argv[1];
+    while (*eq && *eq != '=') eq++;
+    if (*eq != '=') { console_puts("Usage: alias name=command\n"); return; }
+    *eq = '\0';
+    const char *name = argv[1];
+    const char *value = eq + 1;
+    /* Find existing or new slot */
+    int slot = alias_count;
+    for (int i = 0; i < alias_count; i++)
+        if (strcmp(aliases[i].name, name) == 0) { slot = i; break; }
+    if (slot >= MAX_ALIASES) { console_puts("alias: too many aliases\n"); return; }
+    uint32_t nl = 0; while (name[nl] && nl < 31) { aliases[slot].name[nl] = name[nl]; nl++; }
+    aliases[slot].name[nl] = '\0';
+    uint32_t vl = 0; while (value[vl] && vl < 127) { aliases[slot].value[vl] = value[vl]; vl++; }
+    aliases[slot].value[vl] = '\0';
+    if (slot == alias_count) alias_count++;
+}
+
+void cmd_unalias(int argc, char **argv) {
+    if (argc < 2) { console_puts("Usage: unalias <name>\n"); return; }
+    for (int i = 0; i < alias_count; i++) {
+        if (strcmp(aliases[i].name, argv[1]) == 0) {
+            aliases[i] = aliases[--alias_count];
+            return;
+        }
+    }
+}
+
 void cmd_execute(const char *line) {
     char buf[CMD_BUF_SIZE]; strcpy(buf, line);
     char *argv[MAX_ARGS]; int argc = parse_line(buf, argv, MAX_ARGS);
     if (argc == 0) return;
     save_history(line);
+
+    /* Check alias expansion */
+    const char *alias_val = alias_lookup(argv[0]);
+    if (alias_val) {
+        char expanded[CMD_BUF_SIZE];
+        uint32_t p = 0;
+        const char *v = alias_val;
+        while (*v && p < CMD_BUF_SIZE - 1) expanded[p++] = *v++;
+        for (int i = 1; i < argc && p < CMD_BUF_SIZE - 2; i++) {
+            expanded[p++] = ' ';
+            const char *a = argv[i];
+            while (*a && p < CMD_BUF_SIZE - 1) expanded[p++] = *a++;
+        }
+        expanded[p] = '\0';
+        strcpy(buf, expanded);
+        argc = parse_line(buf, argv, MAX_ARGS);
+        if (argc == 0) return;
+    }
 
     int bg = 0;
     if (argc > 0 && strcmp(argv[argc - 1], "&") == 0) {
