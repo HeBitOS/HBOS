@@ -827,15 +827,50 @@ static void cc_repl(void) {
 
     while (1) {
         console_puts("gcc> ");
-        int li = 0;
+        int li = 0, cur = 0;
         while (1) {
             int c = kb_get_key();
-            if (c == '\n' || c == '\r') { console_putchar('\n'); break; }
-            if (c == '\b' || c == 0x7F) {
-                if (li > 0) { li--; console_putchar('\b'); console_putchar(' '); console_putchar('\b'); }
+            if (c == '\n' || c == '\r') {
+                console_putchar('\n');
+                break;
+            }
+            /* Arrow keys */
+            if (c == 0x102) { /* LEFT */
+                if (cur > 0) { cur--; console_putchar('\b'); }
+            } else if (c == 0x103) { /* RIGHT */
+                if (cur < li) { console_putchar(line[cur]); cur++; }
+            } else if (c == 0x106) { /* HOME */
+                while (cur > 0) { cur--; console_putchar('\b'); }
+            } else if (c == 0x107) { /* END */
+                while (cur < li) { console_putchar(line[cur]); cur++; }
+            } else if (c == 0x109) { /* DELETE */
+                if (cur < li) {
+                    for (int i = cur; i < li - 1; i++) line[i] = line[i + 1];
+                    li--;
+                    /* Redraw */
+                    for (int i = cur; i < li; i++) console_putchar(line[i]);
+                    console_putchar(' ');
+                    for (int i = 0; i < li - cur + 1; i++) console_putchar('\b');
+                }
+            } else if (c == '\b' || c == 0x7F) {
+                if (cur > 0) {
+                    for (int i = cur - 1; i < li - 1; i++) line[i] = line[i + 1];
+                    li--;
+                    cur--;
+                    console_putchar('\b');
+                    for (int i = cur; i < li; i++) console_putchar(line[i]);
+                    console_putchar(' ');
+                    for (int i = 0; i < li - cur + 1; i++) console_putchar('\b');
+                }
             } else if (c >= ' ' && c <= '~' && li < 254) {
-                line[li++] = (char)c;
-                console_putchar((char)c);
+                /* Insert at cursor */
+                for (int i = li; i > cur; i--) line[i] = line[i - 1];
+                line[cur] = (char)c;
+                li++;
+                cur++;
+                /* Redraw from cursor */
+                for (int i = cur - 1; i < li; i++) console_putchar(line[i]);
+                for (int i = 0; i < li - cur; i++) console_putchar('\b');
             }
         }
         line[li] = '\0';

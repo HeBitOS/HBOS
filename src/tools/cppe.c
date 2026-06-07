@@ -30,7 +30,7 @@
 #define CPPE_MAX_LINES  512
 #define CPPE_LINE_LEN   128
 #define CPPE_TAB_WIDTH  4
-#define CPPE_SCR_LINES  23   /* usable lines (term height - 2 for bars) */
+/* CPPE_SCR_LINES is now dynamic: E.term_rows - 3 */
 #define CPPE_SCR_COLS   80
 
 /* ── Editor state ───────────────────────────────────────────── */
@@ -269,7 +269,7 @@ static void cppe_paste(void) {
 /* ── Navigation ─────────────────────────────────────────────── */
 static void cppe_ensure_visible(void) {
     if (E.cy < E.scroll_y) E.scroll_y = E.cy;
-    if (E.cy >= E.scroll_y + CPPE_SCR_LINES) E.scroll_y = E.cy - CPPE_SCR_LINES + 1;
+    if (E.cy >= E.scroll_y + (E.term_rows - 3)) E.scroll_y = E.cy - (E.term_rows - 3) + 1;
 }
 
 static void cppe_clamp_cursor(void) {
@@ -431,13 +431,13 @@ static void cppe_draw_screen(void) {
     cppe_reset();
 
     /* Text lines */
-    for (int row = 0; row < CPPE_SCR_LINES; row++) {
+    for (int row = 0; row < (E.term_rows - 3); row++) {
         int lidx = E.scroll_y + row;
         cppe_draw_line(row + 2, lidx);
     }
 
     /* Status bar */
-    cppe_goto(CPPE_SCR_LINES + 2, 1);
+    cppe_goto((E.term_rows - 3) + 2, 1);
     cppe_reverse();
     char status[80];
     int sp = 0;
@@ -461,7 +461,7 @@ static void cppe_draw_screen(void) {
 
     /* Message line */
     if (E.msg_ttl > 0) {
-        cppe_goto(CPPE_SCR_LINES + 3, 1);
+        cppe_goto((E.term_rows - 3) + 3, 1);
         cppe_puts(E.msg);
         E.msg_ttl--;
     }
@@ -482,7 +482,7 @@ static void cppe_set_msg(const char *msg) {
 /* ── Search ─────────────────────────────────────────────────── */
 static void cppe_do_search(void) {
     /* Prompt for search term */
-    cppe_goto(CPPE_SCR_LINES + 3, 1);
+    cppe_goto((E.term_rows - 3) + 3, 1);
     cppe_puts("Search: ");
     E.search_len = 0;
     int c;
@@ -522,7 +522,7 @@ static void cppe_do_search(void) {
 
 /* ── Goto line ──────────────────────────────────────────────── */
 static void cppe_goto_line(void) {
-    cppe_goto(CPPE_SCR_LINES + 3, 1);
+    cppe_goto((E.term_rows - 3) + 3, 1);
     cppe_puts("Goto line: ");
     char buf[8]; int bi = 0;
     int c;
@@ -568,8 +568,13 @@ static void cppe_show_help(void) {
 
 /* ── Main editor loop ───────────────────────────────────────── */
 static void cppe_run(void) {
-    E.term_rows = CPPE_SCR_LINES + 3;
-    E.term_cols = CPPE_SCR_COLS;
+    /* Detect terminal size dynamically */
+    uint64_t cols = 80, rows = 25;
+    console_get_size(&cols, &rows);
+    E.term_cols = (int)cols;
+    E.term_rows = (int)rows;
+    if (E.term_cols < 40) E.term_cols = 80;
+    if (E.term_rows < 10) E.term_rows = 25;
     E.scroll_y = 0;
     E.cx = 0; E.cy = 0;
     E.msg[0] = '\0'; E.msg_ttl = 0;
@@ -586,7 +591,7 @@ static void cppe_run(void) {
         /* Ctrl+X — exit */
         if (c == ('x' & 0x1F)) {
             if (E.modified) {
-                cppe_goto(CPPE_SCR_LINES + 3, 1);
+                cppe_goto((E.term_rows - 3) + 3, 1);
                 cppe_puts("Save before exit? (Y/N) ");
                 int yn = kb_get_key();
                 if (yn == 'y' || yn == 'Y') cppe_save();
@@ -676,11 +681,11 @@ static void cppe_run(void) {
         } else if (c == 0x107) { /* END */
             E.cx = E.line_len[E.cy];
         } else if (c == 0x104) { /* PGUP */
-            E.cy -= CPPE_SCR_LINES;
+            E.cy -= (E.term_rows - 3);
             if (E.cy < 0) E.cy = 0;
             cppe_clamp_cursor(); cppe_ensure_visible();
         } else if (c == 0x105) { /* PGDN */
-            E.cy += CPPE_SCR_LINES;
+            E.cy += (E.term_rows - 3);
             if (E.cy >= E.line_count) E.cy = E.line_count - 1;
             cppe_clamp_cursor(); cppe_ensure_visible();
         } else if (c == 0x109) { /* DELETE */
