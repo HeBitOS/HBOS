@@ -2,7 +2,10 @@ OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(_start)
 
 SECTIONS {
-    . = 1M;
+    /* Keep the Multiboot2 kernel out of fragmented low memory on UEFI/Limine.
+       boot.asm identity-maps 0-4GB before entering long mode, so a 16MiB
+       fixed physical load address remains directly executable. */
+    . = 16M;
 
     .multiboot ALIGN(8) : {
         *(.multiboot)

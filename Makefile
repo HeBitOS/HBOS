@@ -34,7 +34,7 @@ QEMU = /usr/bin/qemu-system-x86_64
 QEMU_ENV = env -u SNAP -u SNAP_NAME -u SNAP_REVISION -u SNAP_ARCH -u SNAP_INSTANCE_NAME \
            -u SNAP_COMMON -u SNAP_DATA -u SNAP_USER_COMMON -u SNAP_USER_DATA \
            -u SNAP_LIBRARY_PATH -u GTK_PATH -u GTK_EXE_PREFIX -u GIO_MODULE_DIR \
-           -u GTK_IM_MODULE_FILE -u LOCPATH
+           -u GTK_IM_MODULE_FILE -u LOCPATH -u LD_LIBRARY_PATH -u LD_PRELOAD
 
 # 字体文件
 FONT_TTF = fonts/ZhengGeDianHei-16.ttf
@@ -218,8 +218,8 @@ $(BUILD_DIR)/apps/%.o: $(SRC_DIR)/apps/%.c | $(BUILD_DIR)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 # Link
-$(KERNEL_BIOS): $(ALL_OBJS)
-	$(LD) $(LDFLAGS_BIOS) $^ -o $@
+$(KERNEL_BIOS): $(ALL_OBJS) linker_bios.ld
+	$(LD) $(LDFLAGS_BIOS) $(filter-out linker_bios.ld,$^) -o $@
 	@echo "✓ BIOS kernel: $@"
 
 $(ISO_BIOS): $(KERNEL_BIOS)
