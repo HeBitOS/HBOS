@@ -5,6 +5,10 @@
 
 ![截图](./photo/hbosv0.1.png "v0.1截图")
 
+## 项目目标
+
+HBOS 的目标是在尽量低廉、低配置的电脑上做出足够好的实际体验。开发时优先轻量、稳定、可用，先把小方向打磨顺手，再推进大方向；避免为了“看起来高级”引入过多无用代码、复杂依赖或消耗低配机器资源的设计。
+
 ## 0.1 beta2 更新
 
 - ✅ 默认构建产物收敛为 BIOS/UEFI 双 ISO：`build/hbos-bios.iso` 与 `build/hbos-uefi.iso`
@@ -15,6 +19,7 @@
 - ✅ 新增启动自测，POSIX/ramfs 通过时输出 `[SELFTEST] POSIX/ramfs: PASS`
 - ✅ 新增 ACPI poweroff 路径，`poweroff`/`shutdown` 优先走 ACPI，失败后回退到虚拟机端口
 - ✅ 修复 CJK 滚动错位与滚动时光标残影问题
+- ✅ GUI 代码工作台增强鼠标保存/运行/打开、运行输出和错误行提示，保持轻量可用
 
 ## beta1 更新
 

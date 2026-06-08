@@ -20,7 +20,10 @@
 #include "tool.h"
 
 extern void task_yield(void);
-extern int hbos_gcc_run_file(const char *path, int verbose);
+extern int hbos_gcc_run_file_capture(const char *path, char *out, uint32_t out_cap);
+extern const char *hbos_gcc_last_error(void);
+extern int hbos_gcc_last_error_line(void);
+extern int hbos_gcc_last_return(void);
 
 #define PANEL_FILES 0
 #define PANEL_DISK  1
@@ -47,7 +50,7 @@ extern int hbos_gcc_run_file(const char *path, int verbose);
 #define BROWSER_URL_CAP 160
 #define BROWSER_PAGE_CAP 2048
 #define CODE_EDIT_CAP 4096
-#define CODE_OUTPUT_CAP 192
+#define CODE_OUTPUT_CAP 256
 #define CODE_FILE_ROWS 7
 #define CODE_VIEW_ROWS 10
 #define SNAKE_W 16
@@ -58,6 +61,9 @@ extern int hbos_gcc_run_file(const char *path, int verbose);
 #define FILE_ROW_H 26
 #define NOTE_FILE_ROWS 7
 #define GUI_PATH_MAX 256
+#define CODE_CMD_SAVE 1
+#define CODE_CMD_RUN  2
+#define CODE_CMD_OPEN 3
 
 typedef struct {
     int active;
@@ -108,6 +114,7 @@ typedef struct {
     int code_loaded;
     int code_modified;
     int code_scroll;
+    int code_error_line;
     int rename_active;
     char rename_buf[MAX_FILENAME];
     uint32_t rename_len;
@@ -1781,6 +1788,21 @@ static void code_set_output(const char *msg) {
     g_code_output[i] = 0;
 }
 
+static void code_append_sanitized(char *buf, uint32_t cap, uint32_t *pos, const char *s) {
+    int space = 0;
+    while (s && *s && *pos + 1 < cap) {
+        char c = *s++;
+        if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        if (c == ' ') {
+            if (space) continue;
+            space = 1;
+        } else {
+            space = 0;
+        }
+        append_char(buf, cap, pos, c);
+    }
+}
+
 static void code_set_path(gui_state_t *st, const char *path) {
     uint32_t i = 0;
     while (path && path[i] && i + 1 < sizeof(st->code_path)) {
@@ -1796,6 +1818,7 @@ static void code_set_path(gui_state_t *st, const char *path) {
     st->code_modified = 0;
     st->code_scroll = 0;
     st->code_cursor = 0;
+    st->code_error_line = 0;
 }
 
 static const char *code_path(gui_state_t *st) {
@@ -1805,8 +1828,11 @@ static const char *code_path(gui_state_t *st) {
 
 static void code_insert_template(void) {
     const char *tpl =
+        "#include <stdio.h>\n"
+        "\n"
         "int main() {\n"
         "    puts(\"HBOS Code Workspace\");\n"
+        "    printf(\"answer=%d\\n\", 40 + 2);\n"
         "    return 0;\n"
         "}\n";
     uint32_t len = (uint32_t)strlen(tpl);
@@ -1832,6 +1858,7 @@ static int code_save(gui_state_t *st) {
     }
     (void)fs_sync();
     st->code_modified = 0;
+    st->code_error_line = 0;
     code_set_output("Saved");
     st->status = "代码已保存";
     return 0;
@@ -1845,6 +1872,7 @@ static void code_load(gui_state_t *st) {
     st->code_cursor = 0;
     st->code_scroll = 0;
     st->code_modified = 0;
+    st->code_error_line = 0;
     vfs_node_t *node = vfs_lookup(path);
     if (!node) {
         code_insert_template();
@@ -1946,6 +1974,16 @@ static uint32_t code_offset_for_line_col(gui_state_t *st, uint32_t line, uint32_
     return start + col;
 }
 
+static void code_jump_to_line(gui_state_t *st, int one_based_line) {
+    if (one_based_line <= 0) return;
+    uint32_t line = (uint32_t)(one_based_line - 1);
+    st->code_cursor = code_offset_for_line_col(st, line, 0);
+    if ((int)line < st->code_scroll) st->code_scroll = (int)line;
+    if ((int)line >= st->code_scroll + CODE_VIEW_ROWS)
+        st->code_scroll = (int)line - CODE_VIEW_ROWS + 1;
+    if (st->code_scroll < 0) st->code_scroll = 0;
+}
+
 static void code_ensure_visible(gui_state_t *st) {
     uint32_t line = 0, col = 0;
     code_line_col(st, st->code_cursor, &line, &col);
@@ -1981,6 +2019,7 @@ static void code_insert_char(gui_state_t *st, char c) {
     g_code_buf[st->code_cursor++] = c;
     st->code_len++;
     st->code_modified = 1;
+    st->code_error_line = 0;
     code_ensure_visible(st);
 }
 
@@ -1992,19 +2031,75 @@ static void code_backspace(gui_state_t *st) {
     st->code_cursor--;
     st->code_len--;
     st->code_modified = 1;
+    st->code_error_line = 0;
     code_ensure_visible(st);
 }
 
 static void code_run_current(gui_state_t *st) {
     code_load(st);
     if (code_save(st) < 0) return;
-    int rc = hbos_gcc_run_file(code_path(st), 0);
+    char run_out[CODE_OUTPUT_CAP];
+    int rc = hbos_gcc_run_file_capture(code_path(st), run_out, sizeof(run_out));
     if (rc == 0) {
-        code_set_output("GCC OK");
+        char line[CODE_OUTPUT_CAP];
+        uint32_t pos = 0;
+        line[0] = 0;
+        append_str(line, sizeof(line), &pos, "Run OK");
+        if (run_out[0]) {
+            append_str(line, sizeof(line), &pos, ": ");
+            code_append_sanitized(line, sizeof(line), &pos, run_out);
+        } else {
+            append_str(line, sizeof(line), &pos, " return ");
+            append_int(line, sizeof(line), &pos, hbos_gcc_last_return());
+        }
+        st->code_error_line = 0;
+        code_set_output(line);
         st->status = "代码运行成功";
     } else {
-        code_set_output("GCC failed");
+        int err_line = hbos_gcc_last_error_line();
+        const char *err = hbos_gcc_last_error();
+        char line[CODE_OUTPUT_CAP];
+        uint32_t pos = 0;
+        line[0] = 0;
+        if (err_line > 0) {
+            append_str(line, sizeof(line), &pos, "Line ");
+            append_uint(line, sizeof(line), &pos, (uint32_t)err_line);
+            append_str(line, sizeof(line), &pos, ": ");
+            st->code_error_line = err_line;
+            code_jump_to_line(st, err_line);
+        } else {
+            append_str(line, sizeof(line), &pos, "GCC failed: ");
+            st->code_error_line = 0;
+        }
+        append_str(line, sizeof(line), &pos, err && err[0] ? err : "unknown error");
+        code_set_output(line);
         st->status = "代码运行失败";
+    }
+}
+
+static int code_command_rect(int content_w, int cmd, int *x, int *y, int *bw) {
+    int idx = cmd - 1;
+    if (idx < 0 || idx > 2 || content_w <= 0) return 0;
+    int gap = 8;
+    int width = 68;
+    int total = width * 3 + gap * 2;
+    int left = content_w - total;
+    if (left < 124 && content_w >= 124 + total) left = 124;
+    if (left < 0) left = 0;
+    if (x) *x = left + idx * (width + gap);
+    if (y) *y = 22;
+    if (bw) *bw = width;
+    return 1;
+}
+
+static void handle_code_command(gui_state_t *st, int cmd) {
+    if (cmd == CODE_CMD_SAVE) {
+        code_load(st);
+        (void)code_save(st);
+    } else if (cmd == CODE_CMD_RUN) {
+        code_run_current(st);
+    } else if (cmd == CODE_CMD_OPEN) {
+        code_open_selected(st);
     }
 }
 
@@ -2023,7 +2118,13 @@ static void draw_code_app(int tx, int ty, int win_w, gui_state_t *st) {
     int line_no_w = 42;
 
     text(tx, ty, "代码工作台", rgb(102, 214, 255), 1);
-    text(tx, ty + 24, "Ctrl+S 保存  Ctrl+R 运行  Ctrl+O 打开选中文件", rgb(148, 168, 180), 1);
+    int bx, by, bw;
+    if (code_command_rect(content_w, CODE_CMD_SAVE, &bx, &by, &bw))
+        draw_small_button(tx + bx, ty + by, bw, "保存", rgb(85, 180, 120));
+    if (code_command_rect(content_w, CODE_CMD_RUN, &bx, &by, &bw))
+        draw_small_button(tx + bx, ty + by, bw, "运行", rgb(23, 147, 209));
+    if (code_command_rect(content_w, CODE_CMD_OPEN, &bx, &by, &bw))
+        draw_small_button(tx + bx, ty + by, bw, "打开", rgb(244, 194, 82));
 
     vgradient(tx, ty + 54, content_w, 24, rgb(34, 48, 64), rgb(18, 28, 40));
     border(tx, ty + 54, content_w, 24, rgb(48, 72, 94));
@@ -2086,7 +2187,12 @@ static void draw_code_app(int tx, int ty, int win_w, gui_state_t *st) {
         num[0] = 0;
         append_uint(num, sizeof(num), &pos, line_idx + 1);
         int y = editor_y + 10 + row * row_h;
-        if (line_idx == cursor_line) rect(editor_x + line_no_w + 1, y - 3, editor_w - line_no_w - 4, row_h, rgb(16, 28, 38));
+        if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
+            rect(editor_x + line_no_w + 1, y - 3, editor_w - line_no_w - 4, row_h, rgb(70, 24, 30));
+            rect(editor_x + line_no_w + 1, y - 3, 3, row_h, rgb(232, 86, 92));
+        } else if (line_idx == cursor_line) {
+            rect(editor_x + line_no_w + 1, y - 3, editor_w - line_no_w - 4, row_h, rgb(16, 28, 38));
+        }
         text(editor_x + 8, y, num, rgb(102, 134, 154), 1);
         text_clipped(editor_x + line_no_w + 10, y, editor_x + editor_w - 10,
                      line, rgb(228, 238, 246), 1);
@@ -2099,10 +2205,11 @@ static void draw_code_app(int tx, int ty, int win_w, gui_state_t *st) {
     }
 
     vgradient(tx, bottom_y, content_w, 58, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, bottom_y, content_w, 58, rgb(46, 66, 84));
+    border(tx, bottom_y, content_w, 58, st->code_error_line > 0 ? rgb(176, 62, 72) : rgb(46, 66, 84));
     text(tx + 12, bottom_y + 12, "输出", rgb(194, 226, 242), 1);
     text_clipped(tx + 62, bottom_y + 12, tx + content_w - 12,
-                 g_code_output[0] ? g_code_output : "Ready", rgb(210, 221, 230), 1);
+                 g_code_output[0] ? g_code_output : "Ready",
+                 st->code_error_line > 0 ? rgb(255, 188, 190) : rgb(210, 221, 230), 1);
     uint32_t pos = 0;
     line[0] = 0;
     append_str(line, sizeof(line), &pos, "Ln ");
@@ -3105,6 +3212,62 @@ static int hit_note_file(int w, int h, const gui_state_t *st, int mx, int my) {
     return -1;
 }
 
+static int hit_code_command(int w, int h, const gui_state_t *st, int mx, int my) {
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
+    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_CODE) return 0;
+
+    int win_x, win_y, win_w, win_h;
+    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
+    (void)win_h;
+    int tx = win_x + 30;
+    int ty = win_y + 42;
+    int content_w = win_w - 60;
+    for (int cmd = CODE_CMD_SAVE; cmd <= CODE_CMD_OPEN; cmd++) {
+        int x, y, bw;
+        if (!code_command_rect(content_w, cmd, &x, &y, &bw)) continue;
+        if (mx >= tx + x && mx < tx + x + bw &&
+            my >= ty + y && my < ty + y + ACTION_H)
+            return cmd;
+    }
+    return 0;
+}
+
+static int hit_code_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off) {
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
+    const wm_window_t *win = wm_get_window(&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_CODE) return 0;
+
+    int win_x, win_y, win_w, win_h;
+    gui_window_metrics(st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
+    (void)win_h;
+    int tx = win_x + 30;
+    int ty = win_y + 42;
+    int content_w = win_w - 60;
+    int side_w = 154;
+    int editor_x = tx + side_w + 14;
+    int editor_w = content_w - side_w - 14;
+    if (editor_w < 300) editor_w = 300;
+    int editor_y = ty + 82;
+    int row_h = 18;
+    int editor_h = CODE_VIEW_ROWS * row_h + 12;
+    int line_no_w = 42;
+    if (mx < editor_x + line_no_w || mx >= editor_x + editor_w ||
+        my < editor_y || my >= editor_y + editor_h)
+        return 0;
+
+    int row = (my - (editor_y + 10)) / row_h;
+    if (row < 0) row = 0;
+    if (row >= CODE_VIEW_ROWS) row = CODE_VIEW_ROWS - 1;
+    uint32_t line = (uint32_t)(st->code_scroll + row);
+    uint32_t total = code_line_count(st);
+    if (line >= total) line = total ? total - 1 : 0;
+    int col = (mx - (editor_x + line_no_w + 10)) / 6;
+    if (col < 0) col = 0;
+    if (off) *off = code_offset_for_line_col(st, line, (uint32_t)col);
+    return 1;
+}
+
 static int hit_code_file(int w, int h, const gui_state_t *st, int mx, int my) {
     if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return -1;
     const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
@@ -3717,23 +3880,35 @@ static void cmd_gui(int argc, char **argv) {
                                 drag_pending = 0;
                                 st.status = "拖动窗口";
                             } else if (st.app_mode != GUI_APP_NONE) {
-                                int note_file = hit_note_file(w, h, &st, mx, my);
-                                if (note_file >= 0) {
-                                    gui_select_file(&st, note_file);
-                                    st.status = "已切换编辑文件";
+                                int code_cmd = hit_code_command(w, h, &st, mx, my);
+                                if (code_cmd) {
+                                    handle_code_command(&st, code_cmd);
                                 } else {
-                                    int code_file = hit_code_file(w, h, &st, mx, my);
-                                    if (code_file >= 0) {
-                                        if (st.last_clicked_file == code_file && st.selected_file == code_file) {
-                                            code_open_selected(&st);
-                                            st.last_clicked_file = -1;
-                                        } else {
-                                            gui_select_file(&st, code_file);
-                                            st.last_clicked_file = code_file;
-                                            st.status = "已选择代码文件";
-                                        }
+                                    int note_file = hit_note_file(w, h, &st, mx, my);
+                                    if (note_file >= 0) {
+                                        gui_select_file(&st, note_file);
+                                        st.status = "已切换编辑文件";
                                     } else {
-                                        st.status = "应用内请使用键盘";
+                                        int code_file = hit_code_file(w, h, &st, mx, my);
+                                        if (code_file >= 0) {
+                                            if (st.last_clicked_file == code_file && st.selected_file == code_file) {
+                                                code_open_selected(&st);
+                                                st.last_clicked_file = -1;
+                                            } else {
+                                                gui_select_file(&st, code_file);
+                                                st.last_clicked_file = code_file;
+                                                st.status = "已选择代码文件";
+                                            }
+                                        } else {
+                                            uint32_t code_off = 0;
+                                            if (hit_code_editor(w, h, &st, mx, my, &code_off)) {
+                                                st.code_cursor = code_off;
+                                                code_ensure_visible(&st);
+                                                st.status = "已移动代码光标";
+                                            } else {
+                                                st.status = "应用已聚焦";
+                                            }
+                                        }
                                     }
                                 }
                             } else {

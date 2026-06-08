@@ -30,7 +30,8 @@
 
 /* ── Token ──────────────────────────────────────────────────── */
 enum {
-    T_EOF = 0, T_NUM, T_STR, T_IDENT,
+    T_EOF = 0,
+    T_NUM = 256, T_STR, T_IDENT,
     T_INT, T_VOID, T_CHAR, T_RETURN, T_IF, T_ELSE, T_WHILE, T_FOR,
     T_PRINTF, T_BREAK, T_CONTINUE,
     T_CLASS, T_PUBLIC, T_PRIVATE, T_NEW, T_DELETE, T_THIS,
@@ -60,6 +61,13 @@ static int pc; /* program counter: current token index */
 static char src[MAX_SRC];
 static int src_len;
 static char src_dir[256] = "/";
+static int g_quiet_errors;
+static char *g_capture_buf;
+static uint32_t g_capture_cap;
+static uint32_t g_capture_len;
+static char g_last_error_msg[96];
+static int g_last_error_line;
+static int g_last_return_val;
 
 /* ── Variables ──────────────────────────────────────────────── */
 typedef struct {
@@ -91,8 +99,23 @@ static int g_return_val;/* value to return */
 static int g_break;     /* set by 'break' to exit loop */
 static int g_continue;  /* set by 'continue' to skip to next iteration */
 
+static void cc_record_error(int line, const char *msg) {
+    g_last_error_line = line;
+    uint32_t i = 0;
+    while (msg && msg[i] && i + 1 < sizeof(g_last_error_msg)) {
+        g_last_error_msg[i] = msg[i];
+        i++;
+    }
+    g_last_error_msg[i] = 0;
+}
+
 static void cc_error(const char *msg) {
     int line = (pc > 0 && pc < tok_count) ? tokens[pc].line : 0;
+    cc_record_error(line, msg);
+    if (g_quiet_errors) {
+        g_error = 1;
+        return;
+    }
     console_puts("\x1b[31mgcc error\x1b[0m line ");
     char buf[8]; int n = 0, v = line;
     do { buf[n++] = '0' + v % 10; v /= 10; } while (v > 0);
@@ -104,11 +127,26 @@ static void cc_error(const char *msg) {
 }
 
 /* ── Helpers ────────────────────────────────────────────────── */
+static void cc_emit_char(char c) {
+    if (g_capture_buf && g_capture_cap > 0) {
+        if (g_capture_len + 1 < g_capture_cap) {
+            g_capture_buf[g_capture_len++] = c;
+            g_capture_buf[g_capture_len] = 0;
+        }
+        return;
+    }
+    console_putchar(c);
+}
+
+static void cc_emit_puts(const char *s) {
+    while (s && *s) cc_emit_char(*s++);
+}
+
 static void put_int(int v) {
-    if (v < 0) { console_putchar('-'); v = -v; }
+    if (v < 0) { cc_emit_char('-'); v = -v; }
     char buf[12]; int n = 0;
     do { buf[n++] = '0' + v % 10; v /= 10; } while (v > 0);
-    while (n--) console_putchar(buf[n]);
+    while (n--) cc_emit_char(buf[n]);
 }
 
 static int is_alpha(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
@@ -212,7 +250,10 @@ static void tokenize(void) {
                 while (j < src_len && (src[j] == ' ' || src[j] == '\t')) j++;
                 if (j < src_len && src[j] == '<') {
                     while (j < src_len && src[j] != '\n') j++;
-                    if (j < src_len) j++;
+                    if (j < src_len) {
+                        j++;
+                        line++;
+                    }
                     pos = j;
                     continue;
                 }
@@ -223,7 +264,10 @@ static void tokenize(void) {
                         path[pi++] = src[j++];
                     path[pi] = '\0';
                     while (j < src_len && src[j] != '\n') j++;
-                    if (j < src_len) j++;
+                    if (j < src_len) {
+                        j++;
+                        line++;
+                    }
                     pos = j;
                     /* Load and prepend included file */
                     int fd = cc_open_include(path);
@@ -247,6 +291,10 @@ static void tokenize(void) {
             }
             /* Skip other preprocessor lines */
             while (pos < src_len && src[pos] != '\n') pos++;
+            if (pos < src_len) {
+                pos++;
+                line++;
+            }
             continue;
         }
 
@@ -522,23 +570,23 @@ static int expr_primary(void) {
                                     unsigned int v = (unsigned int)args[ai++];
                                     char nb[12]; int ni = 0;
                                     do { int d = (int)(v % 16); nb[ni++] = d < 10 ? '0' + d : 'a' + d - 10; v /= 16; } while (v > 0);
-                                    while (ni--) console_putchar(nb[ni]);
+                                    while (ni--) cc_emit_char(nb[ni]);
                                 }
                             } else if (*f == 'c') {
-                                if (ai < ac) console_putchar((char)args[ai++]);
+                                if (ai < ac) cc_emit_char((char)args[ai++]);
                             } else if (*f == 's') {
                                 if (ai < ac) {
                                     int si = args[ai++];
-                                    if (si >= 0 && si < string_count) console_puts(string_table[si]);
+                                    if (si >= 0 && si < string_count) cc_emit_puts(string_table[si]);
                                 }
                             } else if (*f == '%') {
-                                console_putchar('%');
+                                cc_emit_char('%');
                             } else {
-                                console_putchar('%');
-                                console_putchar(*f);
+                                cc_emit_char('%');
+                                cc_emit_char(*f);
                             }
                         } else {
-                            console_putchar(*f);
+                            cc_emit_char(*f);
                         }
                     }
                 }
@@ -548,14 +596,14 @@ static int expr_primary(void) {
             /* Built-in: puts */
             if (strcmp(name, "puts") == 0) {
                 if (ac > 0 && args[0] >= 0 && args[0] < string_count)
-                    console_puts(string_table[args[0]]);
-                console_putchar('\n');
+                    cc_emit_puts(string_table[args[0]]);
+                cc_emit_char('\n');
                 return 0;
             }
 
             /* Built-in: putchar */
             if (strcmp(name, "putchar") == 0) {
-                if (ac > 0) console_putchar((char)args[0]);
+                if (ac > 0) cc_emit_char((char)args[0]);
                 return ac > 0 ? args[0] : 0;
             }
 
@@ -1235,9 +1283,12 @@ static int cc_load_file(const char *path) {
     cc_set_src_dir(path);
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        console_puts("gcc: cannot open ");
-        console_puts(path);
-        console_putchar('\n');
+        cc_record_error(0, "cannot open file");
+        if (!g_quiet_errors) {
+            console_puts("gcc: cannot open ");
+            console_puts(path);
+            console_putchar('\n');
+        }
         return -1;
     }
     src_len = 0;
@@ -1293,9 +1344,32 @@ static uint32_t cc_count_lines(void) {
     return lines;
 }
 
-int hbos_gcc_run_file(const char *path, int verbose) {
-    if (!path || !path[0]) return -1;
-    if (cc_load_file(path) < 0) return -1;
+static int hbos_gcc_run_file_common(const char *path, int verbose, int quiet,
+                                    char *out, uint32_t out_cap) {
+    g_quiet_errors = quiet;
+    g_capture_buf = out;
+    g_capture_cap = out ? out_cap : 0;
+    g_capture_len = 0;
+    if (out && out_cap > 0) out[0] = 0;
+    g_last_error_line = 0;
+    g_last_error_msg[0] = 0;
+    g_last_return_val = 0;
+
+    if (!path || !path[0]) {
+        cc_record_error(0, "missing file path");
+        g_quiet_errors = 0;
+        g_capture_buf = 0;
+        g_capture_cap = 0;
+        g_capture_len = 0;
+        return -1;
+    }
+    if (cc_load_file(path) < 0) {
+        g_quiet_errors = 0;
+        g_capture_buf = 0;
+        g_capture_cap = 0;
+        g_capture_len = 0;
+        return -1;
+    }
 
     if (verbose) {
         console_puts("\x1b[36mgcc\x1b[0m: ");
@@ -1313,9 +1387,11 @@ int hbos_gcc_run_file(const char *path, int verbose) {
     string_count = 0;
     g_error = 0;
     g_return = 0;
+    g_return_val = 0;
     g_break = 0;
     g_continue = 0;
     parse_program();
+    g_last_return_val = g_return_val;
 
     if (verbose) {
         if (g_error) {
@@ -1328,7 +1404,32 @@ int hbos_gcc_run_file(const char *path, int verbose) {
             console_putchar('\n');
         }
     }
-    return g_error ? -1 : 0;
+    int rc = g_error ? -1 : 0;
+    g_quiet_errors = 0;
+    g_capture_buf = 0;
+    g_capture_cap = 0;
+    g_capture_len = 0;
+    return rc;
+}
+
+int hbos_gcc_run_file(const char *path, int verbose) {
+    return hbos_gcc_run_file_common(path, verbose, 0, 0, 0);
+}
+
+int hbos_gcc_run_file_capture(const char *path, char *out, uint32_t out_cap) {
+    return hbos_gcc_run_file_common(path, 0, 1, out, out_cap);
+}
+
+const char *hbos_gcc_last_error(void) {
+    return g_last_error_msg;
+}
+
+int hbos_gcc_last_error_line(void) {
+    return g_last_error_line;
+}
+
+int hbos_gcc_last_return(void) {
+    return g_last_return_val;
 }
 
 /* ── Main command ───────────────────────────────────────────── */
