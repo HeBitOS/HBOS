@@ -51,7 +51,6 @@ extern int hbos_gcc_last_return(void);
 #define BROWSER_PAGE_CAP 2048
 #define CODE_EDIT_CAP 4096
 #define CODE_OUTPUT_CAP 256
-#define CODE_FILE_ROWS 7
 #define CODE_VIEW_ROWS 10
 #define SNAKE_W 16
 #define SNAKE_H 10
@@ -115,6 +114,7 @@ typedef struct {
     int code_modified;
     int code_scroll;
     int code_error_line;
+    int code_view_rows;
     int rename_active;
     char rename_buf[MAX_FILENAME];
     uint32_t rename_len;
@@ -125,6 +125,21 @@ typedef struct {
 
 static char g_code_buf[CODE_EDIT_CAP];
 static char g_code_output[CODE_OUTPUT_CAP];
+
+typedef struct {
+    int content_w;
+    int side_w;
+    int editor_x;
+    int editor_y;
+    int editor_w;
+    int editor_h;
+    int bottom_y;
+    int bottom_h;
+    int row_h;
+    int line_no_w;
+    int view_rows;
+    int file_rows;
+} code_layout_t;
 
 typedef struct {
     const char *name;
@@ -1819,6 +1834,7 @@ static void code_set_path(gui_state_t *st, const char *path) {
     st->code_scroll = 0;
     st->code_cursor = 0;
     st->code_error_line = 0;
+    st->code_view_rows = 0;
 }
 
 static const char *code_path(gui_state_t *st) {
@@ -1952,6 +1968,17 @@ static uint32_t code_line_count(gui_state_t *st) {
     return lines;
 }
 
+static int code_visible_rows(gui_state_t *st) {
+    return st->code_view_rows > 0 ? st->code_view_rows : CODE_VIEW_ROWS;
+}
+
+static void code_clamp_scroll(gui_state_t *st) {
+    int max_scroll = (int)code_line_count(st) - code_visible_rows(st);
+    if (max_scroll < 0) max_scroll = 0;
+    if (st->code_scroll < 0) st->code_scroll = 0;
+    if (st->code_scroll > max_scroll) st->code_scroll = max_scroll;
+}
+
 static uint32_t code_find_line_start(gui_state_t *st, uint32_t target_line) {
     uint32_t line = 0;
     for (uint32_t i = 0; i < st->code_len; i++) {
@@ -1979,9 +2006,9 @@ static void code_jump_to_line(gui_state_t *st, int one_based_line) {
     uint32_t line = (uint32_t)(one_based_line - 1);
     st->code_cursor = code_offset_for_line_col(st, line, 0);
     if ((int)line < st->code_scroll) st->code_scroll = (int)line;
-    if ((int)line >= st->code_scroll + CODE_VIEW_ROWS)
-        st->code_scroll = (int)line - CODE_VIEW_ROWS + 1;
-    if (st->code_scroll < 0) st->code_scroll = 0;
+    if ((int)line >= st->code_scroll + code_visible_rows(st))
+        st->code_scroll = (int)line - code_visible_rows(st) + 1;
+    code_clamp_scroll(st);
 }
 
 static void code_ensure_visible(gui_state_t *st) {
@@ -1989,9 +2016,9 @@ static void code_ensure_visible(gui_state_t *st) {
     code_line_col(st, st->code_cursor, &line, &col);
     (void)col;
     if ((int)line < st->code_scroll) st->code_scroll = (int)line;
-    if ((int)line >= st->code_scroll + CODE_VIEW_ROWS)
-        st->code_scroll = (int)line - CODE_VIEW_ROWS + 1;
-    if (st->code_scroll < 0) st->code_scroll = 0;
+    if ((int)line >= st->code_scroll + code_visible_rows(st))
+        st->code_scroll = (int)line - code_visible_rows(st) + 1;
+    code_clamp_scroll(st);
 }
 
 static void code_move_vertical(gui_state_t *st, int dir) {
@@ -2109,6 +2136,40 @@ static int code_command_rect(int content_w, int cmd, int *x, int *y, int *bw) {
     if (y) *y = 22;
     if (bw) *bw = width;
     return 1;
+}
+
+static void code_make_layout(int tx, int ty, int win_w, int win_h, code_layout_t *l) {
+    l->content_w = win_w - 60;
+    if (l->content_w < 320) l->content_w = 320;
+    int body_h = win_h - 82;
+    if (body_h < 290) body_h = 290;
+    l->row_h = 18;
+    l->line_no_w = 42;
+    l->side_w = l->content_w / 7;
+    if (l->side_w < 154) l->side_w = 154;
+    if (l->side_w > 220) l->side_w = 220;
+    l->editor_x = tx + l->side_w + 14;
+    l->editor_y = ty + 82;
+    l->editor_w = l->content_w - l->side_w - 14;
+    if (l->editor_w < 300) {
+        l->side_w -= 300 - l->editor_w;
+        if (l->side_w < 118) l->side_w = 118;
+        l->editor_x = tx + l->side_w + 14;
+        l->editor_w = l->content_w - l->side_w - 14;
+    }
+
+    int output_min_h = 62;
+    int editor_bottom = ty + body_h - output_min_h - 12;
+    l->editor_h = editor_bottom - l->editor_y;
+    if (l->editor_h < 120) l->editor_h = 120;
+    l->view_rows = (l->editor_h - 12) / l->row_h;
+    if (l->view_rows < 5) l->view_rows = 5;
+    l->editor_h = l->view_rows * l->row_h + 12;
+    l->bottom_y = l->editor_y + l->editor_h + 12;
+    l->bottom_h = ty + body_h - l->bottom_y;
+    if (l->bottom_h < output_min_h) l->bottom_h = output_min_h;
+    l->file_rows = (l->editor_h - 62) / FILE_ROW_H;
+    if (l->file_rows < 3) l->file_rows = 3;
 }
 
 static void handle_code_command(gui_state_t *st, int cmd) {
@@ -2233,75 +2294,69 @@ static void code_draw_highlighted_line(int x, int y, int max_x, const char *line
     }
 }
 
-static void draw_code_app(int tx, int ty, int win_w, gui_state_t *st) {
+static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
     code_load(st);
     char line[128];
-    int content_w = win_w - 60;
-    int side_w = 154;
-    int editor_x = tx + side_w + 14;
-    int editor_w = content_w - side_w - 14;
-    if (editor_w < 300) editor_w = 300;
-    int editor_y = ty + 82;
-    int row_h = 18;
-    int editor_h = CODE_VIEW_ROWS * row_h + 12;
-    int bottom_y = editor_y + editor_h + 12;
-    int line_no_w = 42;
+    code_layout_t l;
+    code_make_layout(tx, ty, win_w, win_h, &l);
+    st->code_view_rows = l.view_rows;
+    code_clamp_scroll(st);
 
     text(tx, ty, "代码工作台", rgb(102, 214, 255), 1);
     int bx, by, bw;
-    if (code_command_rect(content_w, CODE_CMD_SAVE, &bx, &by, &bw))
+    if (code_command_rect(l.content_w, CODE_CMD_SAVE, &bx, &by, &bw))
         draw_small_button(tx + bx, ty + by, bw, "保存", rgb(85, 180, 120));
-    if (code_command_rect(content_w, CODE_CMD_RUN, &bx, &by, &bw))
+    if (code_command_rect(l.content_w, CODE_CMD_RUN, &bx, &by, &bw))
         draw_small_button(tx + bx, ty + by, bw, "运行", rgb(23, 147, 209));
-    if (code_command_rect(content_w, CODE_CMD_OPEN, &bx, &by, &bw))
+    if (code_command_rect(l.content_w, CODE_CMD_OPEN, &bx, &by, &bw))
         draw_small_button(tx + bx, ty + by, bw, "打开", rgb(244, 194, 82));
 
-    vgradient(tx, ty + 54, content_w, 24, rgb(34, 48, 64), rgb(18, 28, 40));
-    border(tx, ty + 54, content_w, 24, rgb(48, 72, 94));
+    vgradient(tx, ty + 54, l.content_w, 24, rgb(34, 48, 64), rgb(18, 28, 40));
+    border(tx, ty + 54, l.content_w, 24, rgb(48, 72, 94));
     line2(line, sizeof(line), "文件 ", code_path(st));
-    text_clipped(tx + 10, ty + 62, tx + content_w - 90, line,
+    text_clipped(tx + 10, ty + 62, tx + l.content_w - 90, line,
                  st->code_modified ? rgb(255, 226, 150) : rgb(232, 242, 248), 1);
-    text(tx + content_w - 78, ty + 62, st->code_modified ? "未保存" : "已保存",
+    text(tx + l.content_w - 78, ty + 62, st->code_modified ? "未保存" : "已保存",
          st->code_modified ? rgb(255, 190, 110) : rgb(124, 220, 154), 1);
 
-    vgradient(tx, editor_y, side_w, editor_h, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, editor_y, side_w, editor_h, rgb(46, 66, 84));
-    text(tx + 12, editor_y + 12, "资源管理器", rgb(194, 226, 242), 1);
-    text_clipped(tx + 12, editor_y + 34, tx + side_w - 10, gui_file_path(st), rgb(132, 196, 232), 1);
+    vgradient(tx, l.editor_y, l.side_w, l.editor_h, rgb(22, 30, 40), rgb(14, 20, 28));
+    border(tx, l.editor_y, l.side_w, l.editor_h, rgb(46, 66, 84));
+    text(tx + 12, l.editor_y + 12, "资源管理器", rgb(194, 226, 242), 1);
+    text_clipped(tx + 12, l.editor_y + 34, tx + l.side_w - 10, gui_file_path(st), rgb(132, 196, 232), 1);
 
     uint32_t count = gui_file_count(st);
     int selected = st->selected_file;
     if (selected < 0) selected = 0;
     if ((uint32_t)selected >= count && count) selected = (int)count - 1;
-    uint32_t start = selected >= CODE_FILE_ROWS ? (uint32_t)selected - (CODE_FILE_ROWS - 1) : 0;
+    uint32_t start = selected >= l.file_rows ? (uint32_t)selected - (uint32_t)(l.file_rows - 1) : 0;
     uint32_t max = count > start ? count - start : 0;
-    if (max > CODE_FILE_ROWS) max = CODE_FILE_ROWS;
+    if (max > (uint32_t)l.file_rows) max = (uint32_t)l.file_rows;
     for (uint32_t i = 0; i < max; i++) {
         uint32_t file_idx = start + i;
         char name[VFS_MAX_NAME], full[GUI_PATH_MAX];
         uint32_t type = 0;
         vfs_node_t *node = 0;
         if (gui_file_entry(st, file_idx, name, &type, &node, full, sizeof(full)) < 0) continue;
-        int y = editor_y + 62 + (int)i * FILE_ROW_H;
+        int y = l.editor_y + 62 + (int)i * FILE_ROW_H;
         if ((int)file_idx == selected) {
-            vgradient(tx + 8, y - 6, side_w - 16, 24, rgb(28, 80, 116), rgb(16, 50, 78));
+            vgradient(tx + 8, y - 6, l.side_w - 16, 24, rgb(28, 80, 116), rgb(16, 50, 78));
             rect(tx + 8, y - 6, 3, 24, rgb(102, 214, 255));
         }
         uint32_t icon = type == VFS_NODE_DIR ? rgb(244, 194, 82) :
                         gui_has_code_suffix(name) ? rgb(102, 214, 255) : rgb(124, 220, 154);
         rect(tx + 14, y + 3, 6, 6, icon);
-        text_clipped(tx + 26, y, tx + side_w - 10, name,
+        text_clipped(tx + 26, y, tx + l.side_w - 10, name,
                      (int)file_idx == selected ? rgb(252, 254, 255) : rgb(210, 222, 234), 1);
     }
 
-    vgradient(editor_x, editor_y, editor_w, editor_h, rgb(8, 14, 22), rgb(2, 6, 12));
-    border(editor_x, editor_y, editor_w, editor_h, rgb(48, 132, 196));
-    rect(editor_x + line_no_w, editor_y + 1, 1, editor_h - 2, rgb(28, 48, 62));
+    vgradient(l.editor_x, l.editor_y, l.editor_w, l.editor_h, rgb(8, 14, 22), rgb(2, 6, 12));
+    border(l.editor_x, l.editor_y, l.editor_w, l.editor_h, rgb(48, 132, 196));
+    rect(l.editor_x + l.line_no_w, l.editor_y + 1, 1, l.editor_h - 2, rgb(28, 48, 62));
 
     uint32_t cursor_line = 0, cursor_col = 0;
     code_line_col(st, st->code_cursor, &cursor_line, &cursor_col);
     uint32_t total_lines = code_line_count(st);
-    for (int row = 0; row < CODE_VIEW_ROWS; row++) {
+    for (int row = 0; row < l.view_rows; row++) {
         uint32_t line_idx = (uint32_t)(st->code_scroll + row);
         if (line_idx >= total_lines) break;
         uint32_t off = code_find_line_start(st, line_idx);
@@ -2316,28 +2371,28 @@ static void draw_code_app(int tx, int ty, int win_w, gui_state_t *st) {
         uint32_t pos = 0;
         num[0] = 0;
         append_uint(num, sizeof(num), &pos, line_idx + 1);
-        int y = editor_y + 10 + row * row_h;
+        int y = l.editor_y + 10 + row * l.row_h;
         if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
-            rect(editor_x + line_no_w + 1, y - 3, editor_w - line_no_w - 4, row_h, rgb(70, 24, 30));
-            rect(editor_x + line_no_w + 1, y - 3, 3, row_h, rgb(232, 86, 92));
+            rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(70, 24, 30));
+            rect(l.editor_x + l.line_no_w + 1, y - 3, 3, l.row_h, rgb(232, 86, 92));
         } else if (line_idx == cursor_line) {
-            rect(editor_x + line_no_w + 1, y - 3, editor_w - line_no_w - 4, row_h, rgb(16, 28, 38));
+            rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(16, 28, 38));
         }
-        text(editor_x + 8, y, num, rgb(102, 134, 154), 1);
-        code_draw_highlighted_line(editor_x + line_no_w + 10, y,
-                                   editor_x + editor_w - 10, line, n);
+        text(l.editor_x + 8, y, num, rgb(102, 134, 154), 1);
+        code_draw_highlighted_line(l.editor_x + l.line_no_w + 10, y,
+                                   l.editor_x + l.editor_w - 10, line, n);
     }
-    if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + CODE_VIEW_ROWS) {
-        int cx = editor_x + line_no_w + 10 + (int)cursor_col * 6;
-        int cy = editor_y + 10 + ((int)cursor_line - st->code_scroll) * row_h;
-        if (cx > editor_x + editor_w - 12) cx = editor_x + editor_w - 12;
+    if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + l.view_rows) {
+        int cx = l.editor_x + l.line_no_w + 10 + (int)cursor_col * 6;
+        int cy = l.editor_y + 10 + ((int)cursor_line - st->code_scroll) * l.row_h;
+        if (cx > l.editor_x + l.editor_w - 12) cx = l.editor_x + l.editor_w - 12;
         rect(cx, cy - 2, 2, 14, rgb(102, 214, 255));
     }
 
-    vgradient(tx, bottom_y, content_w, 58, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, bottom_y, content_w, 58, st->code_error_line > 0 ? rgb(176, 62, 72) : rgb(46, 66, 84));
-    text(tx + 12, bottom_y + 12, "输出", rgb(194, 226, 242), 1);
-    text_clipped(tx + 62, bottom_y + 12, tx + content_w - 12,
+    vgradient(tx, l.bottom_y, l.content_w, l.bottom_h, rgb(22, 30, 40), rgb(14, 20, 28));
+    border(tx, l.bottom_y, l.content_w, l.bottom_h, st->code_error_line > 0 ? rgb(176, 62, 72) : rgb(46, 66, 84));
+    text(tx + 12, l.bottom_y + 12, "输出", rgb(194, 226, 242), 1);
+    text_clipped(tx + 62, l.bottom_y + 12, tx + l.content_w - 12,
                  g_code_output[0] ? g_code_output : "Ready",
                  st->code_error_line > 0 ? rgb(255, 188, 190) : rgb(210, 221, 230), 1);
     uint32_t pos = 0;
@@ -2348,7 +2403,7 @@ static void draw_code_app(int tx, int ty, int win_w, gui_state_t *st) {
     append_uint(line, sizeof(line), &pos, cursor_col + 1);
     append_str(line, sizeof(line), &pos, "  Bytes ");
     append_uint(line, sizeof(line), &pos, st->code_len);
-    text(tx + 12, bottom_y + 34, line, rgb(148, 168, 180), 1);
+    text(tx + 12, l.bottom_y + 34, line, rgb(148, 168, 180), 1);
 }
 
 static void snake_place_food(gui_state_t *st) {
@@ -2699,13 +2754,13 @@ static void draw_panel_window(int tx, int ty, int win_w, int w, int h, gui_state
     else draw_apps_panel(tx, ty, win_w, st);
 }
 
-static void draw_app_window_body(int tx, int ty, int win_w, gui_state_t *st, int mode) {
+static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state_t *st, int mode) {
     if (mode == GUI_APP_NOTES) draw_notes_app(tx, ty, win_w, st);
     else if (mode == GUI_APP_CALC) draw_calc_app(tx, ty, st);
     else if (mode == GUI_APP_UWC) draw_uwc_app(tx, ty, st);
     else if (mode == GUI_APP_SNAKE) draw_snake_app(tx, ty, st);
     else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, st);
-    else if (mode == GUI_APP_CODE) draw_code_app(tx, ty, win_w, st);
+    else if (mode == GUI_APP_CODE) draw_code_app(tx, ty, win_w, win_h, st);
 }
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
@@ -2733,7 +2788,7 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     } else {
         st->active = PANEL_APPS;
         st->app_mode = win->mode;
-        draw_app_window_body(tx, ty, win_w, st, win->mode);
+        draw_app_window_body(tx, ty, win_w, win_h, st, win->mode);
     }
     vgradient(win_x + 1, win_y + win_h - 31, win_w - 2, 30, rgb(28, 34, 37), rgb(13, 16, 19));
     rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, rgb(75, 96, 92));
@@ -3219,8 +3274,9 @@ static void handle_wheel(gui_state_t *st, int dz) {
         st->selected_app = gui_step_selection(st->selected_app, gui_app_count(), steps);
         st->status = "滚轮选择应用";
     } else if (st->app_mode == GUI_APP_CODE) {
+        code_load(st);
         st->code_scroll += steps;
-        if (st->code_scroll < 0) st->code_scroll = 0;
+        code_clamp_scroll(st);
         st->status = "滚动代码";
     }
 }
@@ -3349,13 +3405,13 @@ static int hit_code_command(int w, int h, const gui_state_t *st, int mx, int my)
 
     int win_x, win_y, win_w, win_h;
     gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    (void)win_h;
     int tx = win_x + 30;
     int ty = win_y + 42;
-    int content_w = win_w - 60;
+    code_layout_t l;
+    code_make_layout(tx, ty, win_w, win_h, &l);
     for (int cmd = CODE_CMD_SAVE; cmd <= CODE_CMD_OPEN; cmd++) {
         int x, y, bw;
-        if (!code_command_rect(content_w, cmd, &x, &y, &bw)) continue;
+        if (!code_command_rect(l.content_w, cmd, &x, &y, &bw)) continue;
         if (mx >= tx + x && mx < tx + x + bw &&
             my >= ty + y && my < ty + y + ACTION_H)
             return cmd;
@@ -3370,29 +3426,21 @@ static int hit_code_editor(int w, int h, gui_state_t *st, int mx, int my, uint32
 
     int win_x, win_y, win_w, win_h;
     gui_window_metrics(st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    (void)win_h;
     int tx = win_x + 30;
     int ty = win_y + 42;
-    int content_w = win_w - 60;
-    int side_w = 154;
-    int editor_x = tx + side_w + 14;
-    int editor_w = content_w - side_w - 14;
-    if (editor_w < 300) editor_w = 300;
-    int editor_y = ty + 82;
-    int row_h = 18;
-    int editor_h = CODE_VIEW_ROWS * row_h + 12;
-    int line_no_w = 42;
-    if (mx < editor_x + line_no_w || mx >= editor_x + editor_w ||
-        my < editor_y || my >= editor_y + editor_h)
+    code_layout_t l;
+    code_make_layout(tx, ty, win_w, win_h, &l);
+    if (mx < l.editor_x + l.line_no_w || mx >= l.editor_x + l.editor_w ||
+        my < l.editor_y || my >= l.editor_y + l.editor_h)
         return 0;
 
-    int row = (my - (editor_y + 10)) / row_h;
+    int row = (my - (l.editor_y + 10)) / l.row_h;
     if (row < 0) row = 0;
-    if (row >= CODE_VIEW_ROWS) row = CODE_VIEW_ROWS - 1;
+    if (row >= l.view_rows) row = l.view_rows - 1;
     uint32_t line = (uint32_t)(st->code_scroll + row);
     uint32_t total = code_line_count(st);
     if (line >= total) line = total ? total - 1 : 0;
-    int col = (mx - (editor_x + line_no_w + 10)) / 6;
+    int col = (mx - (l.editor_x + l.line_no_w + 10)) / 6;
     if (col < 0) col = 0;
     if (off) *off = code_offset_for_line_col(st, line, (uint32_t)col);
     return 1;
@@ -3405,23 +3453,22 @@ static int hit_code_file(int w, int h, const gui_state_t *st, int mx, int my) {
 
     int win_x, win_y, win_w, win_h;
     gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    (void)win_w;
-    (void)win_h;
     int tx = win_x + 30;
     int ty = win_y + 42;
-    int side_w = 154;
-    int list_y = ty + 82 + 62;
-    if (mx < tx || mx >= tx + side_w || my < list_y - 8) return -1;
+    code_layout_t l;
+    code_make_layout(tx, ty, win_w, win_h, &l);
+    int list_y = l.editor_y + 62;
+    if (mx < tx || mx >= tx + l.side_w || my < list_y - 8) return -1;
 
     uint32_t count = gui_file_count((gui_state_t *)st);
     if (count == 0) return -1;
     int selected = st->selected_file;
     if (selected < 0) selected = 0;
     if ((uint32_t)selected >= count) selected = (int)count - 1;
-    uint32_t start = selected >= CODE_FILE_ROWS ? (uint32_t)selected - (CODE_FILE_ROWS - 1) : 0;
+    uint32_t start = selected >= l.file_rows ? (uint32_t)selected - (uint32_t)(l.file_rows - 1) : 0;
     int idx = (my - (list_y - 8)) / FILE_ROW_H;
     uint32_t file_idx = start + (uint32_t)idx;
-    if (idx >= 0 && idx < CODE_FILE_ROWS && file_idx < count) return (int)file_idx;
+    if (idx >= 0 && idx < l.file_rows && file_idx < count) return (int)file_idx;
     return -1;
 }
 
