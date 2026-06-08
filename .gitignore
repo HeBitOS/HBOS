@@ -3,7 +3,7 @@
 build/
 .claude/
 .roo/
-
+.claudecode.md
 *.iso
 *.bin
 .roomodes
