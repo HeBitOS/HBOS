@@ -25,6 +25,8 @@
 #include "../unistd.h"
 #include "tool.h"
 
+extern int hbos_gcc_run_file(const char *path, int verbose);
+
 /* ── Limits ─────────────────────────────────────────────────── */
 #define CPPE_MAX_SIZE   16384
 #define CPPE_MAX_LINES  512
@@ -147,6 +149,33 @@ static int cppe_save(void) {
     return 0;
 }
 
+static int cppe_has_code_suffix(const char *path) {
+    int len = (int)strlen(path);
+    if (len >= 2 && strcmp(path + len - 2, ".c") == 0) return 1;
+    if (len >= 4 && strcmp(path + len - 4, ".cpp") == 0) return 1;
+    if (len >= 2 && strcmp(path + len - 2, ".h") == 0) return 1;
+    if (len >= 4 && strcmp(path + len - 4, ".hpp") == 0) return 1;
+    return 0;
+}
+
+static void cppe_insert_template(void) {
+    static const char sample[] =
+        "#include <stdio.h>\n"
+        "\n"
+        "int main() {\n"
+        "    puts(\"HBOS CPPE ready\");\n"
+        "    return 0;\n"
+        "}\n";
+    int len = (int)sizeof(sample) - 1;
+    if (len >= CPPE_MAX_SIZE) len = CPPE_MAX_SIZE - 1;
+    memcpy(E.data, sample, (size_t)len);
+    E.data[len] = 0;
+    E.data_len = len;
+    E.dirty = 1;
+    E.modified = 1;
+    cppe_rebuild_lines();
+}
+
 /* ── Text manipulation ──────────────────────────────────────── */
 static void cppe_insert_char(char c) {
     if (E.data_len >= CPPE_MAX_SIZE - 1) return;
@@ -182,7 +211,10 @@ static void cppe_insert_newline(void) {
     E.cy++;
     E.cx = 0;
 
-    /* Insert indent */
+    /* Rebuild line index so indent uses correct offsets */
+    cppe_rebuild_lines();
+
+    /* Insert indent at the start of the new line */
     for (int i = 0; i < indent + extra && E.data_len < CPPE_MAX_SIZE - 1; i++) {
         int off2 = E.line_off[E.cy] + E.cx;
         for (int j = E.data_len; j > off2; j--) E.data[j] = E.data[j - 1];
@@ -238,14 +270,22 @@ static void cppe_delete(void) {
 }
 
 static void cppe_cut_line(void) {
-    if (E.line_count <= 1) return;
     int start = E.line_off[E.cy];
     int len = E.line_len[E.cy];
     if (E.cy < E.line_count - 1) len++; /* include \n */
-    /* Copy to clipboard */
-    if (len < CPPE_LINE_LEN) {
-        memcpy(E.clip, E.data + start, (size_t)len);
-        E.clip_len = len;
+    /* Copy to clipboard (truncate if needed, but always copy) */
+    int clip_copy = len < CPPE_LINE_LEN ? len : CPPE_LINE_LEN - 1;
+    memcpy(E.clip, E.data + start, (size_t)clip_copy);
+    E.clip_len = clip_copy;
+    /* If only one line left, clear it instead of removing */
+    if (E.line_count <= 1) {
+        E.data[0] = '\0';
+        E.data_len = 0;
+        E.cx = 0;
+        E.dirty = 1;
+        E.modified = 1;
+        cppe_rebuild_lines();
+        return;
     }
     /* Remove line */
     for (int i = start; i + len <= E.data_len; i++)
@@ -304,7 +344,35 @@ static int is_keyword(const char *s, int len) {
     return 0;
 }
 
-static void cppe_draw_line(int row, int lidx) {
+/* Check if position (lidx, col) is inside a block comment.
+   Scans from the start of the file to determine comment state. */
+static int cppe_in_block_comment(int lidx, int col) {
+    int in_comment = 0;
+    for (int l = 0; l <= lidx; l++) {
+        char *line = cppe_line(l);
+        int len = E.line_len[l];
+        int end_col = (l == lidx) ? col : len;
+        for (int i = 0; i < end_col; i++) {
+            if (in_comment) {
+                if (line[i] == '*' && i + 1 < len && line[i + 1] == '/') {
+                    in_comment = 0;
+                    i++; /* skip '/' */
+                }
+            } else {
+                if (line[i] == '/' && i + 1 < len && line[i + 1] == '/') {
+                    break; /* rest of line is single-line comment */
+                }
+                if (line[i] == '/' && i + 1 < len && line[i + 1] == '*') {
+                    in_comment = 1;
+                    i++; /* skip '*' */
+                }
+            }
+        }
+    }
+    return in_comment;
+}
+
+static int cppe_draw_line(int row, int lidx, int in_block) {
     cppe_goto(row, 1);
     /* Line number */
     cppe_set_color(90);
@@ -321,11 +389,46 @@ static void cppe_draw_line(int row, int lidx) {
         int len = E.line_len[lidx];
         int col = 0;
         int i = 0;
-        while (i < len && col < E.term_cols - 6) {
+        while (i < len && col < E.term_cols - 5) {
+            /* Inside block comment — look for closing */
+            if (in_block) {
+                cppe_set_color(32); /* green */
+                while (i < len && col < E.term_cols - 5) {
+                    if (line[i] == '*' && i + 1 < len && line[i + 1] == '/') {
+                        cppe_putc(line[i]); i++; col++;
+                        cppe_putc(line[i]); i++; col++;
+                        in_block = 0;
+                        cppe_reset();
+                        break;
+                    }
+                    cppe_putc(line[i]); i++; col++;
+                }
+                if (in_block) { cppe_reset(); break; }
+                continue;
+            }
+            /* Block comment open */
+            if (line[i] == '/' && i + 1 < len && line[i + 1] == '*') {
+                in_block = 1;
+                cppe_set_color(32); /* green */
+                cppe_putc(line[i]); i++; col++;
+                cppe_putc(line[i]); i++; col++;
+                /* Look for closing on same line */
+                while (i < len && col < E.term_cols - 5) {
+                    if (line[i] == '*' && i + 1 < len && line[i + 1] == '/') {
+                        cppe_putc(line[i]); i++; col++;
+                        cppe_putc(line[i]); i++; col++;
+                        in_block = 0;
+                        break;
+                    }
+                    cppe_putc(line[i]); i++; col++;
+                }
+                cppe_reset();
+                continue;
+            }
             /* Comments: // */
             if (line[i] == '/' && i + 1 < len && line[i + 1] == '/') {
                 cppe_set_color(32); /* green */
-                while (i < len && col < E.term_cols - 6) { cppe_putc(line[i]); i++; col++; }
+                while (i < len && col < E.term_cols - 5) { cppe_putc(line[i]); i++; col++; }
                 cppe_reset();
                 break;
             }
@@ -333,7 +436,7 @@ static void cppe_draw_line(int row, int lidx) {
             if (line[i] == '"') {
                 cppe_set_color(33); /* yellow */
                 cppe_putc(line[i]); i++; col++;
-                while (i < len && line[i] != '"' && col < E.term_cols - 6) {
+                while (i < len && line[i] != '"' && col < E.term_cols - 5) {
                     if (line[i] == '\\' && i + 1 < len) { cppe_putc(line[i]); i++; col++; }
                     cppe_putc(line[i]); i++; col++;
                 }
@@ -345,7 +448,8 @@ static void cppe_draw_line(int row, int lidx) {
             if (line[i] == '\'') {
                 cppe_set_color(33);
                 cppe_putc(line[i]); i++; col++;
-                while (i < len && line[i] != '\'' && col < E.term_cols - 6) {
+                while (i < len && line[i] != '\'' && col < E.term_cols - 5) {
+                    if (line[i] == '\\' && i + 1 < len) { cppe_putc(line[i]); i++; col++; }
                     cppe_putc(line[i]); i++; col++;
                 }
                 if (i < len) { cppe_putc(line[i]); i++; col++; }
@@ -355,14 +459,17 @@ static void cppe_draw_line(int row, int lidx) {
             /* Preprocessor: # */
             if (line[i] == '#') {
                 cppe_set_color(35); /* magenta */
-                while (i < len && col < E.term_cols - 6) { cppe_putc(line[i]); i++; col++; }
+                while (i < len && col < E.term_cols - 5) { cppe_putc(line[i]); i++; col++; }
                 cppe_reset();
                 break;
             }
             /* Numbers */
             if (line[i] >= '0' && line[i] <= '9') {
                 cppe_set_color(36); /* cyan */
-                while (i < len && ((line[i] >= '0' && line[i] <= '9') || line[i] == 'x' || line[i] == 'X') && col < E.term_cols - 6) {
+                while (i < len && ((line[i] >= '0' && line[i] <= '9') ||
+                       (line[i] >= 'a' && line[i] <= 'f') ||
+                       (line[i] >= 'A' && line[i] <= 'F') ||
+                       line[i] == 'x' || line[i] == 'X') && col < E.term_cols - 5) {
                     cppe_putc(line[i]); i++; col++;
                 }
                 cppe_reset();
@@ -379,7 +486,7 @@ static void cppe_draw_line(int row, int lidx) {
                 } else {
                     cppe_reset(); /* default */
                 }
-                for (int j = start; j < i && col < E.term_cols - 6; j++) { cppe_putc(line[j]); col++; }
+                for (int j = start; j < i && col < E.term_cols - 5; j++) { cppe_putc(line[j]); col++; }
                 cppe_reset();
                 continue;
             }
@@ -402,10 +509,19 @@ static void cppe_draw_line(int row, int lidx) {
             }
             /* Default */
             cppe_reset();
-            cppe_putc(line[i]); i++; col++;
+            if (line[i] == '\t') {
+                /* Expand tab to spaces (tab stop every 4 columns) */
+                int spaces = CPPE_TAB_WIDTH - (col % CPPE_TAB_WIDTH);
+                for (int s = 0; s < spaces && col < E.term_cols - 5; s++) {
+                    cppe_putc(' '); col++;
+                }
+                i++;
+            } else {
+                cppe_putc(line[i]); i++; col++;
+            }
         }
         /* Clear rest of line */
-        for (int j = col; j < E.term_cols - 6; j++) cppe_putc(' ');
+        for (int j = col; j < E.term_cols - 5; j++) cppe_putc(' ');
         cppe_reset();
     } else {
         cppe_set_color(90);
@@ -413,6 +529,7 @@ static void cppe_draw_line(int row, int lidx) {
         cppe_reset();
         for (int i = 1; i < E.term_cols - 5; i++) cppe_putc(' ');
     }
+    return in_block;
 }
 
 static void cppe_draw_screen(void) {
@@ -431,9 +548,10 @@ static void cppe_draw_screen(void) {
     cppe_reset();
 
     /* Text lines */
+    int in_block = cppe_in_block_comment(E.scroll_y, 0);
     for (int row = 0; row < (E.term_rows - 3); row++) {
         int lidx = E.scroll_y + row;
-        cppe_draw_line(row + 2, lidx);
+        in_block = cppe_draw_line(row + 2, lidx, in_block);
     }
 
     /* Status bar */
@@ -452,9 +570,11 @@ static void cppe_draw_screen(void) {
     while (ti--) status[sp++] = tmp[ti];
     status[sp++] = ' ';
     /* Help hints */
-    const char *hint = "^X Exit  ^S Save  ^K Cut  ^U Paste  ^L Goto  ^W Find";
+    const char *hint = "^X Exit  ^S Save  ^R Run  ^K Cut  ^U Paste  ^W Find";
     while (*hint && sp < 78) status[sp++] = *hint++;
-    while (sp < E.term_cols) status[sp++] = ' ';
+    /* Fill rest of status bar — clamp to buffer size to prevent stack overflow */
+    int fill_limit = E.term_cols < 79 ? E.term_cols : 79;
+    while (sp < fill_limit) status[sp++] = ' ';
     status[sp] = '\0';
     cppe_puts(status);
     cppe_reset();
@@ -547,11 +667,46 @@ static void cppe_goto_line(void) {
 }
 
 /* ── Help screen ────────────────────────────────────────────── */
+/* Jump to matching bracket (){}[] */
+static void cppe_match_bracket(void) {
+    if (E.cy >= E.line_count) return;
+    char *line = cppe_line(E.cy);
+    if (E.cx >= E.line_len[E.cy]) return;
+    char ch = line[E.cx];
+    char match;
+    int dir; /* 1 = forward, -1 = backward */
+    if (ch == '(') { match = ')'; dir = 1; }
+    else if (ch == ')') { match = '('; dir = -1; }
+    else if (ch == '{') { match = '}'; dir = 1; }
+    else if (ch == '}') { match = '{'; dir = -1; }
+    else if (ch == '[') { match = ']'; dir = 1; }
+    else if (ch == ']') { match = '['; dir = -1; }
+    else return;
+
+    int depth = 1;
+    int cy = E.cy, cx = E.cx + dir;
+    while (cy >= 0 && cy < E.line_count) {
+        char *l = cppe_line(cy);
+        int llen = E.line_len[cy];
+        while (cx >= 0 && cx < llen) {
+            if (l[cx] == ch) depth++;
+            else if (l[cx] == match) { depth--; if (depth == 0) { E.cy = cy; E.cx = cx; cppe_ensure_visible(); return; } }
+            cx += dir;
+        }
+        cy += dir;
+        if (cy >= 0 && cy < E.line_count) {
+            cx = (dir == 1) ? 0 : E.line_len[cy] - 1;
+        }
+    }
+    cppe_set_msg("No match");
+}
+
 static void cppe_show_help(void) {
     cppe_clear();
     cppe_puts("\x1b[33m=== CPPE Help ===\x1b[0m\n\n");
     cppe_puts("  \x1b[36mCtrl+X\x1b[0m  Exit (prompts to save)\n");
     cppe_puts("  \x1b[36mCtrl+S\x1b[0m  Save file\n");
+    cppe_puts("  \x1b[36mCtrl+R\x1b[0m  Save and run with gcc\n");
     cppe_puts("  \x1b[36mCtrl+K\x1b[0m  Cut current line\n");
     cppe_puts("  \x1b[36mCtrl+U\x1b[0m  Paste cut line\n");
     cppe_puts("  \x1b[36mCtrl+D\x1b[0m  Delete current line\n");
@@ -564,6 +719,25 @@ static void cppe_show_help(void) {
     cppe_puts("  \x1b[36mTab\x1b[0m     Insert 4 spaces\n");
     cppe_puts("\n\x1b[90mPress any key to return\x1b[0m");
     kb_get_key();
+}
+
+static void cppe_run_current_file(void) {
+    if (!E.filepath[0]) {
+        cppe_set_msg("Run needs a file path");
+        return;
+    }
+    if (E.modified && cppe_save() < 0) {
+        cppe_set_msg("Save failed");
+        return;
+    }
+    cppe_clear();
+    cppe_puts("\x1b[36mCPPE Run:\x1b[0m ");
+    cppe_puts(E.filepath);
+    cppe_puts("\n\n");
+    (void)hbos_gcc_run_file(E.filepath, 1);
+    cppe_puts("\n\x1b[90mPress any key to return to CPPE\x1b[0m");
+    kb_get_key();
+    cppe_clear();
 }
 
 /* ── Main editor loop ───────────────────────────────────────── */
@@ -607,6 +781,12 @@ static void cppe_run(void) {
             continue;
         }
 
+        /* Ctrl+R — save and run with gcc */
+        if (c == ('r' & 0x1F)) {
+            cppe_run_current_file();
+            continue;
+        }
+
         /* Ctrl+G — help */
         if (c == ('g' & 0x1F)) {
             cppe_show_help();
@@ -644,6 +824,12 @@ static void cppe_run(void) {
         /* Ctrl+W — search */
         if (c == ('w' & 0x1F)) {
             cppe_do_search();
+            continue;
+        }
+
+        /* Ctrl+] — match bracket */
+        if (c == (']' & 0x1F)) {
+            cppe_match_bracket();
             continue;
         }
 
@@ -730,6 +916,10 @@ static void cmd_cppe(int argc, char **argv) {
             E.data[0] = '\0';
             E.data_len = 0;
             cppe_rebuild_lines();
+            if (cppe_has_code_suffix(E.filepath)) {
+                cppe_insert_template();
+                cppe_set_msg("New C file template");
+            }
         }
     } else {
         E.data[0] = '\0';

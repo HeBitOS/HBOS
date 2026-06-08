@@ -618,14 +618,60 @@ void cmd_execute(const char *line) {
     console_puts("\x1b[33mType 'help' for commands\x1b[0m\n");
 }
 
+/* ── source command — execute commands from a file ─────────── */
+static void cmd_source(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("usage: source <scriptfile>\n");
+        return;
+    }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        console_puts("source: cannot open ");
+        console_puts(argv[1]);
+        console_putchar('\n');
+        return;
+    }
+    char buf[256];
+    int bi = 0;
+    ssize_t n;
+    char ch;
+    while ((n = read(fd, &ch, 1)) > 0) {
+        if (ch == '\n' || ch == '\r') {
+            if (bi > 0) {
+                buf[bi] = '\0';
+                cmd_execute(buf);
+            }
+            bi = 0;
+        } else if (bi < 255) {
+            buf[bi++] = ch;
+        }
+    }
+    if (bi > 0) {
+        buf[bi] = '\0';
+        cmd_execute(buf);
+    }
+    close(fd);
+}
+
 void shell_init(void) {
-    // All commands are registered by tool_init_all() in kernel.c
+    static const command_t source_cmd = {
+        "source", CMD_GROUP_SYSTEM, "Execute commands from a file", "source <file>", cmd_source
+    };
+    cmd_register(&source_cmd);
+}
+
+static const char *shell_cwd(char buf[256]) {
+    if (!getcwd(buf, 256)) {
+        buf[0] = '/';
+        buf[1] = 0;
+    }
+    return buf;
 }
 
 void shell_print_prompt(void) {
-    extern char g_cwd[];
+    char cwd[256];
     console_puts("\x1b[32mhbos\x1b[0m:");
-    console_puts(g_cwd);
+    console_puts(shell_cwd(cwd));
     console_puts("# ");
 }
 
@@ -700,6 +746,30 @@ static int sh_strncmp(const char *a, const char *b, int n) {
     return 0;
 }
 
+static void sh_copy_n(char *dest, const char *src, int n) {
+    int i = 0;
+    for (; i < n && src[i]; i++) dest[i] = src[i];
+    dest[i] = 0;
+}
+
+static void tab_add_path_match(char matches[32][CMD_BUF_SIZE], int *mc,
+                               const char *typed_dir, const char *name) {
+    int pos = 0;
+    if (*mc >= 32) return;
+    if (typed_dir && typed_dir[0] && strcmp(typed_dir, ".") != 0) {
+        while (typed_dir[pos] && pos < CMD_BUF_SIZE - 1) {
+            matches[*mc][pos] = typed_dir[pos];
+            pos++;
+        }
+        if (pos > 0 && matches[*mc][pos - 1] != '/' && pos < CMD_BUF_SIZE - 1)
+            matches[*mc][pos++] = '/';
+    }
+    for (int i = 0; name[i] && pos < CMD_BUF_SIZE - 1; i++)
+        matches[*mc][pos++] = name[i];
+    matches[*mc][pos] = 0;
+    (*mc)++;
+}
+
 static void tab_complete(char *line, int *len, int *pos) {
     /* Find the start of the current token */
     int tok_start = 0;
@@ -721,12 +791,32 @@ static void tab_complete(char *line, int *len, int *pos) {
                 strcpy(matches[mc++], list[i]->name);
         }
     } else {
-        uint32_t cnt = fs_get_count();
-        for (uint32_t i = 0; i < cnt && mc < 32; i++) {
-            vfs_node_t *n = fs_get_node(i);
-            if (!n || !n->name[0]) continue;
-            if (sh_strncmp(n->name, prefix, prefix_len) == 0)
-                strcpy(matches[mc++], n->name);
+        char cwd[256], typed[CMD_BUF_SIZE], typed_dir[CMD_BUF_SIZE];
+        char leaf[VFS_MAX_NAME], dir[256], name[VFS_MAX_NAME];
+        uint32_t type;
+        int slash = -1;
+
+        shell_cwd(cwd);
+        sh_copy_n(typed, prefix, prefix_len);
+        for (int i = 0; typed[i]; i++)
+            if (typed[i] == '/') slash = i;
+
+        if (slash >= 0) {
+            sh_copy_n(typed_dir, typed, slash + 1);
+            strcpy(leaf, typed + slash + 1);
+        } else {
+            strcpy(typed_dir, ".");
+            strcpy(leaf, typed);
+        }
+
+        if (vfs_resolve_path(cwd, typed_dir, dir, sizeof(dir)) == 0) {
+            for (uint32_t i = 0; mc < 32 &&
+                 vfs_readdir_at(dir, i, name, &type) == 0; i++) {
+                (void)type;
+                if (sh_strncmp(name, leaf, sh_strlen(leaf)) == 0)
+                    tab_add_path_match(matches, &mc,
+                                       (slash >= 0) ? typed_dir : "", name);
+            }
         }
     }
 

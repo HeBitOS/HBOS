@@ -14,6 +14,7 @@
 #include "../shell/shell.h"
 #include "../string.h"
 #include "../unistd.h"
+#include "../vfs.h"
 #include "tool.h"
 
 /* ── Limits ─────────────────────────────────────────────────── */
@@ -22,7 +23,10 @@
 #define MAX_FUNCS    64
 #define MAX_VARS     256
 #define MAX_ARGS     16
-#define MAX_NAME     32
+#define MAX_NAME     128
+#define MAX_STRINGS  256
+#define MAX_STRING_LEN 256
+#define MAX_ARRAY    256
 
 /* ── Token ──────────────────────────────────────────────────── */
 enum {
@@ -32,6 +36,8 @@ enum {
     T_CLASS, T_PUBLIC, T_PRIVATE, T_NEW, T_DELETE, T_THIS,
     T_EQ, T_NE, T_LE, T_GE, T_AND, T_OR,
     T_PLUS_EQ, T_MINUS_EQ, T_PLUS_PLUS, T_MINUS_MINUS, T_ARROW,
+    T_SHL, T_SHR, T_AND_EQ, T_OR_EQ, T_XOR_EQ,
+    T_MUL_EQ, T_DIV_EQ, T_MOD_EQ, T_SHL_EQ, T_SHR_EQ,
     /* Single-char tokens use their ASCII value directly */
 };
 
@@ -42,6 +48,10 @@ typedef struct {
     int line;
 } token_t;
 
+/* ── String table ───────────────────────────────────────────── */
+static char string_table[MAX_STRINGS][MAX_STRING_LEN];
+static int string_count;
+
 static token_t tokens[MAX_TOKENS];
 static int tok_count;
 static int pc; /* program counter: current token index */
@@ -49,11 +59,14 @@ static int pc; /* program counter: current token index */
 /* ── Source ─────────────────────────────────────────────────── */
 static char src[MAX_SRC];
 static int src_len;
+static char src_dir[256] = "/";
 
 /* ── Variables ──────────────────────────────────────────────── */
 typedef struct {
     char name[MAX_NAME];
     int  value;
+    int  is_array;
+    int  array[MAX_ARRAY];
 } var_t;
 
 static var_t vars[MAX_VARS];
@@ -71,8 +84,12 @@ typedef struct {
 static func_t funcs[MAX_FUNCS];
 static int func_count;
 
-/* ── Error ──────────────────────────────────────────────────── */
+/* ── Control flow flags ─────────────────────────────────────── */
 static int g_error;
+static int g_return;    /* set by 'return' to unwind out of blocks */
+static int g_return_val;/* value to return */
+static int g_break;     /* set by 'break' to exit loop */
+static int g_continue;  /* set by 'continue' to skip to next iteration */
 
 static void cc_error(const char *msg) {
     int line = (pc > 0 && pc < tok_count) ? tokens[pc].line : 0;
@@ -98,6 +115,41 @@ static int is_alpha(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 
 static int is_digit(int c) { return c >= '0' && c <= '9'; }
 static int is_alnum(int c) { return is_alpha(c) || is_digit(c); }
 
+static void cc_set_src_dir(const char *path) {
+    char full[256];
+    char cwd[256];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        cwd[0] = '/';
+        cwd[1] = 0;
+    }
+    if (vfs_resolve_path(cwd, path ? path : "", full, sizeof(full)) < 0) {
+        src_dir[0] = '/';
+        src_dir[1] = 0;
+        return;
+    }
+    uint32_t len = (uint32_t)strlen(full);
+    while (len > 1 && full[len - 1] == '/') len--;
+    while (len > 1 && full[len - 1] != '/') len--;
+    if (len <= 1) {
+        src_dir[0] = '/';
+        src_dir[1] = 0;
+        return;
+    }
+    if (len >= sizeof(src_dir)) len = sizeof(src_dir) - 1;
+    for (uint32_t i = 0; i < len; i++) src_dir[i] = full[i];
+    src_dir[len] = 0;
+}
+
+static int cc_open_include(const char *path) {
+    char full[256];
+    if (path && path[0] != '/' &&
+        vfs_resolve_path(src_dir, path, full, sizeof(full)) == 0) {
+        int fd = open(full, O_RDONLY);
+        if (fd >= 0) return fd;
+    }
+    return open(path, O_RDONLY);
+}
+
 /* ── Variable operations ────────────────────────────────────── */
 static int var_find(const char *name) {
     for (int i = var_count - 1; i >= 0; i--)
@@ -112,6 +164,7 @@ static int var_alloc(const char *name) {
     while (name[n] && n < MAX_NAME - 1) { vars[i].name[n] = name[n]; n++; }
     vars[i].name[n] = '\0';
     vars[i].value = 0;
+    vars[i].is_array = 0;
     return i;
 }
 
@@ -137,6 +190,16 @@ static void tokenize(void) {
             while (pos < src_len && src[pos] != '\n') pos++;
             continue;
         }
+        /* Skip block comments */
+        if (src[pos] == '/' && src[pos + 1] == '*') {
+            pos += 2;
+            while (pos + 1 < src_len && !(src[pos] == '*' && src[pos + 1] == '/')) {
+                if (src[pos] == '\n') line++;
+                pos++;
+            }
+            if (pos + 1 < src_len) pos += 2;
+            continue;
+        }
 
         /* Skip #preprocessor lines (except #include handled separately) */
         if (src[pos] == '#') {
@@ -147,6 +210,12 @@ static void tokenize(void) {
                 src[j+3] == 'l' && src[j+4] == 'u' && src[j+5] == 'd' && src[j+6] == 'e') {
                 j += 7;
                 while (j < src_len && (src[j] == ' ' || src[j] == '\t')) j++;
+                if (j < src_len && src[j] == '<') {
+                    while (j < src_len && src[j] != '\n') j++;
+                    if (j < src_len) j++;
+                    pos = j;
+                    continue;
+                }
                 if (j < src_len && src[j] == '"') {
                     j++;
                     char path[128]; int pi = 0;
@@ -157,7 +226,7 @@ static void tokenize(void) {
                     if (j < src_len) j++;
                     pos = j;
                     /* Load and prepend included file */
-                    int fd = open(path, O_RDONLY);
+                    int fd = cc_open_include(path);
                     if (fd >= 0) {
                         char inc[MAX_SRC]; int il = 0;
                         ssize_t r;
@@ -186,10 +255,13 @@ static void tokenize(void) {
             int val = 0;
             if (src[pos] == '0' && src[pos + 1] == 'x') {
                 pos += 2;
-                while (pos < src_len && is_digit(src[pos]))
-                    val = val * 16 + (src[pos++] - '0');
-                while (pos < src_len && src[pos] >= 'a' && src[pos] <= 'f')
-                    val = val * 16 + (src[pos++] - 'a' + 10);
+                while (pos < src_len && (is_digit(src[pos]) ||
+                       (src[pos] >= 'a' && src[pos] <= 'f') ||
+                       (src[pos] >= 'A' && src[pos] <= 'F'))) {
+                    if (is_digit(src[pos]))      val = val * 16 + (src[pos++] - '0');
+                    else if (src[pos] <= 'f')    val = val * 16 + (src[pos++] - 'a' + 10);
+                    else                         val = val * 16 + (src[pos++] - 'A' + 10);
+                }
             } else {
                 while (pos < src_len && is_digit(src[pos]))
                     val = val * 10 + (src[pos++] - '0');
@@ -221,6 +293,33 @@ static void tokenize(void) {
             if (src[pos] == '"') pos++;
             tokens[tok_count].str[si] = '\0';
             tokens[tok_count].type = T_STR;
+            tokens[tok_count].line = line;
+            tok_count++;
+            continue;
+        }
+
+        /* Character literals */
+        if (src[pos] == '\'') {
+            pos++;
+            int ch = 0;
+            if (pos < src_len && src[pos] == '\\') {
+                pos++;
+                if (pos < src_len) {
+                    if (src[pos] == 'n') ch = '\n';
+                    else if (src[pos] == 't') ch = '\t';
+                    else if (src[pos] == '\\') ch = '\\';
+                    else if (src[pos] == '\'') ch = '\'';
+                    else if (src[pos] == '0') ch = '\0';
+                    else ch = (unsigned char)src[pos];
+                    pos++;
+                }
+            } else if (pos < src_len) {
+                ch = (unsigned char)src[pos];
+                pos++;
+            }
+            if (pos < src_len && src[pos] == '\'') pos++;
+            tokens[tok_count].type = T_NUM;
+            tokens[tok_count].num = ch;
             tokens[tok_count].line = line;
             tok_count++;
             continue;
@@ -304,6 +403,46 @@ static void tokenize(void) {
             tokens[tok_count].type = T_MINUS_EQ; tokens[tok_count].line = line;
             tok_count++; pos += 2; continue;
         }
+        if (src[pos] == '*' && src[pos + 1] == '=') {
+            tokens[tok_count].type = T_MUL_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
+        if (src[pos] == '/' && src[pos + 1] == '=') {
+            tokens[tok_count].type = T_DIV_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
+        if (src[pos] == '%' && src[pos + 1] == '=') {
+            tokens[tok_count].type = T_MOD_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
+        if (src[pos] == '&' && src[pos + 1] == '=') {
+            tokens[tok_count].type = T_AND_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
+        if (src[pos] == '|' && src[pos + 1] == '=') {
+            tokens[tok_count].type = T_OR_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
+        if (src[pos] == '^' && src[pos + 1] == '=') {
+            tokens[tok_count].type = T_XOR_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
+        if (src[pos] == '<' && src[pos + 1] == '<' && src[pos + 2] == '=') {
+            tokens[tok_count].type = T_SHL_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 3; continue;
+        }
+        if (src[pos] == '>' && src[pos + 1] == '>' && src[pos + 2] == '=') {
+            tokens[tok_count].type = T_SHR_EQ; tokens[tok_count].line = line;
+            tok_count++; pos += 3; continue;
+        }
+        if (src[pos] == '<' && src[pos + 1] == '<') {
+            tokens[tok_count].type = T_SHL; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
+        if (src[pos] == '>' && src[pos + 1] == '>') {
+            tokens[tok_count].type = T_SHR; tokens[tok_count].line = line;
+            tok_count++; pos += 2; continue;
+        }
 
         /* Single-char token */
         tokens[tok_count].type = (int)(unsigned char)src[pos];
@@ -318,6 +457,8 @@ static void tokenize(void) {
 
 /* ── Expression evaluator ───────────────────────────────────── */
 static int expr_or(void);
+static int parse_stmt(void);
+static int parse_block(void);
 
 static int expr_primary(void) {
     if (g_error) return 0;
@@ -329,10 +470,20 @@ static int expr_primary(void) {
         return v;
     }
 
-    /* String literal — return 0 (strings only used in printf) */
+    /* String literal — store in string table, return index */
     if (tokens[pc].type == T_STR) {
+        int idx = string_count;
+        if (string_count < MAX_STRINGS) {
+            int i = 0;
+            while (tokens[pc].str[i] && i < MAX_STRING_LEN - 1) {
+                string_table[string_count][i] = tokens[pc].str[i];
+                i++;
+            }
+            string_table[string_count][i] = '\0';
+            string_count++;
+        }
         pc++;
-        return 0;
+        return idx;
     }
 
     /* Identifiers */
@@ -358,39 +509,54 @@ static int expr_primary(void) {
 
             /* Built-in: printf */
             if (strcmp(name, "printf") == 0) {
-                /* First arg is format string — we need to find it in source */
-                /* Hack: search backward in tokens for T_STR */
-                for (int i = pc - 1; i >= 0; i--) {
-                    if (tokens[i].type == T_STR) {
-                        const char *fmt = tokens[i].str;
-                        int ai = 1;
-                        for (const char *f = fmt; *f; f++) {
-                            if (*f == '%' && f[1] == 'd') {
+                if (ac > 0 && args[0] >= 0 && args[0] < string_count) {
+                    const char *fmt = string_table[args[0]];
+                    int ai = 1;
+                    for (const char *f = fmt; *f; f++) {
+                        if (*f == '%' && f[1]) {
+                            f++;
+                            if (*f == 'd') {
                                 if (ai < ac) put_int(args[ai++]);
-                                f++;
-                            } else if (*f == '%' && f[1] == 'x') {
+                            } else if (*f == 'x') {
                                 if (ai < ac) {
                                     unsigned int v = (unsigned int)args[ai++];
                                     char nb[12]; int ni = 0;
-                                    do { int d = v % 16; nb[ni++] = d < 10 ? '0' + d : 'a' + d - 10; v /= 16; } while (v > 0);
+                                    do { int d = (int)(v % 16); nb[ni++] = d < 10 ? '0' + d : 'a' + d - 10; v /= 16; } while (v > 0);
                                     while (ni--) console_putchar(nb[ni]);
                                 }
-                                f++;
-                            } else if (*f == '%' && f[1] == 'c') {
+                            } else if (*f == 'c') {
                                 if (ai < ac) console_putchar((char)args[ai++]);
-                                f++;
-                            } else if (*f == '\\' && f[1] == 'n') {
-                                console_putchar('\n'); f++;
-                            } else if (*f == '\\' && f[1] == 't') {
-                                console_putchar('\t'); f++;
+                            } else if (*f == 's') {
+                                if (ai < ac) {
+                                    int si = args[ai++];
+                                    if (si >= 0 && si < string_count) console_puts(string_table[si]);
+                                }
+                            } else if (*f == '%') {
+                                console_putchar('%');
                             } else {
+                                console_putchar('%');
                                 console_putchar(*f);
                             }
+                        } else {
+                            console_putchar(*f);
                         }
-                        break;
                     }
                 }
                 return 0;
+            }
+
+            /* Built-in: puts */
+            if (strcmp(name, "puts") == 0) {
+                if (ac > 0 && args[0] >= 0 && args[0] < string_count)
+                    console_puts(string_table[args[0]]);
+                console_putchar('\n');
+                return 0;
+            }
+
+            /* Built-in: putchar */
+            if (strcmp(name, "putchar") == 0) {
+                if (ac > 0) console_putchar((char)args[0]);
+                return ac > 0 ? args[0] : 0;
             }
 
             /* Built-in: getchar */
@@ -406,20 +572,29 @@ static int expr_primary(void) {
                     if (vi >= 0) vars[vi].value = args[i];
                 }
                 int saved_pc = pc;
+                int saved_return = g_return;
+                int saved_return_val = g_return_val;
+                g_return = 0;
                 pc = fn->body_start;
                 int ret = 0;
                 /* Execute block */
                 if (tokens[pc].type == '{') {
-                    pc++;
-                    int depth = 1;
-                    while (depth > 0 && !g_error && tokens[pc].type != T_EOF) {
-                        /* Execute statements until matching '}' */
-                        /* This is a simplified block executor */
-                        break; /* placeholder */
+                    pc++; /* skip '{' */
+                    while (tokens[pc].type != '}' && tokens[pc].type != T_EOF && !g_error) {
+                        parse_stmt();
+                        if (g_return) {
+                            ret = g_return_val;
+                            g_return = 0;
+                            break;
+                        }
                     }
+                    /* Skip to matching '}' */
+                    if (tokens[pc].type == '}') pc++;
                 }
                 pc = saved_pc;
                 var_count = saved_var;
+                g_return = saved_return;
+                g_return_val = saved_return_val;
                 return ret;
             }
             return 0;
@@ -428,9 +603,13 @@ static int expr_primary(void) {
         /* Array access */
         if (tokens[pc].type == '[') {
             pc++;
-            expr_or();
+            int idx = expr_or();
             if (tokens[pc].type == ']') pc++;
-            /* For now, arrays not fully supported */
+            int vi = var_find(name);
+            if (vi >= 0 && vars[vi].is_array) {
+                if (idx >= 0 && idx < MAX_ARRAY) return vars[vi].array[idx];
+                return 0;
+            }
             return 0;
         }
 
@@ -473,6 +652,12 @@ static int expr_primary(void) {
         return !expr_primary();
     }
 
+    /* Unary bitwise not */
+    if (tokens[pc].type == '~') {
+        pc++;
+        return ~expr_primary();
+    }
+
     return 0;
 }
 
@@ -498,13 +683,23 @@ static int expr_add(void) {
     return v;
 }
 
-static int expr_cmp(void) {
+static int expr_shift(void) {
     int v = expr_add();
+    while (tokens[pc].type == T_SHL || tokens[pc].type == T_SHR) {
+        int op = tokens[pc].type; pc++;
+        int r = expr_add();
+        if (op == T_SHL) v <<= r; else v >>= r;
+    }
+    return v;
+}
+
+static int expr_cmp(void) {
+    int v = expr_shift();
     while (tokens[pc].type == '<' || tokens[pc].type == '>' ||
            tokens[pc].type == T_LE || tokens[pc].type == T_GE ||
            tokens[pc].type == T_EQ || tokens[pc].type == T_NE) {
         int op = tokens[pc].type; pc++;
-        int r = expr_add();
+        int r = expr_shift();
         switch (op) {
             case '<': v = (v < r); break;
             case '>': v = (v > r); break;
@@ -517,22 +712,47 @@ static int expr_cmp(void) {
     return v;
 }
 
-static int expr_and(void) {
+static int expr_bitand(void) {
     int v = expr_cmp();
-    while (tokens[pc].type == T_AND) { pc++; v = v && expr_cmp(); }
+    while (tokens[pc].type == '&') { pc++; v = v & expr_cmp(); }
+    return v;
+}
+
+static int expr_bitxor(void) {
+    int v = expr_bitand();
+    while (tokens[pc].type == '^') { pc++; v = v ^ expr_bitand(); }
+    return v;
+}
+
+static int expr_bitor(void) {
+    int v = expr_bitxor();
+    while (tokens[pc].type == '|') { pc++; v = v | expr_bitxor(); }
+    return v;
+}
+
+static int expr_and(void) {
+    int v = expr_bitor();
+    while (tokens[pc].type == T_AND) { pc++; v = v && expr_bitor(); }
     return v;
 }
 
 static int expr_or(void) {
     int v = expr_and();
     while (tokens[pc].type == T_OR) { pc++; v = v || expr_and(); }
+    /* Ternary operator */
+    if (tokens[pc].type == '?') {
+        pc++;
+        int true_val = expr_or();
+        if (tokens[pc].type == ':') pc++;
+        int false_val = expr_or();
+        return v ? true_val : false_val;
+    }
     return v;
 }
 
 static int parse_expr(void) { return expr_or(); }
 
 /* ── Statement parser ───────────────────────────────────────── */
-static int parse_stmt(void);
 static int parse_block(void) {
     if (tokens[pc].type != '{') return parse_stmt();
     pc++; /* skip '{' */
@@ -540,6 +760,16 @@ static int parse_block(void) {
     int result = 0;
     while (tokens[pc].type != '}' && tokens[pc].type != T_EOF && !g_error) {
         result = parse_stmt();
+        if (g_return || g_break || g_continue) break;
+    }
+    /* Skip to matching '}' if we exited early */
+    if (g_return || g_break || g_continue) {
+        int depth = 1;
+        while (depth > 0 && tokens[pc].type != T_EOF) {
+            if (tokens[pc].type == '{') depth++;
+            else if (tokens[pc].type == '}') depth--;
+            if (depth > 0) pc++;
+        }
     }
     if (tokens[pc].type == '}') pc++;
     var_count = saved;
@@ -552,7 +782,7 @@ static int parse_stmt(void) {
     /* Block */
     if (tokens[pc].type == '{') return parse_block();
 
-    /* int/char var; or var = expr; */
+    /* int/char var; or var = expr; or int arr[N]; */
     if (tokens[pc].type == T_INT || tokens[pc].type == T_CHAR) {
         pc++;
         if (tokens[pc].type != T_IDENT) { cc_error("expected var name"); return 0; }
@@ -560,6 +790,16 @@ static int parse_stmt(void) {
         strcpy(name, tokens[pc].str);
         pc++;
         int vi = var_alloc(name);
+        /* Array declaration: int a[10]; */
+        if (tokens[pc].type == '[') {
+            pc++;
+            if (tokens[pc].type == T_NUM) pc++; /* skip size */
+            if (tokens[pc].type == ']') pc++;
+            if (vi >= 0) {
+                vars[vi].is_array = 1;
+                for (int i = 0; i < MAX_ARRAY; i++) vars[vi].array[i] = 0;
+            }
+        }
         if (tokens[pc].type == '=') {
             pc++;
             int val = parse_expr();
@@ -576,6 +816,8 @@ static int parse_stmt(void) {
         if (tokens[pc].type != ';' && tokens[pc].type != '}')
             v = parse_expr();
         if (tokens[pc].type == ';') pc++;
+        g_return = 1;
+        g_return_val = v;
         return v;
     }
 
@@ -587,7 +829,22 @@ static int parse_stmt(void) {
         if (tokens[pc].type == ')') pc++;
         if (cond) {
             int v = parse_stmt();
-            if (tokens[pc].type == T_ELSE) { pc++; /* skip else branch */ }
+            /* Skip else branch if present */
+            if (tokens[pc].type == T_ELSE) {
+                pc++; /* skip 'else' keyword */
+                /* Skip the else body without executing */
+                if (tokens[pc].type == '{') {
+                    int depth = 0;
+                    do {
+                        if (tokens[pc].type == '{') depth++;
+                        else if (tokens[pc].type == '}') depth--;
+                        pc++;
+                    } while (depth > 0 && tokens[pc].type != T_EOF);
+                } else {
+                    while (tokens[pc].type != ';' && tokens[pc].type != T_EOF) pc++;
+                    if (tokens[pc].type == ';') pc++;
+                }
+            }
             return v;
         } else {
             /* Skip then branch */
@@ -620,9 +877,28 @@ static int parse_stmt(void) {
         if (tokens[pc].type == ')') pc++;
         int body_pc = pc; /* body start */
 
+        if (!cond) {
+            /* skip body without executing */
+            if (tokens[pc].type == '{') {
+                int depth = 0;
+                do {
+                    if (tokens[pc].type == '{') depth++;
+                    else if (tokens[pc].type == '}') depth--;
+                    pc++;
+                } while (depth > 0 && tokens[pc].type != T_EOF);
+            } else {
+                while (tokens[pc].type != ';' && tokens[pc].type != T_EOF) pc++;
+                if (tokens[pc].type == ';') pc++;
+            }
+            return 0;
+        }
+
         while (cond && !g_error) {
             pc = body_pc;
             parse_stmt();
+            if (g_return) return 0;
+            if (g_break) { g_break = 0; break; }
+            g_continue = 0;
             pc = cond_pc;
             cond = parse_expr();
             if (tokens[pc].type == ')') pc++;
@@ -636,8 +912,12 @@ static int parse_stmt(void) {
         if (tokens[pc].type == '(') pc++;
 
         /* Init */
-        if (tokens[pc].type != ';') parse_expr();
-        if (tokens[pc].type == ';') pc++;
+        if (tokens[pc].type == T_INT || tokens[pc].type == T_CHAR) {
+            parse_stmt(); /* handles 'int i = 0;' — already consumes ';' */
+        } else {
+            if (tokens[pc].type != ';') parse_expr();
+            if (tokens[pc].type == ';') pc++;
+        }
 
         int cond_pc = pc;
         int cond = 1;
@@ -645,7 +925,7 @@ static int parse_stmt(void) {
         if (tokens[pc].type == ';') pc++;
 
         int update_pc = pc;
-        /* Skip update */
+        /* Skip update expression to find ')' */
         if (tokens[pc].type != ')') {
             while (tokens[pc].type != ')' && tokens[pc].type != T_EOF) pc++;
         }
@@ -656,26 +936,39 @@ static int parse_stmt(void) {
         while (cond && !g_error) {
             pc = body_pc;
             parse_stmt();
+            if (g_return) return 0;
+            if (g_break) { g_break = 0; break; }
+            g_continue = 0;
             /* Execute update */
             pc = update_pc;
             if (tokens[pc].type != ')') parse_expr();
             /* Re-evaluate condition */
             pc = cond_pc;
-            cond = parse_expr();
+            cond = 1;
+            if (tokens[pc].type != ';') cond = parse_expr();
             if (tokens[pc].type == ';') pc++;
         }
+        /* Skip past ')' if we broke out early */
         return 0;
     }
 
     /* break / continue */
-    if (tokens[pc].type == T_BREAK || tokens[pc].type == T_CONTINUE) {
+    if (tokens[pc].type == T_BREAK) {
         pc++;
         if (tokens[pc].type == ';') pc++;
+        g_break = 1;
+        return 0;
+    }
+    if (tokens[pc].type == T_CONTINUE) {
+        pc++;
+        if (tokens[pc].type == ';') pc++;
+        g_continue = 1;
         return 0;
     }
 
     /* Expression statement: assignment, function call, etc. */
-    if (tokens[pc].type == T_IDENT) {
+    if (tokens[pc].type == T_IDENT || tokens[pc].type == T_PRINTF ||
+        tokens[pc].type == T_THIS) {
         char name[MAX_NAME];
         strcpy(name, tokens[pc].str);
         int save_pc = pc;
@@ -692,20 +985,45 @@ static int parse_stmt(void) {
             return 0;
         }
 
-        /* += -= */
-        if (tokens[pc].type == T_PLUS_EQ) {
-            pc++;
+        /* += -= *= /= %= <<= >>= &= |= ^= */
+        if (tokens[pc].type == T_PLUS_EQ || tokens[pc].type == T_MINUS_EQ ||
+            tokens[pc].type == T_MUL_EQ || tokens[pc].type == T_DIV_EQ ||
+            tokens[pc].type == T_MOD_EQ || tokens[pc].type == T_SHL_EQ ||
+            tokens[pc].type == T_SHR_EQ || tokens[pc].type == T_AND_EQ ||
+            tokens[pc].type == T_OR_EQ || tokens[pc].type == T_XOR_EQ) {
+            int op = tokens[pc].type; pc++;
             int val = parse_expr();
             int vi = var_find(name);
-            if (vi >= 0) vars[vi].value += val;
+            if (vi >= 0) {
+                switch (op) {
+                    case T_PLUS_EQ:  vars[vi].value += val; break;
+                    case T_MINUS_EQ: vars[vi].value -= val; break;
+                    case T_MUL_EQ:   vars[vi].value *= val; break;
+                    case T_DIV_EQ:   if (val) vars[vi].value /= val; break;
+                    case T_MOD_EQ:   if (val) vars[vi].value %= val; break;
+                    case T_SHL_EQ:   vars[vi].value <<= val; break;
+                    case T_SHR_EQ:   vars[vi].value >>= val; break;
+                    case T_AND_EQ:   vars[vi].value &= val; break;
+                    case T_OR_EQ:    vars[vi].value |= val; break;
+                    case T_XOR_EQ:   vars[vi].value ^= val; break;
+                }
+            }
             if (tokens[pc].type == ';') pc++;
             return 0;
         }
-        if (tokens[pc].type == T_MINUS_EQ) {
+
+        /* Array assignment: a[i] = expr; */
+        if (tokens[pc].type == '[') {
             pc++;
-            int val = parse_expr();
-            int vi = var_find(name);
-            if (vi >= 0) vars[vi].value -= val;
+            int idx = expr_or();
+            if (tokens[pc].type == ']') pc++;
+            if (tokens[pc].type == '=') {
+                pc++;
+                int val = parse_expr();
+                int vi = var_find(name);
+                if (vi >= 0 && vars[vi].is_array && idx >= 0 && idx < MAX_ARRAY)
+                    vars[vi].array[idx] = val;
+            }
             if (tokens[pc].type == ';') pc++;
             return 0;
         }
@@ -752,6 +1070,9 @@ static int parse_stmt(void) {
 static void parse_program(void) {
     pc = 0;
     g_error = 0;
+    g_return = 0;
+    g_break = 0;
+    g_continue = 0;
 
     while (tokens[pc].type != T_EOF && !g_error) {
         /* Function definition: type name(params) { ... } */
@@ -810,7 +1131,8 @@ static void parse_program(void) {
                 }
             }
         } else {
-            pc++;
+            /* Top-level statement (e.g. printf("hello"); ) */
+            parse_stmt();
         }
     }
 }
@@ -894,17 +1216,119 @@ static void cc_repl(void) {
         }
 
         if (complete && accum_len > 0) {
-            /* Execute accumulated code */
+            /* Execute accumulated code — preserve vars across REPL inputs */
             memcpy(src, accum, (size_t)(accum_len + 1));
             src_len = accum_len;
             tokenize();
-            var_count = 0;
             func_count = 0;
+            string_count = 0;
+            g_error = 0;
             parse_program();
+            console_putchar('\n');
             accum_len = 0;
             accum[0] = '\0';
         }
     }
+}
+
+static int cc_load_file(const char *path) {
+    cc_set_src_dir(path);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        console_puts("gcc: cannot open ");
+        console_puts(path);
+        console_putchar('\n');
+        return -1;
+    }
+    src_len = 0;
+    ssize_t n;
+    while ((n = read(fd, src + src_len, (size_t)(MAX_SRC - src_len - 1))) > 0) {
+        src_len += (int)n;
+        if (src_len >= MAX_SRC - 1) break;
+    }
+    close(fd);
+    src[src_len] = '\0';
+    return 0;
+}
+
+static int cc_write_sample(const char *path) {
+    static const char sample[] =
+        "#include <stdio.h>\n"
+        "\n"
+        "int main() {\n"
+        "    puts(\"HBOS gcc ready\");\n"
+        "    printf(\"answer=%d\\n\", 42);\n"
+        "    return 0;\n"
+        "}\n";
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC);
+    if (fd < 0) {
+        console_puts("gcc: cannot create ");
+        console_puts(path);
+        console_putchar('\n');
+        return -1;
+    }
+    int left = (int)sizeof(sample) - 1;
+    int off = 0;
+    while (left > 0) {
+        ssize_t n = write(fd, sample + off, (size_t)left);
+        if (n <= 0) {
+            close(fd);
+            console_puts("gcc: write failed\n");
+            return -1;
+        }
+        off += (int)n;
+        left -= (int)n;
+    }
+    close(fd);
+    console_puts("gcc: created ");
+    console_puts(path);
+    console_puts("\n");
+    return 0;
+}
+
+static uint32_t cc_count_lines(void) {
+    uint32_t lines = src_len > 0 ? 1 : 0;
+    for (int i = 0; i < src_len; i++)
+        if (src[i] == '\n') lines++;
+    return lines;
+}
+
+int hbos_gcc_run_file(const char *path, int verbose) {
+    if (!path || !path[0]) return -1;
+    if (cc_load_file(path) < 0) return -1;
+
+    if (verbose) {
+        console_puts("\x1b[36mgcc\x1b[0m: ");
+        console_puts(path);
+        console_puts("  ");
+        put_int(src_len);
+        console_puts(" bytes, ");
+        put_int((int)cc_count_lines());
+        console_puts(" lines\n");
+    }
+
+    tokenize();
+    var_count = 0;
+    func_count = 0;
+    string_count = 0;
+    g_error = 0;
+    g_return = 0;
+    g_break = 0;
+    g_continue = 0;
+    parse_program();
+
+    if (verbose) {
+        if (g_error) {
+            console_puts("\x1b[31mgcc: failed\x1b[0m\n");
+        } else {
+            console_puts("\x1b[32mgcc: ok\x1b[0m  tokens=");
+            put_int(tok_count);
+            console_puts(" funcs=");
+            put_int(func_count);
+            console_putchar('\n');
+        }
+    }
+    return g_error ? -1 : 0;
 }
 
 /* ── Main command ───────────────────────────────────────────── */
@@ -914,32 +1338,41 @@ static void cmd_gcc(int argc, char **argv) {
         return;
     }
 
-    /* Load file */
-    int fd = open(argv[1], O_RDONLY);
-    if (fd < 0) {
-        console_puts("gcc: cannot open ");
-        console_puts(argv[1]);
-        console_putchar('\n');
+    int verbose = 0;
+    int create_sample = 0;
+    const char *file = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--stats") == 0) {
+            verbose = 1;
+        } else if (strcmp(argv[i], "--new") == 0 || strcmp(argv[i], "--sample") == 0) {
+            create_sample = 1;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            console_puts("Usage: gcc [-v|--stats] <file.c>\n");
+            console_puts("       gcc --new <file.c>   create runnable sample\n");
+            console_puts("       gcc                  start REPL\n");
+            console_puts("       cc  <file.c>         alias\n");
+            return;
+        } else {
+            file = argv[i];
+        }
+    }
+
+    if (!file) {
+        console_puts("Usage: gcc [-v|--stats] [--new] <file.c>\n");
         return;
     }
-    src_len = 0;
-    ssize_t n;
-    while ((n = read(fd, src + src_len, (size_t)(MAX_SRC - src_len - 1))) > 0)
-        src_len += (int)n;
-    close(fd);
-    src[src_len] = '\0';
-
-    /* Tokenize and execute */
-    tokenize();
-    var_count = 0;
-    func_count = 0;
-    parse_program();
+    if (create_sample) {
+        (void)cc_write_sample(file);
+        return;
+    }
+    (void)hbos_gcc_run_file(file, verbose);
 }
 
 /* ── Registration ───────────────────────────────────────────── */
 void tool_cc_init(void) {
     static const command_t cmds[] = {
-        {"gcc", CMD_GROUP_USER, "C/C++ compiler", "gcc [file.c]", cmd_gcc},
+        {"gcc", CMD_GROUP_USER, "C/C++ compiler", "gcc [--new|-v] [file.c]", cmd_gcc},
+        {"cc",  CMD_GROUP_USER, "Alias for gcc",  "cc [--new|-v] [file.c]",  cmd_gcc},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

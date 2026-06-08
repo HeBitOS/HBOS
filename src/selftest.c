@@ -72,6 +72,22 @@ int selftest_run(void) {
     CHECK("stat unlinked", stat("__selftest", &st) < 0 && errno == ENOENT);
     CHECK("unlink missing", unlink("__selftest") < 0 && errno == ENOENT);
 
+    char cwd[64];
+    CHECK("getcwd root", getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/") == 0);
+    (void)rmdir("/tmp/selftest-dir");
+    CHECK("mkdir tmp", mkdir("/tmp/selftest-dir", 0755) == 0);
+    CHECK("chdir tmp", chdir("/tmp/selftest-dir") == 0);
+    CHECK("getcwd tmp", getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/tmp/selftest-dir") == 0);
+    fd = open("rel.txt", O_CREAT | O_RDWR | O_TRUNC);
+    CHECK("open relative", fd >= 3);
+    CHECK("write relative", write(fd, "cwd", 3) == 3);
+    CHECK("close relative", close(fd) == 0);
+    CHECK("stat relative", stat("rel.txt", &st) == 0 && st.st_size == 3);
+    CHECK("stat parent", stat("../selftest-dir/rel.txt", &st) == 0 && st.st_size == 3);
+    CHECK("unlink relative", unlink("rel.txt") == 0);
+    CHECK("chdir root", chdir("/") == 0);
+    CHECK("rmdir tmp", rmdir("/tmp/selftest-dir") == 0);
+
     (void)hbos_unlink("__syscall");
     fd = hbos_open("__syscall", O_CREAT | O_RDWR | O_TRUNC, 0);
     CHECK("syscall open", fd >= 3);

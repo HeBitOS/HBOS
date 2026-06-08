@@ -209,11 +209,11 @@ void pmm_init(void *mbi) {
         }
     }
 
+    g_pmm_ready = true;
+
     // ---- 步骤 6: 保留低 1MB 和内核映像 ----
     pmm_reserve_region(0x0, 0x100000);                    // 低 1MB (BIOS/EBDA/VGA)
     pmm_reserve_region(0x100000, bitmap_phys - 0x100000); // 内核映像
-
-    g_pmm_ready = true;
 }
 
 // ============================================================

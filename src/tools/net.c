@@ -1,7 +1,9 @@
 #include "../graphics/graphics.h"
+#include "../fcntl.h"
 #include "../net.h"
 #include "../string.h"
 #include "../tls.h"
+#include "../unistd.h"
 #include "../vfs.h"
 #include "tool.h"
 
@@ -591,12 +593,13 @@ static void cmd_wget(int argc, char **argv) {
     }
     if (out_name && !print_stdout) {
         const char *file = out_name;
-        vfs_node_t *node = vfs_lookup(file);
-        if (!node) node = vfs_create(file);
-        if (!node || vfs_truncate(node) < 0 || vfs_write(node, 0, payload, payload_len) < 0) {
+        int fd = open(file, O_CREAT | O_WRONLY | O_TRUNC);
+        if (fd < 0 || write(fd, payload, payload_len) != (ssize_t)payload_len) {
+            if (fd >= 0) close(fd);
             console_puts("wget: save failed\n");
             return;
         }
+        close(fd);
         console_puts("saved ");
         console_puts(file);
         console_puts(" (HTTP ");

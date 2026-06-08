@@ -93,7 +93,21 @@ typedef struct {
 } __attribute__((packed)) elf64_phdr_t;
 
 /**
- * 加载 ELF64 可执行文件并执行
+ * 加载 ELF64 可执行文件并派生为新任务
+ *
+ * @param data       ELF 文件数据的指针（文件必须已读入内存）
+ * @param size       文件大小
+ * @param argv       参数向量（NULL 结尾）
+ * @param envp       环境向量（NULL 结尾）
+ * @param task_name  任务名称，NULL 时使用 elf_app
+ * @return 成功返回新任务 ID，失败返回 -1
+ */
+int elf64_load_and_spawn(const uint8_t *data, size_t size,
+                         char *const argv[], char *const envp[],
+                         const char *task_name);
+
+/**
+ * 加载 ELF64 可执行文件并替换当前任务
  *
  * @param data   ELF 文件数据的指针（文件必须已读入内存）
  * @param size   文件大小
@@ -103,5 +117,7 @@ typedef struct {
  */
 int elf64_load_and_exec(const uint8_t *data, size_t size,
                         char *const argv[], char *const envp[]);
+
+const char *elf64_last_error(void);
 
 #endif

@@ -1221,6 +1221,76 @@ int fs_delete_file(const char *name) {
     return 0;
 }
 
+/** 复制普通文件 */
+int fs_copy_file(const char *src_name, const char *dst_name) {
+    char src_norm[MAX_FILENAME];
+    char dst_norm[MAX_FILENAME];
+    if (!normalize_path(src_name, src_norm) || !normalize_path(dst_name, dst_norm))
+        return fs_fail("路径无效");
+    if (strcmp(src_norm, dst_norm) == 0) return fs_fail("源文件和目标文件相同");
+    if (fs_find_file(dst_norm)) return fs_fail("目标已存在");
+
+    file_t *src_file = fs_find_file(src_norm);
+    if (!src_file) return fs_fail("源文件不存在");
+    if (src_file->type != 0) return fs_fail("暂不支持复制目录");
+
+    file_t *dst_file = fs_create_file(dst_norm);
+    if (!dst_file) return fs_fail("创建目标失败");
+    if (fs_truncate_file(dst_file) < 0) {
+        (void)fs_delete_file(dst_norm);
+        return fs_fail("准备目标失败");
+    }
+
+    uint8_t buf[256];
+    uint32_t off = 0;
+    while (off < src_file->size) {
+        uint32_t chunk = src_file->size - off;
+        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+        uint32_t got = fs_read_file_data(src_file, off, buf, chunk);
+        if (got != chunk) {
+            (void)fs_delete_file(dst_norm);
+            return fs_fail("读取源文件失败");
+        }
+        if (fs_write_file_data(dst_file, off, buf, got) < 0) {
+            (void)fs_delete_file(dst_norm);
+            return fs_fail("写入目标失败");
+        }
+        off += got;
+    }
+    (void)fs_sync();
+    fs_error = "ok";
+    return 0;
+}
+
+/** 重命名普通文件 */
+int fs_rename_file(const char *old_name, const char *new_name) {
+    char old_norm[MAX_FILENAME];
+    char new_norm[MAX_FILENAME];
+    if (!normalize_path(old_name, old_norm) || !normalize_path(new_name, new_norm))
+        return fs_fail("路径无效");
+    if (strcmp(old_norm, new_norm) == 0) return 0;
+    if (fs_find_file(new_norm)) return fs_fail("目标已存在");
+
+    file_t *f = fs_find_file(old_norm);
+    if (!f) return fs_fail("源文件不存在");
+    if (f->type != 0) return fs_fail("暂不支持重命名目录");
+
+    if (fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_FAT32) {
+        if (fs_copy_file(old_norm, new_norm) < 0) return -1;
+        if (fs_delete_file(old_norm) < 0) return fs_fail("删除源文件失败");
+        fs_error = "ok";
+        return 0;
+    }
+
+    strcpy(f->name, new_norm);
+    strcpy(f->node.name, new_norm);
+    if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0)
+        return fs_fail("同步文件表失败");
+    (void)fs_sync();
+    fs_error = "ok";
+    return 0;
+}
+
 /** 截断文件，将大小清零 */
 int fs_truncate_file(file_t *f) {
     if (!f || !f->used) return -1;

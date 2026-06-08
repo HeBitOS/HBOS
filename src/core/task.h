@@ -19,6 +19,8 @@ typedef struct vm_area {
 #define TASK_NAME_MAX 32
 #define TASK_STACK_SIZE 8192
 #define MAX_TASKS 16
+#define TASK_USER_HEAP_START 0x0000002000000000ULL
+#define TASK_USER_HEAP_SIZE  (64ULL * 1024 * 1024)
 
 typedef enum {
     TASK_READY = 0,
@@ -55,6 +57,9 @@ typedef struct task {
     vm_area_t *vm_areas;
 
     uint64_t pml4_phys;
+    uint64_t user_heap_start;
+    uint64_t user_brk;
+    uint64_t user_heap_limit;
 
     void (*sig_handler[_NSIG])(int);
     sigset_t sig_pending;
@@ -78,6 +83,11 @@ int task_create(const char *name, void (*entry)(void *), void *arg);
 // user_stack: initial user stack pointer (top of stack)
 // Returns task ID, or -1 on failure
 int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack);
+int task_create_ring3_as(const char *name, uint64_t user_entry,
+                         uint64_t user_stack, uint64_t pml4_phys);
+int task_create_ring3_full(const char *name, uint64_t user_entry,
+                           uint64_t user_stack, uint64_t user_argc,
+                           uint64_t user_argv, uint64_t pml4_phys);
 
 // Cooperative yield — switch to next ready task
 void task_yield(void);

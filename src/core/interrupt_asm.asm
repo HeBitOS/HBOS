@@ -145,6 +145,7 @@ irq_stub_table:
 ; ============================================================
 isr_common:
     push rax
+    push rbx
     push rcx
     push rdx
     push rsi
@@ -175,6 +176,7 @@ isr_common:
     pop rsi
     pop rdx
     pop rcx
+    pop rbx
     pop rax
 
     add rsp, 16         ; pop int_no and err_code
@@ -185,6 +187,7 @@ isr_common:
 ; ============================================================
 irq_common:
     push rax
+    push rbx
     push rcx
     push rdx
     push rsi
@@ -215,6 +218,7 @@ irq_common:
     pop rsi
     pop rdx
     pop rcx
+    pop rbx
     pop rax
 
     add rsp, 16

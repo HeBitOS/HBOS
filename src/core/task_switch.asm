@@ -14,6 +14,7 @@ global task_switch
 global task_entry_trampoline
 global task_enter_ring3
 extern task_exit
+extern smp_sched_unlock
 
 section .text
 bits 64
@@ -56,6 +57,10 @@ task_switch:
 ; After popping, calls entry(arg). If entry returns, calls task_exit.
 ; ============================================================
 task_entry_trampoline:
+    ; First-run tasks enter here while the scheduler handoff lock is held.
+    ; Release it before enabling IRQs or calling task code.
+    call smp_sched_unlock
+    sti
     pop rdi             ; rdi = arg
     pop rax             ; rax = entry function
     call rax            ; call entry(arg)
@@ -83,10 +88,14 @@ task_enter_ring3:
     push qword [rax]    ; RIP = user entry point
 
     ; Set segment registers for user mode
-    mov ax, 0x23
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
+    mov bx, 0x23
+    mov ds, bx
+    mov es, bx
+    mov fs, bx
+    mov gs, bx
+
+    ; _start(argc, argv)
+    mov rdi, [rax+16]
+    mov rsi, [rax+24]
 
     iretq                ; Enter ring3!

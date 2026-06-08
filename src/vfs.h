@@ -41,6 +41,7 @@ struct vfs_node {
 };
 
 int vfs_init(void);             /**< 初始化 VFS 层 */
+int vfs_resolve_path(const char *cwd, const char *path, char *out, uint32_t cap);
 vfs_node_t *vfs_lookup(const char *path); /**< 按路径查找 VFS 节点 */
 vfs_node_t *vfs_create(const char *path); /**< 按路径创建 VFS 节点 */
 int vfs_unlink(const char *path); /**< 按路径删除 VFS 节点 */
@@ -54,6 +55,7 @@ int vfs_mkdir(const char *path);
 int vfs_rmdir(const char *path);
 int vfs_opendir(const char *path);
 int vfs_readdir(const char *path, char *name, uint32_t *type);
+int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type);
 int vfs_closedir(const char *path);
 
 #endif

@@ -31,6 +31,8 @@
 #include "elf.h"
 #include "vfs.h"
 
+#define SYSCALL_EXEC_MAX_SIZE 65536
+
 /**
  * 将 POSIX 函数返回值转换为系统调用返回值
  * POSIX 函数通过 errno 全局变量报告错误，
@@ -40,6 +42,64 @@ static uint64_t finish_syscall(long ret) {
     if (ret < 0 && errno > 0)
         return (uint64_t)(-(int64_t)errno);
     return (uint64_t)ret;
+}
+
+static uint64_t align_page_up(uint64_t value) {
+    return (value + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+}
+
+static int map_user_heap_growth(uint64_t old_brk, uint64_t new_brk) {
+    if (new_brk <= old_brk) return 0;
+    if (new_brk > UINT64_MAX - (PAGE_SIZE - 1)) return -1;
+
+    uint64_t va_start = old_brk & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t va_end = align_page_up(new_brk);
+    for (uint64_t va = va_start; va < va_end; va += PAGE_SIZE) {
+        if (vmm_get_phys(va) != 0) continue;
+        if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) return -1;
+    }
+    return 0;
+}
+
+static uint64_t user_sbrk(intptr_t increment) {
+    task_t *cur = task_current();
+    if (!cur || !cur->user_heap_start ||
+        cur->user_heap_limit <= cur->user_heap_start)
+        return (uint64_t)(-ENOMEM);
+
+    uint64_t old_brk = cur->user_brk ? cur->user_brk : cur->user_heap_start;
+    uint64_t new_brk = old_brk;
+
+    if (increment > 0) {
+        uint64_t inc = (uint64_t)increment;
+        if (inc > cur->user_heap_limit - old_brk) return (uint64_t)(-ENOMEM);
+        new_brk = old_brk + inc;
+    } else if (increment < 0) {
+        uint64_t dec = (uint64_t)(-(increment + 1)) + 1;
+        if (dec > old_brk - cur->user_heap_start) return (uint64_t)(-ENOMEM);
+        new_brk = old_brk - dec;
+    }
+
+    if (map_user_heap_growth(old_brk, new_brk) != 0)
+        return (uint64_t)(-ENOMEM);
+    cur->user_brk = new_brk;
+    return old_brk;
+}
+
+static uint64_t user_brk(uint64_t new_brk) {
+    task_t *cur = task_current();
+    if (!cur || !cur->user_heap_start ||
+        cur->user_heap_limit <= cur->user_heap_start)
+        return (uint64_t)(-ENOMEM);
+    if (!new_brk) return cur->user_brk ? cur->user_brk : cur->user_heap_start;
+    if (new_brk < cur->user_heap_start || new_brk > cur->user_heap_limit)
+        return (uint64_t)(-ENOMEM);
+
+    uint64_t old_brk = cur->user_brk ? cur->user_brk : cur->user_heap_start;
+    if (map_user_heap_growth(old_brk, new_brk) != 0)
+        return (uint64_t)(-ENOMEM);
+    cur->user_brk = new_brk;
+    return new_brk;
 }
 
 /**
@@ -87,7 +147,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return (uint64_t)getpid();
 
         case HBOS_SYS_SBRK:
-            return finish_syscall((long)(intptr_t)sbrk((intptr_t)f->a0));
+            return user_sbrk((intptr_t)f->a0);
 
         case HBOS_SYS_EXIT: {
             // 实际终止当前任务
@@ -155,70 +215,31 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         // 文件系统扩展 (17-22)
         // ============================================================
         case HBOS_SYS_ACCESS: {
-            // access: 检查文件访问权限
-            // 当前简化实现: 只检查文件是否存在
-            const char *path = (const char *)f->a0;
-            if (!path) return (uint64_t)(-EFAULT);
-            struct stat st;
-            if (stat(path, &st) < 0)
-                return (uint64_t)(-errno);
-            return 0;
+            return finish_syscall((long)access((const char *)f->a0, (int)f->a1));
         }
 
         case HBOS_SYS_FTRUNCATE: {
-            // ftruncate: 截断文件到指定长度
-            int fd = (int)f->a0;
-            off_t length = (off_t)f->a1;
-            if (length < 0) return (uint64_t)(-EINVAL);
-            // 通过 lseek + write 模拟截断
-            off_t cur = lseek(fd, 0, SEEK_CUR);
-            if (cur < 0) return (uint64_t)(-errno);
-            if (lseek(fd, length, SEEK_SET) < 0) return (uint64_t)(-errno);
-            // 如果截断到更小，写入空数据覆盖
-            // 简化: 只支持截断到当前大小或更大
-            lseek(fd, cur, SEEK_SET);
-            return 0;
+            return finish_syscall((long)ftruncate((int)f->a0, (off_t)f->a1));
         }
 
         case HBOS_SYS_MKDIR: {
-            const char *path = (const char *)f->a0;
-            if (!path) return (uint64_t)(-EFAULT);
-            int ret = vfs_mkdir(path);
-            if (ret < 0) return (uint64_t)(-EEXIST);
-            return 0;
+            return finish_syscall((long)mkdir((const char *)f->a0, (mode_t)f->a1));
         }
 
         case HBOS_SYS_RMDIR: {
-            const char *path = (const char *)f->a0;
-            if (!path) return (uint64_t)(-EFAULT);
-            int ret = vfs_rmdir(path);
-            if (ret < 0) return (uint64_t)(-ENOTDIR);
-            return 0;
+            return finish_syscall((long)rmdir((const char *)f->a0));
         }
 
         case HBOS_SYS_GETCWD: {
-            // getcwd: 获取当前工作目录
             char *buf = (char *)f->a0;
             size_t size = (size_t)f->a1;
-            if (!buf || size == 0) return (uint64_t)(-EFAULT);
-            // 当前只有根目录 "/"
-            if (size < 2) return (uint64_t)(-ERANGE);
-            buf[0] = '/';
-            buf[1] = '\0';
-            return 1;  // 返回长度（不含 NUL）
+            char *ret = getcwd(buf, size);
+            if (!ret) return (uint64_t)(-(int64_t)errno);
+            return (uint64_t)strlen(ret);
         }
 
         case HBOS_SYS_CHDIR: {
-            // chdir: 更改当前工作目录
-            // 当前简化: 只允许切换到 "/"
-            const char *path = (const char *)f->a0;
-            if (!path) return (uint64_t)(-EFAULT);
-            if (path[0] == '/' && path[1] == '\0') return 0;
-            // 检查目录是否存在
-            struct stat st;
-            if (stat(path, &st) < 0)
-                return (uint64_t)(-errno);
-            return 0;
+            return finish_syscall((long)chdir((const char *)f->a0));
         }
 
         // ============================================================
@@ -336,18 +357,33 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             char *const *argv = (char *const *)f->a1;
             char *const *envp = (char *const *)f->a2;
             if (!path) return (uint64_t)(-EFAULT);
-            extern file_t *fs_find_file(const char *);
-            extern uint32_t fs_read_file_data(file_t *, uint32_t, void *, uint32_t);
-            file_t *file = fs_find_file(path);
-            if (!file) return (uint64_t)(-ENOENT);
-            uint8_t *elf_buf = (uint8_t *)kmalloc(file->size);
-            if (!elf_buf) return (uint64_t)(-ENOMEM);
-            uint32_t read = fs_read_file_data(file, 0, elf_buf, file->size);
-            if (read != file->size) {
-                kfree(elf_buf);
-                return (uint64_t)(-EIO);
+            int fd = open(path, O_RDONLY);
+            if (fd < 0) return (uint64_t)(-(int64_t)(errno ? errno : ENOENT));
+
+            uint8_t *elf_buf = (uint8_t *)kmalloc(SYSCALL_EXEC_MAX_SIZE);
+            if (!elf_buf) {
+                close(fd);
+                return (uint64_t)(-ENOMEM);
             }
-            int ret = elf64_load_and_exec(elf_buf, file->size, argv, envp);
+
+            size_t size = 0;
+            ssize_t n = 0;
+            while ((n = read(fd, elf_buf + size, SYSCALL_EXEC_MAX_SIZE - size)) > 0) {
+                size += (size_t)n;
+                if (size >= SYSCALL_EXEC_MAX_SIZE) break;
+            }
+            int saved_errno = errno;
+            close(fd);
+
+            if (n < 0) {
+                kfree(elf_buf);
+                return (uint64_t)(-(int64_t)(saved_errno ? saved_errno : EIO));
+            }
+            if (size < sizeof(elf64_ehdr_t) || size >= SYSCALL_EXEC_MAX_SIZE) {
+                kfree(elf_buf);
+                return (uint64_t)(size >= SYSCALL_EXEC_MAX_SIZE ? -E2BIG : -ENOEXEC);
+            }
+            int ret = elf64_load_and_exec(elf_buf, size, argv, envp);
             kfree(elf_buf);
             if (ret < 0) return (uint64_t)(-ENOEXEC);
             return 0;
@@ -496,12 +532,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_BRK: {
-            void *addr = (void *)f->a0;
-            if (!addr) {
-                extern void *sbrk(intptr_t);
-                return (uint64_t)sbrk(0);
-            }
-            return (uint64_t)(-ENOMEM);
+            return user_brk((uint64_t)f->a0);
         }
 
         case HBOS_SYS_SETGID: {

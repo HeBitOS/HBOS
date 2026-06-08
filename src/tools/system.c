@@ -1,8 +1,10 @@
 #include "../graphics/graphics.h"
 #include "../acpi.h"
 #include "../block.h"
+#include "../core/heap.h"
 #include "../core/pmm.h"
 #include "../core/task.h"
+#include "../fcntl.h"
 #include "../fs.h"
 #include "../net.h"
 #include "../string.h"
@@ -297,6 +299,54 @@ static void cmd_type(int argc, char **argv) {
     console_puts(": not found\n");
 }
 
+/* ── exec — load and run ELF from filesystem ─────────────── */
+#include "../elf.h"
+
+#define EXEC_MAX_SIZE 65536
+
+static void cmd_exec(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("Usage: exec <file.elf> [args...]\n");
+        return;
+    }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        console_puts("exec: file not found: ");
+        console_puts(argv[1]);
+        console_putchar('\n');
+        return;
+    }
+    uint8_t *buf = (uint8_t *)kmalloc(EXEC_MAX_SIZE);
+    if (!buf) {
+        console_puts("exec: out of memory\n");
+        close(fd);
+        return;
+    }
+    size_t size = 0;
+    ssize_t n;
+    while ((n = read(fd, buf + size, EXEC_MAX_SIZE - size)) > 0) {
+        size += (size_t)n;
+        if (size >= EXEC_MAX_SIZE) break;
+    }
+    close(fd);
+    if (size < 4 || size >= EXEC_MAX_SIZE) {
+        console_puts("exec: file too small or too large\n");
+        kfree(buf);
+        return;
+    }
+    /* Build argv array */
+    char *exec_argv[16];
+    int exec_argc = 0;
+    for (int i = 1; i < argc && exec_argc < 15; i++)
+        exec_argv[exec_argc++] = argv[i];
+    exec_argv[exec_argc] = NULL;
+    int ret = elf64_load_and_exec(buf, size, exec_argv, NULL);
+    kfree(buf);
+    if (ret < 0) {
+        console_puts("exec: not a valid ELF binary\n");
+    }
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
@@ -319,6 +369,7 @@ void tool_system_init(void) {
         {"export",  CMD_GROUP_SYSTEM, "Set environment var",  "export NAME=VAL", cmd_export},
         {"env",     CMD_GROUP_SYSTEM, "Show environment vars","env", cmd_env},
         {"unset",   CMD_GROUP_SYSTEM, "Remove env variable",  "unset <name>", cmd_unset},
+        {"exec",    CMD_GROUP_SYSTEM, "Execute ELF binary",   "exec <file> [args...]", cmd_exec},
     };
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

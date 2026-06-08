@@ -40,7 +40,7 @@ typedef uint64_t pte_t;              /**< 页表条目类型 (64-bit) */
  * @param level  页表级别: 0=PML4, 1=PDPT, 2=PD, 3=PT
  * @return 9-bit 索引 (0-511)
  */
-#define VMM_IDX(virt, level) (((virt) >> (12 + (level) * 9)) & 0x1FF)
+#define VMM_IDX(virt, level) (((virt) >> (39 - (level) * 9)) & 0x1FF)
 
 // ============================================================
 // 内部状态
@@ -78,6 +78,8 @@ static pte_t *vmm_get_pte(uint64_t virt_addr, bool create, uint64_t flags) {
         pte_t *new_pt = (pte_t *)(uintptr_t)phys;
         for (int i = 0; i < PT_ENTRIES; i++) new_pt[i] = 0;
         *pml4e = phys | (flags & 0xFFF) | VMM_P | VMM_W;
+    } else if (create) {
+        *pml4e |= (flags & (VMM_W | VMM_U));
     }
     pte_t *pdpt = (pte_t *)(uintptr_t)(*pml4e & ~0xFFFULL);
 
@@ -90,6 +92,8 @@ static pte_t *vmm_get_pte(uint64_t virt_addr, bool create, uint64_t flags) {
         pte_t *new_pt = (pte_t *)(uintptr_t)phys;
         for (int i = 0; i < PT_ENTRIES; i++) new_pt[i] = 0;
         *pdpte = phys | (flags & 0xFFF) | VMM_P | VMM_W;
+    } else if (create) {
+        *pdpte |= (flags & (VMM_W | VMM_U));
     }
     pte_t *pd = (pte_t *)(uintptr_t)(*pdpte & ~0xFFFULL);
 
@@ -98,6 +102,7 @@ static pte_t *vmm_get_pte(uint64_t virt_addr, bool create, uint64_t flags) {
     if (*pde & VMM_P) {
         // 如果设置了 PS 位，这是 2MB 大页 — 不支持分裂
         if (*pde & VMM_PS) return NULL;
+        if (create) *pde |= (flags & (VMM_W | VMM_U));
     } else {
         if (!create) return NULL;
         uint64_t phys = pmm_alloc_page();
@@ -199,9 +204,10 @@ uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags) {
 uint64_t vmm_get_pml4(void) { return g_pml4_phys; }
 
 /**
- * 创建新的地址空间（独立 PML4，仅共享内核映射）
- * 复制 master PML4 的内核半区（索引 256-511，即 0xFFFF800000000000 以上）
- * 用户半区（索引 0-255）初始为空
+ * 创建新的地址空间。
+ * 当前 HBOS 内核仍运行在低地址恒等映射中，所以这里复制完整 PML4，
+ * 让新任务保留内核、设备和低地址启动映射。用户 ELF 使用高于 4GB
+ * 的地址区间，避免覆盖 boot 阶段的 2MB 大页恒等映射。
  * @return 新 PML4 的物理地址，失败返回 0
  */
 uint64_t vmm_create_address_space(void) {
@@ -210,8 +216,7 @@ uint64_t vmm_create_address_space(void) {
     if (!new_p4_phys) return 0;
     pte_t *new_p4 = (pte_t *)(uintptr_t)new_p4_phys;
     pte_t *src_p4  = g_pml4;
-    for (int i = 0; i < 256; i++) new_p4[i] = 0;
-    for (int i = 256; i < 512; i++) new_p4[i] = src_p4[i];
+    for (int i = 0; i < 512; i++) new_p4[i] = src_p4[i];
     return new_p4_phys;
 }
 

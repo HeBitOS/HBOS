@@ -12,7 +12,7 @@
 #define SECTOR_SIZE 512          /**< 扇区大小（字节） */
 #define MAX_FILES 64             /**< 最大文件数量 */
 #define MAX_FILENAME 32          /**< 文件名最大长度（含结尾 '\0'） */
-#define RAMFS_MAX_FILE_SIZE 8192 /**< 内存文件系统单文件最大容量（字节） */
+#define RAMFS_MAX_FILE_SIZE 65536 /**< ramfs/HBFS 单文件最大容量（字节） */
 
 // 文件结构
 typedef struct file {
@@ -73,6 +73,8 @@ void fs_list(void);              /**< 列出所有文件（预留接口） */
 file_t *fs_find_file(const char *name); /**< 按文件名查找文件 */
 file_t *fs_create_file(const char *name); /**< 创建文件（若已存在则返回已有文件） */
 int fs_delete_file(const char *name); /**< 删除文件 */
+int fs_copy_file(const char *src, const char *dst); /**< 复制文件 */
+int fs_rename_file(const char *old_name, const char *new_name); /**< 重命名文件 */
 int fs_truncate_file(file_t *f); /**< 截断文件（清零大小） */
 uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count); /**< 读取文件数据 */
 int fs_write_file_data(file_t *f, uint32_t offset, const void *buf, uint32_t count); /**< 写入文件数据 */

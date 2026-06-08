@@ -24,6 +24,9 @@ void devfs_init(void);
 /** 尝试解析伪文件系统路径，返回合成 VFS 节点或 NULL */
 vfs_node_t *devfs_lookup(const char *path);
 
+/** 枚举 /dev、/proc 和 /proc/<pid> 目录项 */
+int devfs_readdir(const char *path, uint32_t index, char *name, uint32_t *type);
+
 /** 注册伪文件系统节点到全局表中 */
 void devfs_register_nodes(void);
 

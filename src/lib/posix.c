@@ -16,6 +16,7 @@
 #include "../vfs.h"
 
 static int g_errno;
+static char g_posix_cwd[256] = "/";
 
 int *__errno_location(void) {
     return &g_errno;
@@ -40,9 +41,17 @@ static int fd_alloc(vfs_node_t *node, int flags) {
         fds[fd].node = node;
         fds[fd].flags = flags;
         fds[fd].offset = (flags & O_APPEND) ? node->size : 0;
+        fds[fd].type = FD_FILE;
+        fds[fd].pipe = NULL;
         return fd;
     }
     return set_errno(EMFILE);
+}
+
+static int resolve_user_path(const char *path, char out[256]) {
+    if (!path) return set_errno(EFAULT);
+    if (vfs_resolve_path(g_posix_cwd, path, out, 256) < 0) return set_errno(EINVAL);
+    return 0;
 }
 
 static fd_entry_t *fd_get(int fd) {
@@ -243,21 +252,24 @@ off_t lseek(int fd, off_t offset, int whence) {
 }
 
 int open(const char *path, int flags, ...) {
-    if (!path) return set_errno(EFAULT);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
     if ((flags & O_ACCMODE) != O_RDONLY &&
         (flags & O_ACCMODE) != O_WRONLY &&
         (flags & O_ACCMODE) != O_RDWR) {
         return set_errno(EINVAL);
     }
 
-    vfs_node_t *node = vfs_lookup(path);
+    vfs_node_t *node = vfs_lookup(full);
     if (!node) {
         if (!(flags & O_CREAT)) return set_errno(ENOENT);
-        node = vfs_create(path);
+        node = vfs_create(full);
         if (!node) return set_errno(ENOSPC);
     } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
         return set_errno(EEXIST);
     }
+    if ((flags & O_DIRECTORY) && node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
+    if (node->type == VFS_NODE_DIR && (flags & O_ACCMODE) != O_RDONLY) return set_errno(EISDIR);
 
     if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
         if (vfs_truncate(node) < 0) return set_errno(EIO);
@@ -278,15 +290,19 @@ int fstat(int fd, struct stat *st) {
 
     fd_entry_t *ent = fd_get(fd);
     if (!ent) return set_errno(EBADF);
-    st->st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+    st->st_mode = (ent->node->type == VFS_NODE_DIR ? S_IFDIR :
+                   ent->node->type == VFS_NODE_CHARDEV ? S_IFCHR : S_IFREG) |
+                  S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
     st->st_nlink = 1;
     st->st_size = (off_t)ent->node->size;
     return 0;
 }
 
 int stat(const char *path, struct stat *st) {
-    if (!path || !st) return set_errno(EFAULT);
-    vfs_node_t *node = vfs_lookup(path);
+    if (!st) return set_errno(EFAULT);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup(full);
     if (!node) return set_errno(ENOENT);
 
     memset(st, 0, sizeof(*st));
@@ -297,9 +313,11 @@ int stat(const char *path, struct stat *st) {
 }
 
 int unlink(const char *path) {
-    if (!path) return set_errno(EFAULT);
-    vfs_node_t *node = vfs_lookup(path);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup(full);
     if (!node) return set_errno(ENOENT);
+    if (node->type == VFS_NODE_DIR) return set_errno(EISDIR);
 
     fd_entry_t *fds = fd_table();
     if (!fds) return set_errno(EBADF);
@@ -308,8 +326,97 @@ int unlink(const char *path) {
             return set_errno(EBUSY);
     }
 
-    if (vfs_unlink(path) < 0) return set_errno(ENOENT);
+    if (vfs_unlink(full) < 0) return set_errno(ENOENT);
     return 0;
+}
+
+int access(const char *path, int mode) {
+    if (mode & ~(F_OK | R_OK | W_OK | X_OK)) return set_errno(EINVAL);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup(full);
+    if (!node) return set_errno(ENOENT);
+    return 0;
+}
+
+int ftruncate(int fd, off_t length) {
+    if (length != 0) return set_errno(EINVAL);
+    fd_entry_t *ent = fd_get(fd);
+    if (!ent) return set_errno(EBADF);
+    if ((ent->flags & O_ACCMODE) == O_RDONLY) return set_errno(EBADF);
+    if (vfs_truncate(ent->node) < 0) return set_errno(EIO);
+    if (ent->offset > ent->node->size) ent->offset = ent->node->size;
+    return 0;
+}
+
+char *getcwd(char *buf, size_t size) {
+    size_t len;
+    if (!buf || size == 0) {
+        set_errno(EFAULT);
+        return NULL;
+    }
+    len = strlen(g_posix_cwd);
+    if (len + 1 > size) {
+        set_errno(ERANGE);
+        return NULL;
+    }
+    strcpy(buf, g_posix_cwd);
+    return buf;
+}
+
+int chdir(const char *path) {
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup(full);
+    if (!node) return set_errno(ENOENT);
+    if (node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
+    strcpy(g_posix_cwd, full);
+    return 0;
+}
+
+int mkdir(const char *path, mode_t mode) {
+    (void)mode;
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    if (vfs_lookup(full)) return set_errno(EEXIST);
+    if (vfs_mkdir(full) < 0) return set_errno(ENOSPC);
+    return 0;
+}
+
+int rmdir(const char *path) {
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup(full);
+    if (!node) return set_errno(ENOENT);
+    if (node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
+    if (vfs_rmdir(full) < 0) return set_errno(ENOTEMPTY);
+    return 0;
+}
+
+int symlink(const char *target, const char *linkpath) {
+    (void)target;
+    (void)linkpath;
+    return set_errno(ENOSYS);
+}
+
+int chmod(const char *path, mode_t mode) {
+    (void)path;
+    (void)mode;
+    return set_errno(ENOSYS);
+}
+
+int chown(const char *path, uid_t uid, gid_t gid) {
+    (void)path;
+    (void)uid;
+    (void)gid;
+    return set_errno(ENOSYS);
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    (void)path;
+    (void)buf;
+    (void)bufsiz;
+    return set_errno(ENOSYS);
 }
 
 pid_t getpid(void) {

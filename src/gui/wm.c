@@ -190,9 +190,9 @@ void wm_toggle_start_menu(wm_state_t *wm) {
     wm->start_menu_open = !wm->start_menu_open;
     if (wm->start_menu_open) {
         wm->menu_x = 10;
-        wm->menu_y = wm->desk_h - WM_TASKBAR_H - 200;
+        wm->menu_y = wm->desk_h - WM_TASKBAR_H - 324;
         wm->menu_w = 220;
-        wm->menu_h = 200;
+        wm->menu_h = 324;
         if (wm->menu_y < 10) wm->menu_y = 10;
     }
 }
@@ -340,8 +340,8 @@ int wm_hit_start_menu(wm_state_t *wm, int mx, int my) {
     if (!wm->start_menu_open) return -1;
     if (mx >= wm->menu_x && mx < wm->menu_x + wm->menu_w &&
         my >= wm->menu_y && my < wm->menu_y + wm->menu_h) {
-        int row = (my - wm->menu_y - 12) / 28;
-        if (row >= 0 && row < 6) return row;
+        int row = (my - wm->menu_y - 40) / 28;
+        if (row >= 0 && row < 10) return row;
     }
     return -1;
 }

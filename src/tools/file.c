@@ -37,22 +37,34 @@ static void print_errno(const char *cmd, const char *path) {
 }
 
 static void cmd_ls(int argc, char **argv) {
-    (void)argc; (void)argv;
-    uint32_t count = vfs_count();
-    for (uint32_t i = 0; i < count; i++) {
-        vfs_node_t *node = vfs_get(i);
-        if (!node || !node->name[0]) continue;
-        if (node->type == VFS_NODE_DIR) console_puts("\x1b[34m");
+    const char *dir = argc >= 2 ? argv[1] : ".";
+    char cwd[256];
+    char full[256];
+    char name[VFS_MAX_NAME];
+    uint32_t type;
+    if (!getcwd(cwd, sizeof(cwd))) strcpy(cwd, "/");
+    if (vfs_resolve_path(cwd, dir, full, sizeof(full)) < 0) {
+        print_errno("ls", dir);
+        return;
+    }
+    for (uint32_t i = 0; vfs_readdir_at(full, i, name, &type) == 0; i++) {
+        if (type == VFS_NODE_DIR) console_puts("\x1b[34m");
         else console_puts("\x1b[0m");
-        console_puts(node->name);
-        if (node->type == VFS_NODE_DIR) console_puts("/");
+        console_puts(name);
+        if (type == VFS_NODE_DIR) console_puts("/");
         console_puts("\x1b[0m");
         /* Padding to align sizes */
-        uint32_t nlen = 0; while (node->name[nlen]) nlen++;
-        if (node->type == VFS_NODE_DIR) nlen++;
+        uint32_t nlen = 0; while (name[nlen]) nlen++;
+        if (type == VFS_NODE_DIR) nlen++;
         for (uint32_t p = nlen; p < 24; p++) console_putchar(' ');
-        if (node->type == VFS_NODE_FILE) {
-            print_uint(node->size);
+        if (type == VFS_NODE_FILE) {
+            char path[256];
+            struct stat st;
+            if (vfs_resolve_path(full, name, path, sizeof(path)) == 0 &&
+                stat(path, &st) == 0)
+                print_uint((uint32_t)st.st_size);
+            else
+                print_uint(0);
             console_puts(" B");
         } else {
             console_puts("<DIR>");
@@ -184,6 +196,7 @@ static void cmd_mv(int argc, char **argv) {
         console_puts("Usage: mv <src> <dst>\n");
         return;
     }
+    if (fs_rename_file(argv[1], argv[2]) == 0) return;
     if (copy_path(argv[1], argv[2], "mv") == 0) {
         if (unlink(argv[1]) < 0) print_errno("mv", argv[1]);
     }
@@ -401,69 +414,30 @@ static void cmd_appendfile(int argc, char **argv) {
     write_args_to_file("appendfile", argv[1], O_CREAT | O_WRONLY | O_APPEND, argc, argv);
 }
 
-/* ── cwd support ─────────────────────────────────────────────── */
-char g_cwd[256] = "/";
-
-static void path_join(const char *dir, const char *rel, char *out, uint32_t cap) {
-    uint32_t p = 0;
-    if (rel[0] == '/') {
-        /* absolute path */
-        while (rel[p] && p < cap - 1) { out[p] = rel[p]; p++; }
-        out[p] = '\0';
-        return;
-    }
-    /* relative: start with cwd */
-    uint32_t i = 0;
-    while (dir[i] && p < cap - 1) { out[p++] = dir[i++]; }
-    if (p > 0 && out[p - 1] != '/' && p < cap - 1) out[p++] = '/';
-    i = 0;
-    while (rel[i] && p < cap - 1) { out[p++] = rel[i++]; }
-    out[p] = '\0';
-    /* resolve ".." */
-    char *pp;
-    while ((pp = strstr(out, "/..")) != NULL) {
-        if (pp == out) { strcpy(out, "/"); break; }
-        char *prev = pp - 1;
-        while (prev > out && *prev != '/') prev--;
-        if (*prev == '/') prev++;
-        uint32_t rest_len = (uint32_t)strlen(pp + 3);
-        memmove(prev, pp + 3, rest_len + 1);
-    }
-    /* remove trailing / except root */
-    uint32_t len = (uint32_t)strlen(out);
-    if (len > 1 && out[len - 1] == '/') out[len - 1] = '\0';
-}
-
 static void cmd_cd(int argc, char **argv) {
-    if (argc < 2) { strcpy(g_cwd, "/"); return; }
-    char full[256];
-    path_join(g_cwd, argv[1], full, sizeof(full));
-    if (strcmp(full, "/") == 0) { strcpy(g_cwd, "/"); return; }
-    /* Check it exists and is a directory */
-    struct stat st;
-    if (stat(full, &st) < 0) { print_errno("cd", full); return; }
-    /* Accept directories (mode bit convention: 1 = dir in our VFS) */
-    strcpy(g_cwd, full);
+    const char *dir = argc < 2 ? "/" : argv[1];
+    if (chdir(dir) < 0) print_errno("cd", dir);
 }
 
 static void cmd_pwd(int argc, char **argv) {
     (void)argc; (void)argv;
-    console_puts(g_cwd);
+    char cwd[256];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        print_errno("pwd", NULL);
+        return;
+    }
+    console_puts(cwd);
     console_putchar('\n');
 }
 
 static void cmd_mkdir_cmd(int argc, char **argv) {
     if (argc < 2) { console_puts("Usage: mkdir <dir>\n"); return; }
-    char full[256];
-    path_join(g_cwd, argv[1], full, sizeof(full));
-    if (vfs_mkdir(full) < 0) print_errno("mkdir", argv[1]);
+    if (mkdir(argv[1], 0755) < 0) print_errno("mkdir", argv[1]);
 }
 
 static void cmd_rmdir_cmd(int argc, char **argv) {
     if (argc < 2) { console_puts("Usage: rmdir <dir>\n"); return; }
-    char full[256];
-    path_join(g_cwd, argv[1], full, sizeof(full));
-    if (vfs_rmdir(full) < 0) print_errno("rmdir", argv[1]);
+    if (rmdir(argv[1]) < 0) print_errno("rmdir", argv[1]);
 }
 
 static void cmd_find(int argc, char **argv) {

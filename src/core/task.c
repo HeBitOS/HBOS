@@ -53,6 +53,8 @@ extern void task_enter_ring3(void);
 typedef struct {
     uint64_t user_entry;
     uint64_t user_stack;
+    uint64_t user_argc;
+    uint64_t user_argv;
 } ring3_launch_ctx_t;
 
 // ============================================================
@@ -67,6 +69,19 @@ static uint32_t next_id = 0;                 /**< 下一个任务 ID */
 /** 预分配的栈空间: 16 个任务 × 8KB = 128KB */
 static char task_stacks[MAX_TASKS][TASK_STACK_SIZE]
     __attribute__((aligned(16)));
+
+static uint64_t task_irq_save(void) {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(rflags) :: "memory");
+    return rflags;
+}
+
+static void task_irq_restore(uint64_t rflags) {
+    if (rflags & 0x200)
+        __asm__ volatile("sti" ::: "memory");
+    else
+        __asm__ volatile("cli" ::: "memory");
+}
 
 // ============================================================
 // 调度器 — 轮转选择下一个 READY 任务
@@ -117,6 +132,9 @@ void task_init(void) {
     main_task->stack_size = TASK_STACK_SIZE;
     main_task->vm_areas = NULL;
     main_task->pml4_phys = vmm_get_pml4();
+    main_task->user_heap_start = 0;
+    main_task->user_brk = 0;
+    main_task->user_heap_limit = 0;
     memset(main_task->fds, 0, sizeof(main_task->fds));
     memset(main_task->sig_handler, 0, sizeof(main_task->sig_handler));
     memset(&main_task->sig_pending, 0, sizeof(main_task->sig_pending));
@@ -178,6 +196,9 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->stack_size = TASK_STACK_SIZE;
     tcb->vm_areas = NULL;
     tcb->pml4_phys = vmm_create_address_space();
+    tcb->user_heap_start = 0;
+    tcb->user_brk = 0;
+    tcb->user_heap_limit = 0;
     memset(tcb->fds, 0, sizeof(tcb->fds));
     memset(tcb->sig_handler, 0, sizeof(tcb->sig_handler));
     memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
@@ -191,7 +212,7 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     *--sp = (uint64_t)entry;                   // 最高地址槽位
     *--sp = (uint64_t)arg;
     *--sp = (uint64_t)task_entry_trampoline;   // ret 跳转目标
-    *--sp = 0x202;         // RFLAGS (IF=1, reserved bit 1)
+    *--sp = 0x2;           // RFLAGS (IF enabled by trampoline)
     *--sp = 0;  // RBP
     *--sp = 0;  // RBX
     *--sp = 0;  // R12
@@ -224,7 +245,9 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
  * @param user_stack  用户栈顶地址
  * @return 任务 ID，-1 表示失败
  */
-int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack) {
+int task_create_ring3_full(const char *name, uint64_t user_entry,
+                           uint64_t user_stack, uint64_t user_argc,
+                           uint64_t user_argv, uint64_t pml4_phys) {
     if (!user_entry || !user_stack) return -1;
 
     int idx = -1;
@@ -254,7 +277,11 @@ int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
     tcb->vm_areas = NULL;
-    tcb->pml4_phys = vmm_create_address_space();
+    tcb->pml4_phys = pml4_phys ? pml4_phys : vmm_create_address_space();
+    if (!tcb->pml4_phys) return -1;
+    tcb->user_heap_start = TASK_USER_HEAP_START;
+    tcb->user_brk = TASK_USER_HEAP_START;
+    tcb->user_heap_limit = TASK_USER_HEAP_START + TASK_USER_HEAP_SIZE;
     memset(tcb->fds, 0, sizeof(tcb->fds));
     memset(tcb->sig_handler, 0, sizeof(tcb->sig_handler));
     memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
@@ -265,16 +292,18 @@ int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack
     uint64_t *sp = (uint64_t *)(tcb->stack_base + tcb->stack_size);
 
     // Place ctx struct on stack (aligned)
-    sp -= 2; // 2 uint64_t for ring3_launch_ctx_t
+    sp -= 4; // ring3_launch_ctx_t
     ring3_launch_ctx_t *ctx = (ring3_launch_ctx_t *)sp;
     ctx->user_entry = user_entry;
     ctx->user_stack = user_stack;
+    ctx->user_argc = user_argc;
+    ctx->user_argv = user_argv;
 
     // Build the trampoline frame
-    *--sp = (uint64_t)ctx;                       // arg → rdi
     *--sp = (uint64_t)task_enter_ring3;          // entry → rax
+    *--sp = (uint64_t)ctx;                       // arg → rdi
     *--sp = (uint64_t)task_entry_trampoline;     // ret target
-    *--sp = 0x202;         // RFLAGS (IF=1)
+    *--sp = 0x2;           // RFLAGS (IF enabled by trampoline)
     *--sp = 0;  // RBP
     *--sp = 0;  // RBX
     *--sp = 0;  // R12
@@ -292,17 +321,28 @@ int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack
     return tcb->id;
 }
 
+int task_create_ring3_as(const char *name, uint64_t user_entry,
+                         uint64_t user_stack, uint64_t pml4_phys) {
+    return task_create_ring3_full(name, user_entry, user_stack, 0, 0, pml4_phys);
+}
+
+int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack) {
+    return task_create_ring3_as(name, user_entry, user_stack, 0);
+}
+
 /**
  * 让出 CPU — 协作式调度入口
  * 当前任务状态变为 READY，切换到下一个 READY 任务
  */
 void task_yield(void) {
+    uint64_t irq_flags = task_irq_save();
     smp_sched_lock();
     task_t *prev = current_task;
     task_t *next = sched_next();
 
     if (!next || next == prev) {
         smp_sched_unlock();
+        task_irq_restore(irq_flags);
         return;
     }
 
@@ -317,6 +357,7 @@ void task_yield(void) {
 
     task_switch(&prev->rsp, &next->rsp);
     smp_sched_unlock();
+    task_irq_restore(irq_flags);
 }
 
 /**
@@ -326,6 +367,7 @@ void task_yield(void) {
  */
 void task_exit(void) {
     if (!current_task) return;
+    task_irq_save();
     smp_sched_lock();
     current_task->state = TASK_TERMINATED;
 
@@ -455,6 +497,9 @@ int task_fork(void) {
 
     child->pml4_phys = current_task->pml4_phys ?
         vmm_clone_address_space(current_task->pml4_phys) : 0;
+    child->user_heap_start = current_task->user_heap_start;
+    child->user_brk = current_task->user_brk;
+    child->user_heap_limit = current_task->user_heap_limit;
 
     memcpy(child->fds, current_task->fds, sizeof(child->fds));
     memcpy(child->sig_handler, current_task->sig_handler, sizeof(child->sig_handler));
@@ -466,7 +511,7 @@ int task_fork(void) {
     *--sp = (uint64_t)current_task->entry;
     *--sp = (uint64_t)current_task->arg;
     *--sp = (uint64_t)task_entry_trampoline;
-    *--sp = 0x202;         // RFLAGS (IF=1)
+    *--sp = 0x2;           // RFLAGS (IF enabled by trampoline)
     *--sp = 0;  // RBP
     *--sp = 0;  // RBX
     *--sp = 0;  // R12
@@ -553,6 +598,7 @@ void task_preempt_enable(void) {
 void task_schedule(void) {
     if (preempt_count > 0) return;
     if (!current_task || current_task->state == TASK_TERMINATED) return;
+    uint64_t irq_flags = task_irq_save();
     smp_sched_lock();
     if (current_task->state == TASK_RUNNING)
         current_task->state = TASK_READY;
@@ -564,6 +610,7 @@ void task_schedule(void) {
     }
     if (next->state != TASK_READY) {
         smp_sched_unlock();
+        task_irq_restore(irq_flags);
         return;
     }
     next->state = TASK_RUNNING;
@@ -573,6 +620,7 @@ void task_schedule(void) {
     task_sig_deliver(next);
     task_switch(&prev->rsp, &next->rsp);
     smp_sched_unlock();
+    task_irq_restore(irq_flags);
 }
 
 void pit_init(uint32_t freq_hz) {

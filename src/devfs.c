@@ -42,6 +42,39 @@ static void set_name(vfs_node_t *n, const char *s) {
     n->name[i] = '\0';
 }
 
+static void set_short_name(char *out, const char *s) {
+    uint32_t i = 0;
+    while (s[i] && i < VFS_MAX_NAME - 1) {
+        out[i] = s[i];
+        i++;
+    }
+    out[i] = 0;
+}
+
+static void u32_to_name(uint32_t value, char *out) {
+    char tmp[16];
+    int n = 0;
+    do {
+        tmp[n++] = (char)('0' + (value % 10));
+        value /= 10;
+    } while (value && n < (int)sizeof(tmp));
+    int pos = 0;
+    while (n > 0 && pos < VFS_MAX_NAME - 1)
+        out[pos++] = tmp[--n];
+    out[pos] = 0;
+}
+
+static const char *basename_after(const char *path, const char *prefix) {
+    uint32_t i = 0;
+    while (prefix[i]) {
+        if (path[i] != prefix[i]) return NULL;
+        i++;
+    }
+    const char *name = path + i;
+    if (!name[0] || strchr(name, '/')) return NULL;
+    return name;
+}
+
 /** 更新 proc 动态文件内容到私有缓冲区 */
 static void proc_update(vfs_node_t *node) {
     char *buf = (char *)node->private_data;
@@ -341,4 +374,66 @@ vfs_node_t *devfs_lookup(const char *path) {
     }
 
     return NULL;
+}
+
+int devfs_readdir(const char *path, uint32_t index, char *name, uint32_t *type) {
+    if (!path || !name || !type) return -1;
+
+    if (strcmp(path, "/dev") == 0) {
+        uint32_t seen = 0;
+        for (int i = 0; i < devfs_node_count; i++) {
+            const char *short_name = basename_after(devfs_nodes[i].name, "/dev/");
+            if (!short_name) continue;
+            if (seen++ == index) {
+                set_short_name(name, short_name);
+                *type = devfs_nodes[i].type;
+                return 0;
+            }
+        }
+        return -1;
+    }
+
+    if (strcmp(path, "/proc") == 0) {
+        static const char *static_proc[] = {"uptime", "meminfo", "cpuinfo"};
+        uint32_t static_count = sizeof(static_proc) / sizeof(static_proc[0]);
+        if (index < static_count) {
+            set_short_name(name, static_proc[index]);
+            *type = VFS_NODE_FILE;
+            return 0;
+        }
+
+        uint32_t task_index = index - static_count;
+        const task_t *task = task_get_active(task_index);
+        if (!task) return -1;
+        u32_to_name(task->id, name);
+        *type = VFS_NODE_DIR;
+        return 0;
+    }
+
+    if (path[0] == '/' && path[1] == 'p' && path[2] == 'r' &&
+        path[3] == 'o' && path[4] == 'c' && path[5] == '/') {
+        const char *rest = path + 6;
+        int pid = 0;
+        while (*rest >= '0' && *rest <= '9') {
+            pid = pid * 10 + (*rest - '0');
+            rest++;
+        }
+        if (pid == 0 || *rest != 0) return -1;
+
+        const task_t *task = task_get_by_id((uint32_t)pid);
+        if (!task || task->state == TASK_TERMINATED) return -1;
+
+        if (index == 0) {
+            set_short_name(name, "cmdline");
+            *type = VFS_NODE_FILE;
+            return 0;
+        }
+        if (index == 1) {
+            set_short_name(name, "status");
+            *type = VFS_NODE_FILE;
+            return 0;
+        }
+    }
+
+    return -1;
 }

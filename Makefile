@@ -262,9 +262,6 @@ run-iso: run-bios-ahci
 run-bios-nodisk: $(ISO_BIOS)
 	$(QEMU_ENV) $(QEMU) -cdrom $(ISO_BIOS) -m 512M -boot d -serial stdio -vga std -monitor none
 
-$(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
-	python3 tools/mkhbfs.py $@
-
 disk-img: $(DISK_IMG)
 
 $(INSTALL_IMG_BIOS): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf tools/mkhbosdisk.py
@@ -429,7 +426,7 @@ USER_LIBC_DIR = $(SRC_DIR)/user/libc
 USER_BUILD_DIR = $(BUILD_DIR)/user
 
 USER_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
-              -mno-red-zone -O2 -Wall -Wextra \
+              -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 -O2 -Wall -Wextra \
               -I$(SRC_DIR)/user/libc -I$(SRC_DIR)/user
 
 USER_LDFLAGS = -m elf_x86_64 -static -nostdlib -T user.ld
@@ -465,6 +462,25 @@ user-progs: $(USER_PROG_BINS)
 user-progs-clean:
 	rm -rf $(USER_BUILD_DIR) $(BUILD_DIR)/user
 	@echo "✓ User programs cleaned"
+
+# ── HBFS file injection ──────────────────────────────────────────
+# Copy a file into a standalone HBFS image:  make hbfs-copy DISK=build/hbos_disk.img FILE=hello.c
+hbfs-copy:
+	@test -n "$(FILE)" || { echo "Usage: make hbfs-copy DISK=<image> FILE=<file> [NAME=remote_name]"; exit 1; }
+	python3 tools/hbfs-copy.py $(DISK) $(FILE) $(NAME)
+
+# Copy a file into the installed disk image:  make hbfs-install FILE=hello.c
+hbfs-install: $(INSTALL_IMG_BIOS)
+	python3 tools/hbfs-copy.py $(INSTALL_IMG_BIOS) $(FILE) $(NAME)
+
+# List files in installed disk image:  make hbfs-list
+hbfs-list: $(INSTALL_IMG_BIOS)
+	python3 tools/hbfs-copy.py $(INSTALL_IMG_BIOS) --list
+
+# Create standalone HBFS data disk:  make hbfs-disk
+hbfs-disk: $(DISK_IMG)
+$(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
+	python3 tools/mkhbfs.py $@ --size-mib 16
 
 clean:
 	rm -rf $(BUILD_DIR)
