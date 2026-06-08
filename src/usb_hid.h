@@ -24,8 +24,10 @@ typedef struct {
 typedef struct {
     int type;
     int slot_id;
+    int interface_num;
     int ep_addr;
     uint16_t max_packet_size;
+    uint8_t interval;
     uint8_t report[64];
     int report_len;
     int active;
@@ -38,5 +40,6 @@ int hid_get_mouse_report(int idx, hid_mouse_report_t *report);
 void hid_poll(void);
 int usb_kbd_init(void);
 int usb_kbd_getc(void);
+int usb_kbd_ready(void);
 
 #endif

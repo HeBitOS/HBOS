@@ -9,7 +9,9 @@
 #include "../net.h"
 #include "../string.h"
 #include "../unistd.h"
+#include "../usb_hid.h"
 #include "../version.h"
+#include "../xhci.h"
 #include "tool.h"
 #define PUTS_CN(str) do { if (console_is_framebuffer()) console_puts(str); } while(0)
 
@@ -148,6 +150,17 @@ static void print_uint64(uint64_t v) {
     while (n--) console_putchar(buf[n]);
 }
 
+static void print_hex16(uint16_t v) {
+    static const char hex[] = "0123456789ABCDEF";
+    console_puts("0x");
+    for (int shift = 12; shift >= 0; shift -= 4)
+        console_putchar(hex[(v >> shift) & 0xF]);
+}
+
+static void print_ready(int ok) {
+    console_puts(ok ? "\x1b[32mready\x1b[0m" : "\x1b[31mmissing\x1b[0m");
+}
+
 static void cmd_status(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -186,10 +199,57 @@ static void cmd_status(int argc, char **argv) {
     print_uint(block_sector_count() / 2048);
     console_puts(" MB)\n");
 
-    /* Network — check via ping */
+    /* Network */
+    const net_device_t *dev = net_primary();
     console_puts("\x1b[36mNetwork:\x1b[0m  ");
-    console_puts(net_driver_name(0));
-    console_puts(" driver\n");
+    console_puts(net_driver_name(dev->driver));
+    console_puts(dev->present ? " present" : " not present");
+    if (dev->present) {
+        console_puts(dev->dhcp_ok ? ", DHCP ok" : ", DHCP pending");
+    }
+    console_putchar('\n');
+}
+
+static void cmd_drivers(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    console_puts("\x1b[33m=== HBOS Driver Status ===\x1b[0m\n\n");
+
+    console_puts("\x1b[36mInput:\x1b[0m\n");
+    console_puts("  PS/2 keyboard: "); print_ready(1); console_puts("\n");
+    console_puts("  USB xHCI devices: "); print_uint((uint32_t)xhci_device_count()); console_puts("\n");
+    console_puts("  USB HID devices:  "); print_uint((uint32_t)hid_device_count()); console_puts("\n");
+    console_puts("  USB keyboard:     "); print_ready(usb_kbd_ready()); console_puts("\n\n");
+
+    console_puts("\x1b[36mStorage:\x1b[0m\n");
+    console_puts("  block backend: "); console_puts(block_backend_name()); console_puts("\n");
+    console_puts("  sectors:       "); print_uint(block_sector_count()); console_puts("\n");
+    console_puts("  filesystem:    "); console_puts(fs_backend_name()); console_puts("\n\n");
+
+    const net_device_t *dev = net_primary();
+    console_puts("\x1b[36mNetwork:\x1b[0m\n");
+    console_puts("  driver: "); console_puts(net_driver_name(dev->driver)); console_puts("\n");
+    console_puts("  present: "); print_ready(dev->present); console_puts("\n");
+    if (dev->present) {
+        console_puts("  pci: ");
+        print_hex16(dev->vendor_id);
+        console_putchar(':');
+        print_hex16(dev->device_id);
+        console_puts("  bus ");
+        print_uint(dev->bus);
+        console_putchar(':');
+        print_uint(dev->slot);
+        console_putchar('.');
+        print_uint(dev->func);
+        console_puts("\n");
+        console_puts("  link: "); print_ready(dev->link_ready); console_puts("\n");
+        console_puts("  dhcp: "); print_ready(dev->dhcp_ok); console_puts("\n");
+        if (dev->dhcp_ok) {
+            char ip[16];
+            net_ipv4_to_str(dev->ip, ip);
+            console_puts("  ip: "); console_puts(ip); console_puts("\n");
+        }
+    }
 }
 
 static void cmd_top(int argc, char **argv) {
@@ -360,6 +420,7 @@ void tool_system_init(void) {
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},
+        {"drivers", CMD_GROUP_SYSTEM, "Show hardware driver status", "drivers", cmd_drivers},
         {"top",     CMD_GROUP_SYSTEM, "Real-time task monitor","top",   cmd_top},
         {"uname",   CMD_GROUP_SYSTEM, "Show system identity",  "uname", cmd_uname},
         {"alias",   CMD_GROUP_SYSTEM, "Create command alias",  "alias name=cmd", cmd_alias},

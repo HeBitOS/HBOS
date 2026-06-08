@@ -53,10 +53,6 @@ typedef struct {
     uint32_t param1;
     uint32_t param2;
     uint32_t param3;
-    uint32_t status;
-    uint32_t cycle;
-    uint32_t flags;
-    uint32_t _reserved;
 } xhci_trb_t;
 
 typedef struct {
@@ -135,6 +131,7 @@ typedef struct {
 int xhci_init(void);
 void xhci_poll(void);
 int xhci_device_count(void);
+int xhci_device_slot(int idx);
 int xhci_get_device_desc(int idx, usb_device_desc_t *desc);
 int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           uint8_t bRequest, uint16_t wValue,

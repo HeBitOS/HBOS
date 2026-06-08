@@ -17,6 +17,7 @@
 #include "../user/app.h"
 #include "../vfs.h"
 #include "../gui/wm.h"
+#include "../shell/shell.h"
 #include "tool.h"
 
 extern void task_yield(void);
@@ -952,122 +953,26 @@ enum {
     GUI_KEY_LEFT,
     GUI_KEY_RIGHT,
     GUI_KEY_BACKSPACE,
+    GUI_KEY_DELETE,
+    GUI_KEY_HOME,
+    GUI_KEY_END,
+    GUI_KEY_PGUP,
+    GUI_KEY_PGDOWN,
 };
 
 static int key_poll(void) {
-    static int ext = 0;
-    static int shift = 0;
-    static int ctrl = 0;
-    while (inb(0x64) & 0x01) {
-        uint8_t st = inb(0x64);
-        if (st & 0x20) return 0;
-        uint8_t sc = inb(0x60);
-        if (sc == 0xE0) {
-            ext = 1;
-            continue;
-        }
-        if (sc == 0x2A || sc == 0x36) {
-            shift = 1;
-            ext = 0;
-            continue;
-        }
-        if (sc == 0xAA || sc == 0xB6) {
-            shift = 0;
-            ext = 0;
-            continue;
-        }
-        if (!ext && sc == 0x1D) {
-            ctrl = 1;
-            ext = 0;
-            continue;
-        }
-        if (!ext && sc == 0x9D) {
-            ctrl = 0;
-            ext = 0;
-            continue;
-        }
-        if (sc & 0x80) {
-            ext = 0;
-            continue;
-        }
-        if (ext) {
-            ext = 0;
-            if (sc == 0x1C) return '\n';
-            if (sc == 0x35) return '/';
-            if (sc == 0x48) return GUI_KEY_UP;
-            if (sc == 0x50) return GUI_KEY_DOWN;
-            if (sc == 0x4B) return GUI_KEY_LEFT;
-            if (sc == 0x4D) return GUI_KEY_RIGHT;
-            continue;
-        }
-        if (sc == 0x01) return 27;
-        if (sc == 0x0E) return GUI_KEY_BACKSPACE;
-        if (sc == 0x0F) return '\t';
-        if (sc == 0x1C) return '\n';
-        if (sc == 0x02) return shift ? '!' : '1';
-        if (sc == 0x03) return shift ? '@' : '2';
-        if (sc == 0x04) return shift ? '#' : '3';
-        if (sc == 0x05) return shift ? '$' : '4';
-        if (sc == 0x06) return shift ? '%' : '5';
-        if (sc == 0x07) return shift ? '^' : '6';
-        if (sc == 0x08) return shift ? '&' : '7';
-        if (sc == 0x09) return shift ? '*' : '8';
-        if (sc == 0x0A) return shift ? '(' : '9';
-        if (sc == 0x0B) return shift ? ')' : '0';
-        if (sc == 0x0C) return shift ? '_' : '-';
-        if (sc == 0x0D) return shift ? '+' : '=';
-        if (sc == 0x10) return shift ? 'Q' : 'q';
-        if (sc == 0x11) return shift ? 'W' : 'w';
-        if (sc == 0x12) return shift ? 'E' : 'e';
-        if (sc == 0x13) return ctrl ? 18 : (shift ? 'R' : 'r');
-        if (sc == 0x14) return shift ? 'T' : 't';
-        if (sc == 0x15) return shift ? 'Y' : 'y';
-        if (sc == 0x16) return shift ? 'U' : 'u';
-        if (sc == 0x17) return shift ? 'I' : 'i';
-        if (sc == 0x18) return ctrl ? 15 : (shift ? 'O' : 'o');
-        if (sc == 0x19) return shift ? 'P' : 'p';
-        if (sc == 0x1A) return shift ? '{' : '[';
-        if (sc == 0x1B) return shift ? '}' : ']';
-        if (sc == 0x1E) return shift ? 'A' : 'a';
-        if (sc == 0x1F) return ctrl ? 19 : (shift ? 'S' : 's');
-        if (sc == 0x20) return shift ? 'D' : 'd';
-        if (sc == 0x21) return shift ? 'F' : 'f';
-        if (sc == 0x22) return shift ? 'G' : 'g';
-        if (sc == 0x23) return shift ? 'H' : 'h';
-        if (sc == 0x24) return shift ? 'J' : 'j';
-        if (sc == 0x25) return shift ? 'K' : 'k';
-        if (sc == 0x26) return shift ? 'L' : 'l';
-        if (sc == 0x27) return shift ? ':' : ';';
-        if (sc == 0x28) return shift ? '"' : '\'';
-        if (sc == 0x29) return shift ? '~' : '`';
-        if (sc == 0x2B) return shift ? '|' : '\\';
-        if (sc == 0x2C) return shift ? 'Z' : 'z';
-        if (sc == 0x2D) return shift ? 'X' : 'x';
-        if (sc == 0x2E) return ctrl ? 3 : (shift ? 'C' : 'c');
-        if (sc == 0x2F) return shift ? 'V' : 'v';
-        if (sc == 0x30) return shift ? 'B' : 'b';
-        if (sc == 0x31) return shift ? 'N' : 'n';
-        if (sc == 0x32) return shift ? 'M' : 'm';
-        if (sc == 0x33) return shift ? '<' : ',';
-        if (sc == 0x34) return shift ? '>' : '.';
-        if (sc == 0x35) return shift ? '?' : '/';
-        if (sc == 0x37) return '*';
-        if (sc == 0x39) return ' ';
-        if (sc == 0x47) return '7';
-        if (sc == 0x48) return '8';
-        if (sc == 0x49) return '9';
-        if (sc == 0x4A) return '-';
-        if (sc == 0x4B) return '4';
-        if (sc == 0x4C) return '5';
-        if (sc == 0x4D) return '6';
-        if (sc == 0x4E) return '+';
-        if (sc == 0x4F) return '1';
-        if (sc == 0x50) return '2';
-        if (sc == 0x51) return '3';
-        if (sc == 0x52) return '0';
-        if (sc == 0x53) return '.';
-    }
-    return 0;
+    int key = kb_poll_key();
+    if (key == KB_KEY_UP) return GUI_KEY_UP;
+    if (key == KB_KEY_DOWN) return GUI_KEY_DOWN;
+    if (key == KB_KEY_LEFT) return GUI_KEY_LEFT;
+    if (key == KB_KEY_RIGHT) return GUI_KEY_RIGHT;
+    if (key == KB_KEY_HOME) return GUI_KEY_HOME;
+    if (key == KB_KEY_END) return GUI_KEY_END;
+    if (key == KB_KEY_PGUP) return GUI_KEY_PGUP;
+    if (key == KB_KEY_PGDWN) return GUI_KEY_PGDOWN;
+    if (key == KB_KEY_DELETE) return GUI_KEY_DELETE;
+    if (key == '\b') return GUI_KEY_BACKSPACE;
+    return key;
 }
 
 static void draw_wallpaper(int w, int h) {
@@ -2033,6 +1938,26 @@ static void code_move_vertical(gui_state_t *st, int dir) {
     code_ensure_visible(st);
 }
 
+static void code_move_line_edge(gui_state_t *st, int end) {
+    uint32_t line = 0, col = 0;
+    code_line_col(st, st->code_cursor, &line, &col);
+    (void)col;
+    uint32_t start = code_find_line_start(st, line);
+    st->code_cursor = start + (end ? code_line_len_at(st, start) : 0);
+    code_ensure_visible(st);
+}
+
+static void code_move_page(gui_state_t *st, int dir) {
+    uint32_t line = 0, col = 0;
+    code_line_col(st, st->code_cursor, &line, &col);
+    int target = (int)line + dir * code_visible_rows(st);
+    int max_line = (int)code_line_count(st) - 1;
+    if (target < 0) target = 0;
+    if (target > max_line) target = max_line;
+    st->code_cursor = code_offset_for_line_col(st, (uint32_t)target, col);
+    code_ensure_visible(st);
+}
+
 static void code_insert_char(gui_state_t *st, char c) {
     if (st->code_len + 1 >= CODE_EDIT_CAP) {
         code_set_output("Buffer full");
@@ -2075,6 +2000,17 @@ static void code_backspace(gui_state_t *st) {
             g_code_buf + st->code_cursor,
             st->code_len - st->code_cursor + 1);
     st->code_cursor--;
+    st->code_len--;
+    st->code_modified = 1;
+    st->code_error_line = 0;
+    code_ensure_visible(st);
+}
+
+static void code_delete_forward(gui_state_t *st) {
+    if (st->code_cursor >= st->code_len || st->code_len == 0) return;
+    memmove(g_code_buf + st->code_cursor,
+            g_code_buf + st->code_cursor + 1,
+            st->code_len - st->code_cursor);
     st->code_len--;
     st->code_modified = 1;
     st->code_error_line = 0;
@@ -3621,8 +3557,18 @@ static void handle_app_key(gui_state_t *st, int key) {
             code_move_vertical(st, -1);
         } else if (key == GUI_KEY_DOWN) {
             code_move_vertical(st, 1);
+        } else if (key == GUI_KEY_HOME) {
+            code_move_line_edge(st, 0);
+        } else if (key == GUI_KEY_END) {
+            code_move_line_edge(st, 1);
+        } else if (key == GUI_KEY_PGUP) {
+            code_move_page(st, -1);
+        } else if (key == GUI_KEY_PGDOWN) {
+            code_move_page(st, 1);
         } else if (key == GUI_KEY_BACKSPACE) {
             code_backspace(st);
+        } else if (key == GUI_KEY_DELETE) {
+            code_delete_forward(st);
         } else if (key == 3) {
             code_set_output("Use Esc/window close to leave Code Workspace");
             st->status = "代码工作台保持打开";
@@ -3657,11 +3603,37 @@ static void handle_key(gui_state_t *st, int key) {
     } else if (key == GUI_KEY_DOWN && st->active == PANEL_FILES) {
         if ((uint32_t)(st->selected_file + 1) < gui_file_count(st)) gui_select_file(st, st->selected_file + 1);
         st->status = "已选择文件";
+    } else if (key == GUI_KEY_HOME && st->active == PANEL_FILES) {
+        gui_select_file(st, 0);
+        st->status = "已选择文件";
+    } else if (key == GUI_KEY_END && st->active == PANEL_FILES) {
+        uint32_t count = gui_file_count(st);
+        if (count) gui_select_file(st, (int)count - 1);
+        st->status = "已选择文件";
+    } else if (key == GUI_KEY_PGUP && st->active == PANEL_FILES) {
+        gui_select_file(st, gui_step_selection(st->selected_file, gui_file_count(st), -FILE_LIST_ROWS));
+        st->status = "已选择文件";
+    } else if (key == GUI_KEY_PGDOWN && st->active == PANEL_FILES) {
+        gui_select_file(st, gui_step_selection(st->selected_file, gui_file_count(st), FILE_LIST_ROWS));
+        st->status = "已选择文件";
     } else if (key == GUI_KEY_UP && st->active == PANEL_APPS) {
         if (st->selected_app > 0) st->selected_app--;
         st->status = "已选择应用";
     } else if (key == GUI_KEY_DOWN && st->active == PANEL_APPS) {
         if ((uint32_t)(st->selected_app + 1) < gui_app_count()) st->selected_app++;
+        st->status = "已选择应用";
+    } else if (key == GUI_KEY_HOME && st->active == PANEL_APPS) {
+        st->selected_app = 0;
+        st->status = "已选择应用";
+    } else if (key == GUI_KEY_END && st->active == PANEL_APPS) {
+        uint32_t count = gui_app_count();
+        if (count) st->selected_app = (int)count - 1;
+        st->status = "已选择应用";
+    } else if (key == GUI_KEY_PGUP && st->active == PANEL_APPS) {
+        st->selected_app = gui_step_selection(st->selected_app, gui_app_count(), -4);
+        st->status = "已选择应用";
+    } else if (key == GUI_KEY_PGDOWN && st->active == PANEL_APPS) {
+        st->selected_app = gui_step_selection(st->selected_app, gui_app_count(), 4);
         st->status = "已选择应用";
     } else if (key == 'n') {
         gui_create_note(st);

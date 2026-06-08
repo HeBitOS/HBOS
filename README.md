@@ -20,6 +20,8 @@ HBOS 的目标是在尽量低廉、低配置的电脑上做出足够好的实际
 - ✅ 新增 ACPI poweroff 路径，`poweroff`/`shutdown` 优先走 ACPI，失败后回退到虚拟机端口
 - ✅ 修复 CJK 滚动错位与滚动时光标残影问题
 - ✅ GUI 代码工作台增强鼠标保存/运行/打开、运行输出和错误行提示，保持轻量可用
+- ✅ GUI/代码工作台统一 Shell 输入路径，适配 PS/2 与 USB HID 键盘的 Ctrl+S/R/O、Home/End、PgUp/PgDn、Delete 等常用快捷键
+- ✅ 新增 `drivers` 命令，便于真机上快速查看输入、USB、块设备、文件系统与网卡驱动状态
 
 ## beta1 更新
 
@@ -38,6 +40,7 @@ HBOS 的目标是在尽量低廉、低配置的电脑上做出足够好的实际
 - ✅ VGA 文本模式 + 高分辨率图形终端 (flanterm) 双输出
 - ✅ ANSI→VGA 颜色转换 (VGA 16 色，支持高亮)
 - ✅ PS/2 键盘驱动 (Shift/CapsLock/NumLock/方向键/Home/End/PgUp/PgDn/小键盘)
+- ✅ USB xHCI/HID 键盘基础路径，按配置描述符识别 boot keyboard/mouse 接口
 - ✅ 交互式 Help 模式 (类似 Python `help()`)
 - ✅ 命令分组管理 (系统/文件/图形/调试/用户)，基础命令已模块化到 `src/tools/`
 - ✅ 命令历史 / 搜索 / 上下键回滚 / PgUp-PgDn 上下文浏览
@@ -69,6 +72,18 @@ make run       # QEMU BIOS 硬盘启动
 make run-uefi  # QEMU UEFI 硬盘启动
 make smoke     # 构建并自动验证 BIOS/UEFI ISO/HDD/VMDK 启动
 ```
+
+### 真机优先级
+
+HBOS 优先保证低成本 x86_64 机器上的基础可用性：先让启动、输入、磁盘、文件系统、GUI 和调试信息稳定，再扩展更复杂的桌面体验。当前真机建议优先尝试 BIOS/UEFI ISO 启动；输入路径覆盖 PS/2 键盘与 USB xHCI HID boot keyboard，存储优先 AHCI、回退 ATA PIO，网络以 Intel E1000 路径为主。进入系统后可运行：
+
+```bash
+drivers
+status
+gui
+```
+
+`drivers` 用于确认键盘、USB、块设备、文件系统和网卡是否被识别。未识别的硬件先按该命令输出定位到具体驱动层，不盲目堆 GUI 功能。
 
 Windows PowerShell / CMD 中也可以直接调用：
 

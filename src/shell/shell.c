@@ -167,81 +167,90 @@ static void kb_set_leds(void) {
 static const char scancode_map[128] = {0,0,'1','2','3','4','5','6','7','8','9','0','-','=','\b',0,'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '};
 static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')','_','+','\b',0,'Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A','S','D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C','V','B','N','M','<','>','?',0,'*',0,' '};
 static int ctrl_pressed = 0; /**< Ctrl键状态 */
+static int ext_scancode = 0;
+
+int kb_poll_key(void) {
+    int serial_key = serial_get_key();
+    if (serial_key) return serial_key;
+    int usb_key = usb_kbd_getc();
+    if (usb_key) return usb_key;
+    if (!(inb(0x64) & 1)) return 0;
+
+    uint8_t status = inb(0x64);
+    if (status & 0x20) return 0;
+    uint8_t sc = inb(0x60);
+    if (sc == 0xFA || sc == 0xFE) return 0;
+    if (sc == 0xE0) {
+        ext_scancode = 1;
+        return 0;
+    }
+    if (ext_scancode) {
+        ext_scancode = 0;
+        if (sc & 0x80) return 0;
+        if (sc == 0x47) return KEY_HOME;
+        if (sc == 0x48) return KEY_UP;
+        if (sc == 0x4F) return KEY_END;
+        if (sc == 0x50) return KEY_DOWN;
+        if (sc == 0x4B) return KEY_LEFT;
+        if (sc == 0x4D) return KEY_RIGHT;
+        if (sc == 0x49) return KEY_PGUP;
+        if (sc == 0x51) return KEY_PGDWN;
+        if (sc == 0x52) return KEY_INSERT;
+        if (sc == 0x53) return KEY_DELETE;
+        return 0;
+    }
+    if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; return 0; }
+    if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; return 0; }
+    if (sc == 0x1D) { ctrl_pressed = 1; return 0; }
+    if (sc == 0x9D) { ctrl_pressed = 0; return 0; }
+    if (sc == 0x3A) { caps_lock = !caps_lock; kb_set_leds(); return 0; }
+    if (sc == 0x45) { num_lock = !num_lock; kb_set_leds(); return 0; }
+    if (sc & 0x80) return 0;
+
+    if (sc >= 0x47 && sc <= 0x53) {
+        if (num_lock) {
+            static const char numpad_map[13] = {
+                '7','8','9','-','4','5','6','+','1','2','3','0','.'
+            };
+            return numpad_map[sc - 0x47];
+        }
+        switch (sc) {
+            case 0x47: return KEY_HOME;
+            case 0x48: return KEY_UP;
+            case 0x49: return KEY_PGUP;
+            case 0x4A: return '-';
+            case 0x4B: return KEY_LEFT;
+            case 0x4C: return 0;
+            case 0x4D: return KEY_RIGHT;
+            case 0x4E: return '+';
+            case 0x4F: return KEY_END;
+            case 0x50: return KEY_DOWN;
+            case 0x51: return KEY_PGDWN;
+            case 0x52: return KEY_INSERT;
+            case 0x53: return KEY_DELETE;
+        }
+    }
+    if (sc == 0x0F) return '\t';
+    if (sc < 128) {
+        char c = scancode_map[sc];
+        if (c == 0) return 0;
+        if (ctrl_pressed && c >= 'a' && c <= 'z') return (char)(c - 'a' + 1);
+        if (c >= 'a' && c <= 'z') {
+            if (shift_pressed ^ caps_lock) c = c - 'a' + 'A';
+        } else if (shift_pressed) {
+            c = shift_map[sc];
+        }
+        return c;
+    }
+    return 0;
+}
 
 int get_key(void) {
     while (1) {
         console_cursor_blink();
-        int serial_key = serial_get_key();
-        if (serial_key) return serial_key;
-        int usb_key = usb_kbd_getc();
-        if (usb_key) return usb_key;
-        uint8_t status = inb(0x64);
-        if (status & 1) {
-            uint8_t sc = inb(0x60);
-            if (sc == 0xFA || sc == 0xFE) continue; // keyboard command ACK/RESEND
-            if (sc == 0xE0) {
-                while (!(inb(0x64) & 1));
-                sc = inb(0x60);
-                if (sc & 0x80) continue;
-                if (sc == 0x47) return KEY_HOME;
-                if (sc == 0x48) return KEY_UP;
-                if (sc == 0x4F) return KEY_END;
-                if (sc == 0x50) return KEY_DOWN;
-                if (sc == 0x4B) return KEY_LEFT;
-                if (sc == 0x4D) return KEY_RIGHT;
-                if (sc == 0x49) return KEY_PGUP;
-                if (sc == 0x51) return KEY_PGDWN;
-                if (sc == 0x52) return KEY_INSERT;
-                if (sc == 0x53) return KEY_DELETE;
-                continue;
-            }
-            if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; continue; }
-            if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; continue; }
-            if (sc == 0x1D) { ctrl_pressed = 1; continue; } /* Ctrl press */
-            if (sc == 0x9D) { ctrl_pressed = 0; continue; } /* Ctrl release */
-            if (sc == 0x3A) { caps_lock = !caps_lock; kb_set_leds(); continue; }
-            if (sc == 0x45) { num_lock = !num_lock; kb_set_leds(); continue; }
-            if (sc & 0x80) continue;
-            // Numpad keys (without E0 prefix)
-            if (sc >= 0x47 && sc <= 0x53) {
-                if (num_lock) {
-                    // NumLock ON: produce digits/symbols
-                    static const char numpad_map[13] = {
-                        '7','8','9','-','4','5','6','+','1','2','3','0','.'
-                    };
-                    return numpad_map[sc - 0x47];
-                } else {
-                    // NumLock OFF: produce navigation keys
-                    switch (sc) {
-                        case 0x47: return KEY_HOME;
-                        case 0x48: return KEY_UP;
-                        case 0x49: return KEY_PGUP;
-                        case 0x4A: return '-';  // minus doesn't change
-                        case 0x4B: return KEY_LEFT;
-                        case 0x4C: continue;    // keypad 5 has no navigation action
-                        case 0x4D: return KEY_RIGHT;
-                        case 0x4E: return '+';  // plus doesn't change
-                        case 0x4F: return KEY_END;
-                        case 0x50: return KEY_DOWN;
-                        case 0x51: return KEY_PGDWN;
-                        case 0x52: return KEY_INSERT;
-                        case 0x53: return KEY_DELETE;
-                    }
-                    continue;
-                }
-            }
-            if (sc == 0x0F) return '\t';
-            if (sc < 128) {
-                char c = scancode_map[sc]; if (c == 0) continue;
-                /* Ctrl+letter → control code (0x01..0x1A) */
-                if (ctrl_pressed && c >= 'a' && c <= 'z') return (char)(c - 'a' + 1);
-                if (c >= 'a' && c <= 'z') { if (shift_pressed ^ caps_lock) c = c - 'a' + 'A'; }
-                else { if (shift_pressed) c = shift_map[sc]; }
-                return c;
-            } else {
-                task_yield();
-            }
-        }
+        int key = kb_poll_key();
+        if (key) return key;
+        task_yield();
     }
 }
 

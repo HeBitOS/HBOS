@@ -112,9 +112,9 @@
 #define TRB_SPD  (1 << 3)
 
 #define EP_CTX_DISABLED  0
-#define EP_CTX_CONTROL   1
-#define EP_CTX_BULK      2
-#define EP_CTX_INTERRUPT 3
+#define EP_CTX_CONTROL      4
+#define EP_CTX_BULK_IN      6
+#define EP_CTX_INTERRUPT_IN 7
 #define EP_CTX_ISOCH     4
 
 #define EP_STATE_DISABLED    0
@@ -163,22 +163,31 @@ static uint64_t *xhci_alloc_aligned(size_t size, uint64_t *phys) {
     return (uint64_t *)p;
 }
 
-static void xhci_build_trb(xhci_trb_t *trb, uint64_t param, uint32_t status, uint32_t cycle) {
+static void xhci_build_trb(xhci_trb_t *trb, uint64_t param, uint32_t status, uint32_t control) {
     trb->param0 = (uint32_t)(param & 0xFFFFFFFF);
     trb->param1 = (uint32_t)(param >> 32);
     trb->param2 = status;
-    trb->param3 = 0;
-    trb->status = 0;
-    trb->cycle = cycle;
-    trb->flags = 0;
-    trb->_reserved = 0;
+    trb->param3 = control;
+}
+
+static int xhci_event_ready(const xhci_trb_t *evt) {
+    return (evt->param3 & TRB_C) == xhci.event_ring_cycle;
+}
+
+static void xhci_advance_event(void) {
+    xhci.event_ring_idx++;
+    if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
+        xhci.event_ring_idx = 0;
+        xhci.event_ring_cycle ^= 1;
+    }
 }
 
 static int xhci_post_cmd(uint32_t trb_type, uint64_t param, uint32_t status) {
     uint32_t idx = xhci.cmd_ring_idx;
     xhci_trb_t *trb = &((xhci_trb_t *)xhci.cmd_ring)[idx];
 
-    xhci_build_trb(trb, param, status | (trb_type << 10), xhci.cmd_ring_cycle);
+    xhci_build_trb(trb, param, status,
+                   (trb_type << 10) | (xhci.cmd_ring_cycle ? TRB_C : 0));
 
     xhci.cmd_ring_idx++;
     if (xhci.cmd_ring_idx >= XHCI_CMD_RING_SIZE) {
@@ -194,24 +203,16 @@ static int xhci_wait_cmd_resp(void) {
     for (int timeout = 0; timeout < 5000000; timeout++) {
         uint32_t idx = xhci.event_ring_idx;
         xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[idx];
-        if ((evt->cycle & 1) != xhci.event_ring_cycle) continue;
+        if (!xhci_event_ready(evt)) continue;
 
-        uint32_t evt_type = (evt->param2 >> 10) & 0x3F;
+        uint32_t evt_type = (evt->param3 >> 10) & 0x3F;
         if (evt_type == TRB_EV_CMD_COMP) {
-            int code = (evt->param1 >> 24) & 0xFF;
-            xhci.event_ring_idx++;
-            if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-                xhci.event_ring_idx = 0;
-                xhci.event_ring_cycle ^= 1;
-            }
+            int code = (evt->param2 >> 24) & 0xFF;
+            xhci_advance_event();
             return code == 1 ? 0 : -code;
         }
 
-        xhci.event_ring_idx++;
-        if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-            xhci.event_ring_idx = 0;
-            xhci.event_ring_cycle ^= 1;
-        }
+        xhci_advance_event();
     }
     return -1;
 }
@@ -256,7 +257,8 @@ static int xhci_init_rings(void) {
     xhci.cmd_ring_idx = 0;
     xhci.cmd_ring_cycle = 1;
 
-    xhci.event_ring_seg = (uint64_t *)xhci_alloc_aligned(16, &xhci.event_ring_phys);
+    uint64_t event_ring_seg_phys = 0;
+    xhci.event_ring_seg = (uint64_t *)xhci_alloc_aligned(16, &event_ring_seg_phys);
     if (!xhci.event_ring_seg) return -1;
 
     xhci.event_ring = (uint64_t *)xhci_alloc_aligned(
@@ -269,14 +271,15 @@ static int xhci_init_rings(void) {
     xhci.event_ring_seg[0] = xhci.event_ring_phys;
     xhci.event_ring_seg[1] = XHCI_EVENT_RING_SIZE;
 
-    xhci_write32(XHCI_CRCR_LO, (uint32_t)(xhci.cmd_ring_phys & 0xFFFFFFFF));
+    xhci_write32(XHCI_CRCR_LO, (uint32_t)(xhci.cmd_ring_phys & 0xFFFFFFFF) | TRB_C);
     xhci_write32(XHCI_CRCR_HI, (uint32_t)(xhci.cmd_ring_phys >> 32));
-    xhci_write32(XHCI_CRCR_LO + 1, 1);
 
-    xhci_write32(0x38, (uint32_t)((uint64_t)(uintptr_t)xhci.event_ring_seg & 0xFFFFFFFF));
-    xhci_write32(0x3C, (uint32_t)((uint64_t)(uintptr_t)xhci.event_ring_seg >> 32));
-    xhci_write32(0x20, 0);
-    xhci_write32(0x24, 0);
+    if (!xhci.runtime) return -1;
+    xhci.runtime[0x28 / 4] = 1; /* ERSTSZ */
+    xhci.runtime[0x30 / 4] = (uint32_t)(event_ring_seg_phys & 0xFFFFFFFF);
+    xhci.runtime[0x34 / 4] = (uint32_t)(event_ring_seg_phys >> 32);
+    xhci.runtime[0x38 / 4] = (uint32_t)(xhci.event_ring_phys & 0xFFFFFFFF);
+    xhci.runtime[0x3C / 4] = (uint32_t)(xhci.event_ring_phys >> 32);
 
     return 0;
 }
@@ -288,14 +291,17 @@ static int xhci_init_scratchpad(void) {
     memset(xhci.dcbaa, 0, XHCI_MAX_SLOTS * 8 + 16);
 
     if (xhci.max_scratchpad > 0 && xhci.max_scratchpad <= XHCI_MAX_SCRATCHPAD_BUFFERS) {
+        uint64_t scratchpad_array_phys = 0;
         xhci.scratchpad_array = (uint64_t *)xhci_alloc_aligned(
-            xhci.max_scratchpad * 8, &xhci.dcbaa_phys);
+            xhci.max_scratchpad * 8, &scratchpad_array_phys);
         if (xhci.scratchpad_array) {
             for (uint32_t i = 0; i < xhci.max_scratchpad; i++) {
+                uint64_t scratchpad_phys = 0;
                 xhci.scratchpad_buffers[i] = (uint64_t *)xhci_alloc_aligned(
-                    4096, &xhci.scratchpad_array[i]);
+                    4096, &scratchpad_phys);
+                xhci.scratchpad_array[i] = scratchpad_phys;
             }
-            xhci.dcbaa[0] = (uint64_t)(uintptr_t)xhci.scratchpad_array;
+            xhci.dcbaa[0] = scratchpad_array_phys;
         }
     }
 
@@ -338,11 +344,12 @@ static int xhci_reset_port(uint32_t port) {
 }
 
 static int xhci_setup_device_context(uint32_t slot_id) {
-    uint64_t *ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &xhci.dcbaa[slot_id]);
+    uint64_t ctx_phys = 0;
+    uint64_t *ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &ctx_phys);
     if (!ctx) return -1;
     memset(ctx, 0, CTX_SIZE * 32);
     xhci.device_context_base[slot_id] = ctx;
-    xhci.dcbaa[slot_id] = (uint64_t)(uintptr_t)ctx;
+    xhci.dcbaa[slot_id] = ctx_phys;
     return 0;
 }
 
@@ -360,17 +367,30 @@ static int xhci_enable_slot(uint32_t *slot_id) {
     return -1;
 }
 
+static uint64_t *xhci_alloc_transfer_ring(uint64_t *ring_phys);
+
 static int xhci_address_device(uint32_t slot_id, uint32_t port, uint32_t speed) {
-    (void)port;
-    uint64_t *input_ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &xhci.dcbaa[slot_id]);
+    uint64_t input_phys = 0;
+    uint64_t *input_ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &input_phys);
     if (!input_ctx) return -1;
     memset(input_ctx, 0, CTX_SIZE * 32);
 
-    input_ctx[0] = (1 << 0) | (1 << 1);
-    input_ctx[1] = 0;
-    input_ctx[2] = (1 << 27) | (speed << 20) | (8 << 16);
+    uint64_t ep0_ring_phys = 0;
+    uint64_t *ep0_ring = xhci_alloc_transfer_ring(&ep0_ring_phys);
+    if (!ep0_ring) { kfree((void *)input_ctx); return -1; }
+    memset(ep0_ring, 0, XHCI_TRB_RING_SIZE * 16);
+    xhci.input_context[slot_id] = ep0_ring;
 
-    uint64_t input_phys = (uint64_t)(uintptr_t)input_ctx;
+    uint32_t *ctx = (uint32_t *)input_ctx;
+    ctx[1] = (1 << 0) | (1 << 1); /* Add slot + EP0 contexts */
+    ctx[8] = (1 << 27) | (speed << 20);
+    ctx[9] = (port << 16);
+
+    uint32_t ep0 = 16;
+    ctx[ep0 + 1] = (EP_CTX_CONTROL << 3) | (8 << 16) | (3 << 1);
+    ctx[ep0 + 2] = (uint32_t)(ep0_ring_phys & 0xFFFFFFF0) | TRB_C;
+    ctx[ep0 + 3] = (uint32_t)(ep0_ring_phys >> 32);
+
     int ret = xhci_send_cmd(TRB_ADDRESS_DEV, input_phys, (slot_id << 24));
     kfree((void *)input_ctx);
     return ret;
@@ -379,21 +399,21 @@ static int xhci_address_device(uint32_t slot_id, uint32_t port, uint32_t speed) 
 static int xhci_configure_endpoint(uint32_t slot_id, uint32_t ep_type,
                                    uint32_t ep_id, uint32_t max_packet_size,
                                    uint32_t interval, uint64_t ring_phys) {
-    uint64_t *input_ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &xhci.dcbaa[slot_id]);
+    uint64_t input_phys = 0;
+    uint64_t *input_ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &input_phys);
     if (!input_ctx) return -1;
     memset(input_ctx, 0, CTX_SIZE * 32);
 
-    input_ctx[0] = (1 << 0) | (1 << (ep_id + 1));
-    input_ctx[1] = 0;
+    uint32_t *ctx = (uint32_t *)input_ctx;
+    ctx[1] = (1 << 0) | (1 << ep_id); /* Add slot + target endpoint */
+    ctx[8] = (ep_id << 27);
 
-    uint32_t ep_off = (ep_id + 1) * 4;
-    input_ctx[ep_off + 0] = 0;
-    input_ctx[ep_off + 1] = (ep_type << 3) | (max_packet_size << 16) |
-                            (interval << 0) | (1 << 0);
-    input_ctx[ep_off + 2] = (ring_phys & 0xFFFFFFFF) | (1 << 0);
-    input_ctx[ep_off + 3] = (ring_phys >> 32);
+    uint32_t ep_off = 16 + (ep_id - 1) * 8;
+    ctx[ep_off + 0] = (interval & 0xFF) << 16;
+    ctx[ep_off + 1] = (ep_type << 3) | (max_packet_size << 16) | (3 << 1);
+    ctx[ep_off + 2] = (uint32_t)(ring_phys & 0xFFFFFFF0) | TRB_C;
+    ctx[ep_off + 3] = (uint32_t)(ring_phys >> 32);
 
-    uint64_t input_phys = (uint64_t)(uintptr_t)input_ctx;
     int ret = xhci_send_cmd(TRB_CONFIGURE_EP, input_phys, (slot_id << 24));
     kfree((void *)input_ctx);
     return ret;
@@ -439,6 +459,7 @@ int xhci_init(void) {
     if (xhci_reset_controller() < 0) return -1;
     if (xhci_init_rings() < 0) return -1;
     if (xhci_init_scratchpad() < 0) return -1;
+    xhci_write32(XHCI_CONFIG, xhci.max_slots);
     if (xhci_start_controller() < 0) return -1;
 
     for (uint32_t port = 1; port <= xhci.max_ports; port++) {
@@ -472,9 +493,9 @@ void xhci_poll(void) {
         while (1) {
             uint32_t idx = xhci.event_ring_idx;
             xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[idx];
-            if ((evt->cycle & 1) != xhci.event_ring_cycle) break;
+            if (!xhci_event_ready(evt)) break;
 
-            uint32_t evt_type = (evt->param2 >> 10) & 0x3F;
+            uint32_t evt_type = (evt->param3 >> 10) & 0x3F;
             if (evt_type == TRB_EV_PORT_SC) {
                 uint32_t port = (evt->param0 >> 24) & 0xFF;
                 uint32_t portsc = xhci_read_portsc(port);
@@ -483,11 +504,7 @@ void xhci_poll(void) {
                 }
             }
 
-            xhci.event_ring_idx++;
-            if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-                xhci.event_ring_idx = 0;
-                xhci.event_ring_cycle ^= 1;
-            }
+            xhci_advance_event();
         }
     }
 }
@@ -500,16 +517,20 @@ int xhci_device_count(void) {
     return count;
 }
 
-int xhci_get_device_desc(int idx, usb_device_desc_t *desc) {
-    if (!desc) return -1;
-    int slot = 0;
+int xhci_device_slot(int idx) {
     for (uint32_t i = 1; i <= xhci.max_slots; i++) {
         if (xhci.slot_enabled[i]) {
-            if (idx == 0) { slot = (int)i; break; }
+            if (idx == 0) return (int)i;
             idx--;
         }
     }
-    if (!slot) return -1;
+    return -1;
+}
+
+int xhci_get_device_desc(int idx, usb_device_desc_t *desc) {
+    if (!desc) return -1;
+    int slot = xhci_device_slot(idx);
+    if (slot < 0) return -1;
 
     uint8_t *buf = (uint8_t *)kmalloc(64);
     if (!buf) return -1;
@@ -524,15 +545,23 @@ int xhci_get_device_desc(int idx, usb_device_desc_t *desc) {
 int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           uint8_t bRequest, uint16_t wValue,
                           uint16_t wIndex, void *data, uint16_t wLength) {
-    (void)wIndex;
-    (void)data;
-    (void)wLength;
     if (!xhci.initialized || slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
     if (!xhci.slot_enabled[slot_id]) return -1;
 
     uint64_t ring_phys;
     uint64_t *ring = xhci_alloc_transfer_ring(&ring_phys);
     if (!ring) return -1;
+    memset(ring, 0, XHCI_TRB_RING_SIZE * 16);
+
+    uint64_t data_phys = 0;
+    void *data_buf = 0;
+    if (wLength > 0) {
+        if (!data) { kfree((void *)ring); return -1; }
+        data_buf = xhci_alloc_aligned(wLength, &data_phys);
+        if (!data_buf) { kfree((void *)ring); return -1; }
+        if (bmRequestType & 0x80) memset(data_buf, 0, wLength);
+        else memcpy(data_buf, data, wLength);
+    }
 
     uint32_t idx = 0;
     uint32_t cycle = 1;
@@ -540,42 +569,50 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
     uint32_t dir_in = (bmRequestType & 0x80) ? 1 : 0;
     uint32_t trt = wLength > 0 ? (dir_in ? TRB_TRT_IN_DATA : TRB_TRT_OUT_DATA) : TRB_TRT_NO_DATA;
 
-    uint32_t setup_word = ((uint32_t)bmRequestType << 0) |
-                          ((uint32_t)bRequest << 8) |
-                          ((uint32_t)wValue << 16);
+    uint64_t setup_word = ((uint64_t)bmRequestType << 0) |
+                          ((uint64_t)bRequest << 8) |
+                          ((uint64_t)wValue << 16) |
+                          ((uint64_t)wIndex << 32) |
+                          ((uint64_t)wLength << 48);
 
-    xhci_build_trb(&((xhci_trb_t *)ring)[idx++], setup_word, 0, cycle);
-    ((xhci_trb_t *)ring)[idx-1].param2 = 8 | (TRB_SETUP_STAGE << 10) | (trt << 16) | TRB_IDT;
-    xhci_build_trb(&((xhci_trb_t *)ring)[idx++], 0, 0, cycle);
-    ((xhci_trb_t *)ring)[idx-1].param2 = 0 | (TRB_STATUS_STAGE << 10) | TRB_IOC;
+    xhci_build_trb(&((xhci_trb_t *)ring)[idx++], setup_word, 8,
+                   (TRB_SETUP_STAGE << 10) | (trt << 16) | TRB_IDT | cycle);
+    if (wLength > 0) {
+        uint32_t data_ctrl = (TRB_DATA_STAGE << 10) | cycle;
+        if (dir_in) data_ctrl |= TRB_DIR_IN;
+        xhci_build_trb(&((xhci_trb_t *)ring)[idx++], data_phys, wLength, data_ctrl);
+    }
+    uint32_t status_ctrl = (TRB_STATUS_STAGE << 10) | TRB_IOC | cycle;
+    if (wLength == 0 || !dir_in) status_ctrl |= TRB_DIR_IN;
+    xhci_build_trb(&((xhci_trb_t *)ring)[idx++], 0, 0, status_ctrl);
 
     int ret = xhci_configure_endpoint(slot_id, EP_CTX_CONTROL, 1, 8, 0, ring_phys);
-    if (ret < 0) { kfree((void *)ring); return ret; }
+    if (ret < 0) {
+        if (data_buf) kfree(data_buf);
+        kfree((void *)ring);
+        return ret;
+    }
 
     xhci_ring_doorbell(slot_id, 1);
 
     for (int i = 0; i < 5000000; i++) {
         uint32_t evt_idx = xhci.event_ring_idx;
         xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[evt_idx];
-        if ((evt->cycle & 1) != xhci.event_ring_cycle) continue;
-        uint32_t evt_type = (evt->param2 >> 10) & 0x3F;
+        if (!xhci_event_ready(evt)) continue;
+        uint32_t evt_type = (evt->param3 >> 10) & 0x3F;
         if (evt_type == TRB_EV_TRANSFER) {
-            int code = (evt->param1 >> 24) & 0xFF;
-            xhci.event_ring_idx++;
-            if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-                xhci.event_ring_idx = 0;
-                xhci.event_ring_cycle ^= 1;
-            }
+            int code = (evt->param2 >> 24) & 0xFF;
+            int ok = (code == 1 || code == 0x26);
+            xhci_advance_event();
+            if (ok && data_buf && dir_in) memcpy(data, data_buf, wLength);
+            if (data_buf) kfree(data_buf);
             kfree((void *)ring);
-            return code == 1 ? (int)wLength : (code == 0x26 ? 0 : -code);
+            return ok ? (int)wLength : -code;
         }
-        xhci.event_ring_idx++;
-        if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-            xhci.event_ring_idx = 0;
-            xhci.event_ring_cycle ^= 1;
-        }
+        xhci_advance_event();
     }
 
+    if (data_buf) kfree(data_buf);
     kfree((void *)ring);
     return -1;
 }
@@ -608,13 +645,14 @@ int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len) 
 
     /* Build a Normal TRB pointing to the data buffer */
     xhci_trb_t *trb = (xhci_trb_t *)ring;
-    trb->param0 = (uint32_t)(data_phys & 0xFFFFFFFF);
-    trb->param1 = (uint32_t)(data_phys >> 32);
-    trb->param2 = len | (TRB_NORMAL << 10) | TRB_IOC;
-    trb->cycle = 1;
+    xhci_build_trb(trb, data_phys, len,
+                   (TRB_NORMAL << 10) | TRB_IOC | TRB_ISP | TRB_C);
 
     /* Configure the interrupt endpoint with this transfer ring */
-    int ret = xhci_configure_endpoint(slot_id, ep_id, 1, 64, 0, ring_phys);
+    uint32_t max_packet = len < 8 ? 8 : len;
+    if (max_packet > 64) max_packet = 64;
+    int ret = xhci_configure_endpoint(slot_id, EP_CTX_INTERRUPT_IN, ep_id,
+                                      max_packet, 0, ring_phys);
     if (ret < 0) { kfree(data_buf); kfree((void *)ring); return -1; }
 
     /* Ring the doorbell to kick off the transfer */
@@ -624,16 +662,12 @@ int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len) 
     for (int i = 0; i < 2000000; i++) {
         uint32_t evt_idx = xhci.event_ring_idx;
         xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[evt_idx];
-        if ((evt->cycle & 1) != xhci.event_ring_cycle) continue;
-        uint32_t evt_type = (evt->param2 >> 10) & 0x3F;
+        if (!xhci_event_ready(evt)) continue;
+        uint32_t evt_type = (evt->param3 >> 10) & 0x3F;
         if (evt_type == TRB_EV_TRANSFER) {
-            int code = (evt->param1 >> 24) & 0xFF;
+            int code = (evt->param2 >> 24) & 0xFF;
             /* Advance event ring */
-            xhci.event_ring_idx++;
-            if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-                xhci.event_ring_idx = 0;
-                xhci.event_ring_cycle ^= 1;
-            }
+            xhci_advance_event();
             if (code == 1 || code == 0x26) {
                 memcpy(data, data_buf, len);
                 kfree(data_buf);
@@ -645,11 +679,7 @@ int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len) 
             return -code;
         }
         /* Consume non-matching events */
-        xhci.event_ring_idx++;
-        if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-            xhci.event_ring_idx = 0;
-            xhci.event_ring_cycle ^= 1;
-        }
+        xhci_advance_event();
     }
 
     kfree(data_buf);
