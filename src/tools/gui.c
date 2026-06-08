@@ -2023,6 +2023,25 @@ static void code_insert_char(gui_state_t *st, char c) {
     code_ensure_visible(st);
 }
 
+static void code_insert_newline(gui_state_t *st) {
+    uint32_t start = st->code_cursor;
+    char indent_buf[32];
+    while (start > 0 && g_code_buf[start - 1] != '\n') start--;
+    uint32_t indent = 0;
+    while (start + indent < st->code_len &&
+           (g_code_buf[start + indent] == ' ' || g_code_buf[start + indent] == '\t') &&
+           indent < 32) {
+        indent_buf[indent] = g_code_buf[start + indent];
+        indent++;
+    }
+    int block_indent = st->code_cursor > 0 && g_code_buf[st->code_cursor - 1] == '{';
+    code_insert_char(st, '\n');
+    for (uint32_t i = 0; i < indent; i++) code_insert_char(st, indent_buf[i]);
+    if (block_indent) {
+        for (int i = 0; i < 4; i++) code_insert_char(st, ' ');
+    }
+}
+
 static void code_backspace(gui_state_t *st) {
     if (st->code_cursor == 0 || st->code_len == 0) return;
     memmove(g_code_buf + st->code_cursor - 1,
@@ -2100,6 +2119,117 @@ static void handle_code_command(gui_state_t *st, int cmd) {
         code_run_current(st);
     } else if (cmd == CODE_CMD_OPEN) {
         code_open_selected(st);
+    }
+}
+
+static int code_ident_start(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static int code_ident_char(char c) {
+    return code_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+static int code_word_eq(const char *s, uint32_t len, const char *word) {
+    uint32_t i = 0;
+    while (word[i]) i++;
+    if (i != len) return 0;
+    for (i = 0; i < len; i++)
+        if (s[i] != word[i]) return 0;
+    return 1;
+}
+
+static int code_is_keyword(const char *s, uint32_t len) {
+    return code_word_eq(s, len, "int") || code_word_eq(s, len, "char") ||
+           code_word_eq(s, len, "void") || code_word_eq(s, len, "return") ||
+           code_word_eq(s, len, "if") || code_word_eq(s, len, "else") ||
+           code_word_eq(s, len, "while") || code_word_eq(s, len, "for") ||
+           code_word_eq(s, len, "break") || code_word_eq(s, len, "continue") ||
+           code_word_eq(s, len, "class") || code_word_eq(s, len, "public") ||
+           code_word_eq(s, len, "private") || code_word_eq(s, len, "new") ||
+           code_word_eq(s, len, "delete");
+}
+
+static int code_draw_span(int x, int y, int max_x, const char *s,
+                          uint32_t start, uint32_t len, uint32_t color) {
+    char tmp[48];
+    while (len > 0 && x < max_x) {
+        uint32_t n = len;
+        if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+        memcpy(tmp, s + start, n);
+        tmp[n] = 0;
+        text_clipped(x, y, max_x, tmp, color, 1);
+        x += (int)n * 6;
+        start += n;
+        len -= n;
+    }
+    return x;
+}
+
+static void code_draw_highlighted_line(int x, int y, int max_x, const char *line, uint32_t len) {
+    uint32_t i = 0;
+    if (len > 0 && line[0] == '#') {
+        (void)code_draw_span(x, y, max_x, line, 0, len, rgb(190, 168, 238));
+        return;
+    }
+    while (i < len && x < max_x) {
+        char c = line[i];
+        if (c == '/' && i + 1 < len && line[i + 1] == '/') {
+            x = code_draw_span(x, y, max_x, line, i, len - i, rgb(116, 170, 130));
+            break;
+        }
+        if (c == '/' && i + 1 < len && line[i + 1] == '*') {
+            uint32_t j = i + 2;
+            while (j + 1 < len && !(line[j] == '*' && line[j + 1] == '/')) j++;
+            if (j + 1 < len) j += 2;
+            else j = len;
+            x = code_draw_span(x, y, max_x, line, i, j - i, rgb(116, 170, 130));
+            i = j;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            char quote = c;
+            uint32_t j = i + 1;
+            while (j < len) {
+                if (line[j] == '\\' && j + 1 < len) {
+                    j += 2;
+                    continue;
+                }
+                if (line[j++] == quote) break;
+            }
+            x = code_draw_span(x, y, max_x, line, i, j - i, rgb(236, 192, 116));
+            i = j;
+            continue;
+        }
+        if (c >= '0' && c <= '9') {
+            uint32_t j = i + 1;
+            while (j < len && ((line[j] >= '0' && line[j] <= '9') ||
+                   (line[j] >= 'a' && line[j] <= 'f') ||
+                   (line[j] >= 'A' && line[j] <= 'F') || line[j] == 'x' || line[j] == 'X'))
+                j++;
+            x = code_draw_span(x, y, max_x, line, i, j - i, rgb(122, 218, 210));
+            i = j;
+            continue;
+        }
+        if (code_ident_start(c)) {
+            uint32_t j = i + 1;
+            while (j < len && code_ident_char(line[j])) j++;
+            uint32_t color = rgb(228, 238, 246);
+            if (code_is_keyword(line + i, j - i)) {
+                color = rgb(132, 190, 255);
+            } else {
+                uint32_t k = j;
+                while (k < len && (line[k] == ' ' || line[k] == '\t')) k++;
+                if (k < len && line[k] == '(') color = rgb(150, 220, 182);
+            }
+            x = code_draw_span(x, y, max_x, line, i, j - i, color);
+            i = j;
+            continue;
+        }
+        x = code_draw_span(x, y, max_x, line, i, 1,
+                           (c == '{' || c == '}' || c == '(' || c == ')' ||
+                            c == '[' || c == ']') ? rgb(250, 224, 142) : rgb(196, 208, 218));
+        i++;
     }
 }
 
@@ -2194,8 +2324,8 @@ static void draw_code_app(int tx, int ty, int win_w, gui_state_t *st) {
             rect(editor_x + line_no_w + 1, y - 3, editor_w - line_no_w - 4, row_h, rgb(16, 28, 38));
         }
         text(editor_x + 8, y, num, rgb(102, 134, 154), 1);
-        text_clipped(editor_x + line_no_w + 10, y, editor_x + editor_w - 10,
-                     line, rgb(228, 238, 246), 1);
+        code_draw_highlighted_line(editor_x + line_no_w + 10, y,
+                                   editor_x + editor_w - 10, line, n);
     }
     if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + CODE_VIEW_ROWS) {
         int cx = editor_x + line_no_w + 10 + (int)cursor_col * 6;
@@ -3452,7 +3582,7 @@ static void handle_app_key(gui_state_t *st, int key) {
         } else if (key == '\t') {
             for (int i = 0; i < 4; i++) code_insert_char(st, ' ');
         } else if (key == '\n') {
-            code_insert_char(st, '\n');
+            code_insert_newline(st);
         } else if (key >= 32 && key <= 126) {
             code_insert_char(st, (char)key);
         }
