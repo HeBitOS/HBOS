@@ -12,6 +12,7 @@
 #include "../input/mouse.h"
 #include "../net.h"
 #include "../usb_hid.h"
+#include "../xhci.h"
 #include "../string.h"
 #include "../tls.h"
 #include "../unistd.h"
@@ -42,6 +43,7 @@ extern int hbos_gcc_last_return(void);
 #define GUI_APP_SNAKE 3
 #define GUI_APP_BROWSER 4
 #define GUI_APP_CODE 5
+#define GUI_APP_DIAG 6
 
 #define ACTION_W 116
 #define ACTION_H 28
@@ -161,6 +163,7 @@ static const gui_app_t gui_apps[] = {
     {"贪吃蛇", "方向键移动", GUI_APP_SNAKE},
     {"浏览器", "打开 HTTP/HTTPS 网页", GUI_APP_BROWSER},
     {"代码工作台", "编辑、保存、运行 C 文件", GUI_APP_CODE},
+    {"诊断台", "查看驱动、网络、运行状态", GUI_APP_DIAG},
 };
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
@@ -1344,16 +1347,17 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         const gui_app_t *app = &gui_apps[i];
         if (!app) continue;
         int card_w = 250;
-        int card_h = 78;
+        int card_h = 62;
         int col = (int)(i & 1);
         int row = (int)(i >> 1);
         int x = tx + col * (card_w + 18);
-        int y = ty + 88 + row * (card_h + 16);
+        int y = ty + 82 + row * (card_h + 10);
         uint32_t accent = app->mode == GUI_APP_NOTES ? rgb(85, 180, 120) :
                           app->mode == GUI_APP_CALC ? rgb(23, 147, 209) :
                           app->mode == GUI_APP_UWC ? rgb(244, 194, 82) :
                           app->mode == GUI_APP_SNAKE ? rgb(124, 220, 154) :
                           app->mode == GUI_APP_CODE ? rgb(102, 214, 255) :
+                          app->mode == GUI_APP_DIAG ? rgb(240, 168, 90) :
                                                         rgb(78, 192, 236);
         if ((int)i == selected) {
             vgradient(x, y, card_w, card_h, rgb_lift(accent, 8), rgb_lift(accent, -28));
@@ -1365,17 +1369,17 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         rect(x, y, card_w, 1, (int)i == selected ? rgb_lift(accent, 80) : rgb(56, 78, 98));
         rect(x, y, 6, card_h, accent);
         rect(x, y + card_h - 1, card_w, 1, rgb(6, 10, 16));
-        vgradient(x + 20, y + 18, 34, 34, rgb_lift(accent, 24), rgb_lift(accent, -16));
-        border(x + 20, y + 18, 34, 34, rgb_lift(accent, -30));
-        rect(x + 28, y + 26, 18, 18, rgb(14, 22, 32));
+        vgradient(x + 20, y + 14, 30, 30, rgb_lift(accent, 24), rgb_lift(accent, -16));
+        border(x + 20, y + 14, 30, 30, rgb_lift(accent, -30));
+        rect(x + 27, y + 21, 16, 16, rgb(14, 22, 32));
         if ((int)i == selected) {
             rect(x + card_w - 30, y + card_h - 22, 14, 6, accent);
         }
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, app->name);
-        text_clipped(x + 70, y + 18, x + card_w - 12, line, rgb(238, 246, 252), 1);
-        text_clipped(x + 70, y + 42, x + card_w - 12, app->description, rgb(168, 188, 202), 1);
+        text_clipped(x + 66, y + 14, x + card_w - 12, line, rgb(238, 246, 252), 1);
+        text_clipped(x + 66, y + 36, x + card_w - 12, app->description, rgb(168, 188, 202), 1);
     }
     text(tx, ty + 374, "方向键选择  Enter 打开  鼠标点击卡片选择", rgb(132, 150, 166), 1);
 }
@@ -2347,6 +2351,140 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     text(tx + 12, l.bottom_y + 34, line, rgb(148, 168, 180), 1);
 }
 
+static int diag_line(int x, int y, int max_x, const char *label, const char *value, uint32_t color) {
+    char line[128];
+    line2(line, sizeof(line), label, value);
+    text_clipped(x, y, max_x, line, color, 1);
+    return y + 18;
+}
+
+static int diag_u32(int x, int y, int max_x, const char *label, uint32_t value, const char *suffix) {
+    char line[128];
+    line_u32(line, sizeof(line), label, value, suffix ? suffix : "");
+    text_clipped(x, y, max_x, line, rgb(210, 221, 230), 1);
+    return y + 18;
+}
+
+static int diag_int(int x, int y, int max_x, const char *label, int value) {
+    char line[128];
+    uint32_t pos = 0;
+    line[0] = 0;
+    append_str(line, sizeof(line), &pos, label);
+    append_int(line, sizeof(line), &pos, value);
+    text_clipped(x, y, max_x, line, rgb(210, 221, 230), 1);
+    return y + 18;
+}
+
+static void diag_ready(char *buf, uint32_t cap, const char *label, int ready) {
+    line2(buf, cap, label, ready ? "ready" : "not ready");
+}
+
+static void diag_pci(char *buf, uint32_t cap, const net_device_t *dev) {
+    uint32_t pos = 0;
+    buf[0] = 0;
+    append_str(buf, cap, &pos, "PCI: ");
+    append_uint(buf, cap, &pos, (uint32_t)dev->vendor_id);
+    append_char(buf, cap, &pos, ':');
+    append_uint(buf, cap, &pos, (uint32_t)dev->device_id);
+    append_str(buf, cap, &pos, " bus ");
+    append_uint(buf, cap, &pos, (uint32_t)dev->bus);
+    append_char(buf, cap, &pos, ':');
+    append_uint(buf, cap, &pos, (uint32_t)dev->slot);
+    append_char(buf, cap, &pos, '.');
+    append_uint(buf, cap, &pos, (uint32_t)dev->func);
+}
+
+static void draw_diag_section(int x, int y, int w, const char *title, uint32_t accent) {
+    rect(x, y, w, 1, rgb_lift(accent, -18));
+    rect(x, y + 1, 4, 16, accent);
+    text(x + 12, y + 5, title, rgb(236, 242, 246), 1);
+}
+
+static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
+    (void)win_h;
+    int content_w = win_w - 72;
+    if (content_w < 520) content_w = 520;
+    int col_w = (content_w - 24) / 2;
+    int right_x = tx + col_w + 24;
+    int max_l = tx + col_w - 8;
+    int max_r = right_x + col_w - 8;
+    char line[160];
+
+    text(tx, ty, "诊断台", rgb(240, 168, 90), 1);
+    uint64_t total = pmm_get_total_mem();
+    uint64_t free = pmm_get_free_mem();
+    uint64_t used = total > free ? total - free : 0;
+    uint32_t pos = 0;
+    line[0] = 0;
+    append_str(line, sizeof(line), &pos, "内存 ");
+    append_uint(line, sizeof(line), &pos, (uint32_t)(used / 1024));
+    append_str(line, sizeof(line), &pos, "K / ");
+    append_uint(line, sizeof(line), &pos, (uint32_t)(total / 1024));
+    append_str(line, sizeof(line), &pos, "K  任务 ");
+    append_uint(line, sizeof(line), &pos, (uint32_t)task_get_count());
+    append_str(line, sizeof(line), &pos, "  ");
+    append_str(line, sizeof(line), &pos, st->status ? st->status : "Ready");
+    text_clipped(tx + 82, ty + 2, tx + content_w, line, rgb(148, 168, 180), 1);
+
+    int y = ty + 42;
+    draw_diag_section(tx, y, col_w, "输入 / USB", rgb(240, 168, 90));
+    y += 26;
+    y = diag_line(tx, y, max_l, "鼠标: ", mouse_backend_name(), rgb(210, 221, 230));
+    y = diag_u32(tx, y, max_l, "xHCI 设备: ", (uint32_t)xhci_device_count(), "");
+    y = diag_u32(tx, y, max_l, "HID 设备: ", (uint32_t)hid_device_count(), "");
+    y = diag_u32(tx, y, max_l, "键盘数: ", (uint32_t)hid_keyboard_count(), "");
+    y = diag_u32(tx, y, max_l, "鼠标数: ", (uint32_t)hid_mouse_count(), "");
+    diag_ready(line, sizeof(line), "USB 键盘: ", usb_kbd_ready());
+    y = diag_line(tx, y, max_l, "", line, usb_kbd_ready() ? rgb(124, 220, 154) : rgb(230, 184, 74));
+    diag_ready(line, sizeof(line), "USB 鼠标: ", usb_mouse_ready());
+    y = diag_line(tx, y, max_l, "", line, usb_mouse_ready() ? rgb(124, 220, 154) : rgb(230, 184, 74));
+
+    y += 8;
+    draw_diag_section(tx, y, col_w, "存储 / 文件系统", rgb(244, 194, 82));
+    y += 26;
+    y = diag_line(tx, y, max_l, "块设备: ", block_backend_name(), rgb(210, 221, 230));
+    y = diag_u32(tx, y, max_l, "扇区数: ", block_sector_count(), "");
+    y = diag_line(tx, y, max_l, "文件系统: ", fs_backend_name(), rgb(210, 221, 230));
+    y = diag_u32(tx, y, max_l, "文件数: ", fs_get_count(), "");
+    y = diag_u32(tx, y, max_l, "容量: ", fs_capacity_bytes() / 1024, "K");
+    y = diag_u32(tx, y, max_l, "已用: ", fs_used_bytes() / 1024, "K");
+    y = diag_line(tx, y, max_l, "持久化: ", fs_is_disk() ? "HBFS disk" : "RAMFS",
+                  fs_is_disk() ? rgb(124, 220, 154) : rgb(230, 184, 74));
+
+    y = ty + 42;
+    draw_diag_section(right_x, y, col_w, "网络", rgb(78, 192, 236));
+    y += 26;
+    const net_device_t *dev = net_primary();
+    char ip[16], gw[16], dns[16];
+    net_ipv4_to_str(dev->ip, ip);
+    net_ipv4_to_str(dev->gateway, gw);
+    net_ipv4_to_str(dev->dns, dns);
+    y = diag_line(right_x, y, max_r, "驱动: ", net_driver_name(dev->driver), rgb(210, 221, 230));
+    y = diag_line(right_x, y, max_r, "网卡: ", dev->present ? "present" : "not present",
+                  dev->present ? rgb(124, 220, 154) : rgb(232, 86, 92));
+    y = diag_line(right_x, y, max_r, "链路: ", dev->link_ready ? "ready" : "down",
+                  dev->link_ready ? rgb(124, 220, 154) : rgb(230, 184, 74));
+    y = diag_line(right_x, y, max_r, "DHCP: ", dev->dhcp_ok ? "ok" : "pending",
+                  dev->dhcp_ok ? rgb(124, 220, 154) : rgb(230, 184, 74));
+    y = diag_line(right_x, y, max_r, "IP: ", ip, rgb(210, 221, 230));
+    y = diag_line(right_x, y, max_r, "网关: ", gw, rgb(210, 221, 230));
+    y = diag_line(right_x, y, max_r, "DNS: ", dns, rgb(210, 221, 230));
+    diag_pci(line, sizeof(line), dev);
+    y = diag_line(right_x, y, max_r, "", line, rgb(168, 188, 202));
+
+    y += 8;
+    draw_diag_section(right_x, y, col_w, "代码 / 运行", rgb(102, 214, 255));
+    y += 26;
+    y = diag_line(right_x, y, max_r, "文件: ", code_path(st), rgb(210, 221, 230));
+    y = diag_line(right_x, y, max_r, "状态: ", st->code_modified ? "modified" : "saved",
+                  st->code_modified ? rgb(255, 190, 110) : rgb(124, 220, 154));
+    y = diag_u32(right_x, y, max_r, "错误行: ", (uint32_t)(st->code_error_line > 0 ? st->code_error_line : hbos_gcc_last_error_line()), "");
+    y = diag_int(right_x, y, max_r, "返回值: ", hbos_gcc_last_return());
+    y = diag_line(right_x, y, max_r, "输出: ", g_code_output[0] ? g_code_output : "Ready",
+                  st->code_error_line > 0 ? rgb(255, 188, 190) : rgb(210, 221, 230));
+    y = diag_line(right_x, y, max_r, "GCC: ", hbos_gcc_last_error(), rgb(168, 188, 202));
+}
+
 static void snake_place_food(gui_state_t *st) {
     for (int step = 0; step < SNAKE_MAX; step++) {
         int x = (st->snake_tx + 5 + step * 3) % SNAKE_W;
@@ -2702,6 +2840,7 @@ static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state
     else if (mode == GUI_APP_SNAKE) draw_snake_app(tx, ty, st);
     else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, st);
     else if (mode == GUI_APP_CODE) draw_code_app(tx, ty, win_w, win_h, st);
+    else if (mode == GUI_APP_DIAG) draw_diag_app(tx, ty, win_w, win_h, st);
 }
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
@@ -3299,12 +3438,12 @@ static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
         int y = ty + 42;
         if (mx >= tx && mx < tx + ACTION_W && my >= y && my < y + ACTION_H) return 6;
         int card_w = 250;
-        int card_h = 78;
+        int card_h = 62;
         for (uint32_t i = 0; i < gui_app_count(); i++) {
             int col = (int)(i & 1);
             int row = (int)(i >> 1);
             int x = tx + col * (card_w + 18);
-            int cy = ty + 88 + row * (card_h + 16);
+            int cy = ty + 82 + row * (card_h + 10);
             if (mx >= x && mx < x + card_w && my >= cy && my < cy + card_h)
                 return APP_ACTION_BASE + (int)i;
         }
@@ -3688,13 +3827,13 @@ static void draw_start_menu(gui_state_t *st) {
     static const char *menu_items[] = {
         "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
         "记事本", "计算器", "贪吃蛇", "浏览器", "代码工作台",
-        "返回 Shell", "关机"
+        "诊断台", "返回 Shell", "关机"
     };
-    uint32_t menu_colors[11] = {
+    uint32_t menu_colors[12] = {
         rgb(85, 180, 120), rgb(230, 184, 74), rgb(196, 116, 230),
         rgb(23, 147, 209), rgb(85, 180, 120), rgb(102, 214, 255),
         rgb(124, 220, 154), rgb(78, 192, 236), rgb(102, 214, 255),
-        rgb(204, 156, 74), rgb(226, 86, 84)
+        rgb(240, 168, 90), rgb(204, 156, 74), rgb(226, 86, 84)
     };
     int count = sizeof(menu_items) / sizeof(menu_items[0]);
     for (int i = 0; i < count; i++) {
@@ -3702,13 +3841,13 @@ static void draw_start_menu(gui_state_t *st) {
         uint32_t accent = menu_colors[i];
         if (iy + 26 > my + mh) break;
         draw_panel_shell(mx + 6, iy, mw - 12, 26,
-                         i >= 9 ? rgb(42, 34, 30) : rgb(35, 42, 46),
-                         i >= 9 ? rgb(24, 22, 21) : rgb(20, 25, 29),
+                         i >= 10 ? rgb(42, 34, 30) : rgb(35, 42, 46),
+                         i >= 10 ? rgb(24, 22, 21) : rgb(20, 25, 29),
                          rgb(44, 56, 58), accent);
         rect(mx + 18, iy + 8, 10, 10, accent);
         rect(mx + 21, iy + 11, 4, 4, rgb(18, 24, 26));
         text(mx + 38, iy + 8, menu_items[i],
-             i >= 9 ? rgb(236, 226, 214) : rgb(230, 240, 238), 1);
+             i >= 10 ? rgb(236, 226, 214) : rgb(230, 240, 238), 1);
     }
 }
 
@@ -3808,6 +3947,7 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_SNAKE, "贪吃蛇");
     wm_set_app_title(GUI_APP_BROWSER, "浏览器");
     wm_set_app_title(GUI_APP_CODE, "代码工作台");
+    wm_set_app_title(GUI_APP_DIAG, "诊断台");
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";
@@ -3973,8 +4113,9 @@ static void cmd_gui(int argc, char **argv) {
                         else if (item == 6) gui_open_window(&st, WM_WIN_APP, GUI_APP_SNAKE, 0);
                         else if (item == 7) gui_open_window(&st, WM_WIN_APP, GUI_APP_BROWSER, 0);
                         else if (item == 8) gui_open_window(&st, WM_WIN_APP, GUI_APP_CODE, 0);
-                        else if (item == 9) break;
-                        else if (item == 10) { acpi_poweroff(); break; }
+                        else if (item == 9) gui_open_window(&st, WM_WIN_APP, GUI_APP_DIAG, 0);
+                        else if (item == 10) break;
+                        else if (item == 11) { acpi_poweroff(); break; }
                         redraw = 1;
                     } else {
                         wm_close_start_menu(&st.wm);
