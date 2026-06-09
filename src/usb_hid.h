@@ -35,11 +35,17 @@ typedef struct {
 
 int hid_init(void);
 int hid_device_count(void);
+int hid_keyboard_count(void);
+int hid_mouse_count(void);
 int hid_get_keyboard_report(int idx, hid_kbd_report_t *report);
 int hid_get_mouse_report(int idx, hid_mouse_report_t *report);
 void hid_poll(void);
+int usb_hid_init(void);
 int usb_kbd_init(void);
 int usb_kbd_getc(void);
 int usb_kbd_ready(void);
+int usb_mouse_init(void);
+int usb_mouse_get_report(hid_mouse_report_t *report);
+int usb_mouse_ready(void);
 
 #endif

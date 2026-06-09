@@ -13,5 +13,7 @@ typedef struct {
 int mouse_init(void);
 void mouse_shutdown(void);
 int mouse_poll(mouse_event_t *ev);
+int mouse_is_ready(void);
+const char *mouse_backend_name(void);
 
 #endif

@@ -8,6 +8,9 @@ static int hid_count;
 static hid_kbd_report_t last_report;
 static int usb_kbd_initialized;
 static int usb_kbd_index = -1;
+static int usb_hid_initialized;
+static int usb_mouse_initialized;
+static int usb_mouse_index = -1;
 
 #define USB_KEY_UP      0x100
 #define USB_KEY_DOWN    0x101
@@ -172,6 +175,22 @@ int hid_device_count(void) {
     return hid_count;
 }
 
+int hid_keyboard_count(void) {
+    int count = 0;
+    for (int i = 0; i < hid_count; i++) {
+        if (hid_devices[i].active && hid_devices[i].type == HID_KEYBOARD) count++;
+    }
+    return count;
+}
+
+int hid_mouse_count(void) {
+    int count = 0;
+    for (int i = 0; i < hid_count; i++) {
+        if (hid_devices[i].active && hid_devices[i].type == HID_MOUSE) count++;
+    }
+    return count;
+}
+
 int hid_get_keyboard_report(int idx, hid_kbd_report_t *report) {
     if (idx < 0 || idx >= hid_count) return -1;
     hid_device_t *dev = &hid_devices[idx];
@@ -198,11 +217,18 @@ void hid_poll(void) {
     xhci_poll();
 }
 
+int usb_hid_init(void) {
+    if (usb_hid_initialized) return 0;
+    if (xhci_init() < 0) return -1;
+    if (hid_init() <= 0) return -1;
+    usb_hid_initialized = 1;
+    return 0;
+}
+
 /** 初始化 USB HID 键盘（由 shell 调用） */
 int usb_kbd_init(void) {
     if (usb_kbd_initialized) return 0;
-    if (xhci_init() < 0) return -1;
-    if (hid_init() <= 0) return -1;
+    if (usb_hid_init() < 0) return -1;
     for (int i = 0; i < hid_count; i++) {
         if (hid_devices[i].active && hid_devices[i].type == HID_KEYBOARD) {
             usb_kbd_index = i;
@@ -248,4 +274,28 @@ int usb_kbd_getc(void) {
 
 int usb_kbd_ready(void) {
     return usb_kbd_initialized;
+}
+
+int usb_mouse_init(void) {
+    if (usb_mouse_initialized) return 0;
+    if (usb_hid_init() < 0) return -1;
+    for (int i = 0; i < hid_count; i++) {
+        if (hid_devices[i].active && hid_devices[i].type == HID_MOUSE) {
+            usb_mouse_index = i;
+            break;
+        }
+    }
+    if (usb_mouse_index < 0) return -1;
+    usb_mouse_initialized = 1;
+    return 0;
+}
+
+int usb_mouse_get_report(hid_mouse_report_t *report) {
+    if (!usb_mouse_initialized || !report) return -1;
+    if (hid_get_mouse_report(usb_mouse_index, report) < 0) return -1;
+    return 0;
+}
+
+int usb_mouse_ready(void) {
+    return usb_mouse_initialized;
 }

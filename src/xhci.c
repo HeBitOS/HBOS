@@ -424,6 +424,8 @@ static uint64_t *xhci_alloc_transfer_ring(uint64_t *ring_phys) {
 }
 
 int xhci_init(void) {
+    if (xhci.initialized) return 0;
+
     pci_device_t dev;
     if (pci_find_class(XHCI_PCI_CLASS, XHCI_PCI_SUBCLASS, XHCI_PCI_PROGIF, &dev) < 0) {
         return -1;

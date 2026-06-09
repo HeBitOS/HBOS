@@ -11,6 +11,7 @@
 #include "../graphics/graphics.h"
 #include "../input/mouse.h"
 #include "../net.h"
+#include "../usb_hid.h"
 #include "../string.h"
 #include "../tls.h"
 #include "../unistd.h"
@@ -1305,10 +1306,14 @@ static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
     while (line[pos]) pos++;
     append_uint(line, sizeof(line), &pos, (uint32_t)h);
     text(tx, ty + 198, line, rgb(210, 221, 230), 1);
+    line2(line, sizeof(line), "鼠标: ", mouse_backend_name());
+    text(tx, ty + 220, line, rgb(210, 221, 230), 1);
+    line_u32(line, sizeof(line), "USB HID: ", (uint32_t)hid_device_count(), "");
+    text(tx, ty + 242, line, rgb(210, 221, 230), 1);
 
-    text(tx, ty + 226, "活动任务", rgb(215, 152, 244), 1);
+    text(tx, ty + 270, "活动任务", rgb(215, 152, 244), 1);
     uint32_t max = (uint32_t)task_get_count();
-    if (max > 4) max = 4;
+    if (max > 3) max = 3;
     for (uint32_t i = 0; i < max; i++) {
         const task_t *task = task_get_active(i);
         if (!task) continue;
@@ -1319,7 +1324,7 @@ static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
         append_str(line, sizeof(line), &pos, task->name);
         append_str(line, sizeof(line), &pos, " ");
         append_str(line, sizeof(line), &pos, task_state_name(task->state));
-        text(tx + 18, ty + 248 + (int)i * 20, line, rgb(220, 230, 238), 1);
+        text(tx + 18, ty + 292 + (int)i * 20, line, rgb(220, 230, 238), 1);
     }
 }
 
@@ -3806,6 +3811,7 @@ static void cmd_gui(int argc, char **argv) {
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";
+    else st.status = mouse_backend_name();
     gui_open_panel_window(&st, PANEL_FILES);
 
     uint64_t surface_bytes = (uint64_t)w * (uint64_t)h * sizeof(uint32_t);

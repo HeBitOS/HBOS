@@ -6,6 +6,7 @@
 #include "../core/task.h"
 #include "../fcntl.h"
 #include "../fs.h"
+#include "../input/mouse.h"
 #include "../net.h"
 #include "../string.h"
 #include "../unistd.h"
@@ -219,7 +220,8 @@ static void cmd_drivers(int argc, char **argv) {
     console_puts("  PS/2 keyboard: "); print_ready(1); console_puts("\n");
     console_puts("  USB xHCI devices: "); print_uint((uint32_t)xhci_device_count()); console_puts("\n");
     console_puts("  USB HID devices:  "); print_uint((uint32_t)hid_device_count()); console_puts("\n");
-    console_puts("  USB keyboard:     "); print_ready(usb_kbd_ready()); console_puts("\n\n");
+    console_puts("  USB keyboard:     "); print_ready(usb_kbd_ready()); console_puts("\n");
+    console_puts("  mouse backend:    "); console_puts(mouse_backend_name()); console_puts("\n\n");
 
     console_puts("\x1b[36mStorage:\x1b[0m\n");
     console_puts("  block backend: "); console_puts(block_backend_name()); console_puts("\n");

@@ -1,4 +1,5 @@
 #include "mouse.h"
+#include "../usb_hid.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,9 +13,16 @@
 #define MOUSE_MIDDLE 0x04
 
 static int mouse_ready;
+static int mouse_backend;
 static int mouse_packet_size = 3;
 static uint8_t packet[4];
 static uint8_t packet_i;
+
+enum {
+    MOUSE_BACKEND_NONE = 0,
+    MOUSE_BACKEND_PS2,
+    MOUSE_BACKEND_USB,
+};
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -85,9 +93,8 @@ static int mouse_read_id(uint8_t *id) {
     return read_data(id);
 }
 
-int mouse_init(void) {
+static int ps2_mouse_init(void) {
     uint8_t status = 0;
-    mouse_ready = 0;
     mouse_packet_size = 3;
     packet_i = 0;
 
@@ -109,22 +116,44 @@ int mouse_init(void) {
     }
     if (mouse_set_sample_rate(60) < 0) return -1;
     if (write_mouse(0xF4) < 0 || read_ack() < 0) return -1;
-    mouse_ready = 1;
     return 0;
+}
+
+int mouse_init(void) {
+    mouse_ready = 0;
+    mouse_backend = MOUSE_BACKEND_NONE;
+
+    if (ps2_mouse_init() == 0) {
+        mouse_ready = 1;
+        mouse_backend = MOUSE_BACKEND_PS2;
+        return 0;
+    }
+
+    if (usb_mouse_init() == 0) {
+        mouse_ready = 1;
+        mouse_backend = MOUSE_BACKEND_USB;
+        return 0;
+    }
+
+    return -1;
 }
 
 void mouse_shutdown(void) {
     if (!mouse_ready) return;
+    if (mouse_backend != MOUSE_BACKEND_PS2) {
+        mouse_ready = 0;
+        mouse_backend = MOUSE_BACKEND_NONE;
+        return;
+    }
     (void)write_mouse(0xF5);
     (void)read_ack();
     flush_output();
     mouse_ready = 0;
+    mouse_backend = MOUSE_BACKEND_NONE;
     packet_i = 0;
 }
 
-int mouse_poll(mouse_event_t *ev) {
-    if (!mouse_ready || !ev) return 0;
-
+static int ps2_mouse_poll(mouse_event_t *ev) {
     while (inb(PS2_STATUS) & 0x01) {
         uint8_t status = inb(PS2_STATUS);
         if (!(status & 0x20)) return 0;
@@ -155,4 +184,34 @@ int mouse_poll(mouse_event_t *ev) {
     }
 
     return 0;
+}
+
+static int usb_mouse_poll(mouse_event_t *ev) {
+    hid_mouse_report_t report;
+    if (usb_mouse_get_report(&report) < 0) return 0;
+    if (report.x == 0 && report.y == 0 && report.wheel == 0 &&
+        report.buttons == 0) return 0;
+
+    ev->dx = report.x;
+    ev->dy = report.y;
+    ev->dz = report.wheel;
+    ev->buttons = report.buttons & (MOUSE_LEFT | MOUSE_RIGHT | MOUSE_MIDDLE);
+    return 1;
+}
+
+int mouse_poll(mouse_event_t *ev) {
+    if (!mouse_ready || !ev) return 0;
+    if (mouse_backend == MOUSE_BACKEND_USB) return usb_mouse_poll(ev);
+    if (mouse_backend == MOUSE_BACKEND_PS2) return ps2_mouse_poll(ev);
+    return 0;
+}
+
+int mouse_is_ready(void) {
+    return mouse_ready;
+}
+
+const char *mouse_backend_name(void) {
+    if (mouse_backend == MOUSE_BACKEND_PS2) return "ps2";
+    if (mouse_backend == MOUSE_BACKEND_USB) return "usb-hid";
+    return "none";
 }
