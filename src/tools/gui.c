@@ -44,6 +44,7 @@ extern int hbos_gcc_last_return(void);
 #define GUI_APP_BROWSER 4
 #define GUI_APP_CODE 5
 #define GUI_APP_DIAG 6
+#define GUI_APP_CLOCK 7
 
 #define ACTION_W 116
 #define ACTION_H 28
@@ -104,6 +105,8 @@ typedef struct {
     char file_path[GUI_PATH_MAX];
     char note_buf[NOTE_EDIT_CAP];
     uint32_t note_len;
+    uint32_t note_cursor;
+    int note_dirty;
     int note_loaded;
     char note_name[MAX_FILENAME];
     char browser_url[BROWSER_URL_CAP];
@@ -125,6 +128,9 @@ typedef struct {
     int delete_confirm_index;
     const char *status;
     int splash_ticks;
+    int snap_preview;   // 拖动吸附预览：WM_SNAP_*
+    uint8_t clock_last_sec;
+    int switcher_ticks; // 切换器浮层剩余显示帧数
 } gui_state_t;
 
 static char g_code_buf[CODE_EDIT_CAP];
@@ -164,6 +170,7 @@ static const gui_app_t gui_apps[] = {
     {"浏览器", "打开 HTTP/HTTPS 网页", GUI_APP_BROWSER},
     {"代码工作台", "编辑、保存、运行 C 文件", GUI_APP_CODE},
     {"诊断台", "查看驱动、网络、运行状态", GUI_APP_DIAG},
+    {"时钟", "实时时钟与日期", GUI_APP_CLOCK},
 };
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
@@ -185,6 +192,7 @@ static void gui_select_file(gui_state_t *st, int index);
 static int gui_select_path(gui_state_t *st, const char *path);
 static void draw_desktop(int w, int h, gui_state_t *st);
 static void draw_start_menu(gui_state_t *st);
+static void draw_window_switcher(int w, int h, gui_state_t *st);
 static void gui_sync_focus(gui_state_t *st);
 
 static void clamp_window(gui_state_t *st, int w, int h, int win_w, int win_h) {
@@ -1411,6 +1419,8 @@ static void note_load(gui_state_t *st) {
         st->note_len = fs_read_file_data(f, 0, st->note_buf, n);
         st->note_buf[st->note_len] = 0;
     }
+    st->note_cursor = st->note_len;
+    st->note_dirty = 0;
     st->note_loaded = 1;
 }
 
@@ -1428,28 +1438,108 @@ static void note_save(gui_state_t *st) {
         return;
     }
     (void)fs_sync();
+    st->note_dirty = 0;
     st->status = "笔记已保存";
 }
 
+// 在光标处插入一个字节，仅修改内存缓冲，标记 dirty（Ctrl+S 才落盘）
 static void note_insert(gui_state_t *st, char c) {
     if (st->note_len + 1 >= NOTE_EDIT_CAP) {
         st->status = "笔记已满";
         return;
     }
-    st->note_buf[st->note_len++] = c;
+    if (st->note_cursor > st->note_len) st->note_cursor = st->note_len;
+    for (uint32_t i = st->note_len; i > st->note_cursor; i--)
+        st->note_buf[i] = st->note_buf[i - 1];
+    st->note_buf[st->note_cursor] = c;
+    st->note_len++;
+    st->note_cursor++;
     st->note_buf[st->note_len] = 0;
-    note_save(st);
+    st->note_dirty = 1;
+    st->status = "编辑中（Ctrl+S 保存）";
 }
 
+// 删除光标前的一个 UTF-8 字符
 static void note_backspace(gui_state_t *st) {
-    if (st->note_len == 0) return;
-    st->note_len--;
-    while (st->note_len > 0 &&
-           ((uint8_t)st->note_buf[st->note_len] & 0xC0) == 0x80) {
-        st->note_len--;
-    }
+    if (st->note_cursor == 0) return;
+    uint32_t start = st->note_cursor - 1;
+    while (start > 0 && ((uint8_t)st->note_buf[start] & 0xC0) == 0x80) start--;
+    uint32_t removed = st->note_cursor - start;
+    for (uint32_t i = start; i + removed <= st->note_len; i++)
+        st->note_buf[i] = st->note_buf[i + removed];
+    st->note_len -= removed;
+    st->note_cursor = start;
     st->note_buf[st->note_len] = 0;
-    note_save(st);
+    st->note_dirty = 1;
+    st->status = "编辑中（Ctrl+S 保存）";
+}
+
+// 删除光标后的一个 UTF-8 字符
+static void note_delete_forward(gui_state_t *st) {
+    if (st->note_cursor >= st->note_len) return;
+    uint32_t end = st->note_cursor + 1;
+    while (end < st->note_len && ((uint8_t)st->note_buf[end] & 0xC0) == 0x80) end++;
+    uint32_t removed = end - st->note_cursor;
+    for (uint32_t i = st->note_cursor; i + removed <= st->note_len; i++)
+        st->note_buf[i] = st->note_buf[i + removed];
+    st->note_len -= removed;
+    st->note_buf[st->note_len] = 0;
+    st->note_dirty = 1;
+    st->status = "编辑中（Ctrl+S 保存）";
+}
+
+// 光标按 UTF-8 边界左移
+static void note_cursor_left(gui_state_t *st) {
+    if (st->note_cursor == 0) return;
+    st->note_cursor--;
+    while (st->note_cursor > 0 &&
+           ((uint8_t)st->note_buf[st->note_cursor] & 0xC0) == 0x80)
+        st->note_cursor--;
+}
+
+// 光标按 UTF-8 边界右移
+static void note_cursor_right(gui_state_t *st) {
+    if (st->note_cursor >= st->note_len) return;
+    st->note_cursor++;
+    while (st->note_cursor < st->note_len &&
+           ((uint8_t)st->note_buf[st->note_cursor] & 0xC0) == 0x80)
+        st->note_cursor++;
+}
+
+// 返回光标所在行的起始偏移
+static uint32_t note_line_start(gui_state_t *st, uint32_t off) {
+    while (off > 0 && st->note_buf[off - 1] != '\n') off--;
+    return off;
+}
+
+static void note_cursor_home(gui_state_t *st) {
+    st->note_cursor = note_line_start(st, st->note_cursor);
+}
+
+static void note_cursor_end(gui_state_t *st) {
+    while (st->note_cursor < st->note_len && st->note_buf[st->note_cursor] != '\n')
+        st->note_cursor++;
+}
+
+// 上/下移动光标，尽量保持当前列
+static void note_cursor_vertical(gui_state_t *st, int dir) {
+    uint32_t ls = note_line_start(st, st->note_cursor);
+    uint32_t col = st->note_cursor - ls;
+    if (dir < 0) {
+        if (ls == 0) { st->note_cursor = 0; return; }
+        uint32_t prev = note_line_start(st, ls - 1);
+        uint32_t prev_len = (ls - 1) - prev;
+        st->note_cursor = prev + (col < prev_len ? col : prev_len);
+    } else {
+        uint32_t nl = st->note_cursor;
+        while (nl < st->note_len && st->note_buf[nl] != '\n') nl++;
+        if (nl >= st->note_len) { st->note_cursor = st->note_len; return; }
+        uint32_t next = nl + 1;
+        uint32_t next_end = next;
+        while (next_end < st->note_len && st->note_buf[next_end] != '\n') next_end++;
+        uint32_t next_len = next_end - next;
+        st->note_cursor = next + (col < next_len ? col : next_len);
+    }
 }
 
 static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
@@ -1459,7 +1549,7 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     int edit_w = win_w - list_w - 86;
     if (edit_w < 260) edit_w = 260;
     text(tx, ty, "记事本", rgb(124, 220, 154), 1);
-    text(tx, ty + 40, "选择左侧文件后直接编辑，输入会自动保存", rgb(148, 162, 174), 1);
+    text(tx, ty + 40, "选择左侧文件后编辑", rgb(148, 162, 174), 1);
     char line[96];
 
     vgradient(tx, ty + 70, list_w, 222, rgb(22, 30, 40), rgb(14, 20, 28));
@@ -1498,17 +1588,36 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
 
     line2(line, sizeof(line), "文件: ", gui_note_name(st));
     text_clipped(edit_x, ty + 70, edit_x + edit_w, line, rgb(210, 221, 230), 1);
-    line_u32(line, sizeof(line), "大小: ", st->note_len, "B");
-    text(edit_x, ty + 92, line, rgb(210, 221, 230), 1);
+    {
+        uint32_t pos = 0;
+        line[0] = 0;
+        append_str(line, sizeof(line), &pos, "大小: ");
+        append_uint(line, sizeof(line), &pos, st->note_len);
+        append_str(line, sizeof(line), &pos, "B");
+        if (st->note_dirty) append_str(line, sizeof(line), &pos, "  ●未保存");
+        else append_str(line, sizeof(line), &pos, "  已保存");
+    }
+    text(edit_x, ty + 92, line, st->note_dirty ? rgb(244, 194, 82) : rgb(150, 200, 160), 1);
+    text_clipped(edit_x, ty + 50, edit_x + edit_w,
+                 "方向键移动  Ctrl+S 保存  支持中间插入/删除",
+                 rgb(120, 150, 168), 1);
     vgradient(edit_x, ty + 118, edit_w, 174, rgb(8, 14, 22), rgb(2, 6, 12));
     rect(edit_x, ty + 118, edit_w, 1, rgb(28, 56, 36));
     rect(edit_x, ty + 291, edit_w, 1, rgb(8, 14, 22));
     border(edit_x, ty + 118, edit_w, 174, rgb(85, 180, 120));
     int x = edit_x + 8;
     int y = ty + 126;
+    int cursor_x = x;
+    int cursor_y = y;
+    int cursor_drawn = 0;
     utf8_state_t utf8;
     utf8_init(&utf8);
     for (uint32_t i = 0; i < st->note_len && y < ty + 280; i++) {
+        if (i == st->note_cursor) {
+            cursor_x = x;
+            cursor_y = y;
+            cursor_drawn = 1;
+        }
         if (st->note_buf[i] == '\n') {
             x = edit_x + 8;
             y += 18;
@@ -1528,9 +1637,13 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
             y += 18;
         }
     }
-    if (y < ty + 280) {
-        rect(x, y + 12, 2, 12, rgb(124, 220, 154));
-        rect(x + 2, y + 12, 6, 2, rgb(124, 220, 154));
+    if (!cursor_drawn) {
+        cursor_x = x;
+        cursor_y = y;
+    }
+    // 在光标实际位置绘制竖线光标
+    if (cursor_y < ty + 280) {
+        rect(cursor_x, cursor_y, 2, 14, rgb(124, 220, 154));
     }
 }
 
@@ -1691,6 +1804,71 @@ static void draw_uwc_app(int tx, int ty, gui_state_t *st) {
     text(tx, ty + 64, line, rgb(210, 221, 230), 1);
     line_u32(line, sizeof(line), "行数: ", count_file_lines(f), "");
     text(tx, ty + 86, line, rgb(210, 221, 230), 1);
+}
+
+// 读取 CMOS 日期，格式化为 YYYY-MM-DD
+static void date_line(char *buf, uint32_t cap) {
+    uint8_t status_b = cmos_read(0x0b);
+    uint8_t day = cmos_read(0x07);
+    uint8_t mon = cmos_read(0x08);
+    uint8_t year = cmos_read(0x09);
+    uint8_t cent = cmos_read(0x32);
+    if ((status_b & 0x04) == 0) {
+        day = bcd_to_bin(day);
+        mon = bcd_to_bin(mon);
+        year = bcd_to_bin(year);
+        cent = bcd_to_bin(cent);
+    }
+    uint32_t full_year = (cent ? (uint32_t)cent * 100 : 2000) + year;
+    uint32_t pos = 0;
+    buf[0] = 0;
+    append_uint(buf, cap, &pos, full_year);
+    append_char(buf, cap, &pos, '-');
+    if (mon < 10) append_char(buf, cap, &pos, '0');
+    append_uint(buf, cap, &pos, mon);
+    append_char(buf, cap, &pos, '-');
+    if (day < 10) append_char(buf, cap, &pos, '0');
+    append_uint(buf, cap, &pos, day);
+}
+
+static const char *weekday_name(void) {
+    uint8_t status_b = cmos_read(0x0b);
+    uint8_t wd = cmos_read(0x06);
+    if ((status_b & 0x04) == 0) wd = bcd_to_bin(wd);
+    static const char *names[] = {
+        "", "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"
+    };
+    if (wd >= 1 && wd <= 7) return names[wd];
+    return "";
+}
+
+static void draw_clock_app(int tx, int ty, int win_w, gui_state_t *st) {
+    (void)st;
+    char line[48];
+    text(tx, ty, "时钟", rgb(102, 214, 255), 1);
+
+    int box_w = win_w - 76;
+    if (box_w < 280) box_w = 280;
+    int box_h = 150;
+    int by = ty + 48;
+    soft_shadow(tx, by, box_w, box_h);
+    draw_panel_shell(tx, by, box_w, box_h, rgb(18, 30, 44), rgb(6, 12, 20),
+                     rgb(40, 76, 104), rgb(102, 214, 255));
+
+    // 大号时间显示（scale 4）
+    time_line(line, sizeof(line));
+    int digit_w = 6 * 4;       // 字形宽 6px * scale
+    int tw = (int)strlen(line) * (digit_w + 4);
+    int cx = tx + (box_w - tw) / 2;
+    if (cx < tx + 12) cx = tx + 12;
+    text(cx, by + 30, line, rgb(120, 224, 255), 4);
+
+    // 日期 + 星期
+    date_line(line, sizeof(line));
+    text(tx + 24, by + box_h - 36, line, rgb(200, 224, 240), 2);
+    text(tx + box_w - 120, by + box_h - 32, weekday_name(), rgb(160, 200, 224), 1);
+
+    text(tx, by + box_h + 24, "时间来自 CMOS 实时时钟，每秒自动刷新", rgb(120, 150, 168), 1);
 }
 
 static int gui_has_suffix(const char *path, const char *suffix) {
@@ -2841,6 +3019,7 @@ static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state
     else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, st);
     else if (mode == GUI_APP_CODE) draw_code_app(tx, ty, win_w, win_h, st);
     else if (mode == GUI_APP_DIAG) draw_diag_app(tx, ty, win_w, win_h, st);
+    else if (mode == GUI_APP_CLOCK) draw_clock_app(tx, ty, win_w, st);
 }
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
@@ -2902,6 +3081,7 @@ static void draw_gui_screen(int w, int h, gui_state_t *st) {
     gui_sync_focus(st);
     draw_desktop(w, h, st);
     draw_start_menu(st);
+    draw_window_switcher(w, h, st);
     if (st->splash_ticks > 0)
         draw_splash_window(w, h, st->splash_ticks);
 }
@@ -2989,6 +3169,21 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     if (st->wm.active_window >= 0 && st->wm.active_window < st->wm.window_count)
         draw_one_window(w, h, st, st->wm.active_window);
 
+    // 拖动吸附预览：高亮即将落入的区域
+    if (st->snap_preview != WM_SNAP_NONE) {
+        int px = 0, py = 0, pw = w, ph = h - TASKBAR_H;
+        if (st->snap_preview == WM_SNAP_LEFT) { pw = w / 2; }
+        else if (st->snap_preview == WM_SNAP_RIGHT) { px = w / 2; pw = w - w / 2; }
+        // WM_SNAP_TOP 使用整屏默认值
+        uint32_t accent = rgb(96, 196, 232);
+        for (int yy = py + 4; yy < py + ph - 4; yy += 3)
+            rect(px + 6, yy, pw - 12, 1, rgb(40, 70, 92));
+        rect(px + 4, py + 4, pw - 8, 3, accent);
+        rect(px + 4, py + ph - 7, pw - 8, 3, accent);
+        rect(px + 4, py + 4, 3, ph - 8, accent);
+        rect(px + pw - 7, py + 4, 3, ph - 8, accent);
+    }
+
     draw_taskbar_windows(h, st);
 }
 
@@ -3056,6 +3251,8 @@ static void gui_create_note(gui_state_t *st) {
         for (uint32_t i = 0; i < len; i++) st->note_buf[i] = msg[i];
         st->note_buf[len] = 0;
         st->note_len = len;
+        st->note_cursor = len;
+        st->note_dirty = 0;
         st->note_loaded = 1;
         gui_set_note_name(st, f->name);
         st->note_loaded = 1;
@@ -3629,17 +3826,59 @@ static int snake_auto_tick(gui_state_t *st) {
     return 1;
 }
 
+// 是否有未最小化的时钟窗口可见（需每秒刷新）
+static int gui_clock_visible(gui_state_t *st) {
+    for (int i = 0; i < st->wm.window_count; i++) {
+        wm_window_t *win = wm_get_window(&st->wm, i);
+        if (win && win->kind == WM_WIN_APP && win->mode == GUI_APP_CLOCK &&
+            win->state != WM_STATE_MINIMIZED)
+            return 1;
+    }
+    return 0;
+}
+
+// 时钟/任务栏时间每秒刷新一次
+static int clock_auto_tick(gui_state_t *st) {
+    uint8_t sec = cmos_second();
+    if (sec == st->clock_last_sec) return 0;
+    st->clock_last_sec = sec;
+    return gui_clock_visible(st);
+}
+
 static void handle_app_key(gui_state_t *st, int key) {
     if (key == '\t' && st->app_mode != GUI_APP_CODE) {
         gui_focus_next_window(st, 1);
+        if (st->wm.window_count > 1) st->switcher_ticks = 40;
         return;
     }
     gui_sync_focus(st);
     if (st->app_mode == GUI_APP_NOTES) {
         note_load(st);
-        if (key == GUI_KEY_BACKSPACE) note_backspace(st);
-        else if (key == '\n') note_insert(st, '\n');
-        else if (key >= 32 && key <= 126) note_insert(st, (char)key);
+        if (key == 19) {  // Ctrl+S
+            note_save(st);
+        } else if (key == GUI_KEY_BACKSPACE) {
+            note_backspace(st);
+        } else if (key == GUI_KEY_DELETE) {
+            note_delete_forward(st);
+        } else if (key == GUI_KEY_LEFT) {
+            note_cursor_left(st);
+        } else if (key == GUI_KEY_RIGHT) {
+            note_cursor_right(st);
+        } else if (key == GUI_KEY_UP) {
+            note_cursor_vertical(st, -1);
+        } else if (key == GUI_KEY_DOWN) {
+            note_cursor_vertical(st, 1);
+        } else if (key == GUI_KEY_HOME) {
+            note_cursor_home(st);
+        } else if (key == GUI_KEY_END) {
+            note_cursor_end(st);
+        } else if (key == '\n') {
+            note_insert(st, '\n');
+        } else if (key == '\t') {
+            for (int i = 0; i < 4; i++) note_insert(st, ' ');
+        } else if (key >= 32 && key <= 126) {
+            note_insert(st, (char)key);
+        }
     } else if (st->app_mode == GUI_APP_CALC) {
         if (key >= '0' && key <= '9') calc_digit(st, key - '0');
         else if (key == '+' || key == '-' || key == '*' || key == '/') calc_operator(st, (char)key);
@@ -3731,6 +3970,7 @@ static void handle_key(gui_state_t *st, int key) {
     if (gui_handle_rename_key(st, key)) return;
     if (key == '\t' || key == ' ') {
         gui_focus_next_window(st, 1);
+        if (st->wm.window_count > 1) st->switcher_ticks = 40;
     } else if (key == GUI_KEY_RIGHT && st->wm.window_count > 0 && st->app_mode == GUI_APP_NONE) {
         wm_window_t *win = gui_active_window(st);
         st->active = (st->active + 1) & 3;
@@ -3810,6 +4050,46 @@ static void handle_key(gui_state_t *st, int key) {
     }
 }
 
+// Tab 窗口切换器浮层：列出全部窗口并高亮当前焦点
+static void draw_window_switcher(int w, int h, gui_state_t *st) {
+    if (st->switcher_ticks <= 0) return;
+    int n = st->wm.window_count;
+    if (n <= 0) return;
+
+    int row_h = 30;
+    int pad = 14;
+    int ow = 360;
+    int oh = pad * 2 + 28 + n * row_h;
+    int ox = (w - ow) / 2;
+    int oy = (h - oh) / 2;
+
+    soft_shadow(ox, oy, ow, oh);
+    draw_panel_shell(ox, oy, ow, oh, rgb(30, 38, 46), rgb(14, 19, 25),
+                     rgb(70, 92, 100), rgb(102, 214, 255));
+    text(ox + pad, oy + pad, "切换窗口  (Tab 循环)", rgb(228, 240, 248), 1);
+    rect(ox + pad, oy + pad + 22, ow - pad * 2, 1, rgb(54, 74, 88));
+
+    int ry = oy + pad + 30;
+    for (int i = 0; i < n; i++) {
+        wm_window_t *win = wm_get_window(&st->wm, i);
+        if (!win) continue;
+        int active = (i == st->wm.active_window);
+        uint32_t accent = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : rgb(23, 147, 209);
+        if (active) {
+            vgradient(ox + pad, ry, ow - pad * 2, row_h - 4,
+                      rgb(28, 80, 116), rgb(16, 50, 78));
+            rect(ox + pad, ry, 3, row_h - 4, rgb(124, 220, 154));
+        }
+        rect(ox + pad + 12, ry + 9, 10, 10, accent);
+        const char *label = gui_window_title(win);
+        text_clipped(ox + pad + 32, ry + 7, ox + ow - pad - 60, label,
+                     active ? rgb(252, 254, 255) : rgb(200, 214, 226), 1);
+        if (win->state == WM_STATE_MINIMIZED)
+            text(ox + ow - pad - 54, ry + 7, "最小化", rgb(150, 168, 180), 1);
+        ry += row_h;
+    }
+}
+
 static void draw_start_menu(gui_state_t *st) {
     wm_state_t *wm = &st->wm;
     if (!wm->start_menu_open) return;
@@ -3827,13 +4107,14 @@ static void draw_start_menu(gui_state_t *st) {
     static const char *menu_items[] = {
         "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
         "记事本", "计算器", "贪吃蛇", "浏览器", "代码工作台",
-        "诊断台", "返回 Shell", "关机"
+        "诊断台", "时钟", "返回 Shell", "关机"
     };
-    uint32_t menu_colors[12] = {
+    uint32_t menu_colors[13] = {
         rgb(85, 180, 120), rgb(230, 184, 74), rgb(196, 116, 230),
         rgb(23, 147, 209), rgb(85, 180, 120), rgb(102, 214, 255),
         rgb(124, 220, 154), rgb(78, 192, 236), rgb(102, 214, 255),
-        rgb(240, 168, 90), rgb(204, 156, 74), rgb(226, 86, 84)
+        rgb(240, 168, 90), rgb(102, 214, 255), rgb(204, 156, 74),
+        rgb(226, 86, 84)
     };
     int count = sizeof(menu_items) / sizeof(menu_items[0]);
     for (int i = 0; i < count; i++) {
@@ -3841,13 +4122,13 @@ static void draw_start_menu(gui_state_t *st) {
         uint32_t accent = menu_colors[i];
         if (iy + 26 > my + mh) break;
         draw_panel_shell(mx + 6, iy, mw - 12, 26,
-                         i >= 10 ? rgb(42, 34, 30) : rgb(35, 42, 46),
-                         i >= 10 ? rgb(24, 22, 21) : rgb(20, 25, 29),
+                         i >= 11 ? rgb(42, 34, 30) : rgb(35, 42, 46),
+                         i >= 11 ? rgb(24, 22, 21) : rgb(20, 25, 29),
                          rgb(44, 56, 58), accent);
         rect(mx + 18, iy + 8, 10, 10, accent);
         rect(mx + 21, iy + 11, 4, 4, rgb(18, 24, 26));
         text(mx + 38, iy + 8, menu_items[i],
-             i >= 10 ? rgb(236, 226, 214) : rgb(230, 240, 238), 1);
+             i >= 11 ? rgb(236, 226, 214) : rgb(230, 240, 238), 1);
     }
 }
 
@@ -3919,6 +4200,10 @@ static void cmd_gui(int argc, char **argv) {
     int resize_edge = WM_EDGE_NONE;
     int resize_orig_x = 0, resize_orig_y = 0, resize_orig_w = 0, resize_orig_h = 0;
     int cursor_edge = WM_EDGE_NONE;
+    uint32_t frame_tick = 0;          // 自增帧计数，用于双击计时
+    uint32_t last_title_click = 0;    // 上次点击标题栏的帧
+    int last_title_idx = -1;          // 上次点击的窗口
+    int snap_hint = WM_SNAP_NONE;     // 拖动中预测的吸附目标
     gui_state_t st = {
         .active = PANEL_FILES,
         .selected_file = 0,
@@ -3948,6 +4233,7 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_BROWSER, "浏览器");
     wm_set_app_title(GUI_APP_CODE, "代码工作台");
     wm_set_app_title(GUI_APP_DIAG, "诊断台");
+    wm_set_app_title(GUI_APP_CLOCK, "时钟");
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";
@@ -4076,20 +4362,36 @@ static void cmd_gui(int argc, char **argv) {
                 gui_set_active_window_pos(&st, mx - drag_off_x, my - drag_off_y);
                 clamp_window(&st, w, h, win_w, win_h);
                 gui_store_focus(&st);
-                st.status = "窗口已移动";
+                // 根据指针靠近的屏幕边缘预测吸附目标
+                int prev_hint = snap_hint;
+                if (my <= 4) snap_hint = WM_SNAP_TOP;
+                else if (mx <= 4) snap_hint = WM_SNAP_LEFT;
+                else if (mx >= w - 5) snap_hint = WM_SNAP_RIGHT;
+                else snap_hint = WM_SNAP_NONE;
+                st.snap_preview = snap_hint;
+                st.status = snap_hint != WM_SNAP_NONE ? "松开吸附窗口" : "窗口已移动";
                 drag_pending = 1;
                 int moved = mx - drag_last_draw_x;
                 if (moved < 0) moved = -moved;
                 int moved_y = my - drag_last_draw_y;
                 if (moved_y < 0) moved_y = -moved_y;
-                if (moved + moved_y >= 12) {
+                if (moved + moved_y >= 6 || snap_hint != prev_hint) {
                     drag_last_draw_x = mx;
                     drag_last_draw_y = my;
                     redraw = 1;
                     drag_pending = 0;
                 }
             } else if (!left_down) {
-                if (dragging_window >= 0 && drag_pending) redraw = 1;
+                if (dragging_window >= 0) {
+                    if (snap_hint != WM_SNAP_NONE) {
+                        wm_snap_window(&st.wm, dragging_window, snap_hint);
+                        gui_sync_focus(&st);
+                        st.status = "窗口已吸附";
+                    }
+                    if (drag_pending || snap_hint != WM_SNAP_NONE) redraw = 1;
+                }
+                snap_hint = WM_SNAP_NONE;
+                st.snap_preview = WM_SNAP_NONE;
                 dragging_window = -1;
                 drag_pending = 0;
             }
@@ -4114,8 +4416,9 @@ static void cmd_gui(int argc, char **argv) {
                         else if (item == 7) gui_open_window(&st, WM_WIN_APP, GUI_APP_BROWSER, 0);
                         else if (item == 8) gui_open_window(&st, WM_WIN_APP, GUI_APP_CODE, 0);
                         else if (item == 9) gui_open_window(&st, WM_WIN_APP, GUI_APP_DIAG, 0);
-                        else if (item == 10) break;
-                        else if (item == 11) { acpi_poweroff(); break; }
+                        else if (item == 10) gui_open_window(&st, WM_WIN_APP, GUI_APP_CLOCK, 0);
+                        else if (item == 11) break;
+                        else if (item == 12) { acpi_poweroff(); break; }
                         redraw = 1;
                     } else {
                         wm_close_start_menu(&st.wm);
@@ -4166,15 +4469,27 @@ static void cmd_gui(int argc, char **argv) {
                             int title_idx = hit_window_titlebar(w, h, &st, mx, my);
                             if (title_idx >= 0) {
                                 gui_focus_window(&st, title_idx);
-                                int win_x, win_y, win_w, win_h;
-                                gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
-                                dragging_window = title_idx;
-                                drag_off_x = mx - win_x;
-                                drag_off_y = my - win_y;
-                                drag_last_draw_x = mx;
-                                drag_last_draw_y = my;
-                                drag_pending = 0;
-                                st.status = "拖动窗口";
+                                // 双击标题栏：最大化/还原（同一窗口、约 30 帧内）
+                                if (last_title_idx == title_idx &&
+                                    frame_tick - last_title_click < 30) {
+                                    wm_toggle_maximize(&st.wm, title_idx);
+                                    gui_sync_focus(&st);
+                                    last_title_idx = -1;
+                                    st.status = "窗口已最大化/还原";
+                                } else {
+                                    int win_x, win_y, win_w, win_h;
+                                    gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
+                                    dragging_window = title_idx;
+                                    drag_off_x = mx - win_x;
+                                    drag_off_y = my - win_y;
+                                    drag_last_draw_x = mx;
+                                    drag_last_draw_y = my;
+                                    drag_pending = 0;
+                                    snap_hint = WM_SNAP_NONE;
+                                    last_title_idx = title_idx;
+                                    last_title_click = frame_tick;
+                                    st.status = "拖动窗口";
+                                }
                             } else if (st.app_mode != GUI_APP_NONE) {
                                 int code_cmd = hit_code_command(w, h, &st, mx, my);
                                 if (code_cmd) {
@@ -4253,10 +4568,18 @@ static void cmd_gui(int argc, char **argv) {
         if (snake_auto_tick(&st)) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
+        if (clock_auto_tick(&st)) {
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
+        if (st.switcher_ticks > 0) {
+            st.switcher_ticks--;
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
         if (st.splash_ticks > 0) {
             st.splash_ticks--;
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
+        frame_tick++;
         task_yield();
     }
 

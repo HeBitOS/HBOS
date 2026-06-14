@@ -7,8 +7,8 @@
 
 static int g_titles_ready = 0;
 
-#define WM_APP_TITLE_COUNT 7
-#define WM_START_MENU_ROWS 12
+#define WM_APP_TITLE_COUNT 8
+#define WM_START_MENU_ROWS 13
 
 static const char *panel_titles[4];
 static const char *app_titles[WM_APP_TITLE_COUNT];
@@ -189,13 +189,44 @@ void wm_restore_window(wm_state_t *wm, int idx) {
     }
 }
 
+// 双击标题栏：在最大化与还原之间切换
+void wm_toggle_maximize(wm_state_t *wm, int idx) {
+    wm_window_t *win = wm_get_window(wm, idx);
+    if (!win) return;
+    if (win->state == WM_STATE_MAXIMIZED) wm_restore_window(wm, idx);
+    else wm_maximize_window(wm, idx);
+}
+
+// 边缘吸附：左半屏 / 右半屏 / 顶部最大化
+void wm_snap_window(wm_state_t *wm, int idx, int side) {
+    wm_window_t *win = wm_get_window(wm, idx);
+    if (!win || side == WM_SNAP_NONE) return;
+    if (side == WM_SNAP_TOP) {
+        wm_maximize_window(wm, idx);
+        return;
+    }
+    // 记录还原位置（仅在从普通态吸附时）
+    if (win->state == WM_STATE_NORMAL) {
+        win->prev_x = win->x;
+        win->prev_y = win->y;
+        win->prev_w = win->w;
+        win->prev_h = win->h;
+    }
+    win->state = WM_STATE_NORMAL;
+    int half = wm->desk_w / 2;
+    win->y = 0;
+    win->h = wm->desk_h - WM_TASKBAR_H;
+    win->w = half;
+    win->x = (side == WM_SNAP_LEFT) ? 0 : (wm->desk_w - half);
+}
+
 void wm_toggle_start_menu(wm_state_t *wm) {
     wm->start_menu_open = !wm->start_menu_open;
     if (wm->start_menu_open) {
         wm->menu_x = 10;
-        wm->menu_y = wm->desk_h - WM_TASKBAR_H - 380;
+        wm->menu_h = 420;
+        wm->menu_y = wm->desk_h - WM_TASKBAR_H - wm->menu_h;
         wm->menu_w = 220;
-        wm->menu_h = 380;
         if (wm->menu_y < 10) wm->menu_y = 10;
     }
 }

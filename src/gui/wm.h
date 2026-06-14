@@ -33,6 +33,13 @@ enum {
     WM_EDGE_SW    = 7,
 };
 
+enum {
+    WM_SNAP_NONE  = 0,
+    WM_SNAP_LEFT  = 1,
+    WM_SNAP_RIGHT = 2,
+    WM_SNAP_TOP   = 3,
+};
+
 typedef struct {
     int used;
     int kind;
@@ -65,6 +72,8 @@ void wm_resize_window(wm_state_t *wm, int idx, int w, int h);
 void wm_minimize_window(wm_state_t *wm, int idx);
 void wm_maximize_window(wm_state_t *wm, int idx);
 void wm_restore_window(wm_state_t *wm, int idx);
+void wm_toggle_maximize(wm_state_t *wm, int idx);
+void wm_snap_window(wm_state_t *wm, int idx, int side);
 void wm_toggle_start_menu(wm_state_t *wm);
 void wm_close_start_menu(wm_state_t *wm);
 
