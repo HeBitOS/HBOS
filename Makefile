@@ -14,7 +14,9 @@ DISK_IMG = $(BUILD_DIR)/hbos_disk.img
 INSTALL_IMG = $(BUILD_DIR)/hbos_installed.img
 INSTALL_IMG_BIOS = $(BUILD_DIR)/hbos_installed_bios.img
 INSTALL_IMG_UEFI = $(BUILD_DIR)/hbos_installed_uefi.img
+VMWARE_BIOS_VMDK = $(BUILD_DIR)/hbos_vmware_bios.vmdk
 VMWARE_UEFI_VMDK = $(BUILD_DIR)/hbos_vmware_uefi.vmdk
+VBOX_BIOS_VDI = $(BUILD_DIR)/hbos_virtualbox_bios.vdi
 VBOX_UEFI_VDI = $(BUILD_DIR)/hbos_virtualbox_uefi.vdi
 LIMINE_EFI = limine-bin/bin/BOOTX64.EFI
 UEFI_CD_IMG = $(BUILD_DIR)/limine_uefi_cd.img
@@ -120,7 +122,7 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-uefi vbox-uefi release smoke run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
 
 all: iso
 
@@ -137,7 +139,9 @@ help:
 	@echo "  make bios-iso       Build build/hbos-bios.iso"
 	@echo "  make uefi-iso       Build build/hbos-uefi.iso"
 	@echo "  make install-img    Build BIOS/UEFI bootable hard disk images"
+	@echo "  make vmware-bios    Build VMware BIOS VMDK"
 	@echo "  make vmware-uefi    Build VMware UEFI VMDK"
+	@echo "  make vbox-bios      Build VirtualBox BIOS VDI"
 	@echo "  make vbox-uefi      Build VirtualBox UEFI VDI"
 	@echo "  make disk-img       Build blank HBFS data disk"
 	@echo ""
@@ -275,25 +279,41 @@ $(INSTALL_IMG): $(INSTALL_IMG_UEFI)
 
 install-img: $(INSTALL_IMG_BIOS) $(INSTALL_IMG_UEFI) $(INSTALL_IMG)
 
+$(VMWARE_BIOS_VMDK): $(INSTALL_IMG_BIOS)
+	@rm -f $@
+	$(QEMU_IMG) convert -f raw -O vmdk -o adapter_type=ide,subformat=monolithicSparse $(INSTALL_IMG_BIOS) $@
+	@echo "✓ VMware BIOS VMDK: $@"
+
 $(VMWARE_UEFI_VMDK): $(INSTALL_IMG_UEFI)
 	@rm -f $@
 	$(QEMU_IMG) convert -f raw -O vmdk -o adapter_type=ide,subformat=monolithicSparse $(INSTALL_IMG_UEFI) $@
 	@echo "✓ VMware UEFI VMDK: $@"
+
+$(VBOX_BIOS_VDI): $(INSTALL_IMG_BIOS)
+	@rm -f $@
+	$(QEMU_IMG) convert -f raw -O vdi $(INSTALL_IMG_BIOS) $@
+	@echo "✓ VirtualBox BIOS VDI: $@"
 
 $(VBOX_UEFI_VDI): $(INSTALL_IMG_UEFI)
 	@rm -f $@
 	$(QEMU_IMG) convert -f raw -O vdi $(INSTALL_IMG_UEFI) $@
 	@echo "✓ VirtualBox UEFI VDI: $@"
 
+vmware-bios: $(VMWARE_BIOS_VMDK)
+
 vmware-uefi: $(VMWARE_UEFI_VMDK)
+
+vbox-bios: $(VBOX_BIOS_VDI)
 
 vbox-uefi: $(VBOX_UEFI_VDI)
 
-release: $(ISO_BIOS) $(ISO_UEFI) $(VMWARE_UEFI_VMDK) $(VBOX_UEFI_VDI)
+release: $(ISO_BIOS) $(ISO_UEFI) $(VMWARE_BIOS_VMDK) $(VMWARE_UEFI_VMDK) $(VBOX_BIOS_VDI) $(VBOX_UEFI_VDI)
 	@echo "✓ Release artifacts:"
 	@echo "  $(ISO_BIOS)"
 	@echo "  $(ISO_UEFI)"
+	@echo "  $(VMWARE_BIOS_VMDK)"
 	@echo "  $(VMWARE_UEFI_VMDK)"
+	@echo "  $(VBOX_BIOS_VDI)"
 	@echo "  $(VBOX_UEFI_VDI)"
 
 smoke:

@@ -81,6 +81,20 @@ run_guest "bios-hdd" "$tmpdir/bios-hdd.log" \
     -device ide-hd,drive=hd0,bus=ahci.0 \
     -boot c -serial stdio -monitor none -display none -no-reboot
 
+run_guest "bios-vmdk" "$tmpdir/bios-vmdk.log" \
+    "$QEMU" -m 512M \
+    -device ich9-ahci,id=ahci \
+    -drive file="$BUILD/hbos_vmware_bios.vmdk",format=vmdk,if=none,id=hd0 \
+    -device ide-hd,drive=hd0,bus=ahci.0 \
+    -boot c -serial stdio -monitor none -display none -no-reboot
+
+run_guest "bios-vdi" "$tmpdir/bios-vdi.log" \
+    "$QEMU" -m 512M \
+    -device ich9-ahci,id=ahci \
+    -drive file="$BUILD/hbos_virtualbox_bios.vdi",format=vdi,if=none,id=hd0 \
+    -device ide-hd,drive=hd0,bus=ahci.0 \
+    -boot c -serial stdio -monitor none -display none -no-reboot
+
 cp "$OVMF_VARS" "$BUILD/OVMF_VARS_SMOKE_HDD.fd"
 run_guest "uefi-hdd" "$tmpdir/uefi-hdd.log" \
     "$QEMU" -machine q35 -m 512M \

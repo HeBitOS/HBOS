@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("all", "iso", "bios-iso", "uefi-iso", "install-img", "vmware-uefi", "vbox-uefi", "release", "clean")]
+    [ValidateSet("all", "iso", "bios-iso", "uefi-iso", "install-img", "vmware-bios", "vmware-uefi", "vbox-bios", "vbox-uefi", "release", "clean")]
     [string]$Target = "all",
 
     [switch]$Clean,
@@ -35,7 +35,7 @@ if ($Clean -and $Target -ne "clean") {
 }
 
 $deps = "command -v make >/dev/null && command -v gcc >/dev/null && command -v nasm >/dev/null && command -v grub-mkrescue >/dev/null && command -v xorriso >/dev/null && command -v mkfs.fat >/dev/null && command -v mcopy >/dev/null"
-if ($Target -eq "release" -or $Target -eq "vmware-uefi" -or $Target -eq "vbox-uefi") {
+if ($Target -eq "release" -or $Target -eq "vmware-bios" -or $Target -eq "vmware-uefi" -or $Target -eq "vbox-bios" -or $Target -eq "vbox-uefi") {
     $deps += " && command -v qemu-img >/dev/null"
 }
 $build = "cd '$wslRepo' && $deps && make $makeTarget"
@@ -60,8 +60,14 @@ Write-Host ""
 Write-Host "[HBOS] Build complete:"
 Write-Host "  build/hbos-bios.iso"
 Write-Host "  build/hbos-uefi.iso"
+if ($Target -eq "release" -or $Target -eq "vmware-bios") {
+    Write-Host "  build/hbos_vmware_bios.vmdk"
+}
 if ($Target -eq "release" -or $Target -eq "vmware-uefi") {
     Write-Host "  build/hbos_vmware_uefi.vmdk"
+}
+if ($Target -eq "release" -or $Target -eq "vbox-bios") {
+    Write-Host "  build/hbos_virtualbox_bios.vdi"
 }
 if ($Target -eq "release" -or $Target -eq "vbox-uefi") {
     Write-Host "  build/hbos_virtualbox_uefi.vdi"

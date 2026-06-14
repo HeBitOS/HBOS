@@ -101,25 +101,23 @@ scripts\build-windows.cmd -Clean
 
 - `build/hbos-bios.iso`
 - `build/hbos-uefi.iso`
+- `build/hbos_vmware_bios.vmdk`（`make release` / `make vmware-bios`）
 - `build/hbos_vmware_uefi.vmdk`（`make release` / `make vmware-uefi`）
+- `build/hbos_virtualbox_bios.vdi`（`make release` / `make vbox-bios`）
 - `build/hbos_virtualbox_uefi.vdi`（`make release` / `make vbox-uefi`）
 
 ### 虚拟机使用
 
 VMware Workstation/Player 25H2：
 
-- 固件类型选择 `UEFI`
-- 关闭 `Secure Boot`
-- 光盘启动使用 `build/hbos-uefi.iso`
-- 硬盘启动可添加现有磁盘 `build/hbos_vmware_uefi.vmdk`
+- BIOS 固件：光盘启动使用 `build/hbos-bios.iso`，硬盘启动使用 `build/hbos_vmware_bios.vmdk`
+- UEFI 固件：关闭 `Secure Boot`，光盘启动使用 `build/hbos-uefi.iso`，硬盘启动使用 `build/hbos_vmware_uefi.vmdk`
 - 推荐内存 `512 MiB` 或更高
 
 VirtualBox：
 
-- 勾选 `Enable EFI`
-- 关闭 Secure Boot 相关选项
-- 光盘启动使用 `build/hbos-uefi.iso`
-- 硬盘启动可添加现有磁盘 `build/hbos_virtualbox_uefi.vdi`
+- BIOS 固件：不要勾选 `Enable EFI`，光盘启动使用 `build/hbos-bios.iso`，硬盘启动使用 `build/hbos_virtualbox_bios.vdi`
+- UEFI 固件：勾选 `Enable EFI`，关闭 Secure Boot 相关选项，光盘启动使用 `build/hbos-uefi.iso`，硬盘启动使用 `build/hbos_virtualbox_uefi.vdi`
 
 ## 项目结构
 
