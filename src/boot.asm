@@ -29,14 +29,14 @@ header_start:
     dd 0x100000000 - (0xE85250D6 + 0 + (header_end - header_start))  ; 校验和
 
     ; Framebuffer 请求标签 (type 5) — 可选
-    ; 请求较高分辨率；GRUB/固件不支持时会回退
+    ; 请求 1024x768x32 — 所有 VESA BIOS 支持的基础高分辨率
     ; GRUB 配置使用 gfxmode=1440x900x32,1024x768x32,auto + gfxpayload=keep
     align 8
     dw 5                                 ; 标签类型: framebuffer
     dw 1                                 ; 标志: 可选
     dd 20                                ; 标签大小
-    dd 1440                              ; 首选宽度
-    dd 900                               ; 首选高度
+    dd 1024                              ; 首选宽度 (VirtualBox compatible)
+    dd 768                               ; 首选高度
     dd 32                                ; 首选色深 (bpp)
 
     ; 结束标签

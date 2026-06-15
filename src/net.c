@@ -7,6 +7,7 @@
 #include "pci.h"
 #include "string.h"
 #include "core/vmm.h"
+#include "core/heap.h"
 
 /** @brief PCI 设备类型：网络控制器 */
 #define PCI_CLASS_NETWORK      0x02
@@ -273,6 +274,7 @@ static net_driver_t detect_driver(uint16_t vendor, uint16_t device) {
             default: break;
         }
     }
+    if (vendor == 0x1022 && device == 0x2000) return NET_DRIVER_PCNET;
     if (vendor == 0x10EC && device == 0x8139) return NET_DRIVER_RTL8139;
     if (vendor == 0x1AF4 && (device == 0x1000 || device == 0x1041)) return NET_DRIVER_VIRTIO_NET;
     return NET_DRIVER_UNKNOWN_ETHERNET;
@@ -288,6 +290,7 @@ const char *net_driver_name(net_driver_t driver) {
         case NET_DRIVER_E1000: return "Intel E1000";
         case NET_DRIVER_RTL8139: return "Realtek RTL8139";
         case NET_DRIVER_VIRTIO_NET: return "VirtIO net";
+        case NET_DRIVER_PCNET: return "AMD PCnet";
         case NET_DRIVER_UNKNOWN_ETHERNET: return "unknown ethernet";
         default: return "none";
     }
@@ -419,7 +422,8 @@ typedef int (*packet_cb_t)(const uint8_t *pkt, uint16_t len, void *arg);
  * @param spins 最大轮询次数
  * @return 0 正常，-1 网卡未就绪，回调返回非零值时透传
  */
-static int net_poll(packet_cb_t cb, void *arg, uint32_t spins) {
+/* E1000 poll helper — called via dispatch */
+static int e1000_poll(packet_cb_t cb, void *arg, uint32_t spins) {
     if (!primary.link_ready || !mmio) return -1;
     for (uint32_t s = 0; s < spins; s++) {
         uint32_t tail = reg_read(E1000_RDT);
@@ -440,6 +444,16 @@ static int net_poll(packet_cb_t cb, void *arg, uint32_t spins) {
         if (ret) return ret;
     }
     return 0;
+}
+
+static int pcnet_poll(packet_cb_t cb, void *arg, uint32_t spins);
+
+static int net_poll(packet_cb_t cb, void *arg, uint32_t spins) {
+    switch (primary.driver) {
+    case NET_DRIVER_E1000:  return e1000_poll(cb, arg, spins);
+    case NET_DRIVER_PCNET:  return pcnet_poll(cb, arg, spins);
+    default: return -1;
+    }
 }
 
 /**
@@ -481,7 +495,7 @@ static int send_ip(const uint8_t dst_mac[6], uint32_t dst_ip, uint8_t proto,
     ip->csum = 0;
     ip->csum = checksum(ip, sizeof(ipv4_hdr_t));
     memcpy(frame + sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t), payload, plen);
-    return e1000_send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + plen));
+    return primary.send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + plen));
 }
 
 /**
@@ -511,7 +525,7 @@ static int send_udp_raw(const uint8_t dst_mac[6], uint32_t src_ip, uint32_t dst_
     udp->src = htons(sport); udp->dst = htons(dport);
     udp->len = htons((uint16_t)(sizeof(udp_hdr_t) + plen)); udp->csum = 0;
     udp->csum = udp_checksum(ip, udp, data, plen);
-    return e1000_send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(udp_hdr_t) + plen));
+    return primary.send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(udp_hdr_t) + plen));
 }
 
 /**
@@ -531,7 +545,7 @@ static int send_arp(uint16_t op, uint32_t target_ip, const uint8_t target_mac[6]
     arp->hlen = 6; arp->plen = 4; arp->op = htons(op);
     memcpy(arp->sha, primary.mac, 6); arp->spa = primary.ip;
     memcpy(arp->tha, op == 1 ? zero : target_mac, 6); arp->tpa = target_ip;
-    return e1000_send(frame, sizeof(frame));
+    return primary.send(frame, sizeof(frame));
 }
 
 /**
@@ -699,6 +713,211 @@ static void e1000_init_hw(const pci_device_t *pdev) {
     primary.link_ready = (reg_read(E1000_STATUS) & 2) != 0;
 }
 
+/* ================================================================
+ * AMD PCnet-PCI II (Am79C970A) driver — I/O port based
+ * ================================================================ */
+
+static uint32_t pcnet_iobase;
+
+static inline uint16_t pcnet_inw(uint16_t port) {
+    uint16_t v; __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port)); return v;
+}
+static inline void pcnet_outw(uint16_t port, uint16_t val) {
+    __asm__ volatile("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static uint16_t pcnet_read_csr(uint16_t reg) {
+    pcnet_outw(pcnet_iobase + 0x12, reg);
+    return pcnet_inw(pcnet_iobase + 0x10);
+}
+static void pcnet_write_csr(uint16_t reg, uint16_t val) {
+    pcnet_outw(pcnet_iobase + 0x12, reg);
+    pcnet_outw(pcnet_iobase + 0x10, val);
+}
+static uint16_t pcnet_read_bcr(uint16_t reg) {
+    pcnet_outw(pcnet_iobase + 0x12, reg);
+    return pcnet_inw(pcnet_iobase + 0x16);
+}
+static void pcnet_write_bcr(uint16_t reg, uint16_t val) {
+    pcnet_outw(pcnet_iobase + 0x12, reg);
+    pcnet_outw(pcnet_iobase + 0x16, val);
+}
+
+/* ── PCnet descriptor ring ───────────────────────────── */
+
+#define PCNET_TX_COUNT 8
+#define PCNET_RX_COUNT 16
+#define PCNET_BUF_SIZE 2048
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t base;      /* buffer physical address (16-byte aligned) */
+    int16_t  length;     /* negative=dev owns, positive=host owns */
+    uint16_t status;     /* TX: 0x0200=STP 0x0100=ENP 0x8000=OWN */
+    uint32_t msg_len;    /* reserved / message length */
+} pcnet_desc_t;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    uint16_t mode;       /* 0x0000 */
+    uint8_t  padr[6];    /* MAC address */
+    uint8_t  ladrf[8];   /* logical address filter */
+    uint32_t rx_ring;    /* RX descriptor ring physical addr */
+    uint32_t tx_ring;    /* TX descriptor ring physical addr */
+} pcnet_init_block_t;
+#pragma pack(pop)
+
+static pcnet_desc_t *pcnet_tx_desc;
+static pcnet_desc_t *pcnet_rx_desc;
+static uint8_t *pcnet_tx_buf[PCNET_TX_COUNT];
+static uint8_t *pcnet_rx_buf[PCNET_RX_COUNT];
+static uint16_t pcnet_tx_tail;
+
+static int pcnet_init_hw(pci_device_t *dev) {
+    pcnet_iobase = primary.bar0_base; /* I/O bar, clear flags */
+
+    /* Enable bus mastering (PCI command reg offset 4, bit 2) */
+    {
+        uint32_t v = pci_read32(dev->bus, dev->slot, dev->func, 0x04);
+        pci_write32(dev->bus, dev->slot, dev->func, 0x04, v | 0x0004);
+    }
+
+    /* Set 32-bit mode (SSIZE32 in BCR20) */
+    pcnet_write_bcr(20, pcnet_read_bcr(20) | 0x0100);
+
+    /* Software style: PCnet-PCI (32-bit) */
+    pcnet_write_bcr(9, pcnet_read_bcr(9) | 0x0001);
+
+    /* Reset chip */
+    pcnet_read_csr(0);
+    pcnet_write_csr(0, 0x0004);            /* STOP */
+    for (volatile int i = 0; i < 10000; i++) __asm__ volatile("" ::: "memory");
+    pcnet_write_csr(0, 0x0001);            /* STRT */
+    for (volatile int i = 0; i < 10000; i++) __asm__ volatile("" ::: "memory");
+    uint16_t csr0 = pcnet_read_csr(0);
+    if (!(csr0 & 0x0001)) {                /* STRT must be set after reset */
+        set_error("pcnet reset failed");
+        return -1;
+    }
+
+    /* Read MAC from CSR12-14 */
+    for (int i = 0; i < 3; i++) {
+        uint16_t v = pcnet_read_csr(12 + (uint16_t)i);
+        primary.mac[i * 2]     = (uint8_t)(v & 0xFF);
+        primary.mac[i * 2 + 1] = (uint8_t)(v >> 8);
+    }
+    primary.mac_valid = true;
+
+    /* Allocate descriptor rings (16-byte aligned) */
+    size_t tx_ring_sz = PCNET_TX_COUNT * sizeof(pcnet_desc_t);
+    size_t rx_ring_sz = PCNET_RX_COUNT * sizeof(pcnet_desc_t);
+    pcnet_tx_desc = (pcnet_desc_t *)kmalloc(tx_ring_sz + 16);
+    pcnet_rx_desc = (pcnet_desc_t *)kmalloc(rx_ring_sz + 16);
+    if (!pcnet_tx_desc || !pcnet_rx_desc) {
+        set_error("pcnet ring alloc failed");
+        return -1;
+    }
+    uint64_t tx_phys = ((uint64_t)(uintptr_t)pcnet_tx_desc + 15) & ~15ULL;
+    uint64_t rx_phys = ((uint64_t)(uintptr_t)pcnet_rx_desc + 15) & ~15ULL;
+    pcnet_tx_desc = (pcnet_desc_t *)(uintptr_t)tx_phys;
+    pcnet_rx_desc = (pcnet_desc_t *)(uintptr_t)rx_phys;
+    memset(pcnet_tx_desc, 0, tx_ring_sz);
+    memset(pcnet_rx_desc, 0, rx_ring_sz);
+
+    /* Allocate packet buffers */
+    for (int i = 0; i < PCNET_TX_COUNT; i++) {
+        pcnet_tx_buf[i] = (uint8_t *)kmalloc(PCNET_BUF_SIZE);
+        if (!pcnet_tx_buf[i]) { set_error("tx buf fail"); return -1; }
+    }
+    for (int i = 0; i < PCNET_RX_COUNT; i++) {
+        pcnet_rx_buf[i] = (uint8_t *)kmalloc(PCNET_BUF_SIZE);
+        if (!pcnet_rx_buf[i]) { set_error("rx buf fail"); return -1; }
+    }
+
+    /* Set up RX descriptors (give them to the device) */
+    for (int i = 0; i < PCNET_RX_COUNT; i++) {
+        pcnet_rx_desc[i].base   = (uint32_t)(uintptr_t)pcnet_rx_buf[i];
+        pcnet_rx_desc[i].length = (int16_t)(-(int32_t)PCNET_BUF_SIZE);
+        pcnet_rx_desc[i].status = 0x8000;  /* OWN */
+    }
+
+    /* Build InitBlock (16-byte aligned) */
+    pcnet_init_block_t *ib = (pcnet_init_block_t *)kmalloc(sizeof(*ib) + 16);
+    if (!ib) { set_error("initblock fail"); return -1; }
+    uint64_t ib_phys = ((uint64_t)(uintptr_t)ib + 15) & ~15ULL;
+    ib = (pcnet_init_block_t *)(uintptr_t)ib_phys;
+    memset(ib, 0, sizeof(*ib));
+    ib->mode = 0x0000;
+    memcpy(ib->padr, primary.mac, 6);
+    ib->rx_ring = (uint32_t)(uintptr_t)pcnet_rx_desc;
+    ib->tx_ring = (uint32_t)(uintptr_t)pcnet_tx_desc;
+
+    /* Write InitBlock address and issue INIT */
+    uint32_t ib_addr = (uint32_t)(uintptr_t)ib;
+    pcnet_write_csr(1, (uint16_t)(ib_addr & 0xFFFF));
+    pcnet_write_csr(2, (uint16_t)(ib_addr >> 16));
+    pcnet_write_csr(0, 0x0041);            /* INIT + STRT */
+    for (volatile int i = 0; i < 500000; i++) {
+        if (pcnet_read_csr(0) & 0x0100) break;  /* IDON */
+    }
+    if (!(pcnet_read_csr(0) & 0x0100)) {
+        set_error("pcnet init timeout");
+        return -1;
+    }
+
+    /* Start chip */
+    pcnet_write_csr(0, 0x0043);            /* STRT + INIT + IENA */
+    pcnet_tx_tail = 0;
+    primary.link_ready = true;
+    return 0;
+}
+
+static int pcnet_send(const void *frame, uint16_t len) {
+    if (!primary.link_ready || len > PCNET_BUF_SIZE) {
+        primary.tx_errors++;
+        return -1;
+    }
+    uint16_t idx = pcnet_tx_tail;
+    /* Wait for device to finish with this descriptor */
+    if (pcnet_tx_desc[idx].status & 0x8000) {
+        primary.tx_errors++;
+        return -1;
+    }
+    memcpy(pcnet_tx_buf[idx], frame, len);
+    pcnet_tx_desc[idx].length = (int16_t)(-(int32_t)len);
+    pcnet_tx_desc[idx].status = 0x8300;    /* OWN | STP | ENP */
+    pcnet_tx_tail = (uint16_t)((idx + 1) % PCNET_TX_COUNT);
+    /* Demand transmit */
+    pcnet_write_csr(0, pcnet_read_csr(0) | 0x0048);
+    primary.tx_packets++;
+    primary.tx_bytes += len;
+    return 0;
+}
+
+static int pcnet_poll(packet_cb_t cb, void *arg, uint32_t spins) {
+    if (!primary.link_ready) return -1;
+    for (uint32_t s = 0; s < spins; s++) {
+        for (int i = 0; i < PCNET_RX_COUNT; i++) {
+            pcnet_desc_t *d = &pcnet_rx_desc[i];
+            if (d->status & 0x8000) continue;  /* device still owns */
+            uint16_t rlen = (uint16_t)(d->msg_len & 0xFFF);
+            if (rlen >= sizeof(eth_hdr_t) && rlen <= PCNET_BUF_SIZE && cb) {
+                primary.rx_packets++;
+                primary.rx_bytes += rlen;
+                int ret = cb(pcnet_rx_buf[i], rlen, arg);
+                if (ret) return ret;
+            } else {
+                primary.rx_dropped++;
+            }
+            /* Return descriptor to device */
+            d->length = (int16_t)(-(int32_t)PCNET_BUF_SIZE);
+            d->status = 0x8000;
+        }
+    }
+    return 0;
+}
+
 /**
  * @brief 初始化网络子系统：扫描 PCI 总线查找以太网卡，检测驱动类型并初始化硬件
  */
@@ -717,7 +936,17 @@ void net_init(void) {
     primary.bar0_raw = pci_bar(dev.bus, dev.slot, dev.func, 0);
     primary.bar0_io = (primary.bar0_raw & 1U) != 0;
     primary.bar0_base = primary.bar0_io ? (primary.bar0_raw & ~3U) : (primary.bar0_raw & ~0xFU);
-    if (primary.driver == NET_DRIVER_E1000) e1000_init_hw(&dev);
+    /* Dispatch to driver */
+    if (primary.driver == NET_DRIVER_E1000) {
+        primary.send = e1000_send;
+        e1000_init_hw(&dev);
+    } else if (primary.driver == NET_DRIVER_PCNET) {
+        primary.send = pcnet_send;
+        pcnet_init_hw(&dev);
+    } else {
+        set_error("no driver for this NIC");
+        return;
+    }
 }
 
 /**
@@ -1098,7 +1327,7 @@ static int send_tcp(const uint8_t mac[6], uint32_t dst_ip, uint16_t sport, uint1
     tcp->src = htons(sport); tcp->dst = htons(dport); tcp->seq = htonl(seq); tcp->ack = htonl(ack);
     tcp->off_flags_hi = 5 << 4; tcp->flags = flags; tcp->win = htons(4096);
     tcp->csum = 0; tcp->urg = 0; tcp->csum = tcp_checksum(ip, tcp, payload, dlen);
-    return e1000_send(frame, (uint16_t)(sizeof(eth_hdr_t) + 20 + 20 + dlen));
+    return primary.send(frame, (uint16_t)(sizeof(eth_hdr_t) + 20 + 20 + dlen));
 }
 
 /**

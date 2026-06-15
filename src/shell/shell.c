@@ -102,34 +102,44 @@ int serial_get_key(void) {
     return c;
 }
 
+/* ── ISR-driven keyboard scancode ring buffer ─────────────── */
+static volatile uint8_t kb_raw_queue[64];
+static volatile uint8_t kb_raw_head;
+static volatile uint8_t kb_raw_tail;
+static int kb_initialized;
+void int_enable(void);
+void int_disable(void);
+
+void kb_irq_enqueue_scancode(uint8_t sc) {
+    uint8_t next = (uint8_t)((kb_raw_head + 1) & 63);
+    if (next == kb_raw_tail) return;
+    kb_raw_queue[kb_raw_head] = sc;
+    kb_raw_head = next;
+}
+
+static int kb_raw_dequeue(void) {
+    if (kb_raw_tail == kb_raw_head) return -1;
+    uint8_t sc = kb_raw_queue[kb_raw_tail];
+    kb_raw_tail = (uint8_t)((kb_raw_tail + 1) & 63);
+    return sc;
+}
+
 static void kb_controller_init(void) {
-    /* Disable both PS/2 devices */
-    outb(0x64, 0xAD);
-    outb(0x64, 0xA7);
-    /* Flush output buffer */
-    for (int i = 0; i < 16; i++) { inb(0x60); int t = 1000; while (t--) __asm__ volatile("pause"); }
-    /* Self-test */
-    outb(0x64, 0xAA);
-    {
-        int t = 100000; while (!(inb(0x64) & 1) && t--) __asm__ volatile("pause");
-        if (t > 0) inb(0x60); /* read result, expect 0x55 */
-    }
-    /* Enable first PS/2 port */
-    outb(0x64, 0xAE);
-    /* Reset keyboard */
-    outb(0x60, 0xFF);
-    {
-        int t = 100000;
-        while (!(inb(0x64) & 1) && t--) __asm__ volatile("pause");
-        if (t > 0) { inb(0x60); inb(0x60); } /* flush AA/FA */
-    }
-    /* Enable scanning */
-    outb(0x60, 0xF4);
-    {
-        int t = 100000;
-        while (!(inb(0x64) & 1) && t--) __asm__ volatile("pause");
-        if (t > 0) inb(0x60); /* read ACK */
-    }
+    /*
+     * GRUB already configured the PS/2 controller and keyboard.
+     * We must NOT disable, self-test, or reset — VirtualBox and
+     * some hardware stop delivering bytes after a late re-init.
+     * Only unmask IRQ1 so the ISR can receive scancodes.
+     */
+    outb(0x21, (uint8_t)(inb(0x21) & ~0x02)); /* unmask IRQ1 on PIC */
+}
+
+static void kb_init(void) {
+    if (kb_initialized) return;
+    kb_controller_init();
+    (void)usb_kbd_init();
+    int_enable();
+    kb_initialized = 1;
 }
 
 static bool kb_wait_input_clear(void) {
@@ -170,15 +180,28 @@ static int ctrl_pressed = 0; /**< Ctrl键状态 */
 static int ext_scancode = 0;
 
 int kb_poll_key(void) {
+    if (!kb_initialized) kb_init();
+
     int serial_key = serial_get_key();
     if (serial_key) return serial_key;
     int usb_key = usb_kbd_getc();
     if (usb_key) return usb_key;
-    if (!(inb(0x64) & 1)) return 0;
 
-    uint8_t status = inb(0x64);
-    if (status & 0x20) return 0;
-    uint8_t sc = inb(0x60);
+    /* Check ISR ring buffer first */
+    int queued = kb_raw_dequeue();
+    uint8_t sc = 0;
+    if (queued >= 0) {
+        sc = (uint8_t)queued;
+    } else {
+        /* Direct port read — disable IRQs so ISR can't steal byte */
+        int_disable();
+        if (inb(0x64) & 1) {
+            uint8_t st = inb(0x64);
+            if (!(st & 0x20)) sc = inb(0x60);
+        }
+        int_enable();
+        if (sc == 0) return 0;
+    }
     if (sc == 0xFA || sc == 0xFE) return 0;
     if (sc == 0xE0) {
         ext_scancode = 1;

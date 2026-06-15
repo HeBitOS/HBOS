@@ -20,6 +20,7 @@ typedef enum {
     NET_DRIVER_E1000,              /**< Intel E1000 系列网卡 */
     NET_DRIVER_RTL8139,            /**< Realtek RTL8139 网卡 */
     NET_DRIVER_VIRTIO_NET,         /**< VirtIO 虚拟网卡 */
+    NET_DRIVER_PCNET,              /**< AMD PCnet-PCI II (Am79C970A) */
     NET_DRIVER_UNKNOWN_ETHERNET    /**< 未知以太网卡 */
 } net_driver_t;
 
@@ -51,6 +52,9 @@ typedef struct {
     uint64_t tx_bytes;             /**< 已发送字节数 */
     uint64_t rx_dropped;           /**< 接收丢包计数 */
     uint64_t tx_errors;            /**< 发送错误计数 */
+
+    /* ── Driver vtable ────────────────────────────────── */
+    int (*send)(const void *frame, uint16_t len);   /**< 发送以太网帧 */
 } net_device_t;
 
 /**

@@ -844,9 +844,14 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
 }
 
 static int clamp_delta(int v) {
-    if (v > 48) return 48;
-    if (v < -48) return -48;
-    return v;
+    /* Quadratic acceleration: precise at low speed, rapid at high speed.
+     * +1 extra pixel per ~16 pixels of movement.
+     * Cap at ±80 to prevent runaway from glitched packets. */
+    int s = v < 0 ? -1 : 1;
+    int a = v * s;
+    a = a + (a * a) / 96;
+    if (a > 80) a = 80;
+    return a * s;
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
@@ -4304,8 +4309,8 @@ static void cmd_gui(int argc, char **argv) {
             my += acc_dy;
             if (mx < 0) mx = 0;
             if (my < 0) my = 0;
-            if (mx > w - 24) mx = w - 24;
-            if (my > h - 24) my = h - 24;
+            if (mx > w - 32) mx = w - 32;
+            if (my > h - 32) my = h - 32;
 
             int redraw = 0;
             if (acc_dz != 0) {
@@ -4471,7 +4476,7 @@ static void cmd_gui(int argc, char **argv) {
                                 gui_focus_window(&st, title_idx);
                                 // 双击标题栏：最大化/还原（同一窗口、约 30 帧内）
                                 if (last_title_idx == title_idx &&
-                                    frame_tick - last_title_click < 30) {
+                                    frame_tick - last_title_click < 40) {
                                     wm_toggle_maximize(&st.wm, title_idx);
                                     gui_sync_focus(&st);
                                     last_title_idx = -1;
