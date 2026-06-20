@@ -188,13 +188,16 @@ static void kb_set_leds(void) {
     if (caps_lock) leds |= 4;
     if (num_lock)  leds |= 2;
 
-    if (!kb_wait_input_clear()) return;
-    outb(0x60, 0xED);  // Set LEDs command
-    (void)kb_read_ack();
-
-    if (!kb_wait_input_clear()) return;
-    outb(0x60, leds);  // LED data byte
-    (void)kb_read_ack();
+    int_disable();
+    if (kb_wait_input_clear()) {
+        outb(0x60, 0xED);  // Set LEDs command
+        (void)kb_read_ack();
+    }
+    if (kb_wait_input_clear()) {
+        outb(0x60, leds);  // LED data byte
+        (void)kb_read_ack();
+    }
+    int_enable();
 }
 
 static const char scancode_map[128] = {0,0,'1','2','3','4','5','6','7','8','9','0','-','=','\b',0,'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '};

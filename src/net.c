@@ -761,10 +761,12 @@ typedef struct {
 #pragma pack(push, 1)
 typedef struct {
     uint16_t mode;       /* 0x0000 */
+    uint16_t reserved1;
     uint8_t  padr[6];    /* MAC address */
+    uint16_t reserved2;
     uint8_t  ladrf[8];   /* logical address filter */
-    uint32_t rx_ring;    /* RX descriptor ring physical addr */
-    uint32_t tx_ring;    /* TX descriptor ring physical addr */
+    uint32_t rx_ring;    /* RX descriptor ring physical addr (RLEN in bits 31:28) */
+    uint32_t tx_ring;    /* TX descriptor ring physical addr (TLEN in bits 31:28) */
 } pcnet_init_block_t;
 #pragma pack(pop)
 
@@ -783,21 +785,24 @@ static int pcnet_init_hw(pci_device_t *dev) {
         pci_write32(dev->bus, dev->slot, dev->func, 0x04, v | 0x0004);
     }
 
+    /* Software Reset by reading RESET register (returns to 16-bit WIO mode) */
+    (void)pcnet_inw(pcnet_iobase + 0x14);
+    for (volatile int i = 0; i < 10000; i++) __asm__ volatile("" ::: "memory");
+
+    /* Stop chip first to allow writing BCR registers */
+    pcnet_write_csr(0, 0x0004);            /* STOP */
+    for (volatile int i = 0; i < 10000; i++) __asm__ volatile("" ::: "memory");
+
     /* Set 32-bit mode (SSIZE32 in BCR20) */
     pcnet_write_bcr(20, pcnet_read_bcr(20) | 0x0100);
 
     /* Software style: PCnet-PCI (32-bit) */
     pcnet_write_bcr(9, pcnet_read_bcr(9) | 0x0001);
 
-    /* Reset chip */
-    pcnet_read_csr(0);
-    pcnet_write_csr(0, 0x0004);            /* STOP */
-    for (volatile int i = 0; i < 10000; i++) __asm__ volatile("" ::: "memory");
-    pcnet_write_csr(0, 0x0001);            /* STRT */
-    for (volatile int i = 0; i < 10000; i++) __asm__ volatile("" ::: "memory");
+    /* Check if stop bit is set */
     uint16_t csr0 = pcnet_read_csr(0);
-    if (!(csr0 & 0x0001)) {                /* STRT must be set after reset */
-        set_error("pcnet reset failed");
+    if (!(csr0 & 0x0004)) {                /* STOP must be set */
+        set_error("pcnet stop failed");
         return -1;
     }
 
@@ -849,15 +854,17 @@ static int pcnet_init_hw(pci_device_t *dev) {
     ib = (pcnet_init_block_t *)(uintptr_t)ib_phys;
     memset(ib, 0, sizeof(*ib));
     ib->mode = 0x0000;
+    ib->reserved1 = 0;
+    ib->reserved2 = 0;
     memcpy(ib->padr, primary.mac, 6);
-    ib->rx_ring = (uint32_t)(uintptr_t)pcnet_rx_desc;
-    ib->tx_ring = (uint32_t)(uintptr_t)pcnet_tx_desc;
+    ib->rx_ring = (4U << 28) | ((uint32_t)rx_phys & 0x0FFFFFFF);
+    ib->tx_ring = (3U << 28) | ((uint32_t)tx_phys & 0x0FFFFFFF);
 
     /* Write InitBlock address and issue INIT */
     uint32_t ib_addr = (uint32_t)(uintptr_t)ib;
     pcnet_write_csr(1, (uint16_t)(ib_addr & 0xFFFF));
     pcnet_write_csr(2, (uint16_t)(ib_addr >> 16));
-    pcnet_write_csr(0, 0x0041);            /* INIT + STRT */
+    pcnet_write_csr(0, 0x0001);            /* INIT */
     for (volatile int i = 0; i < 500000; i++) {
         if (pcnet_read_csr(0) & 0x0100) break;  /* IDON */
     }
@@ -866,8 +873,8 @@ static int pcnet_init_hw(pci_device_t *dev) {
         return -1;
     }
 
-    /* Start chip */
-    pcnet_write_csr(0, 0x0043);            /* STRT + INIT + IENA */
+    /* Start chip (WITHOUT IENA) */
+    pcnet_write_csr(0, 0x0002);            /* STRT */
     pcnet_tx_tail = 0;
     primary.link_ready = true;
     return 0;
@@ -888,8 +895,8 @@ static int pcnet_send(const void *frame, uint16_t len) {
     pcnet_tx_desc[idx].length = (int16_t)(-(int32_t)len);
     pcnet_tx_desc[idx].status = 0x8300;    /* OWN | STP | ENP */
     pcnet_tx_tail = (uint16_t)((idx + 1) % PCNET_TX_COUNT);
-    /* Demand transmit */
-    pcnet_write_csr(0, pcnet_read_csr(0) | 0x0048);
+    /* Demand transmit (WITHOUT IENA) */
+    pcnet_write_csr(0, (pcnet_read_csr(0) & ~0x0040) | 0x0008);
     primary.tx_packets++;
     primary.tx_bytes += len;
     return 0;
