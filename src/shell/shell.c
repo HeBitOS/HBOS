@@ -126,6 +126,7 @@ static int kb_raw_dequeue(void) {
 
 static bool kb_wait_input_clear(void);
 static bool kb_wait_output_full(void);
+static bool kb_read_ack(void);
 
 static void kb_controller_init(void) {
     /* Unmask IRQ1 on PIC */
@@ -154,6 +155,18 @@ static void kb_controller_init(void) {
             }
         }
     }
+
+    /* Enable keyboard port */
+    if (kb_wait_input_clear()) {
+        outb(0x64, 0xAE);
+    }
+
+    /* Enable scanning on keyboard device */
+    if (kb_wait_input_clear()) {
+        outb(0x60, 0xF4);
+        (void)kb_read_ack();
+    }
+
     int_enable();
 }
 
