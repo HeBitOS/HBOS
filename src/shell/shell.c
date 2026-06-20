@@ -95,6 +95,24 @@ static inline void outb(uint16_t port, uint8_t val) {
 }
 
 int serial_get_key(void) {
+    static int serial_checked = 0;
+    static bool serial_present = false;
+
+    if (!serial_checked) {
+        // Test Scratch Register (offset 7)
+        outb(0x3F8 + 7, 0xAE);
+        if (inb(0x3F8 + 7) == 0xAE) {
+            outb(0x3F8 + 7, 0x55);
+            if (inb(0x3F8 + 7) == 0x55) {
+                serial_present = true;
+            }
+        }
+        serial_checked = 1;
+    }
+
+    if (!serial_present) return 0;
+    if (inb(0x3F8 + 5) == 0xFF) return 0;
+
     if (!(inb(0x3F8 + 5) & 1)) return 0;
     uint8_t c = inb(0x3F8);
     if (c == '\r') return '\n';
@@ -149,15 +167,6 @@ static void kb_controller_init(void) {
     /* Unmask IRQ1 on PIC */
     outb(0x21, (uint8_t)(inb(0x21) & ~0x02));
 
-    /* For BIOS boot mode, GRUB/Limine already configured the PS/2 controller.
-     * We must NOT perform late re-initialization (disable/self-test/reset)
-     * because VMware, VirtualBox, and some physical hardware will stop delivering keys.
-     * For UEFI boot mode, we must configure and enable the port/scanning.
-     */
-    if (!is_uefi_boot()) {
-        return;
-    }
-
     int_disable();
     for (int i = 0; i < 10 && (inb(0x64) & 1); i++) (void)inb(0x60);
     
@@ -175,6 +184,15 @@ static void kb_controller_init(void) {
                 }
             }
         }
+    }
+
+    /* Only run late re-initialization (enable keyboard port and scanning device) for UEFI boot mode.
+     * BIOS bootloaders (like GRUB/Limine-BIOS) already configured the keyboard,
+     * and sending late AE/F4 commands breaks VirtualBox, VMware, and some physical hardware.
+     */
+    if (!is_uefi_boot()) {
+        int_enable();
+        return;
     }
 
     /* Enable keyboard port */
