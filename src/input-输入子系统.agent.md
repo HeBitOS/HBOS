@@ -1,6 +1,6 @@
 # Input — 输入子系统 (`src/input/`)
 
-> PS/2 键盘/鼠标, USB HID 框架 (xHCI 控制器未实现)
+> PS/2 键盘/鼠标, USB HID 框架 (已实现 xHCI 控制器并完整支持 USB 键盘/鼠标/存储设备)
 
 ## 文件清单
 
@@ -88,9 +88,9 @@ int usb_hid_poll(void);      // 轮询 USB HID 报告
 |----|------|
 | PS/2 键盘 | ✅ 可用, ISR ring buffer 方式 |
 | PS/2 鼠标 | ✅ 可用, 含加速曲线 (在 gui.c 的 clamp_delta) |
-| USB 键盘 | ❌ xHCI 框架未实现 |
-| USB 鼠标 | ❌ 同上 |
-| USB 存储 | ❌ xHCI 框架未实现 |
+| USB 键盘 | ✅ 可用, 基于 xHCI 控制器与 USB HID 驱动 |
+| USB 鼠标 | ✅ 可用, 基于 xHCI 控制器与 USB HID 驱动 |
+| USB 存储 | ✅ 可用, 基于 xHCI bulk 传输与 USB MSC 驱动（已集成至 block 层） |
 
 ## 调试技巧
 

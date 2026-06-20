@@ -25,7 +25,11 @@ static int usb_mouse_index = -1;
 
 /* USB HID keycode → ASCII (0x04..0x57 → a-z, 1-9, 0, Enter, etc.) */
 static int usb_keycode_to_key(uint8_t kc, int shift, int ctrl) {
-    if (kc >= 0x04 && kc <= 0x1D && ctrl) return (kc - 0x04) + 1;
+    if (kc >= 0x04 && kc <= 0x1D && ctrl) {
+        char ctrl_c = (kc - 0x04) + 1;
+        if (ctrl_c == 0x13 || ctrl_c == 0x11 || ctrl_c == 0x03) return ctrl_c;
+        return shift ? 'A' + (kc - 0x04) : 'a' + (kc - 0x04);
+    }
     if (kc >= 0x04 && kc <= 0x1D) return shift ? 'A' + (kc - 0x04) : 'a' + (kc - 0x04);
     if (kc >= 0x1E && kc <= 0x26) return shift ? "!@#$%^&*("[kc - 0x1E] : '1' + (kc - 0x1E);
     if (kc == 0x27) return shift ? ')' : '0';
@@ -91,7 +95,7 @@ static int hid_probe_config(int dev_idx) {
 
     uint16_t total = rd16(hdr + 2);
     if (total < sizeof(hdr)) return 0;
-    if (total > 256) total = 256;
+    if (total > 1024) total = 1024;
 
     uint8_t *buf = (uint8_t *)kmalloc(total);
     if (!buf) return 0;
@@ -163,6 +167,11 @@ int hid_init(void) {
         usb_device_desc_t desc;
         if (xhci_get_device_desc(i, &desc) < 0) continue;
 
+        /* Skip VMware virtual USB devices (0x0E0F and 0x15AD) to force PS/2 fallback,
+         * as VMware's USB emulation drops keystrokes with our XHCI driver.
+         * PS/2 works perfectly in VMware as proven in 0.1_beta2. */
+        if (desc.idVendor == 0x0E0F || desc.idVendor == 0x15AD) continue;
+
         int before = hid_count;
         (void)hid_probe_config(i);
         if (hid_count == before) (void)hid_probe_device_desc(i, &desc);
@@ -198,7 +207,7 @@ int hid_get_keyboard_report(int idx, hid_kbd_report_t *report) {
     if (!report) return -1;
 
     int ret = xhci_interrupt_transfer(dev->slot_id, dev->ep_addr,
-                                       report, sizeof(hid_kbd_report_t));
+                                       report, sizeof(hid_kbd_report_t), dev->interval);
     return ret;
 }
 
@@ -209,7 +218,7 @@ int hid_get_mouse_report(int idx, hid_mouse_report_t *report) {
     if (!report) return -1;
 
     int ret = xhci_interrupt_transfer(dev->slot_id, dev->ep_addr,
-                                       report, sizeof(hid_mouse_report_t));
+                                       report, sizeof(hid_mouse_report_t), dev->interval);
     return ret;
 }
 
@@ -229,6 +238,7 @@ int usb_hid_init(void) {
 int usb_kbd_init(void) {
     if (usb_kbd_initialized) return 0;
     if (usb_hid_init() < 0) return -1;
+    (void)hid_init(); // Rescan xHCI slots
     for (int i = 0; i < hid_count; i++) {
         if (hid_devices[i].active && hid_devices[i].type == HID_KEYBOARD) {
             usb_kbd_index = i;
@@ -241,9 +251,32 @@ int usb_kbd_init(void) {
     return 0;
 }
 
+static inline uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
 /** 从 USB 键盘读取一个字符，无输入返回 0 */
 int usb_kbd_getc(void) {
-    if (!usb_kbd_initialized) return 0;
+    if (!usb_kbd_initialized) {
+        static uint64_t last_init_try = 0;
+        uint64_t now = rdtsc();
+        // Retry initialization at most once every 2 seconds
+        if (now - last_init_try > 2000000000ULL) {
+            last_init_try = now;
+            (void)usb_kbd_init();
+        }
+        if (!usb_kbd_initialized) return 0;
+    }
+
+    static uint64_t last_poll = 0;
+    uint64_t now = rdtsc();
+    /* Throttle to 15ms interval to prevent pegging the CPU during polling */
+    if (now - last_poll < 15000000ULL) {
+        return 0;
+    }
+    last_poll = now;
 
     hid_kbd_report_t report;
     if (hid_get_keyboard_report(usb_kbd_index, &report) < 0) return 0;
@@ -279,6 +312,7 @@ int usb_kbd_ready(void) {
 int usb_mouse_init(void) {
     if (usb_mouse_initialized) return 0;
     if (usb_hid_init() < 0) return -1;
+    (void)hid_init(); // Rescan xHCI slots
     for (int i = 0; i < hid_count; i++) {
         if (hid_devices[i].active && hid_devices[i].type == HID_MOUSE) {
             usb_mouse_index = i;
@@ -291,7 +325,27 @@ int usb_mouse_init(void) {
 }
 
 int usb_mouse_get_report(hid_mouse_report_t *report) {
-    if (!usb_mouse_initialized || !report) return -1;
+    if (!usb_mouse_initialized || !report) {
+        if (report) {
+            static uint64_t last_init_try = 0;
+            uint64_t now = rdtsc();
+            // Retry initialization at most once every 2 seconds
+            if (now - last_init_try > 2000000000ULL) {
+                last_init_try = now;
+                (void)usb_mouse_init();
+            }
+        }
+        if (!usb_mouse_initialized) return -1;
+    }
+
+    static uint64_t last_poll = 0;
+    uint64_t now = rdtsc();
+    /* Throttle to 10ms interval to prevent pegging the CPU during mouse polling */
+    if (now - last_poll < 10000000ULL) {
+        return -1;
+    }
+    last_poll = now;
+
     if (hid_get_mouse_report(usb_mouse_index, report) < 0) return -1;
     return 0;
 }

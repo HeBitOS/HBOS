@@ -46,6 +46,22 @@ void wm_init(wm_state_t *wm, int desk_w, int desk_h) {
     wm->desk_h = desk_h;
 }
 
+static void wm_bring_to_top(wm_state_t *wm, int idx) {
+    int pos = -1;
+    for (int i = 0; i < wm->window_count; i++) {
+        if (wm->z_order[i] == idx) {
+            pos = i;
+            break;
+        }
+    }
+    if (pos >= 0) {
+        for (int i = pos; i + 1 < wm->window_count; i++) {
+            wm->z_order[i] = wm->z_order[i + 1];
+        }
+        wm->z_order[wm->window_count - 1] = idx;
+    }
+}
+
 int wm_open_window(wm_state_t *wm, int kind, int mode, int unique) {
     if (unique) {
         for (int i = 0; i < wm->window_count; i++) {
@@ -69,23 +85,53 @@ int wm_open_window(wm_state_t *wm, int kind, int mode, int unique) {
     win->y = 62 + (idx % 5) * 22;
     win->w = 0;
     win->h = 0;
+    win->anim_type = WM_ANIM_NONE;
+    win->anim_frame = 0;
+    win->anim_total = 0;
+    win->opacity = 255;  /* 完全不透明 */
+    wm->z_order[idx] = idx;
     wm_focus_window(wm, idx);
     return idx;
 }
 
 void wm_close_window(wm_state_t *wm, int idx) {
     if (idx < 0 || idx >= wm->window_count) return;
+
+    int z_pos = -1;
+    for (int i = 0; i < wm->window_count; i++) {
+        if (wm->z_order[i] == idx) {
+            z_pos = i;
+            break;
+        }
+    }
+    if (z_pos >= 0) {
+        for (int i = z_pos; i + 1 < wm->window_count; i++) {
+            wm->z_order[i] = wm->z_order[i + 1];
+        }
+    }
+    for (int i = 0; i < wm->window_count - 1; i++) {
+        if (wm->z_order[i] > idx) {
+            wm->z_order[i]--;
+        }
+    }
+
     for (int i = idx; i + 1 < wm->window_count; i++) {
         wm->windows[i] = wm->windows[i + 1];
     }
     wm->window_count--;
-    if (wm->window_count <= 0) {
-        wm->window_count = 0;
+
+    int next = -1;
+    for (int i = wm->window_count - 1; i >= 0; i--) {
+        int w_idx = wm->z_order[i];
+        if (wm->windows[w_idx].used && wm->windows[w_idx].state != WM_STATE_MINIMIZED) {
+            next = w_idx;
+            break;
+        }
+    }
+    if (next >= 0) {
+        wm_focus_window(wm, next);
+    } else {
         wm->active_window = -1;
-    } else if (wm->active_window >= wm->window_count) {
-        wm->active_window = wm->window_count - 1;
-    } else if (wm->active_window > idx) {
-        wm->active_window--;
     }
 }
 
@@ -94,19 +140,8 @@ void wm_focus_window(wm_state_t *wm, int idx) {
     if (!wm->windows[idx].used) return;
     if (wm->windows[idx].state == WM_STATE_MINIMIZED)
         wm_restore_window(wm, idx);
-    if (wm->active_window != idx) {
-        int old = wm->active_window;
-        wm->active_window = idx;
-        if (old >= 0 && old < wm->window_count) {
-            for (int i = 0; i < wm->window_count; i++) {
-                if (wm->z_order[i] == old) {
-                    wm->z_order[i] = idx;
-                    wm->z_order[idx] = wm->window_count - 1;
-                    break;
-                }
-            }
-        }
-    }
+    wm->active_window = idx;
+    wm_bring_to_top(wm, idx);
 }
 
 void wm_focus_next(wm_state_t *wm, int dir) {
@@ -145,17 +180,32 @@ void wm_minimize_window(wm_state_t *wm, int idx) {
         win->prev_w = win->w;
         win->prev_h = win->h;
     }
+    
+    /* 启动最小化动画 */
+    win->anim_type = WM_ANIM_MINIMIZE;
+    win->anim_frame = 0;
+    win->anim_total = 10;  /* 10帧动画 */
+    win->anim_start_x = win->x;
+    win->anim_start_y = win->y;
+    win->anim_start_w = win->w;
+    win->anim_start_h = win->h;
+    
     win->state = WM_STATE_MINIMIZED;
 
     int next = -1;
-    for (int i = 0; i < wm->window_count; i++) {
-        if (i != idx && wm->windows[i].used &&
-            wm->windows[i].state != WM_STATE_MINIMIZED) {
-            next = i;
+    for (int i = wm->window_count - 1; i >= 0; i--) {
+        int w_idx = wm->z_order[i];
+        if (w_idx != idx && wm->windows[w_idx].used &&
+            wm->windows[w_idx].state != WM_STATE_MINIMIZED) {
+            next = w_idx;
             break;
         }
     }
-    wm->active_window = next;
+    if (next >= 0) {
+        wm_focus_window(wm, next);
+    } else {
+        wm->active_window = -1;
+    }
 }
 
 void wm_maximize_window(wm_state_t *wm, int idx) {
@@ -168,6 +218,16 @@ void wm_maximize_window(wm_state_t *wm, int idx) {
         win->prev_w = win->w;
         win->prev_h = win->h;
     }
+    
+    /* 启动最大化动画 */
+    win->anim_type = WM_ANIM_MAXIMIZE;
+    win->anim_frame = 0;
+    win->anim_total = 8;  /* 8帧动画 */
+    win->anim_start_x = win->x;
+    win->anim_start_y = win->y;
+    win->anim_start_w = win->w;
+    win->anim_start_h = win->h;
+    
     win->state = WM_STATE_MAXIMIZED;
     win->x = 0;
     win->y = 0;
@@ -180,6 +240,16 @@ void wm_restore_window(wm_state_t *wm, int idx) {
     wm_window_t *win = &wm->windows[idx];
     if (!win->used) return;
     if (win->state == WM_STATE_NORMAL) return;
+    
+    /* 启动还原动画 */
+    win->anim_type = WM_ANIM_RESTORE;
+    win->anim_frame = 0;
+    win->anim_total = 8;  /* 8帧动画 */
+    win->anim_start_x = win->x;
+    win->anim_start_y = win->y;
+    win->anim_start_w = win->w;
+    win->anim_start_h = win->h;
+    
     win->state = WM_STATE_NORMAL;
     if (win->prev_w > 0 && win->prev_h > 0) {
         win->x = win->prev_x;
@@ -282,49 +352,53 @@ void wm_get_window_rect(wm_state_t *wm, int idx, int *x, int *y, int *w, int *h)
 int wm_hit_titlebar(wm_state_t *wm, int mx, int my) {
     if (wm->start_menu_open && wm_hit_start_menu(wm, mx, my) >= 0) return -1;
     for (int i = wm->window_count - 1; i >= 0; i--) {
-        if (wm->windows[i].state == WM_STATE_MINIMIZED) continue;
+        int idx = wm->z_order[i];
+        if (wm->windows[idx].state == WM_STATE_MINIMIZED) continue;
         int wx, wy, ww, wh;
-        wm_get_window_rect(wm, i, &wx, &wy, &ww, &wh);
+        wm_get_window_rect(wm, idx, &wx, &wy, &ww, &wh);
         if (mx >= wx && mx < wx + ww - 80 &&
-            my >= wy && my < wy + WM_TITLE_H) return i;
+            my >= wy && my < wy + WM_TITLE_H) return idx;
     }
     return -1;
 }
 
 int wm_hit_close(wm_state_t *wm, int mx, int my) {
     for (int i = wm->window_count - 1; i >= 0; i--) {
-        if (wm->windows[i].state == WM_STATE_MINIMIZED) continue;
+        int idx = wm->z_order[i];
+        if (wm->windows[idx].state == WM_STATE_MINIMIZED) continue;
         int wx, wy, ww, wh;
-        wm_get_window_rect(wm, i, &wx, &wy, &ww, &wh);
+        wm_get_window_rect(wm, idx, &wx, &wy, &ww, &wh);
         (void)wh;
         if (mx >= wx + ww - WM_BTN_W - 8 && mx < wx + ww - 8 &&
-            my >= wy + 4 && my < wy + WM_TITLE_H - 4) return i;
+            my >= wy + 4 && my < wy + WM_TITLE_H - 4) return idx;
     }
     return -1;
 }
 
 int wm_hit_minimize(wm_state_t *wm, int mx, int my) {
     for (int i = wm->window_count - 1; i >= 0; i--) {
-        if (wm->windows[i].state == WM_STATE_MINIMIZED) continue;
+        int idx = wm->z_order[i];
+        if (wm->windows[idx].state == WM_STATE_MINIMIZED) continue;
         int wx, wy, ww, wh;
-        wm_get_window_rect(wm, i, &wx, &wy, &ww, &wh);
+        wm_get_window_rect(wm, idx, &wx, &wy, &ww, &wh);
         (void)wh;
         if (mx >= wx + ww - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 8 &&
             mx <  wx + ww - WM_BTN_W * 2 - WM_BTN_GAP * 2 - 8 &&
-            my >= wy + 4 && my < wy + WM_TITLE_H - 4) return i;
+            my >= wy + 4 && my < wy + WM_TITLE_H - 4) return idx;
     }
     return -1;
 }
 
 int wm_hit_maximize(wm_state_t *wm, int mx, int my) {
     for (int i = wm->window_count - 1; i >= 0; i--) {
-        if (wm->windows[i].state == WM_STATE_MINIMIZED) continue;
+        int idx = wm->z_order[i];
+        if (wm->windows[idx].state == WM_STATE_MINIMIZED) continue;
         int wx, wy, ww, wh;
-        wm_get_window_rect(wm, i, &wx, &wy, &ww, &wh);
+        wm_get_window_rect(wm, idx, &wx, &wy, &ww, &wh);
         (void)wh;
         if (mx >= wx + ww - WM_BTN_W * 2 - WM_BTN_GAP - 8 &&
             mx <  wx + ww - WM_BTN_W - WM_BTN_GAP - 8 &&
-            my >= wy + 4 && my < wy + WM_TITLE_H - 4) return i;
+            my >= wy + 4 && my < wy + WM_TITLE_H - 4) return idx;
     }
     return -1;
 }
@@ -333,9 +407,10 @@ int wm_hit_border(wm_state_t *wm, int mx, int my, int *edge) {
     *edge = WM_EDGE_NONE;
     int bw = WM_BORDER_W + 4;
     for (int i = wm->window_count - 1; i >= 0; i--) {
-        if (wm->windows[i].state != WM_STATE_NORMAL) continue;
+        int idx = wm->z_order[i];
+        if (wm->windows[idx].state != WM_STATE_NORMAL) continue;
         int wx, wy, ww, wh;
-        wm_get_window_rect(wm, i, &wx, &wy, &ww, &wh);
+        wm_get_window_rect(wm, idx, &wx, &wy, &ww, &wh);
         if (mx < wx - bw || mx > wx + ww + bw ||
             my < wy - bw || my > wy + wh + bw) continue;
 
@@ -353,7 +428,7 @@ int wm_hit_border(wm_state_t *wm, int mx, int my, int *edge) {
         else if (on_w) *edge = WM_EDGE_W;
         else if (on_e) *edge = WM_EDGE_E;
 
-        if (*edge != WM_EDGE_NONE) return i;
+        if (*edge != WM_EDGE_NONE) return idx;
     }
     return -1;
 }
@@ -378,4 +453,70 @@ int wm_hit_start_menu(wm_state_t *wm, int mx, int my) {
         if (row >= 0 && row < WM_START_MENU_ROWS) return row;
     }
     return -1;
+}
+
+/* ================================================================
+ * wm_update_animations — 更新所有窗口动画
+ * ================================================================ */
+
+void wm_update_animations(wm_state_t *wm) {
+    for (int i = 0; i < wm->window_count; i++) {
+        wm_window_t *win = &wm->windows[i];
+        if (!win->used || win->anim_type == WM_ANIM_NONE) continue;
+        
+        win->anim_frame++;
+        
+        if (win->anim_frame >= win->anim_total) {
+            /* 动画完成 */
+            win->anim_type = WM_ANIM_NONE;
+            win->anim_frame = 0;
+            win->opacity = 255;  /* 确保完全不透明 */
+        } else {
+            /* 使用固定步长和整数运算计算动画进度与缓动 */
+            int total = win->anim_total > 0 ? win->anim_total : 8;
+            int frame = win->anim_frame;
+            if (frame > total) frame = total;
+            
+            int F = total - frame;
+            /* eased_scaled ranges from 0 to 512, where 512 is 100% */
+            int eased_scaled = 512 - ((F * F * F) * 512) / (total * total * total);
+
+            switch (win->anim_type) {
+                case WM_ANIM_MINIMIZE:
+                    /* 最小化：淡出 */
+                    win->opacity = (uint8_t)(255 * (total - frame) / total);
+                    break;
+                    
+                case WM_ANIM_MAXIMIZE:
+                case WM_ANIM_RESTORE:
+                    /* 最大化/还原：平滑过渡位置和大小 */
+                    {
+                        int target_x = win->x;
+                        int target_y = win->y;
+                        int target_w = win->w;
+                        int target_h = win->h;
+                        
+                        /* 临时设置动画中的位置（用于渲染） */
+                        win->x = win->anim_start_x + ((target_x - win->anim_start_x) * eased_scaled) / 512;
+                        win->y = win->anim_start_y + ((target_y - win->anim_start_y) * eased_scaled) / 512;
+                        win->w = win->anim_start_w + ((target_w - win->anim_start_w) * eased_scaled) / 512;
+                        win->h = win->anim_start_h + ((target_h - win->anim_start_h) * eased_scaled) / 512;
+                    }
+                    break;
+            }
+        }
+    }
+}
+
+/* ================================================================
+ * wm_has_active_animations — 检查是否有活动的动画
+ * ================================================================ */
+
+int wm_has_active_animations(wm_state_t *wm) {
+    for (int i = 0; i < wm->window_count; i++) {
+        if (wm->windows[i].used && wm->windows[i].anim_type != WM_ANIM_NONE) {
+            return 1;
+        }
+    }
+    return 0;
 }

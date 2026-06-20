@@ -175,12 +175,34 @@ void vmm_unmap_page(uint64_t virt_addr) {
  * @return 物理地址，0 表示未映射
  */
 uint64_t vmm_get_phys(uint64_t virt_addr) {
-    pte_t *pte = vmm_get_pte(virt_addr, false, 0);
-    if (!pte) return 0;
-    // 处理 2MB 大页
-    if (*pte & VMM_PS)
-        return (*pte & ~((1ULL<<21)-1)) | (virt_addr & ((1ULL<<21)-1));
-    // 4KB 页
+    if (!g_pml4) return 0;
+
+    // PML4 (Level 4)
+    pte_t *pml4e = &g_pml4[VMM_IDX(virt_addr, VMM_PML4)];
+    if (!(*pml4e & VMM_P)) return 0;
+
+    // PDPT (Level 3)
+    pte_t *pdpt = (pte_t *)(uintptr_t)(*pml4e & ~0xFFFULL);
+    pte_t *pdpte = &pdpt[VMM_IDX(virt_addr, VMM_PDPT)];
+    if (!(*pdpte & VMM_P)) return 0;
+    if (*pdpte & VMM_PS) {
+        return (*pdpte & ~((1ULL << 30) - 1)) | (virt_addr & ((1ULL << 30) - 1));
+    }
+
+    // PD (Level 2)
+    pte_t *pd = (pte_t *)(uintptr_t)(*pdpte & ~0xFFFULL);
+    pte_t *pde = &pd[VMM_IDX(virt_addr, VMM_PD)];
+    if (!(*pde & VMM_P)) return 0;
+    if (*pde & VMM_PS) {
+        return (*pde & ~((1ULL << 21) - 1)) | (virt_addr & ((1ULL << 21) - 1));
+    }
+
+    // PT (Level 1)
+    pte_t *pt = (pte_t *)(uintptr_t)(*pde & ~0xFFFULL);
+    pte_t *pte = &pt[VMM_IDX(virt_addr, VMM_PT)];
+    if (!(*pte & VMM_P)) return 0;
+
+    // 4KB page
     return (*pte & ~0xFFFULL) | (virt_addr & 0xFFF);
 }
 
@@ -248,13 +270,17 @@ void vmm_set_pml4(uint64_t pml4_phys) {
     __asm__ volatile("mov %0, %%cr3" :: "r"(pml4_phys) : "memory");
 }
 
+static uint64_t g_next_mmio_virt = 0x100000000ULL; // 4GB virtual base
+
 void *vmm_map_mmio(uint64_t phys_addr, size_t size) {
+    uint64_t virt_start = g_next_mmio_virt;
     for (size_t off = 0; off < size; off += PAGE_SIZE) {
-        if (vmm_map_page(phys_addr + off, phys_addr + off,
+        if (vmm_map_page(virt_start + off, phys_addr + off,
                          VMM_P | VMM_W | VMM_CD) != 0)
             return NULL;
     }
-    return (void *)(uintptr_t)phys_addr;
+    g_next_mmio_virt += size;
+    return (void *)(uintptr_t)virt_start;
 }
 
 uint64_t vmm_virt_to_phys(uint64_t virt_addr) {

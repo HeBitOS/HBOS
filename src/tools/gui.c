@@ -844,14 +844,10 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
 }
 
 static int clamp_delta(int v) {
-    /* Quadratic acceleration: precise at low speed, rapid at high speed.
-     * +1 extra pixel per ~16 pixels of movement.
-     * Cap at ±80 to prevent runaway from glitched packets. */
-    int s = v < 0 ? -1 : 1;
-    int a = v * s;
-    a = a + (a * a) / 96;
-    if (a > 80) a = 80;
-    return a * s;
+    /* Linear 1:1 mapping with a safety cap to prevent runaway */
+    if (v > 80) return 80;
+    if (v < -80) return -80;
+    return v;
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
@@ -3169,10 +3165,8 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     text(436, 372, "Tab/Space 切换窗口", rgb(216, 232, 244), 1);
 
     for (int i = 0; i < st->wm.window_count; i++) {
-        if (i != st->wm.active_window) draw_one_window(w, h, st, i);
+        draw_one_window(w, h, st, st->wm.z_order[i]);
     }
-    if (st->wm.active_window >= 0 && st->wm.active_window < st->wm.window_count)
-        draw_one_window(w, h, st, st->wm.active_window);
 
     // 拖动吸附预览：高亮即将落入的区域
     if (st->snap_preview != WM_SNAP_NONE) {
@@ -4309,8 +4303,8 @@ static void cmd_gui(int argc, char **argv) {
             my += acc_dy;
             if (mx < 0) mx = 0;
             if (my < 0) my = 0;
-            if (mx > w - 32) mx = w - 32;
-            if (my > h - 32) my = h - 32;
+            if (mx > w - 1) mx = w - 1;
+            if (my > h - 1) my = h - 1;
 
             int redraw = 0;
             if (acc_dz != 0) {
@@ -4586,6 +4580,7 @@ static void cmd_gui(int argc, char **argv) {
         }
         frame_tick++;
         task_yield();
+        usleep(15000); // Throttle GUI loop to ~60 FPS to prevent 100% CPU busy-looping
     }
 
     gui_set_surface(0, 0, 0, 0);

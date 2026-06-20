@@ -71,14 +71,14 @@ make uefi-run     # 用 QEMU 跑 UEFI
 | **多核** | ✅ SMP | AP trampoline, TSS per-core |
 | **ACPI** | ✅ | S5 关机, MADT CPU 检测 |
 | **任务** | ✅ 协作式 | 最多 16 task, 轮转, ring3 用户任务支持 |
-| **输入** | ✅ PS/2 KB+Mouse | USB HID 框架但没有 xHCI 控制器 |
+| **输入** | ✅ PS/2 + USB KB/Mouse | 支持 PS/2 与 USB 键盘鼠标，且无 input lag/CPU peg 现象 |
 | **显示** | ✅ Framebuffer | VESA 1024x768, 24bpp, CJK 位图字体 |
 | **GUI** | ⚠️ 基础可用 | 桌面 + 窗口管理 + 开始菜单, 鼠标有加速 |
 | **文件系统** | ⚠️ 部分 | ramfs (默认), ext2 只读, fat32 只读, devfs |
 | **网络** | ⚠️ 部分 | E1000 ✅, **PCnet ✅ (刚加的)**, RTL8139/VirtIO 未实现 |
 | **TCP/IP** | ✅ 基础可用 | DHCP, ARP, ICMP ping, DNS, TCP, HTTP GET |
-| **USB** | ❌ 无控制器 | xHCI 仅框架, 无 USB 键盘/鼠标/存储 |
-| **SATA** | ⚠️ AHCI 框架 | ATA PIO 模式可用, AHCI 未完成 |
+| **USB** | ✅ 控制器+设备实现 | 已实现 xHCI 驱动，并支持 USB 键盘、鼠标以及 USB 大容量存储 (MSC) |
+| **SATA** | ⚠️ AHCI 框架 | ATA PIO 模式与 USB 存储可用, AHCI 未完成 |
 | **Crypto** | ✅ | ChaCha20-Poly1305, SHA-256, X25519 |
 
 ---
@@ -104,12 +104,11 @@ make uefi-run     # 用 QEMU 跑 UEFI
 
 ## 已知问题 (TODO)
 
-1. **USB 完全不工作** — xHCI 有框架但无实现, 所有 USB HID 设备无法使用
-2. **网卡 RTL8139 / VirtIO 驱动未实现** — 检测到了选不上
-3. **AHCI 未完成** — 磁盘仅 ATA PIO 模式
-4. **ext2/fat32 只读** — 无写入实现
-5. **GUI 基础** — 无窗口拖拽, 无应用框架, 开始菜单是静态的
-6. **任务调度** — 协作式, 无抢占, 无同步原语
+1. **网卡 RTL8139 / VirtIO 驱动未实现** — 检测到了选不上
+2. **AHCI 未完成** — 磁盘支持 ATA PIO 模式与 USB 存储模式
+3. **ext2/fat32 只读** — 无写入实现
+4. **GUI 基础** — 无窗口拖拽, 无应用框架, 开始菜单是静态的
+5. **任务调度** — 协作式, 无抢占, 无同步原语
 
 ---
 

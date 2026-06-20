@@ -99,6 +99,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/gui/wm.c \
 	$(SRC_DIR)/gui/compositor.c \
+	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gpu.c \
 	$(APP_SRCS)
 

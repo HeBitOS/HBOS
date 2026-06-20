@@ -9,6 +9,8 @@
 #include "ahci.h"
 #include "ata.h"
 #include "block.h"
+#include "xhci.h"
+#include "usb_msc.h"
 
 /** 当前选中的块设备后端 */
 static block_backend_t backend = BLOCK_BACKEND_NONE;
@@ -22,6 +24,14 @@ static uint32_t sectors = 0;
  * @return 0 成功，-1 无可用设备
  */
 int block_init(void) {
+    /* Initialize xHCI early to support USB storage detection during mount */
+    (void)xhci_init();
+    if (msc_init() > 0 && msc_get_block_count(0) > 0) {
+        backend = BLOCK_BACKEND_USB;
+        sectors = msc_get_block_count(0);
+        return 0;
+    }
+
     if (ahci_init() == 0 && ahci_sector_count() > 0) {
         backend = BLOCK_BACKEND_AHCI;
         sectors = ahci_sector_count();
@@ -49,6 +59,7 @@ int block_init(void) {
  * @return 0 成功，-1 失败
  */
 int block_read_sector(uint32_t lba, uint8_t *buffer) {
+    if (backend == BLOCK_BACKEND_USB) return msc_read_sector(0, lba, buffer, 1) >= 0 ? 0 : -1;
     if (backend == BLOCK_BACKEND_AHCI) return ahci_read_sector(lba, buffer);
     if (backend == BLOCK_BACKEND_ATA) return ata_read_sector(lba, buffer);
     return -1;
@@ -61,6 +72,7 @@ int block_read_sector(uint32_t lba, uint8_t *buffer) {
  * @return 0 成功，-1 失败
  */
 int block_write_sector(uint32_t lba, const uint8_t *buffer) {
+    if (backend == BLOCK_BACKEND_USB) return msc_write_sector(0, lba, buffer, 1) >= 0 ? 0 : -1;
     if (backend == BLOCK_BACKEND_AHCI) return ahci_write_sector(lba, buffer);
     if (backend == BLOCK_BACKEND_ATA) return ata_write_sector(lba, buffer);
     return -1;
@@ -78,6 +90,7 @@ block_backend_t block_backend(void) {
 
 /** 获取当前块设备后端名称字符串 */
 const char *block_backend_name(void) {
+    if (backend == BLOCK_BACKEND_USB) return "usb";
     if (backend == BLOCK_BACKEND_AHCI) return "ahci";
     if (backend == BLOCK_BACKEND_ATA) return "ata";
     return "none";

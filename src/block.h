@@ -19,6 +19,7 @@ typedef enum {
     BLOCK_BACKEND_NONE = 0,     /**< 无可用块设备 */
     BLOCK_BACKEND_AHCI,         /**< AHCI (SATA) 后端 */
     BLOCK_BACKEND_ATA,          /**< ATA PIO 后端 */
+    BLOCK_BACKEND_USB,          /**< USB Mass Storage 后端 */
 } block_backend_t;
 
 /** 初始化块设备子系统，自动检测 AHCI 和 ATA */

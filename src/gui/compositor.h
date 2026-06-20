@@ -29,6 +29,7 @@ typedef enum {
     COMPOSITOR_OP_NONE = 0,  /**< 无操作 */
     COMPOSITOR_OP_FILL,      /**< 填充矩形 */
     COMPOSITOR_OP_BLIT,      /**< 拷贝矩形 */
+    COMPOSITOR_OP_BLEND,     /**< Alpha混合 */
 } compositor_op_t;
 
 /* ================================================================
@@ -49,8 +50,10 @@ typedef struct {
     compositor_dirty_t dirty[COMPOSITOR_MAX_DIRTY];
     int                 dirty_count;
 
-    /** 帧统计 */
+    /** 帧统计与性能 */
     int       frame_count;
+    uint64_t  last_frame_time;   /**< 上一帧的时间戳（毫秒） */
+    uint64_t  frame_time_avg;    /**< 平均帧时间（毫秒） */
 } compositor_t;
 
 /* ================================================================
@@ -119,5 +122,29 @@ uint64_t compositor_get_width(compositor_t *c);
  * @brief 获取合成器高度
  */
 uint64_t compositor_get_height(compositor_t *c);
+
+/**
+ * @brief Alpha混合两个颜色
+ *
+ * 将源颜色按照alpha值混合到目标颜色上。
+ * 
+ * @param src 源颜色（ARGB格式）
+ * @param dst 目标颜色（ARGB格式）
+ * @return 混合后的颜色
+ */
+uint32_t compositor_blend(uint32_t src, uint32_t dst);
+
+/**
+ * @brief 在合成器缓冲区中绘制带alpha混合的矩形
+ * 
+ * @param c 合成器状态指针
+ * @param x 左上角 X
+ * @param y 左上角 Y
+ * @param w 宽度
+ * @param h 高度
+ * @param color 颜色（ARGB格式）
+ */
+void compositor_fill_rect_alpha(compositor_t *c, uint64_t x, uint64_t y,
+                                uint64_t w, uint64_t h, uint32_t color);
 
 #endif /* HBOS_COMPOSITOR_H */

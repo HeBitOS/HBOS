@@ -318,6 +318,40 @@ void irq_handler(isr_regs_t *regs) {
         return;
     }
 
+    if (irq == 1) {
+        if (inb(0x64) & 1) {
+            uint8_t st = inb(0x64);
+            if (!(st & 0x20)) {
+                uint8_t sc = inb(0x60);
+                extern void kb_irq_enqueue_scancode(uint8_t sc);
+                kb_irq_enqueue_scancode(sc);
+            } else {
+                uint8_t b = inb(0x60);
+                extern void ps2_mouse_enqueue_byte(uint8_t b);
+                ps2_mouse_enqueue_byte(b);
+            }
+        }
+        pic_send_eoi(1);
+        return;
+    }
+
+    if (irq == 12) {
+        if (inb(0x64) & 1) {
+            uint8_t st = inb(0x64);
+            if (st & 0x20) {
+                uint8_t b = inb(0x60);
+                extern void ps2_mouse_enqueue_byte(uint8_t b);
+                ps2_mouse_enqueue_byte(b);
+            } else {
+                uint8_t sc = inb(0x60);
+                extern void kb_irq_enqueue_scancode(uint8_t sc);
+                kb_irq_enqueue_scancode(sc);
+            }
+        }
+        pic_send_eoi(12);
+        return;
+    }
+
     pic_send_eoi(irq);
 }
 

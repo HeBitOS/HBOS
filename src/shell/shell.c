@@ -124,14 +124,37 @@ static int kb_raw_dequeue(void) {
     return sc;
 }
 
+static bool kb_wait_input_clear(void);
+static bool kb_wait_output_full(void);
+
 static void kb_controller_init(void) {
-    /*
-     * GRUB already configured the PS/2 controller and keyboard.
-     * We must NOT disable, self-test, or reset — VirtualBox and
-     * some hardware stop delivering bytes after a late re-init.
-     * Only unmask IRQ1 so the ISR can receive scancodes.
+    /* Unmask IRQ1 on PIC */
+    outb(0x21, (uint8_t)(inb(0x21) & ~0x02));
+
+    /* Configure PS/2 controller configuration byte:
+     * - Enable IRQ1 (bit 0 = 1)
+     * - Enable Keyboard clock (bit 4 = 0)
+     * - Enable Translation to Set 1 (bit 6 = 1)
      */
-    outb(0x21, (uint8_t)(inb(0x21) & ~0x02)); /* unmask IRQ1 on PIC */
+    int_disable();
+    for (int i = 0; i < 10 && (inb(0x64) & 1); i++) (void)inb(0x60);
+    
+    if (kb_wait_input_clear()) {
+        outb(0x64, 0x20); // Read config byte command
+        if (kb_wait_output_full()) {
+            uint8_t cfg = inb(0x60);
+            uint8_t new_cfg = (cfg & (uint8_t)~0x10) | 0x01 | 0x40;
+            if (new_cfg != cfg) {
+                if (kb_wait_input_clear()) {
+                    outb(0x64, 0x60); // Write config byte command
+                    if (kb_wait_input_clear()) {
+                        outb(0x60, new_cfg);
+                    }
+                }
+            }
+        }
+    }
+    int_enable();
 }
 
 static void kb_init(void) {
@@ -179,6 +202,12 @@ static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')',
 static int ctrl_pressed = 0; /**< Ctrl键状态 */
 static int ext_scancode = 0;
 
+void kb_clear_modifiers(void) {
+    ctrl_pressed = 0;
+    shift_pressed = 0;
+    ext_scancode = 0;
+}
+
 int kb_poll_key(void) {
     if (!kb_initialized) kb_init();
 
@@ -197,7 +226,13 @@ int kb_poll_key(void) {
         int_disable();
         if (inb(0x64) & 1) {
             uint8_t st = inb(0x64);
-            if (!(st & 0x20)) sc = inb(0x60);
+            if (!(st & 0x20)) {
+                sc = inb(0x60);
+            } else {
+                uint8_t mouse_byte = inb(0x60);
+                extern void ps2_mouse_enqueue_byte(uint8_t b);
+                ps2_mouse_enqueue_byte(mouse_byte);
+            }
         }
         int_enable();
         if (sc == 0) return 0;
@@ -253,11 +288,21 @@ int kb_poll_key(void) {
             case 0x53: return KEY_DELETE;
         }
     }
+    if (sc == 0x01) {
+        ctrl_pressed = 0;
+        shift_pressed = 0;
+        ext_scancode = 0;
+        return 27;
+    }
     if (sc == 0x0F) return '\t';
     if (sc < 128) {
         char c = scancode_map[sc];
         if (c == 0) return 0;
-        if (ctrl_pressed && c >= 'a' && c <= 'z') return (char)(c - 'a' + 1);
+        if (ctrl_pressed && c >= 'a' && c <= 'z') {
+            char ctrl_c = (char)(c - 'a' + 1);
+            if (ctrl_c == 0x13 || ctrl_c == 0x11 || ctrl_c == 0x03) return ctrl_c;
+            return c;
+        }
         if (c >= 'a' && c <= 'z') {
             if (shift_pressed ^ caps_lock) c = c - 'a' + 'A';
         } else if (shift_pressed) {

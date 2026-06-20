@@ -40,6 +40,13 @@ enum {
     WM_SNAP_TOP   = 3,
 };
 
+enum {
+    WM_ANIM_NONE     = 0,
+    WM_ANIM_MINIMIZE = 1,
+    WM_ANIM_MAXIMIZE = 2,
+    WM_ANIM_RESTORE  = 3,
+};
+
 typedef struct {
     int used;
     int kind;
@@ -48,6 +55,14 @@ typedef struct {
     int x, y;
     int w, h;
     int prev_x, prev_y, prev_w, prev_h;
+    int anim_type;         /**< 当前动画类型 */
+    int anim_frame;        /**< 动画帧计数 */
+    int anim_total;        /**< 动画总帧数 */
+    int anim_start_x;      /**< 动画起始X */
+    int anim_start_y;      /**< 动画起始Y */
+    int anim_start_w;      /**< 动画起始宽度 */
+    int anim_start_h;      /**< 动画起始高度 */
+    uint8_t opacity;       /**< 窗口不透明度 (0-255) */
 } wm_window_t;
 
 typedef struct {
@@ -88,5 +103,7 @@ int          wm_hit_maximize(wm_state_t *wm, int mx, int my);
 int          wm_hit_border(wm_state_t *wm, int mx, int my, int *edge);
 int          wm_hit_taskbar(wm_state_t *wm, int mx, int my);
 int          wm_hit_start_menu(wm_state_t *wm, int mx, int my);
+void         wm_update_animations(wm_state_t *wm);
+int          wm_has_active_animations(wm_state_t *wm);
 
 #endif

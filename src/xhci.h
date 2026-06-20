@@ -42,9 +42,18 @@ typedef struct {
     uint64_t *event_ring_seg;
     uint32_t event_ring_idx;
     uint32_t event_ring_cycle;
-    uint64_t *device_context_base[XHCI_MAX_SLOTS];
-    uint64_t *input_context[XHCI_MAX_SLOTS];
-    uint32_t slot_enabled[XHCI_MAX_SLOTS];
+    uint64_t *device_context_base[XHCI_MAX_SLOTS + 1];
+    uint64_t *input_context[XHCI_MAX_SLOTS + 1];
+    uint32_t slot_enabled[XHCI_MAX_SLOTS + 1];
+    uint64_t *ep_rings[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    uint64_t ep_rings_phys[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    uint32_t ep_ring_idx[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    uint32_t ep_ring_cycle[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    uint32_t ep_configured[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    uint8_t *ep_data_buf[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    uint64_t ep_data_buf_phys[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    uint32_t ep_data_buf_len[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    volatile uint32_t ep_has_data[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
     uint32_t initialized;
 } xhci_t;
 
@@ -137,6 +146,6 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           uint8_t bRequest, uint16_t wValue,
                           uint16_t wIndex, void *data, uint16_t wLength);
 int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len);
-int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len);
+int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len, uint32_t interval);
 
 #endif

@@ -102,7 +102,7 @@ static int ps2_mouse_init(void) {
     {
         uint8_t cfg = 0;
         if (read_data(&cfg) < 0) { int_enable(); return -1; }
-        uint8_t new_cfg = (cfg & (uint8_t)~0x20) | 0x02;
+        uint8_t new_cfg = (cfg & (uint8_t)~0x30) | 0x03 | 0x40;
         if (new_cfg != cfg) {
             if (write_cmd(0x60) < 0) { int_enable(); return -1; }
             if (write_data(new_cfg) < 0) { int_enable(); return -1; }
@@ -173,17 +173,47 @@ void mouse_shutdown(void) {
     packet_i = 0;
 }
 
+extern void kb_clear_modifiers(void);
+
+static volatile uint8_t mouse_raw_queue[128];
+static volatile uint8_t mouse_raw_head = 0;
+static volatile uint8_t mouse_raw_tail = 0;
+
+void ps2_mouse_enqueue_byte(uint8_t b) {
+    uint8_t next = (uint8_t)((mouse_raw_head + 1) & 127);
+    if (next == mouse_raw_tail) return; /* drop if full */
+    mouse_raw_queue[mouse_raw_head] = b;
+    mouse_raw_head = next;
+}
+
+static int ps2_mouse_dequeue_byte(void) {
+    if (mouse_raw_tail == mouse_raw_head) return -1;
+    uint8_t b = mouse_raw_queue[mouse_raw_tail];
+    mouse_raw_tail = (uint8_t)((mouse_raw_tail + 1) & 127);
+    return b;
+}
+
 static int ps2_mouse_poll(mouse_event_t *ev) {
     int sum_x = 0, sum_y = 0, sum_z = 0, buttons = 0;
     int got_any = 0;
 
-    /* Atomically read all pending mouse bytes — prevents keyboard
-     * ISR from stealing bytes mid-packet. */
-    int_disable();
-    while (inb(PS2_STATUS) & 0x01) {
-        uint8_t status = inb(PS2_STATUS);
-        if (!(status & 0x20)) break;
-        uint8_t b = inb(PS2_DATA);
+    while (1) {
+        int queued = ps2_mouse_dequeue_byte();
+        uint8_t b = 0;
+        if (queued >= 0) {
+            b = (uint8_t)queued;
+        } else {
+            /* If no queued bytes, check the physical port */
+            int_disable();
+            if (inb(PS2_STATUS) & 0x01) {
+                uint8_t status = inb(PS2_STATUS);
+                if (status & 0x20) {
+                    b = inb(PS2_DATA);
+                }
+            }
+            int_enable();
+        }
+        if (b == 0 && queued < 0) break;
 
         if (packet_i == 0 && !(b & 0x08)) continue;
         packet[packet_i++] = b;
@@ -205,9 +235,13 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
         buttons = (int)(packet[0] & 0x07);
         got_any = 1;
     }
-    int_enable();
 
     if (got_any) {
+        static int last_buttons = 0;
+        if (buttons != last_buttons) {
+            kb_clear_modifiers();
+            last_buttons = buttons;
+        }
         ev->dx = sum_x; ev->dy = -sum_y;
         ev->dz = sum_z; ev->buttons = buttons;
         return 1;
@@ -215,11 +249,18 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
     return 0;
 }
 
+
 static int usb_mouse_poll(mouse_event_t *ev) {
     hid_mouse_report_t report;
     if (usb_mouse_get_report(&report) < 0) return 0;
     if (report.x == 0 && report.y == 0 && report.wheel == 0 &&
         report.buttons == 0) return 0;
+
+    static int last_usb_buttons = 0;
+    if (report.buttons != last_usb_buttons) {
+        kb_clear_modifiers();
+        last_usb_buttons = report.buttons;
+    }
 
     ev->dx = report.x;
     ev->dy = report.y;

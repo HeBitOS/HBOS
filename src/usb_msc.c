@@ -40,16 +40,48 @@ static int msc_do_command(msc_device_t *dev, uint8_t *cb, uint8_t cb_len,
     return (int)data_len;
 }
 
+extern void console_puts(const char *s);
+extern void console_putchar(char c);
+static void dbg_print_uint(uint32_t v) {
+    char buf[16];
+    int n = 0;
+    do { buf[n++] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    while (n--) console_putchar(buf[n]);
+}
+static void dbg_print_hex16(uint16_t v) {
+    static const char hex[] = "0123456789ABCDEF";
+    console_putchar(hex[(v >> 12) & 0xF]);
+    console_putchar(hex[(v >> 8) & 0xF]);
+    console_putchar(hex[(v >> 4) & 0xF]);
+    console_putchar(hex[v & 0xF]);
+}
+
 int msc_init(void) {
     msc_count = 0;
     memset(msc_devices, 0, sizeof(msc_devices));
 
     int dev_count = xhci_device_count();
+    console_puts("[MSC INIT] dev_count = ");
+    dbg_print_uint(dev_count);
+    console_puts("\n");
+
     for (int i = 0; i < dev_count && msc_count < MSC_MAX_DEVICES; i++) {
         usb_device_desc_t desc;
         if (xhci_get_device_desc(i, &desc) < 0) continue;
 
-        if (desc.bDeviceClass != 0x08) continue;
+        console_puts("[MSC INIT] Device descriptor: Class=");
+        dbg_print_uint(desc.bDeviceClass);
+        console_puts(", SubClass=");
+        dbg_print_uint(desc.bDeviceSubClass);
+        console_puts(", Protocol=");
+        dbg_print_uint(desc.bDeviceProtocol);
+        console_puts(", Vendor=");
+        dbg_print_hex16(desc.idVendor);
+        console_puts(", Product=");
+        dbg_print_hex16(desc.idProduct);
+        console_puts("\n");
+
+        if (desc.bDeviceClass != 0x08 && desc.bDeviceClass != 0x00) continue;
 
         msc_device_t *dev = &msc_devices[msc_count];
         dev->slot_id = i + 1;

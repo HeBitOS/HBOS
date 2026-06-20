@@ -15,5 +15,6 @@ void mouse_shutdown(void);
 int mouse_poll(mouse_event_t *ev);
 int mouse_is_ready(void);
 const char *mouse_backend_name(void);
+void ps2_mouse_enqueue_byte(uint8_t b);
 
 #endif
