@@ -755,6 +755,7 @@ typedef struct {
     int16_t  length;     /* negative=dev owns, positive=host owns */
     uint16_t status;     /* TX: 0x0200=STP 0x0100=ENP 0x8000=OWN */
     uint32_t msg_len;    /* reserved / message length */
+    uint32_t reserved;   /* Padding to 16 bytes */
 } pcnet_desc_t;
 #pragma pack(pop)
 
@@ -776,6 +777,18 @@ static uint8_t *pcnet_tx_buf[PCNET_TX_COUNT];
 static uint8_t *pcnet_rx_buf[PCNET_RX_COUNT];
 static uint16_t pcnet_tx_tail;
 
+static void print_hex(uint32_t val) {
+    extern void console_puts(const char *s);
+    char buf[9];
+    buf[8] = '\0';
+    for (int i = 7; i >= 0; i--) {
+        uint8_t d = val & 0xF;
+        buf[i] = d < 10 ? '0' + d : 'A' + d - 10;
+        val >>= 4;
+    }
+    console_puts(buf);
+}
+
 static int pcnet_init_hw(pci_device_t *dev) {
     pcnet_iobase = primary.bar0_base; /* I/O bar, clear flags */
 
@@ -793,10 +806,10 @@ static int pcnet_init_hw(pci_device_t *dev) {
     pcnet_write_csr(0, 0x0004);            /* STOP */
     for (volatile int i = 0; i < 10000; i++) __asm__ volatile("" ::: "memory");
 
-    /* Set 32-bit mode (SSIZE32 in BCR20) */
-    pcnet_write_bcr(20, pcnet_read_bcr(20) | 0x0100);
+    /* Set SWSTYLE to 2 (PCnet-PCI 32-bit style), which also sets SSIZE32 to 1 */
+    pcnet_write_bcr(20, 0x0102);
 
-    /* Software style: PCnet-PCI (32-bit) */
+    /* Enable Full Duplex in BCR9 */
     pcnet_write_bcr(9, pcnet_read_bcr(9) | 0x0001);
 
     /* Check if stop bit is set */
@@ -859,6 +872,25 @@ static int pcnet_init_hw(pci_device_t *dev) {
     memcpy(ib->padr, primary.mac, 6);
     ib->rx_ring = (4U << 28) | ((uint32_t)rx_phys & 0x0FFFFFFF);
     ib->tx_ring = (3U << 28) | ((uint32_t)tx_phys & 0x0FFFFFFF);
+
+    extern void console_puts(const char *s);
+    console_puts("[PCNET] rx_phys: 0x");
+    print_hex((uint32_t)rx_phys);
+    console_puts(" tx_phys: 0x");
+    print_hex((uint32_t)tx_phys);
+    console_puts(" ib_phys: 0x");
+    print_hex((uint32_t)ib_phys);
+    console_puts("\n");
+    console_puts("[PCNET] rx_ring: 0x");
+    print_hex(ib->rx_ring);
+    console_puts(" tx_ring: 0x");
+    print_hex(ib->tx_ring);
+    console_puts("\n");
+    console_puts("[PCNET] BCR20: 0x");
+    print_hex(pcnet_read_bcr(20));
+    console_puts(" BCR9: 0x");
+    print_hex(pcnet_read_bcr(9));
+    console_puts("\n");
 
     /* Write InitBlock address and issue INIT */
     uint32_t ib_addr = (uint32_t)(uintptr_t)ib;
