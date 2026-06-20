@@ -131,7 +131,22 @@ typedef struct {
     int snap_preview;   // 拖动吸附预览：WM_SNAP_*
     uint8_t clock_last_sec;
     int switcher_ticks; // 切换器浮层剩余显示帧数
+    int theme_light;    // 主题：0-深色赛博 1-浅色赛博
 } gui_state_t;
+
+static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b);
+
+static inline uint32_t cyber_bg_top(int light) { return light ? rgb(230, 235, 242) : rgb(18, 12, 28); }
+static inline uint32_t cyber_bg_bot(int light) { return light ? rgb(200, 208, 220) : rgb(8, 5, 14); }
+static inline uint32_t cyber_neon_pink(int light) { return light ? rgb(220, 0, 100) : rgb(255, 0, 128); }
+static inline uint32_t cyber_neon_cyan(int light) { return light ? rgb(0, 160, 200) : rgb(0, 240, 255); }
+static inline uint32_t cyber_neon_yellow(int light) { return light ? rgb(200, 170, 0) : rgb(255, 230, 0); }
+static inline uint32_t cyber_neon_purple(int light) { return light ? rgb(140, 40, 200) : rgb(196, 116, 230); }
+static inline uint32_t cyber_text(int light) { return light ? rgb(15, 20, 30) : rgb(240, 248, 252); }
+static inline uint32_t cyber_text_muted(int light) { return light ? rgb(100, 110, 125) : rgb(168, 188, 202); }
+static inline uint32_t cyber_border(int light) { return light ? rgb(140, 160, 180) : rgb(80, 0, 120); }
+static inline uint32_t cyber_card_bg_top(int light) { return light ? rgb(245, 247, 250) : rgb(22, 15, 34); }
+static inline uint32_t cyber_card_bg_bot(int light) { return light ? rgb(220, 226, 235) : rgb(10, 8, 18); }
 
 static char g_code_buf[CODE_EDIT_CAP];
 static char g_code_output[CODE_OUTPUT_CAP];
@@ -293,7 +308,7 @@ static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void rect(int x, int y, int w, int h, uint32_t color);
-static void draw_splash_window(int w, int h, int ticks);
+static void draw_splash_window(int w, int h, int ticks, int light);
 
 static uint8_t clamp8(int v) {
     if (v < 0) return 0;
@@ -911,31 +926,31 @@ static void draw_file_action_bar(int tx, int ty, int content_w) {
     }
 }
 
-static void draw_task_button(int x, int y, int w, const char *label, int active, uint32_t color) {
-    uint32_t top = active ? rgb_lift(color, 20) : rgb(31, 38, 43);
-    uint32_t bottom = active ? rgb_lift(color, -32) : rgb(16, 20, 24);
-    uint32_t outline = active ? rgb_lift(color, 42) : rgb(39, 48, 55);
+static void draw_task_button(int x, int y, int w, const char *label, int active, uint32_t color, int light) {
+    uint32_t top = active ? rgb_lift(color, 20) : (light ? rgb(240, 244, 248) : rgb(31, 38, 43));
+    uint32_t bottom = active ? rgb_lift(color, -32) : (light ? rgb(220, 225, 230) : rgb(16, 20, 24));
+    uint32_t outline = active ? rgb_lift(color, 42) : (light ? rgb(180, 185, 192) : rgb(39, 48, 55));
     draw_panel_shell(x, y, w, 32, top, bottom, outline,
                      active ? color : rgb_lift(color, -54));
     rect(x + 8, y + 25, w - 16, 2,
-         active ? rgb(246, 198, 91) : rgb(48, 58, 62));
+         active ? cyber_neon_yellow(light) : (light ? rgb(190, 195, 200) : rgb(48, 58, 62)));
     text_clipped(x + 12, y + 11, x + w - 12, label,
-                 active ? rgb(250, 254, 255) : rgb(196, 206, 212), 1);
+                 active ? cyber_text(light) : cyber_text_muted(light), 1);
 }
 
-static void draw_icon(int x, int y, int active, const char *label, uint32_t color) {
+static void draw_icon(int x, int y, int active, const char *label, uint32_t color, int light) {
     if (active) soft_shadow(x, y, 82, 58);
     draw_panel_shell(x, y, 82, 58,
-                     active ? rgb_lift(color, 12) : rgb(30, 37, 42),
-                     active ? rgb_lift(color, -28) : rgb(15, 19, 23),
-                     active ? rgb_lift(color, 48) : rgb(39, 50, 58),
+                     active ? rgb_lift(color, 12) : (light ? rgb(240, 244, 248) : rgb(30, 37, 42)),
+                     active ? rgb_lift(color, -28) : (light ? rgb(220, 225, 230) : rgb(15, 19, 23)),
+                     active ? rgb_lift(color, 48) : (light ? rgb(180, 185, 192) : rgb(39, 50, 58)),
                      color);
     int gx = x + 14, gy = y + 12;
     vgradient(gx, gy, 22, 22, rgb_lift(color, 30), rgb_lift(color, -10));
     border(gx, gy, 22, 22, rgb_lift(color, -30));
-    rect(gx + 5, gy + 7, 12, 8, rgb(240, 248, 252));
+    rect(gx + 5, gy + 7, 12, 8, light ? rgb(20, 30, 40) : rgb(240, 248, 252));
     text_clipped(x + 42, y + 22, x + 78, label,
-                 active ? rgb(250, 254, 255) : rgb(190, 200, 206), 1);
+                 active ? cyber_text(light) : cyber_text_muted(light), 1);
 }
 
 static void draw_cursor(int x, int y, int edge) {
@@ -988,59 +1003,84 @@ static int key_poll(void) {
     return key;
 }
 
-static void draw_wallpaper(int w, int h) {
+static void draw_wallpaper(int w, int h, int light) {
     char line[32];
     int tb_y = h - TASKBAR_H;
-    vgradient(0, 0, w, tb_y, rgb(22, 27, 31), rgb(8, 11, 14));
+    if (light) {
+        vgradient(0, 0, w, tb_y, rgb(235, 240, 248), rgb(215, 220, 228));
+    } else {
+        vgradient(0, 0, w, tb_y, rgb(25, 10, 35), rgb(5, 5, 15));
+    }
     int sb_x = 112;
-    vgradient(0, 0, sb_x, tb_y, rgb(28, 32, 35), rgb(10, 13, 16));
-    rect(sb_x - 2, 0, 1, tb_y, rgb(72, 108, 104));
-    rect(sb_x - 1, 0, 1, tb_y, rgb(46, 64, 68));
-    rect(sb_x, 0, 1, tb_y, rgb(18, 24, 28));
+    if (light) {
+        vgradient(0, 0, sb_x, tb_y, rgb(220, 225, 232), rgb(200, 205, 212));
+    } else {
+        vgradient(0, 0, sb_x, tb_y, rgb(15, 10, 24), rgb(5, 4, 10));
+    }
+    rect(sb_x - 2, 0, 1, tb_y, cyber_neon_pink(light));
+    rect(sb_x - 1, 0, 1, tb_y, cyber_neon_cyan(light));
+    rect(sb_x, 0, 1, tb_y, light ? rgb(180, 185, 192) : rgb(10, 10, 20));
 
     for (int yy = 18; yy < tb_y - 10; yy += 34) {
         int offset = (yy * 3) & 95;
-        rect(sb_x + offset, yy, w - sb_x - offset - 18, 1, rgb(24, 35, 37));
-        rect(sb_x + 34 + offset, yy + 9, w - sb_x - offset - 90, 1, rgb(34, 30, 24));
+        rect(sb_x + offset, yy, w - sb_x - offset - 18, 1, light ? rgb(210, 215, 222) : rgb(40, 0, 60));
+        rect(sb_x + 34 + offset, yy + 9, w - sb_x - offset - 90, 1, light ? rgb(225, 220, 215) : rgb(0, 40, 50));
     }
 
     int dot = 0;
     for (int yy = 84; yy < tb_y - 20; yy += 28) {
         for (int xx = 140; xx < w - 30; xx += 28) {
-            uint8_t v = (uint8_t)(34 + ((xx * 7 + yy * 3 + dot) & 23));
-            rect(xx, yy, 2, 2, rgb(v, (uint8_t)(v + 5), (uint8_t)(v + 4)));
+            uint8_t r_val = (dot & 1) ? 220 : 0;
+            uint8_t g_val = (dot & 1) ? 0 : 220;
+            uint8_t b_val = (dot & 1) ? 180 : 255;
+            if (light) {
+                r_val = (uint8_t)(r_val * 7 / 10);
+                g_val = (uint8_t)(g_val * 7 / 10);
+                b_val = (uint8_t)(b_val * 7 / 10);
+            }
+            uint8_t factor = (xx * 3 + yy * 7 + dot) % 6;
+            if (factor == 0) {
+                rect(xx, yy, 2, 2, rgb((uint8_t)(r_val/3), (uint8_t)(g_val/3), (uint8_t)(b_val/3)));
+            } else {
+                rect(xx, yy, 1, 1, rgb((uint8_t)(r_val/8), (uint8_t)(g_val/8), (uint8_t)(b_val/8)));
+            }
             dot++;
         }
     }
 
-    vgradient(0, tb_y, w, TASKBAR_H, rgb(28, 32, 35), rgb(12, 15, 18));
-    rect(0, tb_y - 2, w, 1, rgb(96, 132, 116));
-    rect(0, tb_y - 1, w, 1, rgb(204, 156, 74));
-    rect(0, tb_y, w, 1, rgb(44, 52, 54));
+    if (light) {
+        vgradient(0, tb_y, w, TASKBAR_H, rgb(210, 216, 224), rgb(195, 200, 210));
+    } else {
+        vgradient(0, tb_y, w, TASKBAR_H, rgb(15, 5, 25), rgb(5, 2, 10));
+    }
+    rect(0, tb_y - 2, w, 1, cyber_neon_pink(light));
+    rect(0, tb_y - 1, w, 1, cyber_neon_cyan(light));
+    rect(0, tb_y, w, 1, light ? rgb(180, 185, 192) : rgb(10, 10, 20));
 
-    hgradient(8, h - 38, 100, 32, rgb(42, 150, 128), rgb(30, 102, 154));
-    rect(8, h - 38, 100, 1, rgb(142, 226, 196));
-    rect(8, h - 7, 100, 1, rgb(9, 30, 34));
-    border(8, h - 38, 100, 32, rgb(22, 70, 72));
-    rect(20, h - 28, 7, 7, rgb(246, 198, 91));
-    text(36, h - 28, "开始", rgb(248, 252, 255), 1);
+    hgradient(8, h - 38, 100, 32, cyber_neon_pink(light), light ? rgb(160, 0, 70) : rgb(180, 0, 90));
+    rect(8, h - 38, 100, 1, light ? rgb(255, 120, 200) : rgb(255, 100, 180));
+    rect(8, h - 7, 100, 1, light ? rgb(100, 0, 40) : rgb(80, 0, 40));
+    border(8, h - 38, 100, 32, cyber_neon_cyan(light));
+    rect(20, h - 28, 7, 7, cyber_neon_yellow(light));
+    text(36, h - 28, "开始", rgb(255, 255, 255), 1);
 
     time_line(line, sizeof(line));
     draw_panel_shell(w - 102, h - 38, 94, 32,
-                     rgb(28, 34, 37), rgb(12, 15, 18),
-                     rgb(48, 62, 66), rgb(204, 156, 74));
-    text(w - 88, h - 28, line, rgb(222, 234, 232), 1);
+                     light ? rgb(225, 230, 238) : rgb(28, 34, 37),
+                     light ? rgb(210, 215, 222) : rgb(12, 15, 18),
+                     cyber_border(light), cyber_neon_cyan(light));
+    text(w - 88, h - 28, line, cyber_text(light), 1);
 }
 
 static void draw_desktop_tile(int x, int y, int w, int h, const char *title,
-                              const char *value, uint32_t accent) {
+                              const char *value, uint32_t accent, int light) {
     soft_shadow(x, y, w, h);
-    draw_panel_shell(x, y, w, h, rgb(33, 40, 44), rgb(18, 23, 27),
-                     rgb(55, 68, 74), accent);
+    draw_panel_shell(x, y, w, h, cyber_card_bg_top(light), cyber_card_bg_bot(light),
+                     cyber_border(light), accent);
     rect(x + 14, y + 12, 18, 4, accent);
     rect(x + 14, y + 19, 30, 1, rgb_lift(accent, -32));
-    text(x + 16, y + 30, title, rgb(180, 198, 204), 1);
-    text_clipped(x + 16, y + 52, x + w - 12, value, rgb(240, 246, 244), 1);
+    text(x + 16, y + 30, title, cyber_text_muted(light), 1);
+    text_clipped(x + 16, y + 52, x + w - 12, value, cyber_text(light), 1);
 }
 
 static void draw_usage_bar(int x, int y, int w, int h, uint32_t used, uint32_t total, uint32_t color) {
@@ -2953,26 +2993,26 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     draw_wrapped_text(tx + 12, ty + 158, view_w - 24, 172, st->browser_page, st->browser_scroll);
 }
 
-static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state) {
+static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state, int light) {
     if (state != WM_STATE_MAXIMIZED) soft_shadow(x, y, win_w, win_h);
 
-    uint32_t body_top = active ? rgb(31, 38, 42) : rgb(23, 28, 32);
-    uint32_t body_bot = active ? rgb(19, 24, 28) : rgb(15, 18, 22);
-    uint32_t title_top = active ? rgb(38, 132, 138) : rgb(72, 86, 92);
-    uint32_t title_bot = active ? rgb(24, 86, 104) : rgb(48, 58, 64);
-    uint32_t border_c = active ? rgb(82, 170, 160) : rgb(60, 72, 78);
-    uint32_t hl = active ? rgb(156, 228, 196) : rgb(106, 120, 124);
+    uint32_t body_top = active ? cyber_bg_top(light) : (light ? rgb(240, 244, 248) : rgb(23, 28, 32));
+    uint32_t body_bot = active ? cyber_bg_bot(light) : (light ? rgb(225, 230, 236) : rgb(15, 18, 22));
+    uint32_t title_top = active ? cyber_neon_pink(light) : (light ? rgb(210, 216, 222) : rgb(72, 86, 92));
+    uint32_t title_bot = active ? (light ? rgb(160, 0, 70) : rgb(120, 0, 60)) : (light ? rgb(190, 195, 202) : rgb(48, 58, 64));
+    uint32_t border_c = active ? cyber_neon_cyan(light) : (light ? rgb(180, 186, 192) : rgb(60, 72, 78));
+    uint32_t hl = active ? cyber_neon_yellow(light) : (light ? rgb(200, 205, 210) : rgb(106, 120, 124));
 
     vgradient(x + 1, y + 1, win_w - 2, WM_TITLE_H, title_top, title_bot);
     rect(x, y, win_w, 1, hl);
     rect(x + 1, y + 2, win_w - 2, 1, rgb_lift(title_top, 28));
-    rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, rgb(8, 12, 16));
-    rect(x, y + WM_TITLE_H, win_w, 1, active ? rgb(204, 156, 74) : rgb(44, 54, 58));
-    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, rgb(42, 52, 56));
+    rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, light ? rgb(200, 205, 210) : rgb(8, 12, 16));
+    rect(x, y + WM_TITLE_H, win_w, 1, active ? cyber_neon_cyan(light) : (light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
+    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, light ? rgb(220, 225, 230) : rgb(42, 52, 56));
 
     vgradient(x + 1, y + WM_TITLE_H + 2, win_w - 2, win_h - WM_TITLE_H - 4,
               body_top, body_bot);
-    rect(x, y + win_h - 1, win_w, 1, rgb(5, 8, 10));
+    rect(x, y + win_h - 1, win_w, 1, light ? rgb(180, 185, 190) : rgb(5, 8, 10));
     rect(x, y, 1, win_h, rgb_lift(body_top, 18));
     rect(x + win_w - 1, y, 1, win_h, rgb_lift(body_bot, -10));
     border(x, y, win_w, win_h, border_c);
@@ -2986,23 +3026,23 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
                              rgb(252, 238, 236));
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    uint32_t nb_top = active ? rgb(72, 91, 96) : rgb(54, 64, 70);
-    uint32_t nb_bot = active ? rgb(42, 53, 58) : rgb(32, 38, 44);
+    uint32_t nb_top = active ? (light ? rgb(180, 210, 220) : rgb(72, 91, 96)) : (light ? rgb(220, 225, 230) : rgb(54, 64, 70));
+    uint32_t nb_bot = active ? (light ? rgb(140, 170, 180) : rgb(42, 53, 58)) : (light ? rgb(190, 195, 200) : rgb(32, 38, 44));
     draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nb_top, nb_bot,
-                     rgb(22, 30, 34), rgb(104, 190, 172));
+                     light ? rgb(160, 165, 170) : rgb(22, 30, 34), cyber_neon_cyan(light));
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MAX,
                              state == WM_STATE_MAXIMIZED, rgb(236, 242, 240));
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
     draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nb_top, nb_bot,
-                     rgb(22, 30, 34), rgb(204, 156, 74));
+                     light ? rgb(160, 165, 170) : rgb(22, 30, 34), cyber_neon_yellow(light));
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MIN, 0,
                              rgb(236, 242, 240));
 
-    rect(x + 13, y + 12, 10, 10, active ? rgb(246, 198, 91) : rgb(162, 172, 172));
-    rect(x + 16, y + 15, 4, 4, rgb(18, 26, 28));
+    rect(x + 13, y + 12, 10, 10, active ? cyber_neon_yellow(light) : (light ? rgb(160, 165, 170) : rgb(162, 172, 172)));
+    rect(x + 16, y + 15, 4, 4, light ? rgb(240, 244, 248) : rgb(18, 26, 28));
     text_clipped(x + 31, y + 11, x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16,
-                 title, rgb(252, 254, 255), 1);
+                 title, light ? rgb(255, 255, 255) : rgb(252, 254, 255), 1);
 }
 
 static void draw_panel_window(int tx, int ty, int win_w, int w, int h, gui_state_t *st, int panel) {
@@ -3033,7 +3073,7 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     int win_x, win_y, win_w, win_h;
     gui_window_metrics(st, w, h, win, idx, &win_x, &win_y, &win_w, &win_h);
     draw_window_frame(win_x, win_y, win_w, win_h, gui_window_title(win),
-                      idx == st->wm.active_window, win->state);
+                      idx == st->wm.active_window, win->state, st->theme_light);
 
     st->win_x = win_x;
     st->win_y = win_y;
@@ -3050,13 +3090,15 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
         st->app_mode = win->mode;
         draw_app_window_body(tx, ty, win_w, win_h, st, win->mode);
     }
-    vgradient(win_x + 1, win_y + win_h - 31, win_w - 2, 30, rgb(28, 34, 37), rgb(13, 16, 19));
-    rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, rgb(75, 96, 92));
-    rect(win_x + 1, win_y + win_h - 31, win_w - 2, 1, rgb(204, 156, 74));
-    rect(win_x + 1, win_y + win_h - 1, win_w - 2, 1, rgb(5, 8, 10));
+    vgradient(win_x + 1, win_y + win_h - 31, win_w - 2, 30,
+              st->theme_light ? rgb(220, 225, 230) : rgb(28, 34, 37),
+              st->theme_light ? rgb(200, 205, 210) : rgb(13, 16, 19));
+    rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, st->theme_light ? rgb(180, 185, 190) : rgb(75, 96, 92));
+    rect(win_x + 1, win_y + win_h - 31, win_w - 2, 1, idx == st->wm.active_window ? cyber_neon_pink(st->theme_light) : (st->theme_light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
+    rect(win_x + 1, win_y + win_h - 1, win_w - 2, 1, st->theme_light ? rgb(180, 185, 190) : rgb(5, 8, 10));
     text(win_x + 24, win_y + win_h - 22,
          idx == st->wm.active_window ? st->status : "单击任务栏切换",
-         rgb(190, 212, 226), 1);
+         cyber_text_muted(st->theme_light), 1);
 
     st->active = old_active;
     st->app_mode = old_app;
@@ -3070,10 +3112,10 @@ static void draw_taskbar_windows(int h, const gui_state_t *st) {
     for (int i = 0; i < st->wm.window_count && x < 610; i++) {
         wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, i);
         if (!win) continue;
-        uint32_t color = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : rgb(23, 147, 209);
+        uint32_t color = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : cyber_neon_cyan(st->theme_light);
         int width = 104;
         draw_task_button(x, task_y, width, gui_window_title(win),
-                         i == st->wm.active_window, color);
+                         i == st->wm.active_window, color, st->theme_light);
         x += width + 8;
     }
 }
@@ -3084,7 +3126,7 @@ static void draw_gui_screen(int w, int h, gui_state_t *st) {
     draw_start_menu(st);
     draw_window_switcher(w, h, st);
     if (st->splash_ticks > 0)
-        draw_splash_window(w, h, st->splash_ticks);
+        draw_splash_window(w, h, st->splash_ticks, st->theme_light);
 }
 
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
@@ -3094,54 +3136,58 @@ static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, i
 }
 
 static void draw_desktop(int w, int h, gui_state_t *st) {
-    draw_wallpaper(w, h);
+    draw_wallpaper(w, h, st->theme_light);
     char line[96];
 
     soft_shadow(126, 12, w - 138, 60);
-    draw_panel_shell(126, 12, w - 138, 60, rgb(34, 41, 46), rgb(20, 25, 29),
-                     rgb(66, 84, 88), rgb(42, 150, 128));
-    rect(146, 62, 118, 2, rgb(204, 156, 74));
-    text(146, 18, "系统概览", rgb(240, 248, 252), 2);
-    text(148, 56, "左侧启动栏打开工具，桌面直接显示当前状态", rgb(180, 200, 202), 1);
+    draw_panel_shell(126, 12, w - 138, 60,
+                     cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
+    rect(146, 62, 118, 2, cyber_neon_pink(st->theme_light));
+    text(146, 18, "系统概览", cyber_text(st->theme_light), 2);
+    text(148, 56, "左侧启动栏打开工具，桌面直接显示当前状态", cyber_text_muted(st->theme_light), 1);
 
-    draw_icon(15, 92, st->active == PANEL_FILES, "文件", rgb(85, 180, 120));
-    draw_icon(15, 162, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74));
-    draw_icon(15, 232, st->active == PANEL_SYS, "资源", rgb(196, 116, 230));
-    draw_icon(15, 302, st->active == PANEL_APPS, "应用", rgb(23, 147, 209));
+    draw_icon(15, 92, st->active == PANEL_FILES, "文件", rgb(85, 180, 120), st->theme_light);
+    draw_icon(15, 162, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74), st->theme_light);
+    draw_icon(15, 232, st->active == PANEL_SYS, "资源", rgb(196, 116, 230), st->theme_light);
+    draw_icon(15, 302, st->active == PANEL_APPS, "应用", rgb(23, 147, 209), st->theme_light);
+    
+    // 主题切换按钮
+    draw_icon(15, 372, st->theme_light, "主题", st->theme_light ? rgb(0, 200, 220) : rgb(255, 0, 128), st->theme_light);
 
     uint64_t total = pmm_get_total_mem();
     uint64_t free = pmm_get_free_mem();
     uint64_t used = total > free ? total - free : 0;
     line_u32(line, sizeof(line), "", (uint32_t)(used / 1024), "K used");
-    draw_desktop_tile(142, 88, 150, 74, "内存", line, rgb(196, 116, 230));
+    draw_desktop_tile(142, 88, 150, 74, "内存", line, cyber_neon_purple(st->theme_light), st->theme_light);
 
     line_u32(line, sizeof(line), "", fs_get_count(), " files");
-    draw_desktop_tile(310, 88, 150, 74, "文件", line, rgb(85, 180, 120));
+    draw_desktop_tile(310, 88, 150, 74, "文件", line, rgb(85, 180, 120), st->theme_light);
 
     line2(line, sizeof(line), "FS: ", fs_backend_name());
-    draw_desktop_tile(478, 88, 190, 74, "文件系统", line, rgb(23, 147, 209));
+    draw_desktop_tile(478, 88, 190, 74, "文件系统", line, cyber_neon_cyan(st->theme_light), st->theme_light);
 
     line2(line, sizeof(line), "Block: ", block_backend_name());
-    draw_desktop_tile(142, 182, 246, 74, "磁盘", line, rgb(230, 184, 74));
+    draw_desktop_tile(142, 182, 246, 74, "磁盘", line, rgb(230, 184, 74), st->theme_light);
 
     line_u32(line, sizeof(line), "", (uint32_t)task_get_count(), " tasks");
-    draw_desktop_tile(406, 182, 126, 74, "任务", line, rgb(124, 220, 154));
+    draw_desktop_tile(406, 182, 126, 74, "任务", line, rgb(124, 220, 154), st->theme_light);
 
     line_u32(line, sizeof(line), "", gui_app_count(), " apps");
-    draw_desktop_tile(550, 182, 118, 74, "应用", line, rgb(102, 214, 255));
+    draw_desktop_tile(550, 182, 118, 74, "应用", line, cyber_neon_cyan(st->theme_light), st->theme_light);
 
     soft_shadow(142, 282, 250, 126);
-    draw_panel_shell(142, 282, 250, 126, rgb(33, 40, 44), rgb(18, 23, 27),
-                     rgb(58, 72, 76), rgb(85, 180, 120));
+    draw_panel_shell(142, 282, 250, 126, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+                     cyber_border(st->theme_light), rgb(85, 180, 120));
     rect(160, 316, 48, 2, rgb(85, 180, 120));
-    text(160, 298, "最近文件", rgb(240, 248, 252), 1);
+    text(160, 298, "最近文件", cyber_text(st->theme_light), 1);
     char entry[VFS_MAX_NAME];
     uint32_t entry_type;
     uint32_t count = 0;
     while (vfs_readdir_at("/", count, entry, &entry_type) == 0) count++;
     if (count == 0) {
-        text(160, 330, "根目录为空", rgb(170, 188, 190), 1);
-        text(160, 354, "按 N 或点文件中新建", rgb(170, 188, 190), 1);
+        text(160, 330, "根目录为空", cyber_text_muted(st->theme_light), 1);
+        text(160, 354, "按 N 或点文件中新建", cyber_text_muted(st->theme_light), 1);
     } else {
         uint32_t shown = count > 4 ? 4 : count;
         for (uint32_t i = 0; i < shown; i++) {
@@ -3151,32 +3197,30 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
             append_str(line, sizeof(line), &pos, entry);
             append_str(line, sizeof(line), &pos, "  ");
             append_str(line, sizeof(line), &pos, gui_node_type_label(entry_type));
-            text_clipped(160, 328 + (int)i * 20, 380, line, rgb(216, 232, 244), 1);
+            text_clipped(160, 328 + (int)i * 20, 380, line, cyber_text(st->theme_light), 1);
         }
     }
 
     soft_shadow(418, 282, 250, 126);
-    draw_panel_shell(418, 282, 250, 126, rgb(33, 40, 44), rgb(18, 23, 27),
-                     rgb(58, 72, 76), rgb(23, 147, 209));
-    rect(436, 316, 48, 2, rgb(23, 147, 209));
-    text(436, 298, "快捷操作", rgb(240, 248, 252), 1);
-    text(436, 328, "N 新建文件", rgb(216, 232, 244), 1);
-    text(436, 350, "Enter 打开当前项", rgb(216, 232, 244), 1);
-    text(436, 372, "Tab/Space 切换窗口", rgb(216, 232, 244), 1);
+    draw_panel_shell(418, 282, 250, 126, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
+    rect(436, 316, 48, 2, cyber_neon_cyan(st->theme_light));
+    text(436, 298, "快捷操作", cyber_text(st->theme_light), 1);
+    text(436, 328, "N 新建文件", cyber_text_muted(st->theme_light), 1);
+    text(436, 350, "Enter 打开当前项", cyber_text_muted(st->theme_light), 1);
+    text(436, 372, "Tab/Space 切换窗口", cyber_text_muted(st->theme_light), 1);
 
     for (int i = 0; i < st->wm.window_count; i++) {
         draw_one_window(w, h, st, st->wm.z_order[i]);
     }
 
-    // 拖动吸附预览：高亮即将落入的区域
     if (st->snap_preview != WM_SNAP_NONE) {
         int px = 0, py = 0, pw = w, ph = h - TASKBAR_H;
         if (st->snap_preview == WM_SNAP_LEFT) { pw = w / 2; }
         else if (st->snap_preview == WM_SNAP_RIGHT) { px = w / 2; pw = w - w / 2; }
-        // WM_SNAP_TOP 使用整屏默认值
-        uint32_t accent = rgb(96, 196, 232);
+        uint32_t accent = cyber_neon_cyan(st->theme_light);
         for (int yy = py + 4; yy < py + ph - 4; yy += 3)
-            rect(px + 6, yy, pw - 12, 1, rgb(40, 70, 92));
+            rect(px + 6, yy, pw - 12, 1, st->theme_light ? rgb(200, 215, 220) : rgb(40, 70, 92));
         rect(px + 4, py + 4, pw - 8, 3, accent);
         rect(px + 4, py + ph - 7, pw - 8, 3, accent);
         rect(px + 4, py + 4, 3, ph - 8, accent);
@@ -4063,28 +4107,29 @@ static void draw_window_switcher(int w, int h, gui_state_t *st) {
     int oy = (h - oh) / 2;
 
     soft_shadow(ox, oy, ow, oh);
-    draw_panel_shell(ox, oy, ow, oh, rgb(30, 38, 46), rgb(14, 19, 25),
-                     rgb(70, 92, 100), rgb(102, 214, 255));
-    text(ox + pad, oy + pad, "切换窗口  (Tab 循环)", rgb(228, 240, 248), 1);
-    rect(ox + pad, oy + pad + 22, ow - pad * 2, 1, rgb(54, 74, 88));
+    draw_panel_shell(ox, oy, ow, oh, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
+    text(ox + pad, oy + pad, "切换窗口  (Tab 循环)", cyber_text(st->theme_light), 1);
+    rect(ox + pad, oy + pad + 22, ow - pad * 2, 1, cyber_neon_pink(st->theme_light));
 
     int ry = oy + pad + 30;
     for (int i = 0; i < n; i++) {
         wm_window_t *win = wm_get_window(&st->wm, i);
         if (!win) continue;
         int active = (i == st->wm.active_window);
-        uint32_t accent = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : rgb(23, 147, 209);
+        uint32_t accent = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : cyber_neon_cyan(st->theme_light);
         if (active) {
             vgradient(ox + pad, ry, ow - pad * 2, row_h - 4,
-                      rgb(28, 80, 116), rgb(16, 50, 78));
-            rect(ox + pad, ry, 3, row_h - 4, rgb(124, 220, 154));
+                      st->theme_light ? rgb(230, 180, 210) : rgb(50, 0, 80),
+                      st->theme_light ? rgb(210, 150, 180) : rgb(30, 0, 50));
+            rect(ox + pad, ry, 3, row_h - 4, cyber_neon_pink(st->theme_light));
         }
         rect(ox + pad + 12, ry + 9, 10, 10, accent);
         const char *label = gui_window_title(win);
         text_clipped(ox + pad + 32, ry + 7, ox + ow - pad - 60, label,
-                     active ? rgb(252, 254, 255) : rgb(200, 214, 226), 1);
+                     active ? cyber_text(st->theme_light) : cyber_text_muted(st->theme_light), 1);
         if (win->state == WM_STATE_MINIMIZED)
-            text(ox + ow - pad - 54, ry + 7, "最小化", rgb(150, 168, 180), 1);
+            text(ox + ow - pad - 54, ry + 7, "最小化", cyber_text_muted(st->theme_light), 1);
         ry += row_h;
     }
 }
@@ -4095,13 +4140,13 @@ static void draw_start_menu(gui_state_t *st) {
     int mx = wm->menu_x, my = wm->menu_y, mw = wm->menu_w, mh = wm->menu_h;
 
     soft_shadow(mx, my, mw, mh);
-    draw_panel_shell(mx, my, mw, mh, rgb(34, 40, 44), rgb(17, 21, 25),
-                     rgb(72, 92, 92), rgb(42, 150, 128));
-    vgradient(mx + 1, my + 2, mw - 2, 30, rgb(40, 138, 132), rgb(28, 88, 106));
-    rect(mx + 1, my + 2, mw - 2, 1, rgb(156, 228, 196));
-    rect(mx + 1, my + 32, mw - 2, 1, rgb(9, 20, 24));
-    rect(mx + 15, my + 25, 78, 2, rgb(246, 198, 91));
-    text(mx + 16, my + 11, "HBOS 工作站", rgb(252, 254, 255), 1);
+    draw_panel_shell(mx, my, mw, mh, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
+    vgradient(mx + 1, my + 2, mw - 2, 30, cyber_neon_pink(st->theme_light), st->theme_light ? rgb(160, 0, 70) : rgb(180, 0, 90));
+    rect(mx + 1, my + 2, mw - 2, 1, st->theme_light ? rgb(255, 120, 200) : rgb(255, 100, 180));
+    rect(mx + 1, my + 32, mw - 2, 1, st->theme_light ? rgb(200, 205, 210) : rgb(9, 20, 24));
+    rect(mx + 15, my + 25, 78, 2, cyber_neon_yellow(st->theme_light));
+    text(mx + 16, my + 11, "HBOS 工作站", rgb(255, 255, 255), 1);
 
     static const char *menu_items[] = {
         "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
@@ -4121,57 +4166,56 @@ static void draw_start_menu(gui_state_t *st) {
         uint32_t accent = menu_colors[i];
         if (iy + 26 > my + mh) break;
         draw_panel_shell(mx + 6, iy, mw - 12, 26,
-                         i >= 11 ? rgb(42, 34, 30) : rgb(35, 42, 46),
-                         i >= 11 ? rgb(24, 22, 21) : rgb(20, 25, 29),
-                         rgb(44, 56, 58), accent);
+                         i >= 11 ? (st->theme_light ? rgb(250, 230, 220) : rgb(40, 15, 20)) : (st->theme_light ? rgb(240, 244, 248) : rgb(20, 12, 28)),
+                         i >= 11 ? (st->theme_light ? rgb(240, 215, 205) : rgb(25, 8, 12)) : (st->theme_light ? rgb(225, 230, 236) : rgb(12, 8, 18)),
+                         st->theme_light ? rgb(190, 195, 200) : rgb(60, 0, 90), accent);
         rect(mx + 18, iy + 8, 10, 10, accent);
-        rect(mx + 21, iy + 11, 4, 4, rgb(18, 24, 26));
-        text(mx + 38, iy + 8, menu_items[i],
-             i >= 11 ? rgb(236, 226, 214) : rgb(230, 240, 238), 1);
+        rect(mx + 21, iy + 11, 4, 4, st->theme_light ? rgb(240, 244, 248) : rgb(18, 24, 26));
+        text(mx + 38, iy + 8, menu_items[i], cyber_text(st->theme_light), 1);
     }
 }
 
-static void draw_splash_window(int w, int h, int ticks) {
+static void draw_splash_window(int w, int h, int ticks, int light) {
     int sw = 440, sh = 200;
     int sx = (w - sw) / 2, sy = (h - sh) / 2;
     int title_h = WM_TITLE_H;
 
     soft_shadow(sx, sy, sw, sh);
 
-    vgradient(sx + 1, sy + 1, sw - 2, title_h, rgb(52, 140, 204), rgb(24, 96, 158));
-    rect(sx, sy, sw, 1, rgb(130, 210, 248));
-    rect(sx, sy + title_h, sw, 1, rgb(10, 26, 44));
-    rect(sx + 1, sy + title_h + 1, sw - 2, sh - title_h - 2, rgb(26, 38, 52));
-    rect(sx, sy + sh - 1, sw, 1, rgb(8, 14, 22));
-    rect(sx, sy, 1, sh, rgb(80, 136, 176));
-    rect(sx + sw - 1, sy, 1, sh, rgb(20, 40, 60));
-    border(sx, sy, sw, sh, rgb(56, 110, 158));
+    vgradient(sx + 1, sy + 1, sw - 2, title_h, cyber_neon_pink(light), light ? rgb(160, 0, 70) : rgb(180, 0, 90));
+    rect(sx, sy, sw, 1, light ? rgb(255, 120, 200) : rgb(255, 100, 180));
+    rect(sx, sy + title_h, sw, 1, light ? rgb(180, 185, 192) : rgb(10, 8, 16));
+    rect(sx + 1, sy + title_h + 1, sw - 2, sh - title_h - 2, cyber_bg_top(light));
+    rect(sx, sy + sh - 1, sw, 1, light ? rgb(180, 185, 190) : rgb(8, 5, 12));
+    rect(sx, sy, 1, sh, cyber_neon_pink(light));
+    rect(sx + sw - 1, sy, 1, sh, cyber_neon_cyan(light));
+    border(sx, sy, sw, sh, cyber_neon_cyan(light));
 
-    text_clipped(sx + 14, sy + 10, sx + sw - 20, "HBOS  v0.1 beta2", rgb(252, 254, 255), 1);
+    text_clipped(sx + 14, sy + 10, sx + sw - 20, "HBOS  v0.1 beta2", rgb(255, 255, 255), 1);
 
     int bx = sx + 16, by = sy + title_h + 18;
-    vgradient(bx, by, 48, 48, rgb(56, 148, 214), rgb(22, 84, 148));
-    border(bx, by, 48, 48, rgb(22, 68, 110));
-    rect(bx + 6, by + 18, 36, 5, rgb(248, 252, 255));
-    rect(bx + 6, by + 26, 22, 5, rgb(180, 222, 245));
-    rect(bx + 6, by + 34, 30, 5, rgb(130, 192, 232));
+    vgradient(bx, by, 48, 48, cyber_neon_pink(light), light ? rgb(160, 0, 70) : rgb(180, 0, 90));
+    border(bx, by, 48, 48, cyber_neon_cyan(light));
+    rect(bx + 6, by + 18, 36, 5, cyber_neon_yellow(light));
+    rect(bx + 6, by + 26, 22, 5, cyber_neon_cyan(light));
+    rect(bx + 6, by + 34, 30, 5, cyber_neon_pink(light));
 
-    text(sx + 80, sy + title_h + 22, "欢迎使用 HBOS！", rgb(240, 250, 255), 1);
-    text(sx + 80, sy + title_h + 44, "64 位 x86_64 操作系统", rgb(154, 194, 220), 1);
-    text(sx + 80, sy + title_h + 64, "BIOS / UEFI 双启动  协作式多任务", rgb(120, 168, 202), 1);
+    text(sx + 80, sy + title_h + 22, "欢迎使用 HBOS！", cyber_neon_yellow(light), 1);
+    text(sx + 80, sy + title_h + 44, "64 位 x86_64 操作系统", cyber_neon_cyan(light), 1);
+    text(sx + 80, sy + title_h + 64, "BIOS / UEFI 双启动  协作式多任务", cyber_text(light), 1);
 
-    rect(sx + 16, sy + title_h + 94, sw - 32, 1, rgb(38, 60, 80));
-    text(sx + 20, sy + title_h + 106, "help  命令列表      gui  图形界面", rgb(128, 172, 204), 1);
-    text(sx + 20, sy + title_h + 124, "ls / cat  文件      net / http  网络", rgb(128, 172, 204), 1);
+    rect(sx + 16, sy + title_h + 94, sw - 32, 1, cyber_neon_purple(light));
+    text(sx + 20, sy + title_h + 106, "help  命令列表      gui  图形界面", cyber_neon_cyan(light), 1);
+    text(sx + 20, sy + title_h + 124, "ls / cat  文件      net / http  网络", cyber_neon_cyan(light), 1);
 
     int bar_w = sw - 32;
     int filled = ticks > 0 ? bar_w * ticks / 90 : 0;
-    rect(sx + 16, sy + sh - 22, bar_w, 8, rgb(14, 22, 32));
+    rect(sx + 16, sy + sh - 22, bar_w, 8, light ? rgb(220, 225, 230) : rgb(10, 8, 16));
     if (filled > 0) {
-        hgradient(sx + 16, sy + sh - 22, filled, 8, rgb(48, 132, 196), rgb(22, 80, 140));
+        hgradient(sx + 16, sy + sh - 22, filled, 8, cyber_neon_cyan(light), light ? rgb(0, 120, 160) : rgb(0, 120, 200));
     }
-    border(sx + 16, sy + sh - 22, bar_w, 8, rgb(30, 50, 70));
-    text(sx + 20, sy + sh - 12, "点击任意位置关闭", rgb(80, 120, 152), 1);
+    border(sx + 16, sy + sh - 22, bar_w, 8, cyber_neon_pink(light));
+    text(sx + 20, sy + sh - 12, "点击任意位置关闭", cyber_neon_pink(light), 1);
 }
 
 static void cmd_gui(int argc, char **argv) {
@@ -4219,6 +4263,7 @@ static void cmd_gui(int argc, char **argv) {
         .last_clicked_file = -1,
         .delete_confirm_index = -1,
         .status = "就绪",
+        .theme_light = 0,
     };
     wm_init(&st.wm, w, h);
     wm_set_panel_title(PANEL_FILES, "文件管理器");
@@ -4522,13 +4567,17 @@ static void cmd_gui(int argc, char **argv) {
                                     }
                                 }
                             } else {
-                                int panel = hit_panel_shortcut(w, h, mx, my);
-                                if (panel >= 0) {
-                                    gui_open_panel_window(&st, panel);
-                                } else if (mx >= 10 && mx < 106 && my >= h - 36 && my <= h) {
-                                    wm_toggle_start_menu(&st.wm);
-                                    st.status = "开始菜单";
+                                if (mx >= 15 && mx < 97 && my >= 372 && my < 430) {
+                                    st.theme_light = !st.theme_light;
+                                    st.status = st.theme_light ? "浅色赛博朋克" : "深色赛博朋克";
                                 } else {
+                                    int panel = hit_panel_shortcut(w, h, mx, my);
+                                    if (panel >= 0) {
+                                        gui_open_panel_window(&st, panel);
+                                    } else if (mx >= 10 && mx < 106 && my >= h - 36 && my <= h) {
+                                        wm_toggle_start_menu(&st.wm);
+                                        st.status = "开始菜单";
+                                    } else {
                                     int action = hit_action(w, h, &st, mx, my);
                                     if (action >= FILE_ACTION_BASE) {
                                         if (action >= APP_ACTION_BASE) {
@@ -4551,6 +4600,7 @@ static void cmd_gui(int argc, char **argv) {
                                 }
                             }
                         }
+                    }
                     }
                 }
                 redraw = 1;
