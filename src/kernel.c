@@ -82,7 +82,10 @@ void gdt_idt_init(void);
 // 内核入口 — 由 boot.asm 在 64 位 long mode 下调用
 // @param mbi  Multiboot2 信息结构指针（GRUB 传入）
 // ============================================================
+void *g_mbi = NULL;
+
 void kmain(void *mbi) {
+    g_mbi = mbi;
     // ---- Phase 1: 早期输出与图形 ----
     serial_init();
     serial_print("\n===== " HBOS_VERSION_NAME " Starting =====\n");

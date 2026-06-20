@@ -128,15 +128,36 @@ static bool kb_wait_input_clear(void);
 static bool kb_wait_output_full(void);
 static bool kb_read_ack(void);
 
+static bool is_uefi_boot(void) {
+    extern void *g_mbi;
+    if (!g_mbi) return false;
+    uint32_t total = *(uint32_t *)g_mbi;
+    uintptr_t addr = (uintptr_t)g_mbi + 8;
+    while (addr < (uintptr_t)g_mbi + total) {
+        struct {
+            uint32_t type;
+            uint32_t size;
+        } *tag = (void *)addr;
+        if (tag->type == 0 && tag->size == 8) break;
+        if (tag->type == 11 || tag->type == 12) return true;
+        addr = (addr + tag->size + 7) & ~7ULL;
+    }
+    return false;
+}
+
 static void kb_controller_init(void) {
     /* Unmask IRQ1 on PIC */
     outb(0x21, (uint8_t)(inb(0x21) & ~0x02));
 
-    /* Configure PS/2 controller configuration byte:
-     * - Enable IRQ1 (bit 0 = 1)
-     * - Enable Keyboard clock (bit 4 = 0)
-     * - Enable Translation to Set 1 (bit 6 = 1)
+    /* For BIOS boot mode, GRUB/Limine already configured the PS/2 controller.
+     * We must NOT perform late re-initialization (disable/self-test/reset)
+     * because VMware, VirtualBox, and some physical hardware will stop delivering keys.
+     * For UEFI boot mode, we must configure and enable the port/scanning.
      */
+    if (!is_uefi_boot()) {
+        return;
+    }
+
     int_disable();
     for (int i = 0; i < 10 && (inb(0x64) & 1); i++) (void)inb(0x60);
     
