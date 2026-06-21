@@ -2813,9 +2813,21 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     // 霓虹青边框
     border(box_x, box_y, box_w, box_h, cyber_neon_cyan(0));
 
+    int scale = 2;
+    int row_h = 24;
+    int input_y = box_y + box_h - 32;
+
+    // 自动根据可用高度计算最多绘制的历史记录行数，防止重叠
+    int max_lines = (input_y - (box_y + 12)) / row_h;
+    if (max_lines < 1) max_lines = 1;
+    uint32_t start_idx = 0;
+    if (st->console_line_count > (uint32_t)max_lines) {
+        start_idx = st->console_line_count - (uint32_t)max_lines;
+    }
+
     // 绘制命令历史
     int start_y = box_y + 12;
-    for (uint32_t i = 0; i < st->console_line_count; i++) {
+    for (uint32_t i = start_idx; i < st->console_line_count; i++) {
         const char *line = st->console_history[i];
         uint32_t color = cyber_text(0);
         if (strncmp(line, "hpos_gui_shell:", 15) == 0 || strncmp(line, "hbos_gui_shell:", 15) == 0) {
@@ -2825,15 +2837,14 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
         } else if (strncmp(line, "  ", 2) == 0) {
             color = cyber_neon_yellow(0); // 琥珀黄细节
         }
-        text(box_x + 12, start_y, line, color, 1);
-        start_y += 16;
+        text(box_x + 12, start_y, line, color, scale);
+        start_y += row_h;
     }
 
     // 绘制当前输入行
-    int input_y = box_y + box_h - 24;
-    text(box_x + 12, input_y, "hbos_gui_shell:/# ", rgb(0, 255, 128), 1); // 霓虹绿 prompt
-    int prompt_w = 18 * 6;
-    text(box_x + 12 + prompt_w, input_y, st->console_input, cyber_text(0), 1);
+    text(box_x + 12, input_y, "hbos_gui_shell:/# ", rgb(0, 255, 128), scale); // 霓虹绿 prompt
+    int prompt_w = 18 * 6 * scale;
+    text(box_x + 12 + prompt_w, input_y, st->console_input, cyber_text(0), scale);
 
     // 闪烁光标
     static uint32_t cursor_ticks = 0;
@@ -2841,8 +2852,8 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     int cursor_visible = (cursor_ticks / 15) % 2;
     if (cursor_visible) {
         int input_len = (int)strlen(st->console_input);
-        int cursor_x = box_x + 12 + prompt_w + input_len * 6;
-        rect(cursor_x, input_y, 6, 8, rgb(0, 255, 128));
+        int cursor_x = box_x + 12 + prompt_w + input_len * 6 * scale;
+        rect(cursor_x, input_y + 2, 6 * scale, 8 * scale - 2, rgb(0, 255, 128));
     }
 }
 
