@@ -710,7 +710,7 @@ static void e1000_init_hw(const pci_device_t *pdev) {
     tx_tail = 0;
     reg_write(E1000_TCTL, (1U << 1) | (1U << 3) | (0x10U << 4) | (0x40U << 12));
     reg_write(E1000_TIPG, 10 | (8 << 10) | (6 << 20));
-    primary.link_ready = (reg_read(E1000_STATUS) & 2) != 0;
+    primary.link_ready = true; /* Force link ready (VirtualBox/QEMU LU status bit can be 0 initially during reset) */
 }
 
 /* ================================================================

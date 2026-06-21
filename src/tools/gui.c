@@ -140,17 +140,17 @@ typedef struct {
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b);
 
-static inline uint32_t cyber_bg_top(int light) { return light ? rgb(230, 235, 242) : rgb(18, 12, 28); }
-static inline uint32_t cyber_bg_bot(int light) { return light ? rgb(200, 208, 220) : rgb(8, 5, 14); }
-static inline uint32_t cyber_neon_pink(int light) { return light ? rgb(220, 0, 100) : rgb(255, 0, 128); }
-static inline uint32_t cyber_neon_cyan(int light) { return light ? rgb(0, 160, 200) : rgb(0, 240, 255); }
-static inline uint32_t cyber_neon_yellow(int light) { return light ? rgb(200, 170, 0) : rgb(255, 230, 0); }
+static inline uint32_t cyber_bg_top(int light) { return light ? rgb(230, 235, 242) : rgb(31, 38, 42); }
+static inline uint32_t cyber_bg_bot(int light) { return light ? rgb(200, 208, 220) : rgb(19, 24, 28); }
+static inline uint32_t cyber_neon_pink(int light) { return light ? rgb(220, 0, 100) : rgb(38, 132, 138); }
+static inline uint32_t cyber_neon_cyan(int light) { return light ? rgb(0, 160, 200) : rgb(82, 170, 160); }
+static inline uint32_t cyber_neon_yellow(int light) { return light ? rgb(200, 170, 0) : rgb(246, 198, 91); }
 static inline uint32_t cyber_neon_purple(int light) { return light ? rgb(140, 40, 200) : rgb(196, 116, 230); }
-static inline uint32_t cyber_text(int light) { return light ? rgb(15, 20, 30) : rgb(240, 248, 252); }
-static inline uint32_t cyber_text_muted(int light) { return light ? rgb(100, 110, 125) : rgb(168, 188, 202); }
-static inline uint32_t cyber_border(int light) { return light ? rgb(140, 160, 180) : rgb(80, 0, 120); }
-static inline uint32_t cyber_card_bg_top(int light) { return light ? rgb(245, 247, 250) : rgb(22, 15, 34); }
-static inline uint32_t cyber_card_bg_bot(int light) { return light ? rgb(220, 226, 235) : rgb(10, 8, 18); }
+static inline uint32_t cyber_text(int light) { return light ? rgb(15, 20, 30) : rgb(252, 254, 255); }
+static inline uint32_t cyber_text_muted(int light) { return light ? rgb(100, 110, 125) : rgb(180, 198, 204); }
+static inline uint32_t cyber_border(int light) { return light ? rgb(140, 160, 180) : rgb(55, 68, 74); }
+static inline uint32_t cyber_card_bg_top(int light) { return light ? rgb(245, 247, 250) : rgb(33, 40, 44); }
+static inline uint32_t cyber_card_bg_bot(int light) { return light ? rgb(220, 226, 235) : rgb(18, 23, 27); }
 
 static char g_code_buf[CODE_EDIT_CAP];
 static char g_code_output[CODE_OUTPUT_CAP];
@@ -1075,40 +1075,43 @@ static void draw_wallpaper(int w, int h, int light) {
     if (light) {
         vgradient(0, 0, w, tb_y, rgb(235, 240, 248), rgb(215, 220, 228));
     } else {
-        vgradient(0, 0, w, tb_y, rgb(25, 10, 35), rgb(5, 5, 15));
+        vgradient(0, 0, w, tb_y, rgb(22, 27, 31), rgb(8, 11, 14));
     }
     int sb_x = 112;
     if (light) {
         vgradient(0, 0, sb_x, tb_y, rgb(220, 225, 232), rgb(200, 205, 212));
     } else {
-        vgradient(0, 0, sb_x, tb_y, rgb(15, 10, 24), rgb(5, 4, 10));
+        vgradient(0, 0, sb_x, tb_y, rgb(28, 32, 35), rgb(10, 13, 16));
     }
-    rect(sb_x - 2, 0, 1, tb_y, cyber_neon_pink(light));
-    rect(sb_x - 1, 0, 1, tb_y, cyber_neon_cyan(light));
-    rect(sb_x, 0, 1, tb_y, light ? rgb(180, 185, 192) : rgb(10, 10, 20));
+    rect(sb_x - 2, 0, 1, tb_y, light ? cyber_neon_pink(1) : rgb(72, 108, 104));
+    rect(sb_x - 1, 0, 1, tb_y, light ? cyber_neon_cyan(1) : rgb(46, 64, 68));
+    rect(sb_x, 0, 1, tb_y, light ? rgb(180, 185, 192) : rgb(18, 24, 28));
 
     for (int yy = 18; yy < tb_y - 10; yy += 34) {
         int offset = (yy * 3) & 95;
-        rect(sb_x + offset, yy, w - sb_x - offset - 18, 1, light ? rgb(210, 215, 222) : rgb(40, 0, 60));
-        rect(sb_x + 34 + offset, yy + 9, w - sb_x - offset - 90, 1, light ? rgb(225, 220, 215) : rgb(0, 40, 50));
+        rect(sb_x + offset, yy, w - sb_x - offset - 18, 1, light ? rgb(210, 215, 222) : rgb(24, 35, 37));
+        rect(sb_x + 34 + offset, yy + 9, w - sb_x - offset - 90, 1, light ? rgb(225, 220, 215) : rgb(34, 30, 24));
     }
 
     int dot = 0;
     for (int yy = 84; yy < tb_y - 20; yy += 28) {
         for (int xx = 140; xx < w - 30; xx += 28) {
-            uint8_t r_val = (dot & 1) ? 220 : 0;
-            uint8_t g_val = (dot & 1) ? 0 : 220;
-            uint8_t b_val = (dot & 1) ? 180 : 255;
             if (light) {
+                uint8_t r_val = (dot & 1) ? 220 : 0;
+                uint8_t g_val = (dot & 1) ? 0 : 220;
+                uint8_t b_val = (dot & 1) ? 180 : 255;
                 r_val = (uint8_t)(r_val * 7 / 10);
                 g_val = (uint8_t)(g_val * 7 / 10);
                 b_val = (uint8_t)(b_val * 7 / 10);
-            }
-            uint8_t factor = (xx * 3 + yy * 7 + dot) % 6;
-            if (factor == 0) {
-                rect(xx, yy, 2, 2, rgb((uint8_t)(r_val/3), (uint8_t)(g_val/3), (uint8_t)(b_val/3)));
+                uint8_t factor = (xx * 3 + yy * 7 + dot) % 6;
+                if (factor == 0) {
+                    rect(xx, yy, 2, 2, rgb((uint8_t)(r_val/3), (uint8_t)(g_val/3), (uint8_t)(b_val/3)));
+                } else {
+                    rect(xx, yy, 1, 1, rgb((uint8_t)(r_val/8), (uint8_t)(g_val/8), (uint8_t)(b_val/8)));
+                }
             } else {
-                rect(xx, yy, 1, 1, rgb((uint8_t)(r_val/8), (uint8_t)(g_val/8), (uint8_t)(b_val/8)));
+                uint8_t v = (uint8_t)(34 + ((xx * 7 + yy * 3 + dot) & 23));
+                rect(xx, yy, 2, 2, rgb(v, (uint8_t)(v + 5), (uint8_t)(v + 4)));
             }
             dot++;
         }
@@ -1117,25 +1120,26 @@ static void draw_wallpaper(int w, int h, int light) {
     if (light) {
         vgradient(0, tb_y, w, TASKBAR_H, rgb(210, 216, 224), rgb(195, 200, 210));
     } else {
-        vgradient(0, tb_y, w, TASKBAR_H, rgb(15, 5, 25), rgb(5, 2, 10));
+        vgradient(0, tb_y, w, TASKBAR_H, rgb(28, 32, 35), rgb(12, 15, 18));
     }
-    rect(0, tb_y - 2, w, 1, cyber_neon_pink(light));
-    rect(0, tb_y - 1, w, 1, cyber_neon_cyan(light));
-    rect(0, tb_y, w, 1, light ? rgb(180, 185, 192) : rgb(10, 10, 20));
+    rect(0, tb_y - 2, w, 1, light ? cyber_neon_pink(1) : rgb(96, 132, 116));
+    rect(0, tb_y - 1, w, 1, light ? cyber_neon_cyan(1) : rgb(204, 156, 74));
+    rect(0, tb_y, w, 1, light ? rgb(180, 185, 192) : rgb(44, 52, 54));
 
-    hgradient(8, h - 38, 100, 32, cyber_neon_pink(light), light ? rgb(160, 0, 70) : rgb(180, 0, 90));
-    rect(8, h - 38, 100, 1, light ? rgb(255, 120, 200) : rgb(255, 100, 180));
-    rect(8, h - 7, 100, 1, light ? rgb(100, 0, 40) : rgb(80, 0, 40));
-    border(8, h - 38, 100, 32, cyber_neon_cyan(light));
-    rect(20, h - 28, 7, 7, cyber_neon_yellow(light));
-    text(36, h - 28, "开始", rgb(255, 255, 255), 1);
+    hgradient(8, h - 38, 100, 32, light ? cyber_neon_pink(1) : rgb(42, 150, 128), light ? rgb(160, 0, 70) : rgb(30, 102, 154));
+    rect(8, h - 38, 100, 1, light ? rgb(255, 120, 200) : rgb(142, 226, 196));
+    rect(8, h - 7, 100, 1, light ? rgb(100, 0, 40) : rgb(9, 30, 34));
+    border(8, h - 38, 100, 32, light ? cyber_neon_cyan(1) : rgb(22, 70, 72));
+    rect(20, h - 28, 7, 7, light ? cyber_neon_yellow(1) : rgb(246, 198, 91));
+    text(36, h - 28, "开始", rgb(248, 252, 255), 1);
 
     time_line(line, sizeof(line));
     draw_panel_shell(w - 102, h - 38, 94, 32,
                      light ? rgb(225, 230, 238) : rgb(28, 34, 37),
                      light ? rgb(210, 215, 222) : rgb(12, 15, 18),
-                     cyber_border(light), cyber_neon_cyan(light));
-    text(w - 88, h - 28, line, cyber_text(light), 1);
+                     light ? cyber_border(1) : rgb(48, 62, 66),
+                     light ? cyber_neon_cyan(1) : rgb(204, 156, 74));
+    text(w - 88, h - 28, line, light ? cyber_text(1) : rgb(222, 234, 232), 1);
 }
 
 static void draw_desktop_tile(int x, int y, int w, int h, const char *title,
@@ -3137,7 +3141,7 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
     uint32_t body_top = active ? cyber_bg_top(light) : (light ? rgb(240, 244, 248) : rgb(23, 28, 32));
     uint32_t body_bot = active ? cyber_bg_bot(light) : (light ? rgb(225, 230, 236) : rgb(15, 18, 22));
     uint32_t title_top = active ? cyber_neon_pink(light) : (light ? rgb(210, 216, 222) : rgb(72, 86, 92));
-    uint32_t title_bot = active ? (light ? rgb(160, 0, 70) : rgb(120, 0, 60)) : (light ? rgb(190, 195, 202) : rgb(48, 58, 64));
+    uint32_t title_bot = active ? (light ? rgb(160, 0, 70) : rgb(24, 86, 104)) : (light ? rgb(190, 195, 202) : rgb(48, 58, 64));
     uint32_t border_c = active ? cyber_neon_cyan(light) : (light ? rgb(180, 186, 192) : rgb(60, 72, 78));
     uint32_t hl = active ? cyber_neon_yellow(light) : (light ? rgb(200, 205, 210) : rgb(106, 120, 124));
 
@@ -3145,7 +3149,7 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
     rect(x, y, win_w, 1, hl);
     rect(x + 1, y + 2, win_w - 2, 1, rgb_lift(title_top, 28));
     rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, light ? rgb(200, 205, 210) : rgb(8, 12, 16));
-    rect(x, y + WM_TITLE_H, win_w, 1, active ? cyber_neon_cyan(light) : (light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
+    rect(x, y + WM_TITLE_H, win_w, 1, active ? (light ? cyber_neon_cyan(1) : rgb(204, 156, 74)) : (light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
     rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, light ? rgb(220, 225, 230) : rgb(42, 52, 56));
 
     vgradient_alpha(x + 1, y + WM_TITLE_H + 2, win_w - 2, win_h - WM_TITLE_H - 4,
