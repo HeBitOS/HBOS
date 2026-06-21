@@ -18,6 +18,9 @@ static int mouse_backend;
 static int mouse_packet_size = 3;
 static uint8_t packet[4];
 static uint8_t packet_i;
+static volatile uint8_t mouse_raw_queue[128];
+static volatile uint8_t mouse_raw_head = 0;
+static volatile uint8_t mouse_raw_tail = 0;
 
 enum {
     MOUSE_BACKEND_NONE = 0,
@@ -86,6 +89,8 @@ static int read_ack(void) {
 static int ps2_mouse_init(void) {
     mouse_packet_size = 3;
     packet_i = 0;
+    mouse_raw_head = 0;
+    mouse_raw_tail = 0;
 
     /* Disable interrupts — keyboard ISR would steal our command
      * responses from port 0x60, causing timeouts. */
@@ -117,6 +122,9 @@ static int ps2_mouse_init(void) {
     for (int attempt = 0; attempt < 4; attempt++) {
         flush_output();
         if (write_mouse(0xF4) == 0 && read_ack() == 0) {
+            packet_i = 0;
+            mouse_raw_head = 0;
+            mouse_raw_tail = 0;
             int_enable();
             return 0;
         }
@@ -175,9 +183,7 @@ void mouse_shutdown(void) {
 
 extern void kb_clear_modifiers(void);
 
-static volatile uint8_t mouse_raw_queue[128];
-static volatile uint8_t mouse_raw_head = 0;
-static volatile uint8_t mouse_raw_tail = 0;
+
 
 void ps2_mouse_enqueue_byte(uint8_t b) {
     uint8_t next = (uint8_t)((mouse_raw_head + 1) & 127);
