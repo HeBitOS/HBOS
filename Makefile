@@ -4,7 +4,7 @@ LD = ld
 
 BUILD_DIR = build
 SRC_DIR = src
-HBOS_VERSION = 0.1 beta2
+HBOS_VERSION = v0.1-beta3-pre3
 
 KERNEL_BIOS = $(BUILD_DIR)/hbos-bios.bin
 ISO_BIOS = $(BUILD_DIR)/hbos-bios.iso
@@ -235,7 +235,9 @@ $(ISO_BIOS): $(KERNEL_BIOS)
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios 2>/dev/null
+	@cp $@ "$(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 	@echo "✓ BIOS ISO: $@"
+	@echo "✓ Versioned BIOS ISO: $(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 
 $(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) limine.conf
 	@rm -rf $(BUILD_DIR)/isodir-uefi
@@ -248,7 +250,9 @@ $(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) limine.conf
 		-eltorito-alt-boot -e boot/uefi-cd.img -no-emul-boot \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		-o $@ $(BUILD_DIR)/isodir-uefi >/dev/null 2>&1
+	@cp $@ "$(BUILD_DIR)/hbos-uefi-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 	@echo "✓ UEFI ISO: $@"
+	@echo "✓ Versioned UEFI ISO: $(BUILD_DIR)/hbos-uefi-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 
 iso: $(ISO_BIOS) $(ISO_UEFI)
 

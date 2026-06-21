@@ -1054,7 +1054,7 @@ void shell_run(void) {
         " |  _  | |_) | |_| |___) |\r\n"
         " |_| |_|____/ \\___/|____/\r\n"
         "\x1b[0m"
-        "\x1b[1m\x1b[36m  v0.1 beta2\x1b[0m"
+        "\x1b[1m\x1b[36m  v0.1 beta3-pre3\x1b[0m"
         "  \x1b[90m64-bit x86_64  "
         "输入 \x1b[0mhelp\x1b[90m 查看命令\x1b[0m\r\n\r\n"
     );

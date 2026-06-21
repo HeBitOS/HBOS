@@ -4354,7 +4354,7 @@ static void draw_splash_window(int w, int h, int ticks, int light) {
     rect(sx + sw - 1, sy, 1, sh, cyber_neon_cyan(light));
     border(sx, sy, sw, sh, cyber_neon_cyan(light));
 
-    text_clipped(sx + 14, sy + 10, sx + sw - 20, "HBOS  v0.1 beta2", rgb(255, 255, 255), 1);
+    text_clipped(sx + 14, sy + 10, sx + sw - 20, "HBOS  v0.1 beta3-pre3", rgb(255, 255, 255), 1);
 
     int bx = sx + 16, by = sy + title_h + 18;
     vgradient(bx, by, 48, 48, cyber_neon_pink(light), light ? rgb(160, 0, 70) : rgb(180, 0, 90));
