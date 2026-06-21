@@ -187,8 +187,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             memset(buf, 0, sizeof(struct utsname));
             memcpy(buf->sysname, "HBOS", 5);
             memcpy(buf->nodename, "hbos", 5);
-            memcpy(buf->release, "0.1-beta2", 10);
-            memcpy(buf->version, "HBOS 0.1 beta2", 15);
+            memcpy(buf->release, "0.1-beta3-pre3", 15);
+            memcpy(buf->version, "HBOS 0.1-beta3-pre3", 20);
             memcpy(buf->machine, "x86_64", 7);
             return 0;
         }
