@@ -136,6 +136,8 @@ typedef struct {
     uint32_t console_input_len;
     char console_history[16][80];
     uint32_t console_line_count;
+    uint32_t console_cursor;
+    int console_history_idx;
 } gui_state_t;
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b);
@@ -2800,6 +2802,8 @@ static void console_exec_cmd(gui_state_t *st) {
 
     st->console_input_len = 0;
     st->console_input[0] = 0;
+    st->console_cursor = 0;
+    st->console_history_idx = -1;
 }
 
 static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
@@ -2813,9 +2817,9 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     // 霓虹青边框
     border(box_x, box_y, box_w, box_h, cyber_neon_cyan(0));
 
-    int scale = 2;
-    int row_h = 24;
-    int input_y = box_y + box_h - 32;
+    int scale = 1;
+    int row_h = 16;
+    int input_y = box_y + box_h - 24;
 
     // 自动根据可用高度计算最多绘制的历史记录行数，防止重叠
     int max_lines = (input_y - (box_y + 12)) / row_h;
@@ -2851,9 +2855,8 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     cursor_ticks++;
     int cursor_visible = (cursor_ticks / 15) % 2;
     if (cursor_visible) {
-        int input_len = (int)strlen(st->console_input);
-        int cursor_x = box_x + 12 + prompt_w + input_len * 6 * scale;
-        rect(cursor_x, input_y + 2, 6 * scale, 8 * scale - 2, rgb(0, 255, 128));
+        int cursor_x = box_x + 12 + prompt_w + st->console_cursor * 6 * scale;
+        rect(cursor_x, input_y + 1, 6 * scale, 8 * scale - 1, rgb(0, 255, 128));
     }
 }
 
@@ -4163,15 +4166,66 @@ static void handle_app_key(gui_state_t *st, int key) {
         }
     } else if (st->app_mode == GUI_APP_DIAG) {
         if (key == GUI_KEY_BACKSPACE) {
-            if (st->console_input_len > 0) {
+            if (st->console_cursor > 0) {
+                for (uint32_t j = st->console_cursor - 1; j < st->console_input_len; j++) {
+                    st->console_input[j] = st->console_input[j + 1];
+                }
+                st->console_cursor--;
                 st->console_input_len--;
-                st->console_input[st->console_input_len] = 0;
             }
         } else if (key == '\n' || key == '\r') {
             console_exec_cmd(st);
+        } else if (key == GUI_KEY_LEFT) {
+            if (st->console_cursor > 0) {
+                st->console_cursor--;
+            }
+        } else if (key == GUI_KEY_RIGHT) {
+            if (st->console_cursor < st->console_input_len) {
+                st->console_cursor++;
+            }
+        } else if (key == GUI_KEY_UP) {
+            int curr = (st->console_history_idx == -1) ? 15 : st->console_history_idx - 1;
+            for (int i = curr; i >= 0; i--) {
+                if (strncmp(st->console_history[i], "hbos_gui_shell:/# ", 18) == 0) {
+                    const char *cmd_val = st->console_history[i] + 18;
+                    strncpy(st->console_input, cmd_val, 79);
+                    st->console_input[79] = 0;
+                    st->console_input_len = (uint32_t)strlen(st->console_input);
+                    st->console_cursor = st->console_input_len;
+                    st->console_history_idx = i;
+                    break;
+                }
+            }
+        } else if (key == GUI_KEY_DOWN) {
+            if (st->console_history_idx != -1) {
+                int found = 0;
+                for (int i = st->console_history_idx + 1; i <= 15; i++) {
+                    if (strncmp(st->console_history[i], "hbos_gui_shell:/# ", 18) == 0) {
+                        const char *cmd_val = st->console_history[i] + 18;
+                        strncpy(st->console_input, cmd_val, 79);
+                        st->console_input[79] = 0;
+                        st->console_input_len = (uint32_t)strlen(st->console_input);
+                        st->console_cursor = st->console_input_len;
+                        st->console_history_idx = i;
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found) {
+                    st->console_input[0] = 0;
+                    st->console_input_len = 0;
+                    st->console_cursor = 0;
+                    st->console_history_idx = -1;
+                }
+            }
         } else if (key >= 32 && key <= 126) {
             if (st->console_input_len + 1 < 80) {
-                st->console_input[st->console_input_len++] = (char)key;
+                for (uint32_t j = st->console_input_len; j > st->console_cursor; j--) {
+                    st->console_input[j] = st->console_input[j - 1];
+                }
+                st->console_input[st->console_cursor] = (char)key;
+                st->console_cursor++;
+                st->console_input_len++;
                 st->console_input[st->console_input_len] = 0;
             }
         }
@@ -4444,6 +4498,8 @@ static void cmd_gui(int argc, char **argv) {
     st.console_input[0] = 0;
     st.console_input_len = 0;
     st.console_line_count = 0;
+    st.console_cursor = 0;
+    st.console_history_idx = -1;
     console_append_history(&st, "Welcome to HBOS Cyber Console!");
     console_append_history(&st, "Type 'help' to view available commands.");
     wm_set_panel_title(PANEL_FILES, "文件管理器");
