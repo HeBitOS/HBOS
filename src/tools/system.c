@@ -97,6 +97,15 @@ static void cmd_version(int argc, char **argv) {
     console_puts("Files: ramfs + HBFS disk backend\n");
 }
 
+static void cmd_neofetch(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts("   \x1b[36m/\\\\_/\\\\\x1b[0m      \x1b[1m\x1b[35mHBOS (HeBitOS) " HBOS_VERSION_NAME "\x1b[0m\n");
+    console_puts("  \x1b[36m( o.o )\x1b[0m     \x1b[32mKernel:\x1b[0m Coop-Multitasking\n");
+    console_puts("   \x1b[36m> ^ <\x1b[0m      \x1b[32mArch:\x1b[0m   x86_64\n");
+    console_puts("  \x1b[36m/     \\\\\x1b[0m     \x1b[32mUI:\x1b[0m     Cyberpunk TUI Console\n");
+    console_puts(" \x1b[36m|       |\x1b[0m    \x1b[32mStatus:\x1b[0m Online & Ready\n");
+}
+
 static void cmd_about(int argc, char **argv) {
     (void)argc; (void)argv;
     console_puts("\n\x1b[33mHBOS\x1b[0m - He Bit OS\n");
@@ -417,6 +426,7 @@ void tool_system_init(void) {
         {"credits", CMD_GROUP_SYSTEM, "Show credits",        "credits", cmd_credits},
         {"echo",    CMD_GROUP_SYSTEM, "Print text",          "echo <text>", cmd_echo},
         {"version", CMD_GROUP_SYSTEM, "Show version info",   "version", cmd_version},
+        {"neofetch",CMD_GROUP_SYSTEM, "Show system logo and info", "neofetch", cmd_neofetch},
         {"about",   CMD_GROUP_SYSTEM, "Show HBOS overview",  "about",   cmd_about},
         {"clear",   CMD_GROUP_SYSTEM, "Clear the screen",    "clear",   cmd_clear},
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
