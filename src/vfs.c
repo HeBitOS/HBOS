@@ -190,6 +190,9 @@ int vfs_opendir(const char *path) {
     }
     for (uint32_t i = 0; i < sizeof(vfs_virtual_dirs) / sizeof(vfs_virtual_dirs[0]); i++) {
         if (strcmp(path, vfs_virtual_dirs[i].name) == 0) {
+            if (fs_opendir(path) >= 0) {
+                return 0;
+            }
             fs_closedir(path);
             return 0;
         }

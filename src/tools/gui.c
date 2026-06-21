@@ -3113,13 +3113,13 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     char ipbuf[16];
     net_ipv4_to_str(dev->ip, ipbuf);
     text(tx, ty, "浏览器", rgb(78, 192, 236), 1);
-    text(tx, ty + 30, "Enter加载  S保存  方向键滚动", rgb(148, 162, 174), 1);
+    text(tx, ty + 30, "Enter加载  Ctrl+S保存  方向键滚动", rgb(148, 162, 174), 1);
     rect(tx, ty + 58, view_w, 32, rgb(6, 14, 22));
     border(tx, ty + 58, view_w, 32, rgb(78, 192, 236));
     text(tx + 10, ty + 68, st->browser_url, rgb(232, 242, 248), 1);
     rect(tx + view_w - 12, ty + 68, 6, 14, rgb(78, 192, 236));
     draw_small_button(tx, ty + 104, 96, "Enter 加载", rgb(78, 192, 236));
-    draw_small_button(tx + 108, ty + 104, 68, "S 保存", rgb(85, 180, 120));
+    draw_small_button(tx + 108, ty + 104, 68, "保存", rgb(85, 180, 120));
     char line[128];
     uint32_t pos = 0;
     line[0] = 0;
@@ -4095,7 +4095,7 @@ static void handle_app_key(gui_state_t *st, int key) {
     } else if (st->app_mode == GUI_APP_BROWSER) {
         browser_init(st);
         if (key == '\n') browser_load(st);
-        else if (key == 's' || key == 'S') browser_save_page(st);
+        else if (key == 19) browser_save_page(st);
         else if (key == GUI_KEY_BACKSPACE) {
             uint32_t n = (uint32_t)strlen(st->browser_url);
             if (n) st->browser_url[n - 1] = 0;
@@ -4405,6 +4405,7 @@ static void cmd_gui(int argc, char **argv) {
     int resizing_window = -1;
     int resize_edge = WM_EDGE_NONE;
     int resize_orig_x = 0, resize_orig_y = 0, resize_orig_w = 0, resize_orig_h = 0;
+    int resize_orig_win_x = 0, resize_orig_win_y = 0;
     int cursor_edge = WM_EDGE_NONE;
     uint32_t frame_tick = 0;          // 自增帧计数，用于双击计时
     uint32_t last_title_click = 0;    // 上次点击标题栏的帧
@@ -4539,23 +4540,29 @@ static void cmd_gui(int argc, char **argv) {
                 if (rw) {
                     int dx = mx - resize_orig_x;
                     int dy = my - resize_orig_y;
-                    int new_x = rw->x, new_y = rw->y;
-                    int new_w = resize_orig_w, new_h = resize_orig_h;
+                    int new_x = resize_orig_win_x;
+                    int new_y = resize_orig_win_y;
+                    int new_w = resize_orig_w;
+                    int new_h = resize_orig_h;
 
                     if (resize_edge == WM_EDGE_E || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_SE)
                         new_w = resize_orig_w + dx;
-                    if (resize_edge == WM_EDGE_W || resize_edge == WM_EDGE_NW || resize_edge == WM_EDGE_SW) {
+                    if (resize_edge == WM_EDGE_W || resize_edge == WM_EDGE_NW || resize_edge == WM_EDGE_SW)
                         new_w = resize_orig_w - dx;
-                        new_x = resize_orig_x + dx;
-                    }
+                    if (new_w < 200) new_w = 200;
+
+                    if (resize_edge == WM_EDGE_W || resize_edge == WM_EDGE_NW || resize_edge == WM_EDGE_SW)
+                        new_x = (resize_orig_win_x + resize_orig_w) - new_w;
+
                     if (resize_edge == WM_EDGE_S || resize_edge == WM_EDGE_SE || resize_edge == WM_EDGE_SW)
                         new_h = resize_orig_h + dy;
-                    if (resize_edge == WM_EDGE_N || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_NW) {
+                    if (resize_edge == WM_EDGE_N || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_NW)
                         new_h = resize_orig_h - dy;
-                        new_y = resize_orig_y + dy;
-                    }
-                    if (new_w < 200) new_w = 200;
                     if (new_h < 120) new_h = 120;
+
+                    if (resize_edge == WM_EDGE_N || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_NW)
+                        new_y = (resize_orig_win_y + resize_orig_h) - new_h;
+
                     rw->w = new_w;
                     rw->h = new_h;
                     rw->x = new_x;
@@ -4666,6 +4673,8 @@ static void cmd_gui(int argc, char **argv) {
                                 resize_orig_y = my;
                                 resize_orig_w = bw->w > 0 ? bw->w : (w > 920 ? 790 : w - 120);
                                 resize_orig_h = bw->h > 0 ? bw->h : (h > 620 ? 430 : h - 140);
+                                resize_orig_win_x = bw->x;
+                                resize_orig_win_y = bw->y;
                             }
                         }
                     } else {
