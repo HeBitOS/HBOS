@@ -3301,7 +3301,7 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
                      0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
                      0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
                      cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
-    rect(146, 62, 118, 2, cyber_neon_pink(st->theme_light));
+    rect(146, 42, 118, 2, cyber_neon_pink(st->theme_light));
     text(146, 18, "系统概览", cyber_text(st->theme_light), 2);
     text(148, 56, "左侧启动栏打开工具，桌面直接显示当前状态", cyber_text_muted(st->theme_light), 1);
 
