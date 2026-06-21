@@ -132,6 +132,10 @@ typedef struct {
     uint8_t clock_last_sec;
     int switcher_ticks; // 切换器浮层剩余显示帧数
     int theme_light;    // 主题：0-深色赛博 1-浅色赛博
+    char console_input[80];
+    uint32_t console_input_len;
+    char console_history[16][80];
+    uint32_t console_line_count;
 } gui_state_t;
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b);
@@ -184,7 +188,7 @@ static const gui_app_t gui_apps[] = {
     {"贪吃蛇", "方向键移动", GUI_APP_SNAKE},
     {"浏览器", "打开 HTTP/HTTPS 网页", GUI_APP_BROWSER},
     {"代码工作台", "编辑、保存、运行 C 文件", GUI_APP_CODE},
-    {"诊断台", "查看驱动、网络、运行状态", GUI_APP_DIAG},
+    {"控制台终端", "运行命令与系统交互", GUI_APP_DIAG},
     {"时钟", "实时时钟与日期", GUI_APP_CLOCK},
 };
 
@@ -377,6 +381,68 @@ static void gui_present_surface(const fb_info_t *fb) {
         uint32_t *dst = fb->addr + (uint32_t)y * fb_pitch;
         uint32_t *src = g_gui_surface + (uint32_t)y * g_gui_surface_pitch;
         for (int x = 0; x < g_gui_surface_w; x++) dst[x] = src[x];
+    }
+}
+
+static void rect(int x, int y, int w, int h, uint32_t color);
+
+static void rect_alpha(int x, int y, int w, int h, uint32_t color) {
+    if (w <= 0 || h <= 0) return;
+    uint8_t alpha = (color >> 24) & 0xFF;
+    if (alpha == 0) return;
+    if (alpha == 0xFF) {
+        rect(x, y, w, h, color);
+        return;
+    }
+    if (g_gui_surface) {
+        if (x >= g_gui_surface_w || y >= g_gui_surface_h) return;
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (w <= 0 || h <= 0) return;
+        if (x + w > g_gui_surface_w) w = g_gui_surface_w - x;
+        if (y + h > g_gui_surface_h) h = g_gui_surface_h - y;
+
+        uint32_t src_r = (color >> 16) & 0xFF;
+        uint32_t src_g = (color >> 8) & 0xFF;
+        uint32_t src_b = color & 0xFF;
+        uint32_t inv_alpha = 255 - alpha;
+
+        for (int yy = 0; yy < h; yy++) {
+            uint32_t *row = g_gui_surface + (uint32_t)(y + yy) * g_gui_surface_pitch + (uint32_t)x;
+            for (int xx = 0; xx < w; xx++) {
+                uint32_t dst = row[xx];
+                uint32_t dst_r = (dst >> 16) & 0xFF;
+                uint32_t dst_g = (dst >> 8) & 0xFF;
+                uint32_t dst_b = dst & 0xFF;
+
+                uint32_t out_r = (src_r * alpha + dst_r * inv_alpha) / 255;
+                uint32_t out_g = (src_g * alpha + dst_g * inv_alpha) / 255;
+                uint32_t out_b = (src_b * alpha + dst_b * inv_alpha) / 255;
+
+                row[xx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
+        return;
+    }
+    fb_fill_rect((uint64_t)x, (uint64_t)y, (uint64_t)w, (uint64_t)h, color);
+}
+
+static uint32_t rgb_mix_alpha(uint32_t c1, uint32_t c2, int t) {
+    if (t < 0) t = 0;
+    if (t > 255) t = 255;
+    uint8_t a1 = (c1 >> 24) & 0xFF, r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
+    uint8_t a2 = (c2 >> 24) & 0xFF, r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
+    uint8_t a = (uint8_t)(a1 + ((int)a2 - (int)a1) * t / 255);
+    uint8_t r = (uint8_t)(r1 + ((int)r2 - (int)r1) * t / 255);
+    uint8_t g = (uint8_t)(g1 + ((int)g2 - (int)g1) * t / 255);
+    uint8_t b = (uint8_t)(b1 + ((int)b2 - (int)b1) * t / 255);
+    return ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+}
+
+static void vgradient_alpha(int x, int y, int w, int h, uint32_t top, uint32_t bottom) {
+    if (w <= 0 || h <= 0) return;
+    for (int i = 0; i < h; i++) {
+        rect_alpha(x, y + i, w, 1, rgb_mix_alpha(top, bottom, (i * 255) / (h > 1 ? h - 1 : 1)));
     }
 }
 
@@ -2570,138 +2636,210 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     text(tx + 12, l.bottom_y + 34, line, rgb(148, 168, 180), 1);
 }
 
-static int diag_line(int x, int y, int max_x, const char *label, const char *value, uint32_t color) {
-    char line[128];
-    line2(line, sizeof(line), label, value);
-    text_clipped(x, y, max_x, line, color, 1);
-    return y + 18;
+
+
+static void console_append_history(gui_state_t *st, const char *line) {
+    if (st->console_line_count < 16) {
+        strncpy(st->console_history[st->console_line_count], line, 79);
+        st->console_history[st->console_line_count][79] = 0;
+        st->console_line_count++;
+    } else {
+        for (int i = 0; i < 15; i++) {
+            strcpy(st->console_history[i], st->console_history[i + 1]);
+        }
+        strncpy(st->console_history[15], line, 79);
+        st->console_history[15][79] = 0;
+    }
 }
 
-static int diag_u32(int x, int y, int max_x, const char *label, uint32_t value, const char *suffix) {
-    char line[128];
-    line_u32(line, sizeof(line), label, value, suffix ? suffix : "");
-    text_clipped(x, y, max_x, line, rgb(210, 221, 230), 1);
-    return y + 18;
-}
+static void console_exec_cmd(gui_state_t *st) {
+    if (st->console_input_len == 0) {
+        console_append_history(st, "hbos_gui_shell:/#");
+        return;
+    }
 
-static int diag_int(int x, int y, int max_x, const char *label, int value) {
-    char line[128];
-    uint32_t pos = 0;
-    line[0] = 0;
-    append_str(line, sizeof(line), &pos, label);
-    append_int(line, sizeof(line), &pos, value);
-    text_clipped(x, y, max_x, line, rgb(210, 221, 230), 1);
-    return y + 18;
-}
+    char cmd_line[120];
+    uint32_t cpos = 0;
+    cmd_line[0] = 0;
+    append_str(cmd_line, sizeof(cmd_line), &cpos, "hbos_gui_shell:/# ");
+    append_str(cmd_line, sizeof(cmd_line), &cpos, st->console_input);
+    console_append_history(st, cmd_line);
 
-static void diag_ready(char *buf, uint32_t cap, const char *label, int ready) {
-    line2(buf, cap, label, ready ? "ready" : "not ready");
-}
+    char *cmd = st->console_input;
+    while (*cmd == ' ') cmd++;
+    
+    if (strcmp(cmd, "help") == 0) {
+        console_append_history(st, "Available commands:");
+        console_append_history(st, "  help      Show this help message");
+        console_append_history(st, "  ls        List files in root directory");
+        console_append_history(st, "  cat <f>   Display contents of file <f>");
+        console_append_history(st, "  mem       Show memory usage info");
+        console_append_history(st, "  tasks     List running processes");
+        console_append_history(st, "  clear     Clear screen history");
+        console_append_history(st, "  neofetch  Show system neofetch/logo");
+    } else if (strcmp(cmd, "clear") == 0) {
+        st->console_line_count = 0;
+    } else if (strcmp(cmd, "ls") == 0) {
+        char entry[VFS_MAX_NAME];
+        uint32_t entry_type;
+        uint32_t idx = 0;
+        while (vfs_readdir_at("/", idx, entry, &entry_type) == 0) {
+            char line[80];
+            uint32_t pos = 0;
+            append_str(line, sizeof(line), &pos, entry_type == VFS_NODE_DIR ? "[DIR]  " : "[FILE] ");
+            append_str(line, sizeof(line), &pos, entry);
+            console_append_history(st, line);
+            idx++;
+        }
+        if (idx == 0) {
+            console_append_history(st, "Directory is empty.");
+        }
+    } else if (strncmp(cmd, "cat ", 4) == 0) {
+        const char *arg = cmd + 4;
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+            console_append_history(st, "Usage: cat <filename>");
+        } else {
+            char full_path[128];
+            full_path[0] = 0;
+            uint32_t pos = 0;
+            if (arg[0] != '/') {
+                append_str(full_path, sizeof(full_path), &pos, "/");
+            }
+            append_str(full_path, sizeof(full_path), &pos, arg);
 
-static void diag_pci(char *buf, uint32_t cap, const net_device_t *dev) {
-    uint32_t pos = 0;
-    buf[0] = 0;
-    append_str(buf, cap, &pos, "PCI: ");
-    append_uint(buf, cap, &pos, (uint32_t)dev->vendor_id);
-    append_char(buf, cap, &pos, ':');
-    append_uint(buf, cap, &pos, (uint32_t)dev->device_id);
-    append_str(buf, cap, &pos, " bus ");
-    append_uint(buf, cap, &pos, (uint32_t)dev->bus);
-    append_char(buf, cap, &pos, ':');
-    append_uint(buf, cap, &pos, (uint32_t)dev->slot);
-    append_char(buf, cap, &pos, '.');
-    append_uint(buf, cap, &pos, (uint32_t)dev->func);
-}
+            vfs_node_t *node = vfs_lookup(full_path);
+            if (!node) {
+                console_append_history(st, "cat: File not found.");
+            } else {
+                char buf[512];
+                int got = vfs_read(node, 0, buf, sizeof(buf) - 1);
+                if (got < 0) {
+                    console_append_history(st, "cat: Read error.");
+                } else {
+                    buf[got] = 0;
+                    char *line_start = buf;
+                    for (int i = 0; i <= got; i++) {
+                        if (buf[i] == '\n' || buf[i] == '\r' || i == got) {
+                            char old_c = buf[i];
+                            buf[i] = 0;
+                            if (strlen(line_start) > 0) {
+                                console_append_history(st, line_start);
+                            }
+                            buf[i] = old_c;
+                            line_start = buf + i + 1;
+                        }
+                    }
+                }
+            }
+        }
+    } else if (strcmp(cmd, "mem") == 0) {
+        uint64_t total = pmm_get_total_mem();
+        uint64_t free = pmm_get_free_mem();
+        uint64_t used = total > free ? total - free : 0;
+        char line[80];
+        uint32_t pos = 0;
+        
+        pos = 0; line[0] = 0;
+        append_str(line, sizeof(line), &pos, "Total Memory: ");
+        append_uint(line, sizeof(line), &pos, (uint32_t)(total / 1024));
+        append_str(line, sizeof(line), &pos, " KB");
+        console_append_history(st, line);
 
-static void draw_diag_section(int x, int y, int w, const char *title, uint32_t accent) {
-    rect(x, y, w, 1, rgb_lift(accent, -18));
-    rect(x, y + 1, 4, 16, accent);
-    text(x + 12, y + 5, title, rgb(236, 242, 246), 1);
+        pos = 0; line[0] = 0;
+        append_str(line, sizeof(line), &pos, "Used Memory:  ");
+        append_uint(line, sizeof(line), &pos, (uint32_t)(used / 1024));
+        append_str(line, sizeof(line), &pos, " KB");
+        console_append_history(st, line);
+
+        pos = 0; line[0] = 0;
+        append_str(line, sizeof(line), &pos, "Free Memory:  ");
+        append_uint(line, sizeof(line), &pos, (uint32_t)(free / 1024));
+        append_str(line, sizeof(line), &pos, " KB");
+        console_append_history(st, line);
+    } else if (strcmp(cmd, "tasks") == 0) {
+        uint32_t count = (uint32_t)task_get_count();
+        char line[80];
+        uint32_t pos = 0;
+        append_str(line, sizeof(line), &pos, "Active Tasks: ");
+        append_uint(line, sizeof(line), &pos, count);
+        console_append_history(st, line);
+        for (uint32_t i = 0; i < count && i < 10; i++) {
+            const task_t *task = task_get_active(i);
+            if (task) {
+                pos = 0;
+                line[0] = 0;
+                append_str(line, sizeof(line), &pos, " PID: ");
+                append_uint(line, sizeof(line), &pos, task->id);
+                append_str(line, sizeof(line), &pos, " | ");
+                append_str(line, sizeof(line), &pos, task->name);
+                append_str(line, sizeof(line), &pos, " (");
+                append_str(line, sizeof(line), &pos, task_state_name(task->state));
+                append_str(line, sizeof(line), &pos, ")");
+                console_append_history(st, line);
+            }
+        }
+    } else if (strcmp(cmd, "neofetch") == 0) {
+        console_append_history(st, "   /\\_/\\      HBOS (HeBitOS) v0.1");
+        console_append_history(st, "  ( o.o )     Kernel: Coop-Multitasking");
+        console_append_history(st, "   > ^ <      Arch: x86_64");
+        console_append_history(st, "  /     \\     UI: Cyberpunk Neon Terminal");
+        console_append_history(st, " |       |    Status: Online & Ready");
+    } else {
+        char err[120];
+        uint32_t pos = 0;
+        err[0] = 0;
+        append_str(err, sizeof(err), &pos, "hbos_shell: command not found: ");
+        append_str(err, sizeof(err), &pos, cmd);
+        console_append_history(st, err);
+    }
+
+    st->console_input_len = 0;
+    st->console_input[0] = 0;
 }
 
 static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
-    (void)win_h;
-    int content_w = win_w - 72;
-    if (content_w < 520) content_w = 520;
-    int col_w = (content_w - 24) / 2;
-    int right_x = tx + col_w + 24;
-    int max_l = tx + col_w - 8;
-    int max_r = right_x + col_w - 8;
-    char line[160];
+    int box_x = tx - 20;
+    int box_y = ty - 4;
+    int box_w = win_w - 20;
+    int box_h = win_h - 74;
 
-    text(tx, ty, "诊断台", rgb(240, 168, 90), 1);
-    uint64_t total = pmm_get_total_mem();
-    uint64_t free = pmm_get_free_mem();
-    uint64_t used = total > free ? total - free : 0;
-    uint32_t pos = 0;
-    line[0] = 0;
-    append_str(line, sizeof(line), &pos, "内存 ");
-    append_uint(line, sizeof(line), &pos, (uint32_t)(used / 1024));
-    append_str(line, sizeof(line), &pos, "K / ");
-    append_uint(line, sizeof(line), &pos, (uint32_t)(total / 1024));
-    append_str(line, sizeof(line), &pos, "K  任务 ");
-    append_uint(line, sizeof(line), &pos, (uint32_t)task_get_count());
-    append_str(line, sizeof(line), &pos, "  ");
-    append_str(line, sizeof(line), &pos, st->status ? st->status : "Ready");
-    text_clipped(tx + 82, ty + 2, tx + content_w, line, rgb(148, 168, 180), 1);
+    // 半透明背景填充 (Alpha 0xD0, Obsidian Blue/Black)
+    rect_alpha(box_x, box_y, box_w, box_h, 0xD002050E);
+    // 霓虹青边框
+    border(box_x, box_y, box_w, box_h, cyber_neon_cyan(0));
 
-    int y = ty + 42;
-    draw_diag_section(tx, y, col_w, "输入 / USB", rgb(240, 168, 90));
-    y += 26;
-    y = diag_line(tx, y, max_l, "鼠标: ", mouse_backend_name(), rgb(210, 221, 230));
-    y = diag_u32(tx, y, max_l, "xHCI 设备: ", (uint32_t)xhci_device_count(), "");
-    y = diag_u32(tx, y, max_l, "HID 设备: ", (uint32_t)hid_device_count(), "");
-    y = diag_u32(tx, y, max_l, "键盘数: ", (uint32_t)hid_keyboard_count(), "");
-    y = diag_u32(tx, y, max_l, "鼠标数: ", (uint32_t)hid_mouse_count(), "");
-    diag_ready(line, sizeof(line), "USB 键盘: ", usb_kbd_ready());
-    y = diag_line(tx, y, max_l, "", line, usb_kbd_ready() ? rgb(124, 220, 154) : rgb(230, 184, 74));
-    diag_ready(line, sizeof(line), "USB 鼠标: ", usb_mouse_ready());
-    y = diag_line(tx, y, max_l, "", line, usb_mouse_ready() ? rgb(124, 220, 154) : rgb(230, 184, 74));
+    // 绘制命令历史
+    int start_y = box_y + 12;
+    for (uint32_t i = 0; i < st->console_line_count; i++) {
+        const char *line = st->console_history[i];
+        uint32_t color = cyber_text(0);
+        if (strncmp(line, "hpos_gui_shell:", 15) == 0 || strncmp(line, "hbos_gui_shell:", 15) == 0) {
+            color = rgb(0, 240, 255); // 霓虹蓝 prompt
+        } else if (strncmp(line, "hbos_shell:", 11) == 0) {
+            color = cyber_neon_pink(0); // 霓虹粉 error
+        } else if (strncmp(line, "  ", 2) == 0) {
+            color = cyber_neon_yellow(0); // 琥珀黄细节
+        }
+        text(box_x + 12, start_y, line, color, 1);
+        start_y += 16;
+    }
 
-    y += 8;
-    draw_diag_section(tx, y, col_w, "存储 / 文件系统", rgb(244, 194, 82));
-    y += 26;
-    y = diag_line(tx, y, max_l, "块设备: ", block_backend_name(), rgb(210, 221, 230));
-    y = diag_u32(tx, y, max_l, "扇区数: ", block_sector_count(), "");
-    y = diag_line(tx, y, max_l, "文件系统: ", fs_backend_name(), rgb(210, 221, 230));
-    y = diag_u32(tx, y, max_l, "文件数: ", fs_get_count(), "");
-    y = diag_u32(tx, y, max_l, "容量: ", fs_capacity_bytes() / 1024, "K");
-    y = diag_u32(tx, y, max_l, "已用: ", fs_used_bytes() / 1024, "K");
-    y = diag_line(tx, y, max_l, "持久化: ", fs_is_disk() ? "HBFS disk" : "RAMFS",
-                  fs_is_disk() ? rgb(124, 220, 154) : rgb(230, 184, 74));
+    // 绘制当前输入行
+    int input_y = box_y + box_h - 24;
+    text(box_x + 12, input_y, "hbos_gui_shell:/# ", rgb(0, 255, 128), 1); // 霓虹绿 prompt
+    int prompt_w = 18 * 6;
+    text(box_x + 12 + prompt_w, input_y, st->console_input, cyber_text(0), 1);
 
-    y = ty + 42;
-    draw_diag_section(right_x, y, col_w, "网络", rgb(78, 192, 236));
-    y += 26;
-    const net_device_t *dev = net_primary();
-    char ip[16], gw[16], dns[16];
-    net_ipv4_to_str(dev->ip, ip);
-    net_ipv4_to_str(dev->gateway, gw);
-    net_ipv4_to_str(dev->dns, dns);
-    y = diag_line(right_x, y, max_r, "驱动: ", net_driver_name(dev->driver), rgb(210, 221, 230));
-    y = diag_line(right_x, y, max_r, "网卡: ", dev->present ? "present" : "not present",
-                  dev->present ? rgb(124, 220, 154) : rgb(232, 86, 92));
-    y = diag_line(right_x, y, max_r, "链路: ", dev->link_ready ? "ready" : "down",
-                  dev->link_ready ? rgb(124, 220, 154) : rgb(230, 184, 74));
-    y = diag_line(right_x, y, max_r, "DHCP: ", dev->dhcp_ok ? "ok" : "pending",
-                  dev->dhcp_ok ? rgb(124, 220, 154) : rgb(230, 184, 74));
-    y = diag_line(right_x, y, max_r, "IP: ", ip, rgb(210, 221, 230));
-    y = diag_line(right_x, y, max_r, "网关: ", gw, rgb(210, 221, 230));
-    y = diag_line(right_x, y, max_r, "DNS: ", dns, rgb(210, 221, 230));
-    diag_pci(line, sizeof(line), dev);
-    y = diag_line(right_x, y, max_r, "", line, rgb(168, 188, 202));
-
-    y += 8;
-    draw_diag_section(right_x, y, col_w, "代码 / 运行", rgb(102, 214, 255));
-    y += 26;
-    y = diag_line(right_x, y, max_r, "文件: ", code_path(st), rgb(210, 221, 230));
-    y = diag_line(right_x, y, max_r, "状态: ", st->code_modified ? "modified" : "saved",
-                  st->code_modified ? rgb(255, 190, 110) : rgb(124, 220, 154));
-    y = diag_u32(right_x, y, max_r, "错误行: ", (uint32_t)(st->code_error_line > 0 ? st->code_error_line : hbos_gcc_last_error_line()), "");
-    y = diag_int(right_x, y, max_r, "返回值: ", hbos_gcc_last_return());
-    y = diag_line(right_x, y, max_r, "输出: ", g_code_output[0] ? g_code_output : "Ready",
-                  st->code_error_line > 0 ? rgb(255, 188, 190) : rgb(210, 221, 230));
-    y = diag_line(right_x, y, max_r, "GCC: ", hbos_gcc_last_error(), rgb(168, 188, 202));
+    // 闪烁光标
+    static uint32_t cursor_ticks = 0;
+    cursor_ticks++;
+    int cursor_visible = (cursor_ticks / 15) % 2;
+    if (cursor_visible) {
+        int input_len = (int)strlen(st->console_input);
+        int cursor_x = box_x + 12 + prompt_w + input_len * 6;
+        rect(cursor_x, input_y, 6, 8, rgb(0, 255, 128));
+    }
 }
 
 static void snake_place_food(gui_state_t *st) {
@@ -3010,8 +3148,9 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
     rect(x, y + WM_TITLE_H, win_w, 1, active ? cyber_neon_cyan(light) : (light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
     rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, light ? rgb(220, 225, 230) : rgb(42, 52, 56));
 
-    vgradient(x + 1, y + WM_TITLE_H + 2, win_w - 2, win_h - WM_TITLE_H - 4,
-              body_top, body_bot);
+    vgradient_alpha(x + 1, y + WM_TITLE_H + 2, win_w - 2, win_h - WM_TITLE_H - 4,
+                    0xD0000000 | (body_top & 0x00FFFFFF),
+                    0xD0000000 | (body_bot & 0x00FFFFFF));
     rect(x, y + win_h - 1, win_w, 1, light ? rgb(180, 185, 190) : rgb(5, 8, 10));
     rect(x, y, 1, win_h, rgb_lift(body_top, 18));
     rect(x + win_w - 1, y, 1, win_h, rgb_lift(body_bot, -10));
@@ -3090,9 +3229,9 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
         st->app_mode = win->mode;
         draw_app_window_body(tx, ty, win_w, win_h, st, win->mode);
     }
-    vgradient(win_x + 1, win_y + win_h - 31, win_w - 2, 30,
-              st->theme_light ? rgb(220, 225, 230) : rgb(28, 34, 37),
-              st->theme_light ? rgb(200, 205, 210) : rgb(13, 16, 19));
+    vgradient_alpha(win_x + 1, win_y + win_h - 31, win_w - 2, 30,
+                    0xD0000000 | (st->theme_light ? rgb(220, 225, 230) : rgb(28, 34, 37)),
+                    0xD0000000 | (st->theme_light ? rgb(200, 205, 210) : rgb(13, 16, 19)));
     rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, st->theme_light ? rgb(180, 185, 190) : rgb(75, 96, 92));
     rect(win_x + 1, win_y + win_h - 31, win_w - 2, 1, idx == st->wm.active_window ? cyber_neon_pink(st->theme_light) : (st->theme_light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
     rect(win_x + 1, win_y + win_h - 1, win_w - 2, 1, st->theme_light ? rgb(180, 185, 190) : rgb(5, 8, 10));
@@ -3141,7 +3280,8 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
 
     soft_shadow(126, 12, w - 138, 60);
     draw_panel_shell(126, 12, w - 138, 60,
-                     cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
+                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
                      cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
     rect(146, 62, 118, 2, cyber_neon_pink(st->theme_light));
     text(146, 18, "系统概览", cyber_text(st->theme_light), 2);
@@ -3151,9 +3291,6 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_icon(15, 162, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74), st->theme_light);
     draw_icon(15, 232, st->active == PANEL_SYS, "资源", rgb(196, 116, 230), st->theme_light);
     draw_icon(15, 302, st->active == PANEL_APPS, "应用", rgb(23, 147, 209), st->theme_light);
-    
-    // 主题切换按钮
-    draw_icon(15, 372, st->theme_light, "主题", st->theme_light ? rgb(0, 200, 220) : rgb(255, 0, 128), st->theme_light);
 
     uint64_t total = pmm_get_total_mem();
     uint64_t free = pmm_get_free_mem();
@@ -3177,7 +3314,9 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_desktop_tile(550, 182, 118, 74, "应用", line, cyber_neon_cyan(st->theme_light), st->theme_light);
 
     soft_shadow(142, 282, 250, 126);
-    draw_panel_shell(142, 282, 250, 126, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+    draw_panel_shell(142, 282, 250, 126,
+                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
+                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
                      cyber_border(st->theme_light), rgb(85, 180, 120));
     rect(160, 316, 48, 2, rgb(85, 180, 120));
     text(160, 298, "最近文件", cyber_text(st->theme_light), 1);
@@ -3202,7 +3341,9 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     }
 
     soft_shadow(418, 282, 250, 126);
-    draw_panel_shell(418, 282, 250, 126, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+    draw_panel_shell(418, 282, 250, 126,
+                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
+                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
                      cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
     rect(436, 316, 48, 2, cyber_neon_cyan(st->theme_light));
     text(436, 298, "快捷操作", cyber_text(st->theme_light), 1);
@@ -4005,6 +4146,20 @@ static void handle_app_key(gui_state_t *st, int key) {
         } else if (key >= 32 && key <= 126) {
             code_insert_char(st, (char)key);
         }
+    } else if (st->app_mode == GUI_APP_DIAG) {
+        if (key == GUI_KEY_BACKSPACE) {
+            if (st->console_input_len > 0) {
+                st->console_input_len--;
+                st->console_input[st->console_input_len] = 0;
+            }
+        } else if (key == '\n' || key == '\r') {
+            console_exec_cmd(st);
+        } else if (key >= 32 && key <= 126) {
+            if (st->console_input_len + 1 < 80) {
+                st->console_input[st->console_input_len++] = (char)key;
+                st->console_input[st->console_input_len] = 0;
+            }
+        }
     }
 }
 
@@ -4140,7 +4295,9 @@ static void draw_start_menu(gui_state_t *st) {
     int mx = wm->menu_x, my = wm->menu_y, mw = wm->menu_w, mh = wm->menu_h;
 
     soft_shadow(mx, my, mw, mh);
-    draw_panel_shell(mx, my, mw, mh, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
+    draw_panel_shell(mx, my, mw, mh,
+                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
+                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
                      cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
     vgradient(mx + 1, my + 2, mw - 2, 30, cyber_neon_pink(st->theme_light), st->theme_light ? rgb(160, 0, 70) : rgb(180, 0, 90));
     rect(mx + 1, my + 2, mw - 2, 1, st->theme_light ? rgb(255, 120, 200) : rgb(255, 100, 180));
@@ -4151,7 +4308,7 @@ static void draw_start_menu(gui_state_t *st) {
     static const char *menu_items[] = {
         "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
         "记事本", "计算器", "贪吃蛇", "浏览器", "代码工作台",
-        "诊断台", "时钟", "返回 Shell", "关机"
+        "控制台终端", "时钟", "返回 Shell", "关机"
     };
     uint32_t menu_colors[13] = {
         rgb(85, 180, 120), rgb(230, 184, 74), rgb(196, 116, 230),
@@ -4165,9 +4322,11 @@ static void draw_start_menu(gui_state_t *st) {
         int iy = my + 40 + i * 28;
         uint32_t accent = menu_colors[i];
         if (iy + 26 > my + mh) break;
+        uint32_t item_top = i >= 11 ? (st->theme_light ? rgb(250, 230, 220) : rgb(40, 15, 20)) : (st->theme_light ? rgb(240, 244, 248) : rgb(20, 12, 28));
+        uint32_t item_bot = i >= 11 ? (st->theme_light ? rgb(240, 215, 205) : rgb(25, 8, 12)) : (st->theme_light ? rgb(225, 230, 236) : rgb(12, 8, 18));
         draw_panel_shell(mx + 6, iy, mw - 12, 26,
-                         i >= 11 ? (st->theme_light ? rgb(250, 230, 220) : rgb(40, 15, 20)) : (st->theme_light ? rgb(240, 244, 248) : rgb(20, 12, 28)),
-                         i >= 11 ? (st->theme_light ? rgb(240, 215, 205) : rgb(25, 8, 12)) : (st->theme_light ? rgb(225, 230, 236) : rgb(12, 8, 18)),
+                         0xD0000000 | (item_top & 0x00FFFFFF),
+                         0xD0000000 | (item_bot & 0x00FFFFFF),
                          st->theme_light ? rgb(190, 195, 200) : rgb(60, 0, 90), accent);
         rect(mx + 18, iy + 8, 10, 10, accent);
         rect(mx + 21, iy + 11, 4, 4, st->theme_light ? rgb(240, 244, 248) : rgb(18, 24, 26));
@@ -4266,6 +4425,11 @@ static void cmd_gui(int argc, char **argv) {
         .theme_light = 0,
     };
     wm_init(&st.wm, w, h);
+    st.console_input[0] = 0;
+    st.console_input_len = 0;
+    st.console_line_count = 0;
+    console_append_history(&st, "Welcome to HBOS Cyber Console!");
+    console_append_history(&st, "Type 'help' to view available commands.");
     wm_set_panel_title(PANEL_FILES, "文件管理器");
     wm_set_panel_title(PANEL_DISK, "磁盘管理器");
     wm_set_panel_title(PANEL_SYS, "资源管理器");
@@ -4276,7 +4440,7 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_SNAKE, "贪吃蛇");
     wm_set_app_title(GUI_APP_BROWSER, "浏览器");
     wm_set_app_title(GUI_APP_CODE, "代码工作台");
-    wm_set_app_title(GUI_APP_DIAG, "诊断台");
+    wm_set_app_title(GUI_APP_DIAG, "控制台终端");
     wm_set_app_title(GUI_APP_CLOCK, "时钟");
 
     (void)block_init();
@@ -4567,17 +4731,13 @@ static void cmd_gui(int argc, char **argv) {
                                     }
                                 }
                             } else {
-                                if (mx >= 15 && mx < 97 && my >= 372 && my < 430) {
-                                    st.theme_light = !st.theme_light;
-                                    st.status = st.theme_light ? "浅色赛博朋克" : "深色赛博朋克";
+                                int panel = hit_panel_shortcut(w, h, mx, my);
+                                if (panel >= 0) {
+                                    gui_open_panel_window(&st, panel);
+                                } else if (mx >= 10 && mx < 106 && my >= h - 36 && my <= h) {
+                                    wm_toggle_start_menu(&st.wm);
+                                    st.status = "开始菜单";
                                 } else {
-                                    int panel = hit_panel_shortcut(w, h, mx, my);
-                                    if (panel >= 0) {
-                                        gui_open_panel_window(&st, panel);
-                                    } else if (mx >= 10 && mx < 106 && my >= h - 36 && my <= h) {
-                                        wm_toggle_start_menu(&st.wm);
-                                        st.status = "开始菜单";
-                                    } else {
                                     int action = hit_action(w, h, &st, mx, my);
                                     if (action >= FILE_ACTION_BASE) {
                                         if (action >= APP_ACTION_BASE) {
@@ -4601,7 +4761,6 @@ static void cmd_gui(int argc, char **argv) {
                             }
                         }
                     }
-                    }
                 }
                 redraw = 1;
             }
@@ -4618,6 +4777,9 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (clock_auto_tick(&st)) {
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
+        if (st.app_mode == GUI_APP_DIAG && (frame_tick % 20 == 0)) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (st.switcher_ticks > 0) {
