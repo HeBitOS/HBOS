@@ -58,6 +58,23 @@ void wm_bring_to_front(int idx);                                 // 提升 Z-ord
 int  wm_hit_test(int mx, int my);                                // 鼠标命中检测 (返回窗口索引)
 ```
 
+## App 模块系统 (`gui/gui_app.h` + `gui/gui_apps.c`)
+
+```c
+typedef struct {
+    int mode;          /* GUI_APP_* 枚举值 */
+    const char *name;
+    const char *desc;
+    void (*draw)(gui_state_t *st, int tx, int ty, int win_w, int win_h);
+    int  (*on_key)(gui_state_t *st, int key);
+    int  (*on_tick)(gui_state_t *st);  /* 返回 1 要求重绘 */
+} gui_app_module_t;
+```
+
+- 已拆出为独立文件的 App：`gui/apps/app_calc.c`、`gui/apps/app_clock.c`
+- 其余 App（notes/snake/browser/code/diag/uwc）仍在 `tools/gui.c`
+- 新增 App 步骤：① 在 `gui_state.h` 加 `GUI_APP_XXX` 枚举；② 创建 `gui/apps/app_xxx.c` 实现 `gui_app_module_t`；③ 在 `gui_apps.c` 的 `g_modules[]` 注册
+
 ## 与 `tools/gui.c` 的交互
 
 GUI 主循环 (`tools/gui.c`) 使用 `src/gui/` 的 compositor + wm:

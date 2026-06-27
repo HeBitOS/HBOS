@@ -14,7 +14,9 @@
 | `ata.c` | ata 命令 |
 | `app.c` | app 命令 (用户程序管理) |
 | `net.c` | net 命令 (网络工具) |
-| `cc.c`, `cppe.c` | C 编译器 + 预处理器 (内建) |
+| `cc.c`, `cc.h` | C 编译器 + 图形 builtin 钩子表 (`cc_gfx_t`) |
+| `python.c`, `python.h` | ★ Python 解释器 (内建) |
+| `cppe.c` | C 预处理器 |
 | `editor.c` | 文本编辑器 |
 | `system/` | 系统工具 (reboot, poweroff 等) |
 | `debug/` | 调试工具 |
@@ -34,7 +36,8 @@ static inline void tool_init_all(void) {
     tool_disk_init();    // disk 命令
     tool_gui_init();     // ★ gui 命令 (启动桌面)
     tool_net_init();     // net 命令 (dhcp, ping, wget, ...)
-    tool_cc_init();      // cc 命令 (C 编译器)
+    tool_cc_init();      // cc/gcc 命令 (C 编译器 + GUI 脚本)
+    tool_python_init();  // python/python3/py 命令 (Python 解释器)
     tool_cppe_init();    // cpp 命令 (预处理器)
 }
 
@@ -104,13 +107,106 @@ static int hit_task_window(...);       // 任务栏窗口按钮
 | 应用 | 枚举值 | 文件 | 功能 |
 |------|--------|------|------|
 | 记事本 | `GUI_APP_NOTES` | `gui_state_t.note_*` | 文件编辑/保存 (NOTE_EDIT_CAP=512) |
-| 计算器 | `GUI_APP_CALC` | `gui_state_t.calc_*` | 四则运算 (两位数) |
-| 代码编辑器 | `GUI_APP_CODE` | `gui_state_t.code_*` | 4096 字节, 行号, 保存/运行 |
+| 计算器 | `GUI_APP_CALC` | `gui/apps/app_calc.c` | 四则运算 |
+| 代码编辑器 | `GUI_APP_CODE` | `gui_state_t.code_*` | 4096 字节, 行号, 保存/运行/**GUI运行** |
 | 浏览器 | `GUI_APP_BROWSER` | `gui_state_t.browser_*` | HTTP GET + 页面渲染 |
 | 蛇 | `GUI_APP_SNAKE` | `gui_state_t.snake_*` | 16x10 格子, WASD 控制 |
-| 时钟 | `GUI_APP_CLOCK` | `gui_state_t` | 模拟时钟 |
+| 时钟 | `GUI_APP_CLOCK` | `gui/apps/app_clock.c` | 模拟时钟 |
 | 诊断 | `GUI_APP_DIAG` | `gui_state_t.diag_*` | 系统诊断信息 |
 | UWC | `GUI_APP_UWC` | — | 用户字数统计 |
+
+---
+
+## C / Python GUI 脚本系统
+
+### 架构
+
+```
+cc_gfx_t (src/tools/cc.h)
+    ↑ cc_set_gfx()    ↑ py_set_gfx()
+    cc.c             python.c
+         ↖         ↗
+          gui.c (g_sgfx hooks + code_gui_run())
+```
+
+### cc_gfx_t 钩子表 (`src/tools/cc.h`)
+
+```c
+typedef struct {
+    void (*rect)(int x, int y, int w, int h, uint32_t color);
+    void (*text)(int x, int y, const char *s, uint32_t color, int scale);
+    void (*present)(void);
+    int  (*screen_w)(void);
+    int  (*screen_h)(void);
+    int  (*get_key)(void);   /* 非阻塞; 0 = 无按键 */
+    int  (*wait_key)(void);  /* 阻塞 */
+} cc_gfx_t;
+```
+
+- `cc_set_gfx(hooks)` — 给 C 解释器设置图形钩子，`NULL` 清除
+- `py_set_gfx(hooks)` — 给 Python 解释器设置图形钩子
+
+### C 脚本 builtin 函数 (`cc.c`)
+
+| 函数 | 说明 |
+|------|------|
+| `rgb(r,g,b)` | 返回颜色整数 |
+| `rect(x,y,w,h,color)` | 填充矩形 |
+| `text(x,y,"str",color,scale)` | 绘制文本，string 以字符串表索引传递 |
+| `clear(color)` | 清屏 |
+| `present()` | 将 surface 刷新到 framebuffer |
+| `screen_w()` / `screen_h()` | 屏幕尺寸 |
+| `get_key()` | 非阻塞取键；0=无 |
+| `wait_key()` | 阻塞取键；内部调 `task_yield()` |
+
+### Python 解释器 (`python.c` ~650 行)
+
+**支持语法：**
+- 变量赋值 / 增量赋值 (`+=`, `-=`, `*=`, `/=`)
+- `if` / `elif` / `else`（缩进块）
+- `while` 循环
+- `for i in range(n)` / `range(start, stop)` / `range(start, stop, step)`
+- `def` 函数定义 + `return` / `break` / `continue`
+- 表达式：算术 `+ - * / // % **`，比较 `== != < > <= >=`，逻辑 `and or not`
+- 字符串字面量（单/双引号），字符串 + 拼接
+
+**内建函数：** `print()`, `int()`, `str()`, `len()`, `abs()`  
+**图形 builtin：** `rgb`, `rect`, `text`, `clear`, `present`, `get_key`, `wait_key`, `screen_w`, `screen_h`
+
+**命令行：**
+```bash
+python file.py          # 运行
+python --new file.py    # 生成 GUI 样板
+python3 / py            # 别名
+```
+
+### 代码工作台 "GUI运行" 按钮
+
+- 位置：代码工作台第 4 个按钮（紫色 `rgb(215,100,244)`）
+- 逻辑（`code_gui_run()` in `gui.c`）：
+  1. 保存文件
+  2. 清屏为黑色并 present
+  3. 根据文件扩展名 `.py` → Python，否则 → C
+  4. 挂载 `g_sgfx` 钩子（`g_script_fb` 指向当前 fb）
+  5. 调 `py_run_file()` 或 `hbos_gcc_run_file()`（同步，阻塞 GUI）
+  6. 清除钩子，`gui_dirty_mark_full()` 重绘
+
+### GUI 脚本执行模型
+
+- 脚本**同步运行**，占用整个 framebuffer，期间 WM 暂停
+- `wait_key()` 内部 `task_yield()` 避免 CPU 空转
+- 脚本用 `while k != 27:` + `wait_key()` 自建事件循环
+- `present()` 手动控制帧刷新
+- 脚本 `main()` 返回 / 函数结束 → 自动回到 GUI
+
+### 样板生成
+
+```bash
+gcc --new myapp.c      # C GUI App 样板
+python --new myapp.py  # Python GUI App 样板
+```
+
+样板包含：矩形动画 + 键盘控制（A/D 移动，ESC 退出）
 
 ### 开始菜单 & 面板
 ```c

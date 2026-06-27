@@ -57,6 +57,11 @@ static token_t tokens[MAX_TOKENS];
 static int tok_count;
 static int pc; /* program counter: current token index */
 
+/* ── GFX hooks (scripted GUI apps) ─────────────────────────── */
+#include "cc.h"
+static const cc_gfx_t *g_cc_gfx;
+void cc_set_gfx(const cc_gfx_t *h) { g_cc_gfx = h; }
+
 /* ── Source ─────────────────────────────────────────────────── */
 static char src[MAX_SRC];
 static int src_len;
@@ -609,6 +614,54 @@ static int expr_primary(void) {
 
             /* Built-in: getchar */
             if (strcmp(name, "getchar") == 0) return kb_get_key();
+
+            /* Built-in: rgb(r,g,b) */
+            if (strcmp(name, "rgb") == 0) {
+                if (ac >= 3)
+                    return (int)(((uint32_t)(args[0]&0xFF)<<16)|
+                                 ((uint32_t)(args[1]&0xFF)<<8)|
+                                  (uint32_t)(args[2]&0xFF));
+                return 0;
+            }
+            /* Built-in: rect(x,y,w,h,color) */
+            if (strcmp(name, "rect") == 0) {
+                if (g_cc_gfx && g_cc_gfx->rect && ac >= 5)
+                    g_cc_gfx->rect(args[0],args[1],args[2],args[3],(uint32_t)args[4]);
+                return 0;
+            }
+            /* Built-in: text(x,y,"str",color,scale) */
+            if (strcmp(name, "text") == 0) {
+                if (g_cc_gfx && g_cc_gfx->text && ac >= 4) {
+                    const char *s = (args[2]>=0 && args[2]<string_count)
+                                    ? string_table[args[2]] : "";
+                    g_cc_gfx->text(args[0], args[1], s,
+                                   (uint32_t)args[3], ac>=5 ? args[4] : 1);
+                }
+                return 0;
+            }
+            /* Built-in: clear(color) */
+            if (strcmp(name, "clear") == 0) {
+                if (g_cc_gfx && g_cc_gfx->rect && g_cc_gfx->screen_w && g_cc_gfx->screen_h) {
+                    uint32_t c = ac>=1 ? (uint32_t)args[0] : 0;
+                    g_cc_gfx->rect(0,0,g_cc_gfx->screen_w(),g_cc_gfx->screen_h(),c);
+                }
+                return 0;
+            }
+            /* Built-in: present() */
+            if (strcmp(name, "present") == 0) {
+                if (g_cc_gfx && g_cc_gfx->present) g_cc_gfx->present();
+                return 0;
+            }
+            /* Built-in: screen_w() / screen_h() */
+            if (strcmp(name, "screen_w") == 0)
+                return (g_cc_gfx && g_cc_gfx->screen_w) ? g_cc_gfx->screen_w() : 800;
+            if (strcmp(name, "screen_h") == 0)
+                return (g_cc_gfx && g_cc_gfx->screen_h) ? g_cc_gfx->screen_h() : 600;
+            /* Built-in: get_key() / wait_key() */
+            if (strcmp(name, "get_key") == 0)
+                return (g_cc_gfx && g_cc_gfx->get_key) ? g_cc_gfx->get_key() : 0;
+            if (strcmp(name, "wait_key") == 0)
+                return (g_cc_gfx && g_cc_gfx->wait_key) ? g_cc_gfx->wait_key() : 0;
 
             /* User function */
             int fi = func_find(name);
@@ -1304,11 +1357,23 @@ static int cc_load_file(const char *path) {
 
 static int cc_write_sample(const char *path) {
     static const char sample[] =
-        "#include <stdio.h>\n"
-        "\n"
+        "/* HBOS GUI App - use rect/text/rgb/clear/present/get_key/wait_key */\n"
         "int main() {\n"
-        "    puts(\"HBOS gcc ready\");\n"
-        "    printf(\"answer=%d\\n\", 42);\n"
+        "    int x = 40;\n"
+        "    int col = rgb(0, 180, 255);\n"
+        "    int k = 0;\n"
+        "    while (k != 27) {\n"
+        "        clear(rgb(20, 25, 35));\n"
+        "        rect(x, 80, 120, 80, col);\n"
+        "        text(40, 40, \"Hello HBOS!\", rgb(255, 255, 255), 2);\n"
+        "        text(40, 200, \"A/D move  ESC quit\", rgb(160, 200, 220), 1);\n"
+        "        present();\n"
+        "        k = wait_key();\n"
+        "        if (k == 97) x = x - 8;\n"
+        "        if (k == 100) x = x + 8;\n"
+        "        if (x < 0) x = 0;\n"
+        "        if (x > screen_w() - 120) x = screen_w() - 120;\n"
+        "    }\n"
         "    return 0;\n"
         "}\n";
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC);

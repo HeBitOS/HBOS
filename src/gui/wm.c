@@ -330,11 +330,24 @@ void wm_get_window_rect(wm_state_t *wm, int idx, int *x, int *y, int *w, int *h)
     if (def_x < 100) def_x = 100;
     int def_y = 42;
 
-    if (win->state == WM_STATE_MAXIMIZED) {
+    if (win->state == WM_STATE_MAXIMIZED && win->anim_type == WM_ANIM_NONE) {
         *x = 0;
         *y = 0;
         *w = wm->desk_w;
         *h = wm->desk_h - WM_TASKBAR_H;
+        return;
+    }
+
+    if (win->anim_type == WM_ANIM_MAXIMIZE || win->anim_type == WM_ANIM_RESTORE ||
+        win->anim_type == WM_ANIM_MINIMIZE) {
+        *x = win->x ? win->x : def_x + idx * 24;
+        *y = win->y ? win->y : def_y + idx * 18;
+        *w = win->w > 0 ? win->w : def_w;
+        *h = win->h > 0 ? win->h : def_h;
+        if (*x + *w > wm->desk_w - 4) *x = wm->desk_w - *w - 4;
+        if (*y + *h > wm->desk_h - WM_TASKBAR_H - 4) *y = wm->desk_h - WM_TASKBAR_H - *h - 4;
+        if (*x < 4) *x = 4;
+        if (*y < 4) *y = 4;
         return;
     }
 

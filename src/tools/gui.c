@@ -8,6 +8,7 @@
 #include "../fcntl.h"
 #include "../fs.h"
 #include "../graphics/font_cjk.h"
+#include "../graphics/gui_font.h"
 #include "../graphics/graphics.h"
 #include "../input/mouse.h"
 #include "../net.h"
@@ -19,8 +20,14 @@
 #include "../user/app.h"
 #include "../vfs.h"
 #include "../gui/wm.h"
+#include "../gui/gui_state.h"
+#include "../gui/gui_dirty.h"
+#include "../gui/gui_draw.h"
+#include "../gui/gui_app.h"
 #include "../shell/shell.h"
 #include "tool.h"
+#include "cc.h"
+#include "python.h"
 
 extern void task_yield(void);
 extern int hbos_gcc_run_file_capture(const char *path, char *out, uint32_t out_cap);
@@ -36,16 +43,6 @@ extern int hbos_gcc_last_return(void);
 #define FILE_ACTION_BASE 100
 #define APP_ACTION_BASE  200
 
-#define GUI_APP_NONE  -1
-#define GUI_APP_NOTES 0
-#define GUI_APP_CALC  1
-#define GUI_APP_UWC   2
-#define GUI_APP_SNAKE 3
-#define GUI_APP_BROWSER 4
-#define GUI_APP_CODE 5
-#define GUI_APP_DIAG 6
-#define GUI_APP_CLOCK 7
-
 #define ACTION_W 116
 #define ACTION_H 28
 #define FILE_ACTION_COUNT 7
@@ -59,100 +56,32 @@ extern int hbos_gcc_last_return(void);
 #define CODE_VIEW_ROWS 10
 #define SNAKE_W 16
 #define SNAKE_H 10
-#define SNAKE_MAX (SNAKE_W * SNAKE_H)
 #define GUI_PAGE_SIZE 4096ULL
 #define FILE_LIST_ROWS 8
 #define FILE_ROW_H 26
 #define NOTE_FILE_ROWS 7
 #define GUI_PATH_MAX 256
-#define CODE_CMD_SAVE 1
-#define CODE_CMD_RUN  2
-#define CODE_CMD_OPEN 3
-
-typedef struct {
-    int active;
-    int selected_file;
-    int selected_app;
-    int app_mode;
-    int calc_value;
-    int calc_acc;
-    int calc_input;
-    int calc_last_lhs;
-    int calc_last_rhs;
-    int calc_just_evaluated;
-    char calc_op;
-    char calc_last_op;
-    int calc_has_input;
-    int calc_error;
-    int snake_x;
-    int snake_y;
-    int snake_tx;
-    int snake_ty;
-    int snake_score;
-    int snake_len;
-    int snake_dx;
-    int snake_dy;
-    int snake_alive;
-    uint8_t snake_last_sec;
-    int snake_body_x[SNAKE_MAX];
-    int snake_body_y[SNAKE_MAX];
-    int win_x;
-    int win_y;
-    int clicks;
-    uint8_t buttons;
-    wm_state_t wm;
-    int last_clicked_file;
-    char file_path[GUI_PATH_MAX];
-    char note_buf[NOTE_EDIT_CAP];
-    uint32_t note_len;
-    uint32_t note_cursor;
-    int note_dirty;
-    int note_loaded;
-    char note_name[MAX_FILENAME];
-    char browser_url[BROWSER_URL_CAP];
-    char browser_page[BROWSER_PAGE_CAP];
-    uint32_t browser_page_len;
-    int browser_loaded;
-    int browser_scroll;
-    char code_path[GUI_PATH_MAX];
-    uint32_t code_len;
-    uint32_t code_cursor;
-    int code_loaded;
-    int code_modified;
-    int code_scroll;
-    int code_error_line;
-    int code_view_rows;
-    int rename_active;
-    char rename_buf[MAX_FILENAME];
-    uint32_t rename_len;
-    int delete_confirm_index;
-    const char *status;
-    int splash_ticks;
-    int snap_preview;   // 拖动吸附预览：WM_SNAP_*
-    uint8_t clock_last_sec;
-    int switcher_ticks; // 切换器浮层剩余显示帧数
-    int theme_light;    // 主题：0-深色赛博 1-浅色赛博
-    char console_input[80];
-    uint32_t console_input_len;
-    char console_history[16][80];
-    uint32_t console_line_count;
-    uint32_t console_cursor;
-    int console_history_idx;
-} gui_state_t;
+#define CODE_CMD_SAVE    1
+#define CODE_CMD_RUN     2
+#define CODE_CMD_OPEN    3
+#define CODE_CMD_GUI_RUN 4
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b);
 
-static inline uint32_t cyber_bg_top(int light) { return light ? rgb(230, 235, 242) : rgb(31, 38, 42); }
-static inline uint32_t cyber_bg_bot(int light) { return light ? rgb(200, 208, 220) : rgb(19, 24, 28); }
-static inline uint32_t cyber_neon_pink(int light) { return light ? rgb(220, 0, 100) : rgb(38, 132, 138); }
-static inline uint32_t cyber_neon_cyan(int light) { return light ? rgb(0, 160, 200) : rgb(82, 170, 160); }
-static inline uint32_t cyber_neon_yellow(int light) { return light ? rgb(200, 170, 0) : rgb(246, 198, 91); }
-static inline uint32_t cyber_neon_purple(int light) { return light ? rgb(140, 40, 200) : rgb(196, 116, 230); }
-static inline uint32_t cyber_text(int light) { return light ? rgb(15, 20, 30) : rgb(252, 254, 255); }
-static inline uint32_t cyber_text_muted(int light) { return light ? rgb(100, 110, 125) : rgb(180, 198, 204); }
-static inline uint32_t cyber_border(int light) { return light ? rgb(140, 160, 180) : rgb(55, 68, 74); }
-static inline uint32_t cyber_card_bg_top(int light) { return light ? rgb(245, 247, 250) : rgb(33, 40, 44); }
-static inline uint32_t cyber_card_bg_bot(int light) { return light ? rgb(220, 226, 235) : rgb(18, 23, 27); }
+// Palette — dark branch follows KDE Breeze Dark (cool grays, single blue accent
+// #3daee9). The historical cyber_* names are kept so call sites need no churn;
+// only the values changed. Light branch retuned toward Breeze Light.
+static inline uint32_t cyber_bg_top(int light) { return light ? rgb(239, 240, 241) : rgb(35, 38, 41); }
+static inline uint32_t cyber_bg_bot(int light) { return light ? rgb(226, 228, 231) : rgb(27, 30, 33); }
+static inline uint32_t cyber_neon_pink(int light) { return light ? rgb(41, 128, 185) : rgb(41, 128, 185); }   // secondary blue
+static inline uint32_t cyber_neon_cyan(int light) { return light ? rgb(41, 174, 233) : rgb(61, 174, 233); }   // accent #3daee9
+static inline uint32_t cyber_neon_yellow(int light) { return light ? rgb(230, 110, 0) : rgb(246, 116, 0); }   // highlight #f67400
+static inline uint32_t cyber_neon_purple(int light) { return light ? rgb(39, 160, 90) : rgb(39, 174, 96); }   // positive green
+static inline uint32_t cyber_text(int light) { return light ? rgb(35, 38, 41) : rgb(239, 240, 241); }
+static inline uint32_t cyber_text_muted(int light) { return light ? rgb(110, 116, 122) : rgb(160, 167, 173); }
+static inline uint32_t cyber_border(int light) { return light ? rgb(188, 192, 196) : rgb(60, 64, 69); }
+static inline uint32_t cyber_card_bg_top(int light) { return light ? rgb(252, 252, 252) : rgb(49, 54, 59); }
+static inline uint32_t cyber_card_bg_bot(int light) { return light ? rgb(239, 240, 241) : rgb(42, 46, 50); }
 
 static char g_code_buf[CODE_EDIT_CAP];
 static char g_code_output[CODE_OUTPUT_CAP];
@@ -176,14 +105,14 @@ typedef struct {
     const char *name;
     const char *description;
     int mode;
-} gui_app_t;
+} gui_app_meta_t;
 
 typedef struct {
     const char *label;
     int action;
 } gui_file_action_t;
 
-static const gui_app_t gui_apps[] = {
+static const gui_app_meta_t gui_apps[] = {
     {"记事本", "编辑笔记文件", GUI_APP_NOTES},
     {"计算器", "方向键调整数值", GUI_APP_CALC},
     {"文件统计", "统计选中文件行数和字节", GUI_APP_UWC},
@@ -368,15 +297,36 @@ static uint32_t *g_gui_surface = 0;
 static uint32_t g_gui_surface_pitch = 0;
 static int g_gui_surface_w = 0;
 static int g_gui_surface_h = 0;
+static uint8_t g_layer_opacity = 255;
 
-static void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px) {
+/* ── Script GUI hooks (defined after text()/key_poll()) ─────── */
+static const fb_info_t *g_script_fb;
+
+void gui_set_layer_opacity(uint8_t opacity) {
+    g_layer_opacity = opacity;
+}
+
+uint8_t gui_get_layer_opacity(void) {
+    return g_layer_opacity;
+}
+
+static uint32_t apply_layer_opacity(uint32_t color) {
+    if (g_layer_opacity >= 255) return color;
+    if (g_layer_opacity == 0) return color & 0x00FFFFFF;
+    uint8_t a = (color >> 24) & 0xFF;
+    if (a == 0) a = 255;
+    a = (uint8_t)((a * g_layer_opacity) / 255);
+    return ((uint32_t)a << 24) | (color & 0x00FFFFFF);
+}
+
+void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px) {
     g_gui_surface = surface;
     g_gui_surface_w = surface ? w : 0;
     g_gui_surface_h = surface ? h : 0;
     g_gui_surface_pitch = surface ? pitch_px : 0;
 }
 
-static void gui_present_surface(const fb_info_t *fb) {
+void gui_present_surface(const fb_info_t *fb) {
     if (!fb || !g_gui_surface) return;
     uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
     for (int y = 0; y < g_gui_surface_h; y++) {
@@ -386,10 +336,27 @@ static void gui_present_surface(const fb_info_t *fb) {
     }
 }
 
+void gui_present_rect(const fb_info_t *fb, int x, int y, int w, int h) {
+    if (!fb || !g_gui_surface || w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > g_gui_surface_w) w = g_gui_surface_w - x;
+    if (y + h > g_gui_surface_h) h = g_gui_surface_h - y;
+    if (w <= 0 || h <= 0) return;
+    uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
+    for (int yy = 0; yy < h; yy++) {
+        uint32_t *dst = fb->addr + (uint32_t)(y + yy) * fb_pitch + (uint32_t)x;
+        uint32_t *src = g_gui_surface + (uint32_t)(y + yy) * g_gui_surface_pitch + (uint32_t)x;
+        for (int xx = 0; xx < w; xx++) dst[xx] = src[xx];
+    }
+}
+
 static void rect(int x, int y, int w, int h, uint32_t color);
 
 static void rect_alpha(int x, int y, int w, int h, uint32_t color) {
     if (w <= 0 || h <= 0) return;
+    if (!gui_clip_intersect(&x, &y, &w, &h)) return;
+    color = apply_layer_opacity(color);
     uint8_t alpha = (color >> 24) & 0xFF;
     if (alpha == 0) return;
     if (alpha == 0xFF) {
@@ -450,6 +417,13 @@ static void vgradient_alpha(int x, int y, int w, int h, uint32_t top, uint32_t b
 
 static void rect(int x, int y, int w, int h, uint32_t color) {
     if (w <= 0 || h <= 0) return;
+    if (!gui_clip_intersect(&x, &y, &w, &h)) return;
+    color = apply_layer_opacity(color);
+    uint8_t layer_a = (color >> 24) & 0xFF;
+    if (layer_a > 0 && layer_a < 255) {
+        rect_alpha(x, y, w, h, color);
+        return;
+    }
     if (g_gui_surface) {
         if (x >= g_gui_surface_w || y >= g_gui_surface_h) return;
         if (x < 0) {
@@ -482,15 +456,11 @@ static void border(int x, int y, int w, int h, uint32_t color) {
 static void draw_panel_shell(int x, int y, int w, int h, uint32_t top,
                              uint32_t bottom, uint32_t border_c, uint32_t accent) {
     if (w <= 0 || h <= 0) return;
-    vgradient(x, y, w, h, top, bottom);
-    rect(x, y, w, 1, rgb_lift(border_c, 28));
-    rect(x + 1, y + 1, w - 2, 1, rgb_lift(top, 18));
-    rect(x, y + h - 1, w, 1, rgb_lift(bottom, -28));
-    rect(x, y, 1, h, rgb_lift(border_c, 8));
-    rect(x + w - 1, y, 1, h, rgb_lift(bottom, -18));
+    // Breeze-flat: near-solid fill with only a whisper of top sheen, a single
+    // 1px border, and a slim accent edge (no glossy highlight/shadow runs).
+    vgradient(x, y, w, h, rgb_lift(top, 4), bottom);
     if (accent) {
-        rect(x, y + 1, 4, h - 2, accent);
-        rect(x + 4, y + 1, 1, h - 2, rgb_lift(accent, -36));
+        rect(x, y + 1, 3, h - 2, accent);
     }
     border(x, y, w, h, border_c);
 }
@@ -531,154 +501,104 @@ static void draw_window_control_icon(int x, int y, int kind, int restore, uint32
     }
 }
 
-static const uint8_t *glyph(char c) {
-    static const uint8_t blank[7] = {0,0,0,0,0,0,0};
-    static const uint8_t unknown[7] = {14,17,1,2,4,0,4};
-    static const uint8_t table[][7] = {
-        {14,17,19,21,25,17,14}, {4,12,4,4,4,4,14},
-        {14,17,1,2,4,8,31}, {30,1,1,14,1,1,30},
-        {2,6,10,18,31,2,2}, {31,16,30,1,1,17,14},
-        {6,8,16,30,17,17,14}, {31,1,2,4,8,8,8},
-        {14,17,17,14,17,17,14}, {14,17,17,15,1,2,12},
-        {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30},
-        {14,17,16,16,16,17,14}, {30,17,17,17,17,17,30},
-        {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
-        {14,17,16,23,17,17,15}, {17,17,17,31,17,17,17},
-        {14,4,4,4,4,4,14}, {7,2,2,2,18,18,12},
-        {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
-        {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17},
-        {14,17,17,17,17,17,14}, {30,17,17,30,16,16,16},
-        {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17},
-        {15,16,16,14,1,1,30}, {31,4,4,4,4,4,4},
-        {17,17,17,17,17,17,14}, {17,17,17,17,17,10,4},
-        {17,17,17,21,21,21,10}, {17,17,10,4,10,17,17},
-        {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31}
-    };
-    static const uint8_t lower[][7] = {
-        {0,0,14,1,15,17,15}, {16,16,30,17,17,17,30},
-        {0,0,14,16,16,17,14}, {1,1,15,17,17,17,15},
-        {0,0,14,17,31,16,14}, {6,8,8,30,8,8,8},
-        {0,0,15,17,17,15,1}, {16,16,30,17,17,17,17},
-        {4,0,12,4,4,4,14}, {2,0,6,2,2,18,12},
-        {16,16,18,20,24,20,18}, {12,4,4,4,4,4,14},
-        {0,0,26,21,21,17,17}, {0,0,30,17,17,17,17},
-        {0,0,14,17,17,17,14}, {0,0,30,17,17,30,16},
-        {0,0,15,17,17,15,1}, {0,0,22,24,16,16,16},
-        {0,0,15,16,14,1,30}, {8,8,30,8,8,9,6},
-        {0,0,17,17,17,19,13}, {0,0,17,17,17,10,4},
-        {0,0,17,17,21,21,10}, {0,0,17,10,4,10,17},
-        {0,0,17,17,17,15,1}, {0,0,31,2,4,8,31}
-    };
-    static const uint8_t colon[7] = {0,4,4,0,4,4,0};
-    static const uint8_t dot[7] = {0,0,0,0,0,4,4};
-    static const uint8_t dash[7] = {0,0,0,31,0,0,0};
-    static const uint8_t slash[7] = {1,1,2,4,8,16,16};
-    static const uint8_t plus[7] = {0,4,4,31,4,4,0};
-    static const uint8_t percent[7] = {17,2,4,8,16,17,0};
-    static const uint8_t equal[7] = {0,0,31,0,31,0,0};
-    static const uint8_t gt[7] = {16,8,4,2,4,8,16};
-    static const uint8_t lt[7] = {1,2,4,8,4,2,1};
-    static const uint8_t bang[7] = {4,4,4,4,4,0,4};
-    static const uint8_t question[7] = {14,17,1,2,4,0,4};
-    static const uint8_t quote[7] = {10,10,10,0,0,0,0};
-    static const uint8_t apos[7] = {4,4,4,0,0,0,0};
-    static const uint8_t comma[7] = {0,0,0,0,0,4,8};
-    static const uint8_t semicolon[7] = {0,4,4,0,4,4,8};
-    static const uint8_t underscore[7] = {0,0,0,0,0,0,31};
-    static const uint8_t star[7] = {0,21,14,31,14,21,0};
-    static const uint8_t hash[7] = {10,31,10,10,31,10,0};
-    static const uint8_t dollar[7] = {4,15,20,14,5,30,4};
-    static const uint8_t amp[7] = {12,18,20,8,21,18,13};
-    static const uint8_t at[7] = {14,17,23,21,23,16,14};
-    static const uint8_t caret[7] = {4,10,17,0,0,0,0};
-    static const uint8_t tilde[7] = {0,0,8,21,2,0,0};
-    static const uint8_t lparen[7] = {2,4,8,8,8,4,2};
-    static const uint8_t rparen[7] = {8,4,2,2,2,4,8};
-    static const uint8_t lbrack[7] = {14,8,8,8,8,8,14};
-    static const uint8_t rbrack[7] = {14,2,2,2,2,2,14};
-    static const uint8_t lbrace[7] = {2,4,4,8,4,4,2};
-    static const uint8_t rbrace[7] = {8,4,4,2,4,4,8};
-    static const uint8_t backslash[7] = {16,16,8,4,2,1,1};
-    static const uint8_t pipe[7] = {4,4,4,4,4,4,4};
+// Alpha-blend an 8-bit coverage glyph onto the GUI surface at (x, y) (the
+// glyph's top-left). `scale` nearest-upscales (rarely > 1). The foreground is
+// `color` (0x00RRGGBB), modulated per pixel by the glyph coverage and the
+// active layer opacity. Replaces the old hardcoded 5x7 / 1-bit blitters.
+static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int scale) {
+    if (!g->coverage || g->width == 0 || g->height == 0) return;
+    if (scale < 1) scale = 1;
+    int dw = (int)g->width * scale;
+    int dh = (int)g->height * scale;
+    int cx = x, cy = y, cw = dw, ch = dh;
+    if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
+    int off_x = cx - x, off_y = cy - y;
 
-    if (c == ' ') return blank;
-    if (c >= 'a' && c <= 'z') return lower[c - 'a'];
-    if (c >= '0' && c <= '9') return table[c - '0'];
-    if (c >= 'A' && c <= 'Z') return table[10 + c - 'A'];
-    if (c == ':') return colon;
-    if (c == '.') return dot;
-    if (c == '-') return dash;
-    if (c == '/') return slash;
-    if (c == '+') return plus;
-    if (c == '%') return percent;
-    if (c == '=') return equal;
-    if (c == '>') return gt;
-    if (c == '<') return lt;
-    if (c == '!') return bang;
-    if (c == '?') return question;
-    if (c == '"') return quote;
-    if (c == '\'') return apos;
-    if (c == ',') return comma;
-    if (c == ';') return semicolon;
-    if (c == '_') return underscore;
-    if (c == '*') return star;
-    if (c == '#') return hash;
-    if (c == '$') return dollar;
-    if (c == '&') return amp;
-    if (c == '@') return at;
-    if (c == '^') return caret;
-    if (c == '~') return tilde;
-    if (c == '(') return lparen;
-    if (c == ')') return rparen;
-    if (c == '[') return lbrack;
-    if (c == ']') return rbrack;
-    if (c == '{') return lbrace;
-    if (c == '}') return rbrace;
-    if (c == '\\') return backslash;
-    if (c == '|') return pipe;
-    return unknown;
-}
+    uint32_t base_a = (color >> 24) & 0xFF;
+    if (base_a == 0) base_a = 255;
+    uint32_t fg_a = base_a * g_layer_opacity / 255;
+    if (fg_a == 0) return;
+    uint32_t src_r = (color >> 16) & 0xFF;
+    uint32_t src_g = (color >> 8) & 0xFF;
+    uint32_t src_b = color & 0xFF;
+    int width = g->width;
 
-static int draw_cjk_text_glyph(int x, int y, uint32_t cp, uint32_t color, int scale) {
-    const uint8_t *bitmap = cjk_font_lookup(cp);
-    if (!bitmap) return 0;
-    for (int row = 0; row < CJK_GLYPH_SIZE; row++) {
-        uint8_t byte0 = bitmap[row * 2];
-        uint8_t byte1 = bitmap[row * 2 + 1];
-        for (int col = 0; col < 8; col++) {
-            if (byte0 & (0x80 >> col))
-                rect(x + col * scale, y + row * scale, scale, scale, color);
-            if (byte1 & (0x80 >> col))
-                rect(x + (8 + col) * scale, y + row * scale, scale, scale, color);
+    if (g_gui_surface) {
+        if (cx < 0) { cw += cx; off_x -= cx; cx = 0; }
+        if (cy < 0) { ch += cy; off_y -= cy; cy = 0; }
+        if (cx >= g_gui_surface_w || cy >= g_gui_surface_h) return;
+        if (cx + cw > g_gui_surface_w) cw = g_gui_surface_w - cx;
+        if (cy + ch > g_gui_surface_h) ch = g_gui_surface_h - cy;
+        for (int yy = 0; yy < ch; yy++) {
+            int sy = (off_y + yy) / scale;
+            const uint8_t *cov_row = g->coverage + (uint32_t)sy * width;
+            uint32_t *row = g_gui_surface +
+                            (uint32_t)(cy + yy) * g_gui_surface_pitch + (uint32_t)cx;
+            for (int xx = 0; xx < cw; xx++) {
+                uint32_t cov = cov_row[(off_x + xx) / scale];
+                if (cov == 0) continue;
+                uint32_t a = cov * fg_a / 255;
+                if (a == 0) continue;
+                uint32_t dst = row[xx];
+                uint32_t inv = 255 - a;
+                uint32_t dr = (dst >> 16) & 0xFF;
+                uint32_t dg = (dst >> 8) & 0xFF;
+                uint32_t db = dst & 0xFF;
+                uint32_t out_r = (src_r * a + dr * inv) / 255;
+                uint32_t out_g = (src_g * a + dg * inv) / 255;
+                uint32_t out_b = (src_b * a + db * inv) / 255;
+                row[xx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
+        return;
+    }
+    // Framebuffer fallback (no compositor surface): threshold the coverage.
+    for (int yy = 0; yy < ch; yy++) {
+        int sy = (off_y + yy) / scale;
+        const uint8_t *cov_row = g->coverage + (uint32_t)sy * width;
+        for (int xx = 0; xx < cw; xx++) {
+            if (cov_row[(off_x + xx) / scale] >= 128)
+                fb_put_pixel((uint64_t)(cx + xx), (uint64_t)(cy + yy), color);
         }
     }
-    return CJK_GLYPH_SIZE * scale;
 }
 
+// Draw one codepoint with its top at `y`, returning the pen advance. Latin and
+// CJK share a baseline (y + ascent), so mixed text aligns naturally.
 static int draw_text_codepoint(int x, int y, uint32_t cp, uint32_t color, int scale) {
-    if (cp < 0x80) {
-        const uint8_t *g = glyph((char)cp);
-        for (int row = 0; row < 7; row++) {
-            for (int col = 0; col < 5; col++) {
-                if (g[row] & (1 << (4 - col)))
-                    rect(x + col * scale, y + row * scale, scale, scale, color);
-            }
-        }
-        return 6 * scale;
+    if (scale < 1) scale = 1;
+    gui_glyph_t g;
+    if (!gui_font_lookup(cp, &g)) {
+        if (!gui_font_lookup('?', &g)) return 6 * scale;
     }
+    int baseline = y + gui_font_ascent() * scale;
+    int gx = x + (int)g.bearing_x * scale;
+    int gy = baseline - (int)g.bearing_y * scale;
+    blit_glyph(gx, gy, &g, color, scale);
+    int adv = (int)g.advance * scale;
+    if (adv <= 0) adv = (g.width ? (g.width + 1) : 4) * scale;
+    return adv;
+}
 
-    int advance = draw_cjk_text_glyph(x, y, cp, color, scale);
-    if (advance == 0) {
-        const uint8_t *g = glyph('?');
-        for (int row = 0; row < 7; row++) {
-            for (int col = 0; col < 5; col++) {
-                if (g[row] & (1 << (4 - col)))
-                    rect(x + col * scale, y + row * scale, scale, scale, color);
-            }
-        }
-        advance = 6 * scale;
+// Total pen advance of a UTF-8 string (no drawing). Used for centering/layout.
+static int text_width(const char *s, int scale) {
+    if (!s) return 0;
+    if (scale < 1) scale = 1;
+    int w = 0;
+    utf8_state_t utf8;
+    utf8_init(&utf8);
+    while (*s) {
+        uint32_t cp = 0;
+        int ok = utf8_feed(&utf8, (uint8_t)*s++, &cp);
+        if (ok < 0) continue;
+        if (ok == 0) cp = '?';
+        gui_glyph_t g;
+        if (!gui_font_lookup(cp, &g)) { w += 6 * scale; continue; }
+        int adv = (int)g.advance * scale;
+        if (adv <= 0) adv = (g.width ? (g.width + 1) : 4) * scale;
+        w += adv;
     }
-    return advance;
+    return w;
 }
 
 static void text(int x, int y, const char *s, uint32_t color, int scale) {
@@ -704,11 +624,16 @@ static void text_clipped(int x, int y, int max_x, const char *s, uint32_t color,
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
 
-        int advance = draw_text_codepoint(x, y, cp, color, scale);
-        if (x + advance > max_x) {
-            rect(x, y, max_x - x + 1, 7 * scale + scale, rgb(18, 27, 36));
-            break;
+        gui_glyph_t g;
+        int advance;
+        if (gui_font_lookup(cp, &g)) {
+            advance = (int)g.advance * scale;
+            if (advance <= 0) advance = (g.width ? (g.width + 1) : 4) * scale;
+        } else {
+            advance = 6 * scale;
         }
+        if (x + advance > max_x) break;
+        draw_text_codepoint(x, y, cp, color, scale);
         x += advance;
     }
 }
@@ -943,24 +868,24 @@ static void draw_button(int x, int y, const char *label, uint32_t color) {
 }
 
 static void draw_small_button(int x, int y, int w, const char *label, uint32_t color) {
-    soft_shadow(x, y, w, ACTION_H);
-    draw_panel_shell(x, y, w, ACTION_H,
-                     rgb_lift(color, 34), rgb_lift(color, -24),
-                     rgb_lift(color, -46), color);
-    rect(x + 7, y + 5, w - 14, 1, rgb_lift(color, 72));
-    text_clipped(x + 11, y + 10, x + w - 10, label, rgb(252, 254, 255), 1);
+    // Flat Breeze button: solid surface, 1px border, centered label.
+    vgradient(x, y, w, ACTION_H, rgb_lift(color, 8), rgb_lift(color, -8));
+    border(x, y, w, ACTION_H, rgb_lift(color, -30));
+    int tw = text_width(label, 1);
+    int tx = x + (w - tw) / 2;
+    if (tx < x + 5) tx = x + 5;
+    int ty = y + (ACTION_H - gui_font_line_height()) / 2;
+    if (ty < y) ty = y;
+    text_clipped(tx, ty, x + w - 4, label, rgb(252, 254, 255), 1);
 }
 
 static uint32_t gui_file_action_color(int action) {
-    if (action == 0) return rgb(85, 180, 120);
-    if (action == 1) return rgb(23, 147, 209);
-    if (action == 9) return rgb(204, 156, 74);
-    if (action == 7) return rgb(124, 220, 154);
-    if (action == 8) return rgb(102, 214, 255);
-    if (action == 2) return rgb(102, 214, 255);
-    if (action == 3) return rgb(244, 194, 82);
-    if (action == 4) return rgb(234, 82, 82);
-    return rgb(132, 150, 162);
+    // Breeze button semantics: primary action = accent blue, destructive = red,
+    // everything else = neutral surface so the toolbar reads calm and flat.
+    if (action == 1) return rgb(61, 174, 233);   // 打开 — primary
+    if (action == 3) return rgb(218, 68, 83);     // 清空 — destructive
+    if (action == 4) return rgb(218, 68, 83);     // 删除 — destructive
+    return rgb(75, 81, 88);                        // neutral surface
 }
 
 static int gui_file_action_rect(int content_w, int index, int *x, int *y, int *w) {
@@ -995,15 +920,15 @@ static void draw_file_action_bar(int tx, int ty, int content_w) {
 }
 
 static void draw_task_button(int x, int y, int w, const char *label, int active, uint32_t color, int light) {
-    uint32_t top = active ? rgb_lift(color, 20) : (light ? rgb(240, 244, 248) : rgb(31, 38, 43));
-    uint32_t bottom = active ? rgb_lift(color, -32) : (light ? rgb(220, 225, 230) : rgb(16, 20, 24));
-    uint32_t outline = active ? rgb_lift(color, 42) : (light ? rgb(180, 185, 192) : rgb(39, 48, 55));
-    draw_panel_shell(x, y, w, 32, top, bottom, outline,
-                     active ? color : rgb_lift(color, -54));
-    rect(x + 8, y + 25, w - 16, 2,
-         active ? cyber_neon_yellow(light) : (light ? rgb(190, 195, 200) : rgb(48, 58, 62)));
-    text_clipped(x + 12, y + 11, x + w - 12, label,
-                 active ? cyber_text(light) : cyber_text_muted(light), 1);
+    (void)color;
+    // Flat Breeze taskbar entry: accent fill when active, neutral otherwise.
+    uint32_t fill = active ? rgb(61, 174, 233) : (light ? rgb(214, 217, 221) : rgb(54, 58, 63));
+    uint32_t bord = active ? rgb(41, 128, 185) : (light ? rgb(196, 200, 204) : rgb(66, 71, 77));
+    rect(x, y, w, 32, fill);
+    border(x, y, w, 32, bord);
+    uint32_t fg = active ? rgb(255, 255, 255) : cyber_text(light);
+    int ty = y + (32 - gui_font_line_height()) / 2;
+    text_clipped(x + 10, ty, x + w - 8, label, fg, 1);
 }
 
 static void draw_icon(int x, int y, int active, const char *label, uint32_t color, int light) {
@@ -1043,19 +968,6 @@ static void draw_cursor(int x, int y, int edge) {
     }
 }
 
-enum {
-    GUI_KEY_UP = 1001,
-    GUI_KEY_DOWN,
-    GUI_KEY_LEFT,
-    GUI_KEY_RIGHT,
-    GUI_KEY_BACKSPACE,
-    GUI_KEY_DELETE,
-    GUI_KEY_HOME,
-    GUI_KEY_END,
-    GUI_KEY_PGUP,
-    GUI_KEY_PGDOWN,
-};
-
 static int key_poll(void) {
     int key = kb_poll_key();
     if (key == KB_KEY_UP) return GUI_KEY_UP;
@@ -1071,77 +983,50 @@ static int key_poll(void) {
     return key;
 }
 
+/* ── Script GFX hooks (after text/rect/key_poll are defined) ── */
+static void sgfx_rect(int x,int y,int w,int h,uint32_t c){rect(x,y,w,h,c);}
+static void sgfx_text(int x,int y,const char*s,uint32_t c,int sc){text(x,y,s,c,sc);}
+static void sgfx_present(void){ if(g_script_fb) gui_present_surface(g_script_fb); }
+static int  sgfx_sw(void){ return g_gui_surface_w; }
+static int  sgfx_sh(void){ return g_gui_surface_h; }
+static int  sgfx_getkey(void){ return key_poll(); }
+static int  sgfx_waitkey(void){ int k; while(!(k=key_poll())) task_yield(); return k; }
+static const cc_gfx_t g_sgfx = {
+    .rect=sgfx_rect,.text=sgfx_text,.present=sgfx_present,
+    .screen_w=sgfx_sw,.screen_h=sgfx_sh,
+    .get_key=sgfx_getkey,.wait_key=sgfx_waitkey
+};
+
 static void draw_wallpaper(int w, int h, int light) {
     char line[32];
     int tb_y = h - TASKBAR_H;
-    if (light) {
-        vgradient(0, 0, w, tb_y, rgb(235, 240, 248), rgb(215, 220, 228));
-    } else {
-        vgradient(0, 0, w, tb_y, rgb(22, 27, 31), rgb(8, 11, 14));
-    }
     int sb_x = 112;
-    if (light) {
-        vgradient(0, 0, sb_x, tb_y, rgb(220, 225, 232), rgb(200, 205, 212));
-    } else {
-        vgradient(0, 0, sb_x, tb_y, rgb(28, 32, 35), rgb(10, 13, 16));
-    }
-    rect(sb_x - 2, 0, 1, tb_y, light ? cyber_neon_pink(1) : rgb(72, 108, 104));
-    rect(sb_x - 1, 0, 1, tb_y, light ? cyber_neon_cyan(1) : rgb(46, 64, 68));
-    rect(sb_x, 0, 1, tb_y, light ? rgb(180, 185, 192) : rgb(18, 24, 28));
+    uint32_t accent = rgb(61, 174, 233);
 
-    for (int yy = 18; yy < tb_y - 10; yy += 34) {
-        int offset = (yy * 3) & 95;
-        rect(sb_x + offset, yy, w - sb_x - offset - 18, 1, light ? rgb(210, 215, 222) : rgb(24, 35, 37));
-        rect(sb_x + 34 + offset, yy + 9, w - sb_x - offset - 90, 1, light ? rgb(225, 220, 215) : rgb(34, 30, 24));
-    }
+    // Flat Breeze desktop + dock column (no decorative grid/scanlines).
+    rect(0, 0, w, tb_y, light ? rgb(239, 240, 241) : rgb(31, 34, 37));
+    rect(0, 0, sb_x, tb_y, light ? rgb(227, 229, 232) : rgb(42, 46, 50));
+    rect(sb_x, 0, 1, tb_y, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
 
-    int dot = 0;
-    for (int yy = 84; yy < tb_y - 20; yy += 28) {
-        for (int xx = 140; xx < w - 30; xx += 28) {
-            if (light) {
-                uint8_t r_val = (dot & 1) ? 220 : 0;
-                uint8_t g_val = (dot & 1) ? 0 : 220;
-                uint8_t b_val = (dot & 1) ? 180 : 255;
-                r_val = (uint8_t)(r_val * 7 / 10);
-                g_val = (uint8_t)(g_val * 7 / 10);
-                b_val = (uint8_t)(b_val * 7 / 10);
-                uint8_t factor = (xx * 3 + yy * 7 + dot) % 6;
-                if (factor == 0) {
-                    rect(xx, yy, 2, 2, rgb((uint8_t)(r_val/3), (uint8_t)(g_val/3), (uint8_t)(b_val/3)));
-                } else {
-                    rect(xx, yy, 1, 1, rgb((uint8_t)(r_val/8), (uint8_t)(g_val/8), (uint8_t)(b_val/8)));
-                }
-            } else {
-                uint8_t v = (uint8_t)(34 + ((xx * 7 + yy * 3 + dot) & 23));
-                rect(xx, yy, 2, 2, rgb(v, (uint8_t)(v + 5), (uint8_t)(v + 4)));
-            }
-            dot++;
-        }
-    }
+    // Taskbar: flat panel with a single 1px top separator.
+    rect(0, tb_y, w, TASKBAR_H, light ? rgb(227, 229, 232) : rgb(42, 46, 50));
+    rect(0, tb_y, w, 1, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
 
-    if (light) {
-        vgradient(0, tb_y, w, TASKBAR_H, rgb(210, 216, 224), rgb(195, 200, 210));
-    } else {
-        vgradient(0, tb_y, w, TASKBAR_H, rgb(28, 32, 35), rgb(12, 15, 18));
-    }
-    rect(0, tb_y - 2, w, 1, light ? cyber_neon_pink(1) : rgb(96, 132, 116));
-    rect(0, tb_y - 1, w, 1, light ? cyber_neon_cyan(1) : rgb(204, 156, 74));
-    rect(0, tb_y, w, 1, light ? rgb(180, 185, 192) : rgb(44, 52, 54));
+    // Start button (flat, accent-filled).
+    int by = h - 38;
+    rect(8, by, 100, 32, accent);
+    border(8, by, 100, 32, rgb(41, 128, 185));
+    rect(20, h - 27, 8, 8, rgb(255, 255, 255));
+    text(40, by + (32 - gui_font_line_height()) / 2, "开始", rgb(255, 255, 255), 1);
 
-    hgradient(8, h - 38, 100, 32, light ? cyber_neon_pink(1) : rgb(42, 150, 128), light ? rgb(160, 0, 70) : rgb(30, 102, 154));
-    rect(8, h - 38, 100, 1, light ? rgb(255, 120, 200) : rgb(142, 226, 196));
-    rect(8, h - 7, 100, 1, light ? rgb(100, 0, 40) : rgb(9, 30, 34));
-    border(8, h - 38, 100, 32, light ? cyber_neon_cyan(1) : rgb(22, 70, 72));
-    rect(20, h - 28, 7, 7, light ? cyber_neon_yellow(1) : rgb(246, 198, 91));
-    text(36, h - 28, "开始", rgb(248, 252, 255), 1);
-
+    // Clock panel (flat).
     time_line(line, sizeof(line));
-    draw_panel_shell(w - 102, h - 38, 94, 32,
-                     light ? rgb(225, 230, 238) : rgb(28, 34, 37),
-                     light ? rgb(210, 215, 222) : rgb(12, 15, 18),
-                     light ? cyber_border(1) : rgb(48, 62, 66),
-                     light ? cyber_neon_cyan(1) : rgb(204, 156, 74));
-    text(w - 88, h - 28, line, light ? cyber_text(1) : rgb(222, 234, 232), 1);
+    int cw = 94, cx = w - 8 - cw;
+    rect(cx, by, cw, 32, light ? rgb(214, 217, 221) : rgb(49, 54, 59));
+    border(cx, by, cw, 32, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
+    int tw = text_width(line, 1);
+    text(cx + (cw - tw) / 2, by + (32 - gui_font_line_height()) / 2, line,
+         light ? cyber_text(1) : rgb(239, 240, 241), 1);
 }
 
 static void draw_desktop_tile(int x, int y, int w, int h, const char *title,
@@ -1247,10 +1132,9 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         vfs_node_t *node = 0;
         if (gui_file_entry(mst, file_idx, name, &type, &node, full, sizeof(full)) < 0) continue;
         int y = list_y + (int)i * FILE_ROW_H;
-        if ((i & 1) == 1) rect(main_x + 1, y - 8, main_w - 2, FILE_ROW_H, rgb(30, 44, 56));
+        if ((i & 1) == 1) rect(main_x + 1, y - 8, main_w - 2, FILE_ROW_H, rgb(42, 46, 50));
         if ((int)file_idx == selected) {
-            vgradient(main_x + 6, y - 7, main_w - 12, 24, rgb(28, 130, 180), rgb(18, 90, 130));
-            rect(main_x + 6, y - 7, 4, 24, rgb(124, 220, 154));
+            rect(main_x + 6, y - 7, main_w - 12, 24, rgb(61, 174, 233));
         }
         uint32_t icon = type == VFS_NODE_DIR ? rgb(244, 194, 82) :
                         type == VFS_NODE_CHARDEV ? rgb(102, 214, 255) : rgb(124, 220, 154);
@@ -1465,7 +1349,7 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     if ((uint32_t)selected >= gui_app_count()) selected = (int)gui_app_count() - 1;
     uint32_t max = gui_app_count();
     for (uint32_t i = 0; i < max; i++) {
-        const gui_app_t *app = &gui_apps[i];
+        const gui_app_meta_t *app = &gui_apps[i];
         if (!app) continue;
         int card_w = 250;
         int card_h = 62;
@@ -1760,148 +1644,6 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     }
 }
 
-static void calc_clear(gui_state_t *st) {
-    st->calc_value = 0;
-    st->calc_acc = 0;
-    st->calc_input = 0;
-    st->calc_last_lhs = 0;
-    st->calc_last_rhs = 0;
-    st->calc_op = 0;
-    st->calc_last_op = 0;
-    st->calc_has_input = 0;
-    st->calc_error = 0;
-    st->calc_just_evaluated = 0;
-    st->status = "计算器已清空";
-}
-
-static int calc_apply(gui_state_t *st, int rhs) {
-    if (!st->calc_op) return rhs;
-    if (st->calc_op == '+') return st->calc_acc + rhs;
-    if (st->calc_op == '-') return st->calc_acc - rhs;
-    if (st->calc_op == '*') return st->calc_acc * rhs;
-    if (st->calc_op == '/') {
-        if (rhs == 0) {
-            st->calc_error = 1;
-            return st->calc_acc;
-        }
-        return st->calc_acc / rhs;
-    }
-    return rhs;
-}
-
-static void calc_digit(gui_state_t *st, int digit) {
-    if (st->calc_error) calc_clear(st);
-    if (st->calc_just_evaluated && !st->calc_op) {
-        st->calc_acc = 0;
-        st->calc_input = 0;
-        st->calc_value = 0;
-        st->calc_just_evaluated = 0;
-    }
-    if (!st->calc_has_input) {
-        st->calc_input = 0;
-        st->calc_has_input = 1;
-    }
-    if (st->calc_input < 10000000)
-        st->calc_input = st->calc_input * 10 + digit;
-    st->calc_value = st->calc_input;
-    st->status = "输入数字";
-}
-
-static void calc_operator(gui_state_t *st, char op) {
-    if (st->calc_error) calc_clear(st);
-    st->calc_just_evaluated = 0;
-    if (st->calc_has_input) {
-        if (st->calc_op) st->calc_acc = calc_apply(st, st->calc_input);
-        else st->calc_acc = st->calc_input;
-    }
-    st->calc_op = op;
-    st->calc_has_input = 0;
-    st->calc_input = 0;
-    st->calc_value = st->calc_acc;
-    st->status = "已选择运算符";
-}
-
-static void calc_equal(gui_state_t *st) {
-    if (st->calc_error) return;
-    int rhs = st->calc_has_input ? st->calc_input : st->calc_acc;
-    int lhs = st->calc_acc;
-    char op = st->calc_op;
-    st->calc_value = calc_apply(st, rhs);
-    if (st->calc_error) {
-        st->status = "不能除以 0";
-        return;
-    }
-    st->calc_last_lhs = lhs;
-    st->calc_last_rhs = rhs;
-    st->calc_last_op = op;
-    st->calc_acc = st->calc_value;
-    st->calc_input = st->calc_value;
-    st->calc_has_input = 1;
-    st->calc_op = 0;
-    st->calc_just_evaluated = 1;
-    st->status = "计算完成";
-}
-
-static void calc_backspace(gui_state_t *st) {
-    if (!st->calc_has_input) return;
-    st->calc_just_evaluated = 0;
-    st->calc_input /= 10;
-    st->calc_value = st->calc_input;
-    st->status = "已删除一位";
-}
-
-static void draw_calc_app(int tx, int ty, gui_state_t *st) {
-    char line[96];
-    text(tx, ty, "计算器", rgb(102, 214, 255), 1);
-    text(tx, ty + 42, "数字输入  + - * / 运算  Enter 求值  C 清空", rgb(210, 221, 230), 1);
-    uint32_t pos = 0;
-    line[0] = 0;
-    if (st->calc_error) append_str(line, sizeof(line), &pos, "ERROR");
-    else append_int(line, sizeof(line), &pos, st->calc_value);
-    vgradient(tx, ty + 88, 300, 74, rgb(8, 14, 22), rgb(2, 6, 12));
-    rect(tx, ty + 88, 300, 1, rgb(38, 90, 130));
-    rect(tx, ty + 161, 300, 1, rgb(8, 14, 22));
-    border(tx, ty + 88, 300, 74, rgb(48, 132, 196));
-    text(tx + 18, ty + 98, st->calc_just_evaluated ? "结果" : "当前", rgb(132, 196, 232), 1);
-    text_clipped(tx + 22, ty + 126, tx + 290, line,
-                 st->calc_error ? rgb(232, 88, 96) : rgb(235, 242, 250), 2);
-
-    pos = 0;
-    line[0] = 0;
-    if (st->calc_op) {
-        append_str(line, sizeof(line), &pos, "算式: ");
-        append_int(line, sizeof(line), &pos, st->calc_acc);
-        append_char(line, sizeof(line), &pos, ' ');
-        append_char(line, sizeof(line), &pos, st->calc_op);
-        append_char(line, sizeof(line), &pos, ' ');
-        if (st->calc_has_input) append_int(line, sizeof(line), &pos, st->calc_input);
-        else append_char(line, sizeof(line), &pos, '_');
-    } else if (st->calc_just_evaluated && st->calc_last_op) {
-        append_str(line, sizeof(line), &pos, "上次: ");
-        append_int(line, sizeof(line), &pos, st->calc_last_lhs);
-        append_char(line, sizeof(line), &pos, ' ');
-        append_char(line, sizeof(line), &pos, st->calc_last_op);
-        append_char(line, sizeof(line), &pos, ' ');
-        append_int(line, sizeof(line), &pos, st->calc_last_rhs);
-        append_str(line, sizeof(line), &pos, " = ");
-        append_int(line, sizeof(line), &pos, st->calc_value);
-    } else {
-        append_str(line, sizeof(line), &pos, "输入数字后选择运算符");
-    }
-    text(tx, ty + 184, line, rgb(210, 221, 230), 1);
-
-    static const char *ops = "+-*/";
-    for (int i = 0; i < 4; i++) {
-        int ox = tx + i * 42;
-        vgradient(ox, ty + 216, 36, 24, rgb(48, 68, 86), rgb(24, 38, 52));
-        rect(ox, ty + 216, 36, 1, rgb(70, 100, 120));
-        rect(ox, ty + 239, 36, 1, rgb(8, 14, 22));
-        border(ox, ty + 216, 36, 24, rgb(28, 50, 68));
-        char s[2] = {ops[i], 0};
-        text(ox + 14, ty + 224, s, rgb(238, 244, 250), 1);
-    }
-}
-
 static void draw_uwc_app(int tx, int ty, gui_state_t *st) {
     char line[96];
     file_t *f = selected_file(st);
@@ -1917,71 +1659,6 @@ static void draw_uwc_app(int tx, int ty, gui_state_t *st) {
     text(tx, ty + 64, line, rgb(210, 221, 230), 1);
     line_u32(line, sizeof(line), "行数: ", count_file_lines(f), "");
     text(tx, ty + 86, line, rgb(210, 221, 230), 1);
-}
-
-// 读取 CMOS 日期，格式化为 YYYY-MM-DD
-static void date_line(char *buf, uint32_t cap) {
-    uint8_t status_b = cmos_read(0x0b);
-    uint8_t day = cmos_read(0x07);
-    uint8_t mon = cmos_read(0x08);
-    uint8_t year = cmos_read(0x09);
-    uint8_t cent = cmos_read(0x32);
-    if ((status_b & 0x04) == 0) {
-        day = bcd_to_bin(day);
-        mon = bcd_to_bin(mon);
-        year = bcd_to_bin(year);
-        cent = bcd_to_bin(cent);
-    }
-    uint32_t full_year = (cent ? (uint32_t)cent * 100 : 2000) + year;
-    uint32_t pos = 0;
-    buf[0] = 0;
-    append_uint(buf, cap, &pos, full_year);
-    append_char(buf, cap, &pos, '-');
-    if (mon < 10) append_char(buf, cap, &pos, '0');
-    append_uint(buf, cap, &pos, mon);
-    append_char(buf, cap, &pos, '-');
-    if (day < 10) append_char(buf, cap, &pos, '0');
-    append_uint(buf, cap, &pos, day);
-}
-
-static const char *weekday_name(void) {
-    uint8_t status_b = cmos_read(0x0b);
-    uint8_t wd = cmos_read(0x06);
-    if ((status_b & 0x04) == 0) wd = bcd_to_bin(wd);
-    static const char *names[] = {
-        "", "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"
-    };
-    if (wd >= 1 && wd <= 7) return names[wd];
-    return "";
-}
-
-static void draw_clock_app(int tx, int ty, int win_w, gui_state_t *st) {
-    (void)st;
-    char line[48];
-    text(tx, ty, "时钟", rgb(102, 214, 255), 1);
-
-    int box_w = win_w - 76;
-    if (box_w < 280) box_w = 280;
-    int box_h = 150;
-    int by = ty + 48;
-    soft_shadow(tx, by, box_w, box_h);
-    draw_panel_shell(tx, by, box_w, box_h, rgb(18, 30, 44), rgb(6, 12, 20),
-                     rgb(40, 76, 104), rgb(102, 214, 255));
-
-    // 大号时间显示（scale 4）
-    time_line(line, sizeof(line));
-    int digit_w = 6 * 4;       // 字形宽 6px * scale
-    int tw = (int)strlen(line) * (digit_w + 4);
-    int cx = tx + (box_w - tw) / 2;
-    if (cx < tx + 12) cx = tx + 12;
-    text(cx, by + 30, line, rgb(120, 224, 255), 4);
-
-    // 日期 + 星期
-    date_line(line, sizeof(line));
-    text(tx + 24, by + box_h - 36, line, rgb(200, 224, 240), 2);
-    text(tx + box_w - 120, by + box_h - 32, weekday_name(), rgb(160, 200, 224), 1);
-
-    text(tx, by + box_h + 24, "时间来自 CMOS 实时时钟，每秒自动刷新", rgb(120, 150, 168), 1);
 }
 
 static int gui_has_suffix(const char *path, const char *suffix) {
@@ -2361,12 +2038,11 @@ static void code_run_current(gui_state_t *st) {
 
 static int code_command_rect(int content_w, int cmd, int *x, int *y, int *bw) {
     int idx = cmd - 1;
-    if (idx < 0 || idx > 2 || content_w <= 0) return 0;
-    int gap = 8;
+    if (idx < 0 || idx > 3 || content_w <= 0) return 0;
+    int gap = 6;
     int width = 68;
-    int total = width * 3 + gap * 2;
+    int total = width * 4 + gap * 3;
     int left = content_w - total;
-    if (left < 124 && content_w >= 124 + total) left = 124;
     if (left < 0) left = 0;
     if (x) *x = left + idx * (width + gap);
     if (y) *y = 22;
@@ -2408,6 +2084,57 @@ static void code_make_layout(int tx, int ty, int win_w, int win_h, code_layout_t
     if (l->file_rows < 3) l->file_rows = 3;
 }
 
+static int code_path_is_py(gui_state_t *st) {
+    const char *p = code_path(st);
+    int n = (int)strlen(p);
+    return n >= 3 && p[n-3]=='.' && p[n-2]=='p' && p[n-1]=='y';
+}
+
+static void code_gui_run(gui_state_t *st, const fb_info_t *fb) {
+    code_load(st);
+    if (code_save(st) < 0) return;
+    g_script_fb = fb;
+    /* clear screen */
+    rect(0, 0, g_gui_surface_w, g_gui_surface_h, rgb(10, 13, 18));
+    gui_present_surface(fb);
+    if (code_path_is_py(st)) {
+        py_set_gfx(&g_sgfx);
+        int rc = py_run_file(code_path(st));
+        py_set_gfx(0);
+        if (rc != 0) {
+            char line[128]; uint32_t pos = 0; line[0] = 0;
+            int el = py_last_error_line();
+            if (el > 0) { append_str(line,sizeof(line),&pos,"Line "); append_uint(line,sizeof(line),&pos,(uint32_t)el); append_str(line,sizeof(line),&pos,": "); }
+            else append_str(line,sizeof(line),&pos,"Python error: ");
+            const char *em = py_last_error();
+            append_str(line,sizeof(line),&pos,em&&em[0]?em:"error");
+            code_set_output(line);
+            st->status = "Python 脚本错误";
+        } else {
+            code_set_output("Python GUI OK");
+            st->status = "Python 脚本运行完成";
+        }
+    } else {
+        cc_set_gfx(&g_sgfx);
+        int rc = hbos_gcc_run_file(code_path(st), 0);
+        cc_set_gfx(0);
+        if (rc != 0) {
+            char line[128]; uint32_t pos = 0; line[0] = 0;
+            int el = hbos_gcc_last_error_line();
+            if (el > 0) { append_str(line,sizeof(line),&pos,"Line "); append_uint(line,sizeof(line),&pos,(uint32_t)el); append_str(line,sizeof(line),&pos,": "); }
+            const char *em = hbos_gcc_last_error();
+            append_str(line,sizeof(line),&pos,em&&em[0]?em:"error");
+            code_set_output(line);
+            st->code_error_line = el;
+            st->status = "GUI 脚本错误";
+        } else {
+            code_set_output("GUI OK");
+            st->status = "GUI 脚本运行完成";
+        }
+    }
+    g_script_fb = 0;
+}
+
 static void handle_code_command(gui_state_t *st, int cmd) {
     if (cmd == CODE_CMD_SAVE) {
         code_load(st);
@@ -2417,6 +2144,7 @@ static void handle_code_command(gui_state_t *st, int cmd) {
     } else if (cmd == CODE_CMD_OPEN) {
         code_open_selected(st);
     }
+    /* CODE_CMD_GUI_RUN is handled separately (needs fb pointer) */
 }
 
 static int code_ident_start(char c) {
@@ -2546,6 +2274,8 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
         draw_small_button(tx + bx, ty + by, bw, "运行", rgb(23, 147, 209));
     if (code_command_rect(l.content_w, CODE_CMD_OPEN, &bx, &by, &bw))
         draw_small_button(tx + bx, ty + by, bw, "打开", rgb(244, 194, 82));
+    if (code_command_rect(l.content_w, CODE_CMD_GUI_RUN, &bx, &by, &bw))
+        draw_small_button(tx + bx, ty + by, bw, "GUI运行", rgb(215, 100, 244));
 
     vgradient(tx, ty + 54, l.content_w, 24, rgb(34, 48, 64), rgb(18, 28, 40));
     border(tx, ty + 54, l.content_w, 24, rgb(48, 72, 94));
@@ -3152,49 +2882,41 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state, int light) {
     if (state != WM_STATE_MAXIMIZED) soft_shadow(x, y, win_w, win_h);
 
-    uint32_t body_top = active ? cyber_bg_top(light) : (light ? rgb(240, 244, 248) : rgb(23, 28, 32));
-    uint32_t body_bot = active ? cyber_bg_bot(light) : (light ? rgb(225, 230, 236) : rgb(15, 18, 22));
-    uint32_t title_top = active ? cyber_neon_pink(light) : (light ? rgb(210, 216, 222) : rgb(72, 86, 92));
-    uint32_t title_bot = active ? (light ? rgb(160, 0, 70) : rgb(24, 86, 104)) : (light ? rgb(190, 195, 202) : rgb(48, 58, 64));
-    uint32_t border_c = active ? cyber_neon_cyan(light) : (light ? rgb(180, 186, 192) : rgb(60, 72, 78));
-    uint32_t hl = active ? cyber_neon_yellow(light) : (light ? rgb(200, 205, 210) : rgb(106, 120, 124));
+    uint32_t body_bg  = active ? (light ? rgb(239, 240, 241) : rgb(42, 46, 50))
+                               : (light ? rgb(239, 240, 241) : rgb(35, 38, 41));
+    uint32_t title_bg = active ? (light ? rgb(214, 217, 221) : rgb(49, 54, 59))
+                               : (light ? rgb(231, 233, 235) : rgb(38, 41, 44));
+    uint32_t border_c = active ? rgb(61, 174, 233)
+                               : (light ? rgb(188, 192, 196) : rgb(60, 64, 69));
 
-    vgradient(x + 1, y + 1, win_w - 2, WM_TITLE_H, title_top, title_bot);
-    rect(x, y, win_w, 1, hl);
-    rect(x + 1, y + 2, win_w - 2, 1, rgb_lift(title_top, 28));
-    rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, light ? rgb(200, 205, 210) : rgb(8, 12, 16));
-    rect(x, y + WM_TITLE_H, win_w, 1, active ? (light ? cyber_neon_cyan(1) : rgb(204, 156, 74)) : (light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
-    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, 1, light ? rgb(220, 225, 230) : rgb(42, 52, 56));
-
-    vgradient_alpha(x + 1, y + WM_TITLE_H + 2, win_w - 2, win_h - WM_TITLE_H - 4,
-                    0xD0000000 | (body_top & 0x00FFFFFF),
-                    0xD0000000 | (body_bot & 0x00FFFFFF));
-    rect(x, y + win_h - 1, win_w, 1, light ? rgb(180, 185, 190) : rgb(5, 8, 10));
-    rect(x, y, 1, win_h, rgb_lift(body_top, 18));
-    rect(x + win_w - 1, y, 1, win_h, rgb_lift(body_bot, -10));
+    // Flat Breeze frame: solid titlebar, a single 1px separator, opaque body.
+    rect(x + 1, y + 1, win_w - 2, WM_TITLE_H, title_bg);
+    rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
+    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, win_h - WM_TITLE_H - 2, body_bg);
     border(x, y, win_w, win_h, border_c);
 
+    // Window controls: flat, close=red, min/max neutral (no accent strip).
+    uint32_t nbtn = active ? (light ? rgb(206, 209, 213) : rgb(66, 71, 77))
+                           : (light ? rgb(222, 224, 227) : rgb(54, 58, 63));
     int btn_x = x + win_w - WM_BTN_W - 8;
     int btn_y = y + 7;
     draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20,
-                     rgb(226, 86, 84), rgb(150, 42, 46),
-                     rgb(86, 26, 30), rgb(226, 86, 84));
+                     rgb(218, 68, 83), rgb(218, 68, 83), rgb(160, 46, 58), 0);
     draw_window_control_icon(btn_x + 7, btn_y + 6, GUI_CTRL_CLOSE, 0,
                              rgb(252, 238, 236));
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    uint32_t nb_top = active ? (light ? rgb(180, 210, 220) : rgb(72, 91, 96)) : (light ? rgb(220, 225, 230) : rgb(54, 64, 70));
-    uint32_t nb_bot = active ? (light ? rgb(140, 170, 180) : rgb(42, 53, 58)) : (light ? rgb(190, 195, 200) : rgb(32, 38, 44));
-    draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nb_top, nb_bot,
-                     light ? rgb(160, 165, 170) : rgb(22, 30, 34), cyber_neon_cyan(light));
+    draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nbtn, nbtn,
+                     light ? rgb(176, 180, 184) : rgb(60, 64, 69), 0);
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MAX,
-                             state == WM_STATE_MAXIMIZED, rgb(236, 242, 240));
+                             state == WM_STATE_MAXIMIZED,
+                             light ? rgb(60, 64, 69) : rgb(236, 242, 240));
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nb_top, nb_bot,
-                     light ? rgb(160, 165, 170) : rgb(22, 30, 34), cyber_neon_yellow(light));
+    draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nbtn, nbtn,
+                     light ? rgb(176, 180, 184) : rgb(60, 64, 69), 0);
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MIN, 0,
-                             rgb(236, 242, 240));
+                             light ? rgb(60, 64, 69) : rgb(236, 242, 240));
 
     rect(x + 13, y + 12, 10, 10, active ? cyber_neon_yellow(light) : (light ? rgb(160, 165, 170) : rgb(162, 172, 172)));
     rect(x + 16, y + 15, 4, 4, light ? rgb(240, 244, 248) : rgb(18, 26, 28));
@@ -3210,25 +2932,27 @@ static void draw_panel_window(int tx, int ty, int win_w, int w, int h, gui_state
 }
 
 static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state_t *st, int mode) {
+    if (gui_app_draw(st, mode, tx, ty, win_w, win_h)) return;
     if (mode == GUI_APP_NOTES) draw_notes_app(tx, ty, win_w, st);
-    else if (mode == GUI_APP_CALC) draw_calc_app(tx, ty, st);
     else if (mode == GUI_APP_UWC) draw_uwc_app(tx, ty, st);
     else if (mode == GUI_APP_SNAKE) draw_snake_app(tx, ty, st);
     else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, st);
     else if (mode == GUI_APP_CODE) draw_code_app(tx, ty, win_w, win_h, st);
     else if (mode == GUI_APP_DIAG) draw_diag_app(tx, ty, win_w, win_h, st);
-    else if (mode == GUI_APP_CLOCK) draw_clock_app(tx, ty, win_w, st);
 }
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     wm_window_t *win = wm_get_window(&st->wm, idx);
-    if (!win || win->state == WM_STATE_MINIMIZED) return;
+    if (!win) return;
+    if (win->state == WM_STATE_MINIMIZED && win->anim_type != WM_ANIM_MINIMIZE) return;
     int old_active = st->active;
     int old_app = st->app_mode;
     int old_x = st->win_x;
     int old_y = st->win_y;
     int win_x, win_y, win_w, win_h;
     gui_window_metrics(st, w, h, win, idx, &win_x, &win_y, &win_w, &win_h);
+    uint8_t saved_opacity = gui_get_layer_opacity();
+    if (win->opacity < 255) gui_set_layer_opacity(win->opacity);
     draw_window_frame(win_x, win_y, win_w, win_h, gui_window_title(win),
                       idx == st->wm.active_window, win->state, st->theme_light);
 
@@ -3261,6 +2985,7 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     st->app_mode = old_app;
     st->win_x = old_x;
     st->win_y = old_y;
+    gui_set_layer_opacity(saved_opacity);
 }
 
 static void draw_taskbar_windows(int h, const gui_state_t *st) {
@@ -3269,7 +2994,7 @@ static void draw_taskbar_windows(int h, const gui_state_t *st) {
     for (int i = 0; i < st->wm.window_count && x < 610; i++) {
         wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, i);
         if (!win) continue;
-        uint32_t color = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : cyber_neon_cyan(st->theme_light);
+        uint32_t color = cyber_neon_cyan(st->theme_light);
         int width = 104;
         draw_task_button(x, task_y, width, gui_window_title(win),
                          i == st->wm.active_window, color, st->theme_light);
@@ -3286,23 +3011,62 @@ static void draw_gui_screen(int w, int h, gui_state_t *st) {
         draw_splash_window(w, h, st->splash_ticks, st->theme_light);
 }
 
+static void draw_gui_screen(int w, int h, gui_state_t *st);
+
+static void gui_damage_region(int x, int y, int rw, int rh, int scr_w, int scr_h) {
+    gui_dirty_expand(&x, &y, &rw, &rh, GUI_DIRTY_PAD, scr_w, scr_h);
+    if (rw > 0 && rh > 0) gui_dirty_add(x, y, rw, rh);
+}
+
+static void gui_damage_window(gui_state_t *st, int scr_w, int scr_h, int idx) {
+    int wx, wy, ww, wh;
+    gui_window_metrics(st, scr_w, scr_h, NULL, idx, &wx, &wy, &ww, &wh);
+    gui_damage_region(wx, wy, ww, wh, scr_w, scr_h);
+}
+
+static void gui_damage_cursor(int omx, int omy, int nmx, int nmy) {
+    gui_dirty_add(omx - 2, omy - 2, 22, 22);
+    gui_dirty_add(nmx - 2, nmy - 2, 22, 22);
+}
+
+static int cursor_overlaps_rect(int mx, int my, int rx, int ry, int rw, int rh) {
+    return mx + 22 > rx && mx - 2 < rx + rw && my + 22 > ry && my - 2 < ry + rh;
+}
+
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
-    draw_gui_screen(w, h, st);
-    draw_cursor(mx, my, edge);
-    gui_present_surface(fb);
+    if (gui_dirty_is_full() || gui_dirty_count() == 0) {
+        if (gui_dirty_count() == 0) gui_dirty_mark_full();
+        draw_gui_screen(w, h, st);
+        draw_cursor(mx, my, edge);
+        gui_present_surface(fb);
+        gui_dirty_reset();
+        return;
+    }
+
+    int n = gui_dirty_count();
+    for (int i = 0; i < n; i++) {
+        int rx, ry, rw, rh;
+        if (gui_dirty_get(i, &rx, &ry, &rw, &rh) < 0) continue;
+        gui_clip_set(rx, ry, rw, rh);
+        draw_gui_screen(w, h, st);
+        if (cursor_overlaps_rect(mx, my, rx, ry, rw, rh))
+            draw_cursor(mx, my, edge);
+        gui_present_rect(fb, rx, ry, rw, rh);
+    }
+    gui_clip_clear();
+    gui_dirty_reset();
 }
 
 static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h, st->theme_light);
     char line[96];
 
-    soft_shadow(126, 12, w - 138, 60);
     draw_panel_shell(126, 12, w - 138, 60,
-                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
-                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
+                     cyber_card_bg_top(st->theme_light),
+                     cyber_card_bg_bot(st->theme_light),
                      cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
-    rect(146, 42, 118, 2, cyber_neon_pink(st->theme_light));
-    text(146, 18, "系统概览", cyber_text(st->theme_light), 2);
+    rect(146, 44, 118, 2, cyber_neon_cyan(st->theme_light));
+    text(146, 16, "系统概览", cyber_text(st->theme_light), 2);
     text(148, 56, "左侧启动栏打开工具，桌面直接显示当前状态", cyber_text_muted(st->theme_light), 1);
 
     draw_icon(15, 92, st->active == PANEL_FILES, "文件", rgb(85, 180, 120), st->theme_light);
@@ -3679,7 +3443,7 @@ static void gui_install(gui_state_t *st) {
     else st->status = "HBFS 已安装";
 }
 
-static const gui_app_t *selected_gui_app(gui_state_t *st) {
+static const gui_app_meta_t *selected_gui_app(gui_state_t *st) {
     uint32_t count = gui_app_count();
     if (count == 0) {
         st->selected_app = 0;
@@ -3691,7 +3455,7 @@ static const gui_app_t *selected_gui_app(gui_state_t *st) {
 }
 
 static void gui_open_selected_app(gui_state_t *st) {
-    const gui_app_t *app = selected_gui_app(st);
+    const gui_app_meta_t *app = selected_gui_app(st);
     if (!app) {
         st->status = "未选择应用";
         return;
@@ -3888,7 +3652,7 @@ static int hit_code_command(int w, int h, const gui_state_t *st, int mx, int my)
     int ty = win_y + 42;
     code_layout_t l;
     code_make_layout(tx, ty, win_w, win_h, &l);
-    for (int cmd = CODE_CMD_SAVE; cmd <= CODE_CMD_OPEN; cmd++) {
+    for (int cmd = CODE_CMD_SAVE; cmd <= CODE_CMD_GUI_RUN; cmd++) {
         int x, y, bw;
         if (!code_command_rect(l.content_w, cmd, &x, &y, &bw)) continue;
         if (mx >= tx + x && mx < tx + x + bw &&
@@ -4028,25 +3792,6 @@ static int snake_auto_tick(gui_state_t *st) {
     return 1;
 }
 
-// 是否有未最小化的时钟窗口可见（需每秒刷新）
-static int gui_clock_visible(gui_state_t *st) {
-    for (int i = 0; i < st->wm.window_count; i++) {
-        wm_window_t *win = wm_get_window(&st->wm, i);
-        if (win && win->kind == WM_WIN_APP && win->mode == GUI_APP_CLOCK &&
-            win->state != WM_STATE_MINIMIZED)
-            return 1;
-    }
-    return 0;
-}
-
-// 时钟/任务栏时间每秒刷新一次
-static int clock_auto_tick(gui_state_t *st) {
-    uint8_t sec = cmos_second();
-    if (sec == st->clock_last_sec) return 0;
-    st->clock_last_sec = sec;
-    return gui_clock_visible(st);
-}
-
 static void handle_app_key(gui_state_t *st, int key) {
     if (key == '\t' && st->app_mode != GUI_APP_CODE) {
         gui_focus_next_window(st, 1);
@@ -4054,6 +3799,7 @@ static void handle_app_key(gui_state_t *st, int key) {
         return;
     }
     gui_sync_focus(st);
+    if (gui_app_handle_key(st, key)) return;
     if (st->app_mode == GUI_APP_NOTES) {
         note_load(st);
         if (key == 19) {  // Ctrl+S
@@ -4080,21 +3826,6 @@ static void handle_app_key(gui_state_t *st, int key) {
             for (int i = 0; i < 4; i++) note_insert(st, ' ');
         } else if (key >= 32 && key <= 126) {
             note_insert(st, (char)key);
-        }
-    } else if (st->app_mode == GUI_APP_CALC) {
-        if (key >= '0' && key <= '9') calc_digit(st, key - '0');
-        else if (key == '+' || key == '-' || key == '*' || key == '/') calc_operator(st, (char)key);
-        else if (key == '\n' || key == '=') calc_equal(st);
-        else if (key == GUI_KEY_BACKSPACE) calc_backspace(st);
-        else if (key == 'c') calc_clear(st);
-        else if (key == GUI_KEY_LEFT) {
-            st->calc_value--;
-            st->calc_input = st->calc_value;
-            st->calc_has_input = 1;
-        } else if (key == GUI_KEY_RIGHT) {
-            st->calc_value++;
-            st->calc_input = st->calc_value;
-            st->calc_has_input = 1;
         }
     } else if (st->app_mode == GUI_APP_UWC) {
         if (key == 'n') gui_create_note(st);
@@ -4456,6 +4187,11 @@ static void cmd_gui(int argc, char **argv) {
         return;
     }
 
+    if (!gui_font_init()) {
+        console_puts("gui: GUI 字体加载失败\n");
+        return;
+    }
+
     int w = (int)fb.width;
     int h = (int)fb.height;
     int mx = w / 2;
@@ -4475,7 +4211,11 @@ static void cmd_gui(int argc, char **argv) {
     uint32_t frame_tick = 0;          // 自增帧计数，用于双击计时
     uint32_t last_title_click = 0;    // 上次点击标题栏的帧
     int last_title_idx = -1;          // 上次点击的窗口
-    int snap_hint = WM_SNAP_NONE;     // 拖动中预测的吸附目标
+    int snap_hint = WM_SNAP_NONE;     // 拖动吸附预览：WM_SNAP_*
+    int drag_bounds_valid = 0;
+    int drag_last_x = 0, drag_last_y = 0, drag_last_w = 0, drag_last_h = 0;
+    int resize_bounds_valid = 0;
+    int resize_last_x = 0, resize_last_y = 0, resize_last_w = 0, resize_last_h = 0;
     gui_state_t st = {
         .active = PANEL_FILES,
         .selected_file = 0,
@@ -4530,26 +4270,33 @@ static void cmd_gui(int argc, char **argv) {
     }
 
     st.splash_ticks = 90;
+    gui_dirty_mark_full();
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
     while (1) {
+        wm_update_animations(&st.wm);
+
         int key = key_poll();
         if (st.splash_ticks > 0 && key) {
             st.splash_ticks = 0;
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
         if (key == 27 && st.rename_active) {
             gui_cancel_rename(&st);
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
         if (key == 27 && st.delete_confirm_index >= 0) {
             gui_cancel_delete_confirm(&st);
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
         if (key == 27 && st.wm.window_count > 0) {
             gui_close_window(&st, st.wm.active_window);
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
@@ -4558,6 +4305,7 @@ static void cmd_gui(int argc, char **argv) {
             gui_sync_focus(&st);
             if (st.app_mode == GUI_APP_NONE) handle_key(&st, key);
             else handle_app_key(&st, key);
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
 
@@ -4639,6 +4387,7 @@ static void cmd_gui(int argc, char **argv) {
                 }
             } else if (!left_down) {
                 resizing_window = -1;
+                resize_bounds_valid = 0;
             }
 
             if (dragging_window >= 0 && left_down && resizing_window < 0) {
@@ -4680,6 +4429,7 @@ static void cmd_gui(int argc, char **argv) {
                 st.snap_preview = WM_SNAP_NONE;
                 dragging_window = -1;
                 drag_pending = 0;
+                drag_bounds_valid = 0;
             }
 
             int edge = WM_EDGE_NONE;
@@ -4780,7 +4530,9 @@ static void cmd_gui(int argc, char **argv) {
                                 }
                             } else if (st.app_mode != GUI_APP_NONE) {
                                 int code_cmd = hit_code_command(w, h, &st, mx, my);
-                                if (code_cmd) {
+                                if (code_cmd == CODE_CMD_GUI_RUN) {
+                                    code_gui_run(&st, &fb);
+                                } else if (code_cmd) {
                                     handle_code_command(&st, code_cmd);
                                 } else {
                                     int note_file = hit_note_file(w, h, &st, mx, my);
@@ -4848,26 +4600,72 @@ static void cmd_gui(int argc, char **argv) {
             skip_input:;
 
             if (redraw) {
+                gui_dirty_reset();
+                if (dragging_window >= 0) {
+                    if (drag_bounds_valid)
+                        gui_damage_region(drag_last_x, drag_last_y, drag_last_w, drag_last_h, w, h);
+                    gui_damage_window(&st, w, h, dragging_window);
+                    if (st.snap_preview != WM_SNAP_NONE) {
+                        int px = 0, py = 0, pw = w, ph = h - TASKBAR_H;
+                        if (st.snap_preview == WM_SNAP_LEFT) pw = w / 2;
+                        else if (st.snap_preview == WM_SNAP_RIGHT) { px = w / 2; pw = w - w / 2; }
+                        gui_damage_region(px, py, pw, ph, w, h);
+                    }
+                    gui_window_metrics(&st, w, h, NULL, dragging_window,
+                                       &drag_last_x, &drag_last_y, &drag_last_w, &drag_last_h);
+                    gui_dirty_expand(&drag_last_x, &drag_last_y, &drag_last_w, &drag_last_h,
+                                     GUI_DIRTY_PAD, w, h);
+                    drag_bounds_valid = 1;
+                } else if (resizing_window >= 0) {
+                    if (resize_bounds_valid)
+                        gui_damage_region(resize_last_x, resize_last_y, resize_last_w, resize_last_h, w, h);
+                    gui_damage_window(&st, w, h, resizing_window);
+                    gui_window_metrics(&st, w, h, NULL, resizing_window,
+                                       &resize_last_x, &resize_last_y, &resize_last_w, &resize_last_h);
+                    gui_dirty_expand(&resize_last_x, &resize_last_y, &resize_last_w, &resize_last_h,
+                                     GUI_DIRTY_PAD, w, h);
+                    resize_bounds_valid = 1;
+                } else {
+                    drag_bounds_valid = 0;
+                    resize_bounds_valid = 0;
+                    gui_dirty_mark_full();
+                }
                 draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             } else if (mx != old_mx || my != old_my) {
+                gui_dirty_reset();
+                gui_damage_cursor(old_mx, old_my, mx, my);
                 draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             }
         }
         if (snake_auto_tick(&st)) {
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
-        if (clock_auto_tick(&st)) {
+        if (gui_app_tick(&st)) {
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (st.app_mode == GUI_APP_DIAG && (frame_tick % 20 == 0)) {
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (st.switcher_ticks > 0) {
             st.switcher_ticks--;
+            gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (st.splash_ticks > 0) {
             st.splash_ticks--;
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
+        if (wm_has_active_animations(&st.wm)) {
+            gui_dirty_reset();
+            for (int i = 0; i < st.wm.window_count; i++) {
+                wm_window_t *win = wm_get_window(&st.wm, i);
+                if (win && win->anim_type != WM_ANIM_NONE)
+                    gui_damage_window(&st, w, h, i);
+            }
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         frame_tick++;
@@ -4890,3 +4688,22 @@ void tool_gui_init(void) {
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
 }
+
+uint32_t gui_rgb(uint8_t r, uint8_t g, uint8_t b) { return rgb(r, g, b); }
+void gui_rect(int x, int y, int w, int h, uint32_t color) { rect(x, y, w, h, color); }
+void gui_rect_alpha(int x, int y, int w, int h, uint32_t color) { rect_alpha(x, y, w, h, color); }
+void gui_border(int x, int y, int w, int h, uint32_t color) { border(x, y, w, h, color); }
+void gui_vgradient(int x, int y, int w, int h, uint32_t top, uint32_t bottom) { vgradient(x, y, w, h, top, bottom); }
+void gui_soft_shadow(int x, int y, int w, int h) { soft_shadow(x, y, w, h); }
+void gui_draw_panel_shell(int x, int y, int w, int h, uint32_t top, uint32_t bottom,
+                          uint32_t border_c, uint32_t accent) {
+    draw_panel_shell(x, y, w, h, top, bottom, border_c, accent);
+}
+void gui_text(int x, int y, const char *s, uint32_t color, int scale) { text(x, y, s, color, scale); }
+void gui_text_clipped(int x, int y, int max_x, const char *s, uint32_t color, int scale) {
+    text_clipped(x, y, max_x, s, color, scale);
+}
+void gui_append_char(char *buf, uint32_t cap, uint32_t *pos, char c) { append_char(buf, cap, pos, c); }
+void gui_append_str(char *buf, uint32_t cap, uint32_t *pos, const char *s) { append_str(buf, cap, pos, s); }
+void gui_append_int(char *buf, uint32_t cap, uint32_t *pos, int v) { append_int(buf, cap, pos, v); }
+void gui_append_uint(char *buf, uint32_t cap, uint32_t *pos, uint32_t v) { append_uint(buf, cap, pos, v); }

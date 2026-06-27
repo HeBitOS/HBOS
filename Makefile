@@ -27,7 +27,7 @@ QEMU_IMG ?= qemu-img
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
          -O2 -Wall -Wextra \
-         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_DIR)/user
+         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_DIR)/gui -I$(SRC_DIR)/user
 
 ASFLAGS = -f elf64
 LDFLAGS_BIOS = -m elf_x86_64 -static -Bsymbolic -nostdlib -T linker_bios.ld
@@ -41,6 +41,10 @@ QEMU_ENV = env -u SNAP -u SNAP_NAME -u SNAP_REVISION -u SNAP_ARCH -u SNAP_INSTAN
 # 字体文件
 FONT_TTF = fonts/ZhengGeDianHei-16.ttf
 FONT_BIN = $(BUILD_DIR)/font_cjk.bin
+# GUI proportional anti-aliased font (HarmonyOS Sans SC). Swap GUI_FONT_TTF to
+# change the GUI typeface; glyph coverage is decided by tools/genfont.py.
+GUI_FONT_TTF = fonts/HarmonyOS_Sans_SC_Regular.ttf
+GUI_FONT_BIN = $(BUILD_DIR)/gui_font.bin
 
 # 所有 C 源文件
 APP_SRCS = $(wildcard $(SRC_DIR)/apps/*.c)
@@ -73,6 +77,7 @@ C_SRCS = \
 	$(SRC_DIR)/tty.c \
 	$(SRC_DIR)/graphics/graphics.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
+	$(SRC_DIR)/graphics/gui_font.c \
 	$(SRC_DIR)/input/mouse.c \
 	$(SRC_DIR)/shell/shell.c \
 	$(SRC_DIR)/core/task.c \
@@ -96,10 +101,15 @@ C_SRCS = \
 	$(SRC_DIR)/tools/gui.c \
 	$(SRC_DIR)/tools/editor.c \
 	$(SRC_DIR)/tools/cc.c \
+	$(SRC_DIR)/tools/python.c \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/gui/wm.c \
 	$(SRC_DIR)/gui/compositor.c \
 	$(SRC_DIR)/gui/effects.c \
+	$(SRC_DIR)/gui/gui_dirty.c \
+	$(SRC_DIR)/gui/gui_apps.c \
+	$(SRC_DIR)/gui/apps/app_calc.c \
+	$(SRC_DIR)/gui/apps/app_clock.c \
 	$(SRC_DIR)/gpu.c \
 	$(APP_SRCS)
 
@@ -117,6 +127,7 @@ ASM_SRCS = \
 	$(SRC_DIR)/core/task_switch.asm \
 	$(SRC_DIR)/core/interrupt_asm.asm \
 	$(SRC_DIR)/graphics/cjk_glyph.asm \
+	$(SRC_DIR)/graphics/gui_glyph.asm \
 	$(SRC_DIR)/smp_trampoline.asm
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
@@ -157,12 +168,17 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/input $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps $(BUILD_DIR)/gui $(BUILD_DIR)/crypto
 
 # Font generation
-font: $(FONT_BIN)
+font: $(FONT_BIN) $(GUI_FONT_BIN)
 
 $(FONT_BIN): $(FONT_TTF) tools/genhzk.py
 	@echo "[MAKE] Generating CJK font bitmap..."
 	python3 tools/genhzk.py $(FONT_TTF) $(FONT_BIN)
 	@echo "[MAKE] CJK font: $(FONT_BIN)"
+
+$(GUI_FONT_BIN): $(GUI_FONT_TTF) tools/genfont.py
+	@echo "[MAKE] Generating GUI proportional font atlas..."
+	python3 tools/genfont.py $(GUI_FONT_TTF) $(GUI_FONT_BIN)
+	@echo "[MAKE] GUI font: $(GUI_FONT_BIN)"
 
 # NASM (.asm) — various directories
 $(BUILD_DIR)/boot.o: $(SRC_DIR)/boot.asm | $(BUILD_DIR)
@@ -177,7 +193,7 @@ $(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN)
+$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) $(GUI_FONT_BIN)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 

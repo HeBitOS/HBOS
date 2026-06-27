@@ -73,7 +73,7 @@ make uefi-run     # 用 QEMU 跑 UEFI
 | **任务** | ✅ 协作式 | 最多 16 task, 轮转, ring3 用户任务支持 |
 | **输入** | ✅ PS/2 + USB KB/Mouse | 支持 PS/2 与 USB 键盘鼠标，且无 input lag/CPU peg 现象 |
 | **显示** | ✅ Framebuffer | VESA 1024x768, 24bpp, CJK 位图字体 |
-| **GUI** | ⚠️ 基础可用 | 桌面 + 窗口管理 + 开始菜单, 鼠标有加速 |
+| **GUI** | ⚠️ 基础可用 | 桌面 + 窗口管理 + 开始菜单 + **C/Python GUI 脚本** |
 | **文件系统** | ⚠️ 部分 | ramfs (默认), ext2 只读, fat32 只读, devfs |
 | **网络** | ⚠️ 部分 | E1000 ✅, **PCnet ✅ (刚加的)**, RTL8139/VirtIO 未实现 |
 | **TCP/IP** | ✅ 基础可用 | DHCP, ARP, ICMP ping, DNS, TCP, HTTP GET |
@@ -92,7 +92,7 @@ make uefi-run     # 用 QEMU 跑 UEFI
 | 内核核心 | `src/core-内核核心.agent.md` | `core/gdt_idt.c`, `pmm.c`, `vmm.c`, `heap.c`, `task.c` |
 | 输入子系统 | `src/input-输入子系统.agent.md` | `input/mouse.c`, `usb_hid.c`, `xhci.c` |
 | 网络 | `src/net-网络子系统.agent.md` | `net.c` (1549 行, E1000+PCnet) |
-| GUI/工具 | `src/tools-GUI系统工具.agent.md` | `tools/gui.c` (4600 行), `tools/*.c` |
+| GUI/工具 | `src/tools-GUI系统工具.agent.md` | `tools/gui.c`, `tools/cc.c`, `tools/python.c` |
 | Shell | `src/shell-命令行.agent.md` | `shell/shell.c` (1066 行) |
 | 图形/字体 | `src/graphics-图形字体.agent.md` | `graphics/graphics.c`, `font_cjk.c` |
 | GUI 框架 | `src/gui-GUI子系统.agent.md` | `gui/compositor.c`, `wm.c` |
@@ -107,7 +107,7 @@ make uefi-run     # 用 QEMU 跑 UEFI
 1. **网卡 RTL8139 / VirtIO 驱动未实现** — 检测到了选不上
 2. **AHCI 未完成** — 磁盘支持 ATA PIO 模式与 USB 存储模式
 3. **ext2/fat32 只读** — 无写入实现
-4. **GUI 基础** — 无窗口拖拽, 无应用框架, 开始菜单是静态的
+4. **GUI 基础** — 开始菜单静态; C/Python GUI 脚本已可用
 5. **任务调度** — 协作式, 无抢占, 无同步原语
 
 ---
@@ -163,5 +163,8 @@ static inline uint16_t inw(uint16_t port) { uint16_t v; __asm__ volatile ("inw %
   static command_t my_cmd = { .name="xxx", .desc="...", .group=CMD_GROUP_SYSTEM, .fn=my_cmd_fn };
   // 在 tool_init_all() 里调用 cmd_register(&my_cmd);
   ```
+- 新增工具需同时在 `tool.h` 声明 `void tool_xxx_init(void)` 并在 `tool_init_all()` 调用
+- **C 脚本 GUI 钩子**: `cc_set_gfx(hooks)` 在运行脚本前挂载，`cc.h` 定义 `cc_gfx_t`
+- **Python 脚本 GUI 钩子**: `py_set_gfx(hooks)` / `py_run_file(path)` — 见 `python.h`
 - **不要**在中断上下文调用 `console_print` / `gfx_*`
 - 不改 Makefile 架构, 不改 linker.ld/linker_bios.ld
