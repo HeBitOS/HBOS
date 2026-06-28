@@ -29,11 +29,21 @@ int gui_font_size_px(int idx);
 int gui_font_line_height_n(int idx);
 int gui_font_ascent_n(int idx);
 
+// ── Runtime-switchable base size ────────────────────────────
+// The blob bakes several base sizes (full coverage) followed by their 2x "large"
+// companions. The active base is selected at runtime (F2/F3 in the GUI). The
+// convenience wrappers below and gui_font_active_*()/large index all follow it.
+int  gui_font_base_count(void);          // number of selectable base sizes
+int  gui_font_active(void);              // active base slot, 0..base_count-1
+void gui_font_set_active(int slot);      // clamp-set the active base slot
+int  gui_font_active_base_idx(void);     // size-directory index of active base
+int  gui_font_active_large_idx(void);    // index of its 2x companion, or -1
+
 // Look up a codepoint in a given size. Whitespace returns true with
 // out->coverage == NULL and a valid advance.
 bool gui_font_lookup_n(uint32_t codepoint, int idx, gui_glyph_t *out);
 
-// Convenience wrappers for the base size (index 0).
+// Convenience wrappers for the active base size.
 int gui_font_line_height(void);
 int gui_font_ascent(void);
 bool gui_font_lookup(uint32_t codepoint, gui_glyph_t *out);

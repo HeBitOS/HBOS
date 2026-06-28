@@ -35,10 +35,14 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-# GUI base font size. This is the single knob for overall text size; the chrome
-# constants in gui.c / wm.h are tuned to roughly match it. LARGE_PX must stay 2x.
-BASE_PX = 18
-LARGE_PX = 36
+# Runtime-switchable GUI base sizes. The active one is chosen at runtime (F2/F3);
+# the chrome constants in gui.c / wm.h are tuned around the middle size and loose
+# enough that the smaller/larger sizes don't overflow. Each base gets a 2x "large"
+# companion (for crisp scaled-up titles) — large = 2*base, must stay exact.
+#
+# Layout in the GFN2 blob: all bases first (indices 0..N-1), then their large
+# companions in the same order (indices N..2N-1). gui_font.c derives the pairing.
+BASE_SIZES = [16, 18, 20]
 
 # Full coverage for the base size.
 BASE_RANGES = [
@@ -120,20 +124,25 @@ def main():
     print(f"[genfont] Loading font: {font_path}")
     sizes = []  # (px, records, line_height, ascent)
 
+    # Full-coverage base atlases (one per runtime-selectable size).
     base_cps = codepoints_from_ranges(BASE_RANGES)
-    print(f"[genfont] base {BASE_PX}px: {len(base_cps)} candidates")
-    recs, lh, asc = render_size(font_path, BASE_PX, base_cps)
-    sizes.append((BASE_PX, recs, lh, asc))
-    print(f"[genfont]   -> {len(recs)} glyphs")
+    for px in BASE_SIZES:
+        print(f"[genfont] base {px}px: {len(base_cps)} candidates")
+        recs, lh, asc = render_size(font_path, px, base_cps)
+        sizes.append((px, recs, lh, asc))
+        print(f"[genfont]   -> {len(recs)} glyphs")
 
+    # 2x "large" companions (latin + only the CJK that appears in GUI source).
     large_cps = codepoints_from_ranges(LARGE_BASE_RANGES)
     src_cjk = scan_source_cjk()
     large_cps |= src_cjk
-    print(f"[genfont] large {LARGE_PX}px: {len(large_cps)} candidates "
-          f"({len(src_cjk)} CJK scanned from source)")
-    recs, lh, asc = render_size(font_path, LARGE_PX, large_cps)
-    sizes.append((LARGE_PX, recs, lh, asc))
-    print(f"[genfont]   -> {len(recs)} glyphs")
+    for px in BASE_SIZES:
+        lpx = px * 2
+        print(f"[genfont] large {lpx}px: {len(large_cps)} candidates "
+              f"({len(src_cjk)} CJK scanned from source)")
+        recs, lh, asc = render_size(font_path, lpx, large_cps)
+        sizes.append((lpx, recs, lh, asc))
+        print(f"[genfont]   -> {len(recs)} glyphs")
 
     # Assemble. Compute payload offsets after the header + size directory.
     header_len = 8 + len(sizes) * 20

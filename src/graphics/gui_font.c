@@ -11,7 +11,7 @@
 // ============================================================
 
 #define GUI_FONT_REC_BYTES 16
-#define GUI_FONT_MAX_SIZES 4
+#define GUI_FONT_MAX_SIZES 8
 
 typedef struct {
     uint16_t       px;
@@ -25,6 +25,14 @@ typedef struct {
 static const uint8_t  *g_blob = NULL;
 static gui_font_size_t g_sizes[GUI_FONT_MAX_SIZES];
 static int             g_nsizes = 0;
+static int             g_active = 0;   // active base slot, 0..base_count-1
+
+// Bases occupy the first half of the size directory; their 2x companions the
+// second half (see tools/genfont.py). For an odd/single count there are no
+// companions. base_count = ceil(nsizes/2).
+static int gui_font_nbase(void) {
+    return (g_nsizes + 1) / 2;
+}
 
 static inline uint32_t rd_u32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -67,7 +75,30 @@ bool gui_font_init(void) {
     }
     g_nsizes = (int)nsz;
     g_blob = data;
+    /* Default to the middle base size (e.g. 18px of 16/18/20). */
+    g_active = gui_font_nbase() / 2;
     return true;
+}
+
+int gui_font_base_count(void) { return gui_font_nbase(); }
+int gui_font_active(void) { return g_active; }
+
+void gui_font_set_active(int slot) {
+    int n = gui_font_nbase();
+    if (n <= 0) return;
+    if (slot < 0) slot = 0;
+    if (slot >= n) slot = n - 1;
+    g_active = slot;
+}
+
+int gui_font_active_base_idx(void) {
+    /* Bases are the first half, in order, so the slot is the index directly. */
+    return g_active;
+}
+
+int gui_font_active_large_idx(void) {
+    int large = g_active + gui_font_nbase();
+    return large < g_nsizes ? large : -1;
 }
 
 int gui_font_size_count(void) { return g_nsizes; }
@@ -114,8 +145,8 @@ bool gui_font_lookup_n(uint32_t codepoint, int idx, gui_glyph_t *out) {
     return false;
 }
 
-int gui_font_line_height(void) { return gui_font_line_height_n(0); }
-int gui_font_ascent(void) { return gui_font_ascent_n(0); }
+int gui_font_line_height(void) { return gui_font_line_height_n(g_active); }
+int gui_font_ascent(void) { return gui_font_ascent_n(g_active); }
 bool gui_font_lookup(uint32_t codepoint, gui_glyph_t *out) {
-    return gui_font_lookup_n(codepoint, 0, out);
+    return gui_font_lookup_n(codepoint, g_active, out);
 }

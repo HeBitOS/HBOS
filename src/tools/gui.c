@@ -667,16 +667,20 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
 // still aligns on one baseline.
 static int gui_resolve_glyph(uint32_t cp, int scale, gui_glyph_t *g,
                              int *out_idx, int *out_sub) {
-    if (scale >= 2 && gui_font_size_count() > 1) {
-        int base = gui_font_size_px(0), large = gui_font_size_px(1);
+    int base_idx  = gui_font_active_base_idx();
+    int large_idx = gui_font_active_large_idx();
+    if (scale >= 2 && large_idx >= 0) {
+        int base = gui_font_size_px(base_idx), large = gui_font_size_px(large_idx);
         if (base > 0 && large > 0 && (scale * base) % large == 0) {
             int sub = scale * base / large;
-            if (sub >= 1 && gui_font_lookup_n(cp, 1, g)) {
-                *out_idx = 1; *out_sub = sub; return 1;
+            if (sub >= 1 && gui_font_lookup_n(cp, large_idx, g)) {
+                *out_idx = large_idx; *out_sub = sub; return 1;
             }
         }
     }
-    if (gui_font_lookup_n(cp, 0, g)) { *out_idx = 0; *out_sub = scale; return 1; }
+    if (gui_font_lookup_n(cp, base_idx, g)) {
+        *out_idx = base_idx; *out_sub = scale; return 1;
+    }
     return 0;
 }
 
@@ -4596,6 +4600,15 @@ static void cmd_gui(int argc, char **argv) {
         wm_update_animations(&st.wm);
 
         int key = key_poll();
+        /* F2 / F3: shrink / grow the GUI font (global, works in any app). */
+        if (key == KB_KEY_F2 || key == KB_KEY_F3) {
+            int slot = gui_font_active() + (key == KB_KEY_F3 ? 1 : -1);
+            gui_font_set_active(slot);
+            st.status = (key == KB_KEY_F3) ? "字体已放大" : "字体已缩小";
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         if (st.splash_ticks > 0 && key) {
             st.splash_ticks = 0;
             gui_dirty_mark_full();
