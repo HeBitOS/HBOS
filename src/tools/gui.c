@@ -239,6 +239,35 @@ static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" :: "a"(val), "Nd"(port));
 }
 
+// Serial-only diagnostic log (COM1) — does NOT touch the framebuffer, so it is
+// safe to call while the GUI owns the screen. Shows up in `-serial stdio`.
+static void gui_serial_log(const char *s) {
+    while (*s) {
+        char c = *s++;
+        if (c == '\n') {
+            while (!(inb(0x3F8 + 5) & 0x20)) { }
+            outb(0x3F8, '\r');
+        }
+        while (!(inb(0x3F8 + 5) & 0x20)) { }
+        outb(0x3F8, (uint8_t)c);
+    }
+}
+
+static void gui_serial_log_int(const char *label, int v) {
+    gui_serial_log(label);
+    char tmp[12];
+    int n = 0;
+    if (v < 0) { gui_serial_log("-"); v = -v; }
+    if (v == 0) tmp[n++] = '0';
+    while (v) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+    char out[14];
+    int m = 0;
+    while (n) out[m++] = tmp[--n];
+    out[m++] = '\n';
+    out[m] = 0;
+    gui_serial_log(out);
+}
+
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
@@ -4565,23 +4594,37 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_CLOCK, "时钟");
 
     (void)block_init();
-    if (mouse_init() < 0) st.status = "未检测到鼠标";
+    gui_serial_log("[GUI] block_init done\n");
+    int mrc = mouse_init();
+    if (mrc < 0) st.status = "未检测到鼠标";
     else st.status = mouse_backend_name();
+    gui_serial_log_int("[GUI] mouse_init rc=", mrc);
+    gui_serial_log("[GUI] mouse backend=");
+    gui_serial_log(mouse_backend_name());
+    gui_serial_log("\n");
     // Boot to a clean desktop (wallpaper + icons); user opens apps from there.
 
     uint64_t surface_bytes = (uint64_t)w * (uint64_t)h * sizeof(uint32_t);
     size_t surface_pages = (size_t)((surface_bytes + GUI_PAGE_SIZE - 1) / GUI_PAGE_SIZE);
+    gui_serial_log_int("[GUI] surface w=", (int)w);
+    gui_serial_log_int("[GUI] surface h=", (int)h);
     uint64_t surface_phys = pmm_alloc_blocks(surface_pages);
     if (surface_phys) {
         gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
+        gui_serial_log("[GUI] surface alloc OK\n");
     } else {
         st.status = "图形缓冲分配失败";
+        gui_serial_log("[GUI] surface alloc FAILED\n");
     }
 
     st.splash_ticks = 90;
     gui_dirty_mark_full();
+    gui_serial_log("[GUI] first frame...\n");
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+    gui_serial_log("[GUI] first frame done; entering main loop\n");
     while (1) {
+        if ((frame_tick % 120) == 0)
+            gui_serial_log_int("[GUI] alive frame=", (int)frame_tick);
         wm_update_animations(&st.wm);
 
         int key = key_poll();
