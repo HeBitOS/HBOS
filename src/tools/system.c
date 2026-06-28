@@ -7,6 +7,7 @@
 #include "../fcntl.h"
 #include "../fs.h"
 #include "../input/mouse.h"
+#include "../shell/shell.h"
 #include "../net.h"
 #include "../string.h"
 #include "../unistd.h"
@@ -418,8 +419,68 @@ static void cmd_exec(int argc, char **argv) {
     }
 }
 
+static void diag_put_int(int v) {
+    if (v < 0) { console_putchar('-'); v = -v; }
+    char tmp[12];
+    int n = 0;
+    if (v == 0) tmp[n++] = '0';
+    while (v) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+    while (n) console_putchar(tmp[--n]);
+}
+
+// Live mouse-input diagnostic. Re-inits the mouse and prints every motion/click
+// event so we can tell init failure from a dead event stream from a GUI-only
+// problem. Move the mouse (grab the QEMU pointer first), press any key to stop.
+static void cmd_mousediag(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts("\n[mousediag] move the mouse (click in the window first to grab\n"
+                 "            the QEMU pointer); press any key to stop.\n");
+    int rc = mouse_init();
+    console_puts("[mousediag] mouse_init=");
+    console_puts(rc == 0 ? "OK" : "FAILED");
+    console_puts("  backend=");
+    console_puts(mouse_backend_name());
+    console_putchar('\n');
+    if (rc != 0) {
+        console_puts("[mousediag] no mouse detected — init failed.\n");
+        return;
+    }
+
+    console_puts("[mousediag] polling... press ESC or 'q' to stop.\n");
+    // Drain the Enter that launched this command so we don't stop instantly.
+    for (int d = 0; d < 100000; d++) (void)kb_poll_key();
+
+    mouse_event_t ev;
+    int polls = 0, events = 0, printed = 0;
+    while (1) {
+        int k = kb_poll_key();
+        if (k == 27 || k == 'q' || k == 'Q') break;
+        if (mouse_poll(&ev)) {
+            if (ev.dx || ev.dy || ev.dz || ev.buttons) {
+                events++;
+                if (printed < 80) {
+                    console_puts("  dx="); diag_put_int(ev.dx);
+                    console_puts(" dy="); diag_put_int(ev.dy);
+                    console_puts(" wheel="); diag_put_int(ev.dz);
+                    console_puts(" btn="); diag_put_int(ev.buttons);
+                    console_putchar('\n');
+                    printed++;
+                }
+            }
+        }
+        polls++;
+        task_yield();
+    }
+    console_puts("[mousediag] stopped. polls=");
+    diag_put_int(polls);
+    console_puts("  movement/click events=");
+    diag_put_int(events);
+    console_putchar('\n');
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
+        {"mousediag",CMD_GROUP_SYSTEM, "Diagnose mouse input", "mousediag", cmd_mousediag},
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
         {"poweroff",CMD_GROUP_SYSTEM, "Power off the system","poweroff",cmd_poweroff},
         {"shutdown",CMD_GROUP_SYSTEM, "Power off (alias)",   "shutdown",cmd_poweroff},
