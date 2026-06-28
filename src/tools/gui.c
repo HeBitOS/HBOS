@@ -980,18 +980,14 @@ static int clamp_delta(int v) {
 
 // Pointer transfer function. Input: the per-frame summed raw delta of one axis.
 // Output: desired movement in .8 fixed point (pixels * 256) so the caller can
-// carry the sub-pixel remainder across frames. That carry is what kills the
-// low-speed jitter the old integer `v*7/5` had: it truncated fractional motion
-// (sum 1→1, 3→4) unevenly, so slow tracking shimmered. Gain starts ~1.85x for
-// easy precise tracking and ramps with speed up to ~3.5x so crossing a 1600px
-// screen takes one relaxed flick.
+// carry the sub-pixel remainder across frames — that carry keeps slow motion
+// smooth without the integer-divide shimmer. The gain is FLAT (no speed-based
+// acceleration): a speed-dependent ramp made the cursor feel "一会儿快一会儿慢"
+// because variable frame timing binned the same hand speed into different gains.
+// Constant gain = constant feel. Tune MOUSE_GAIN_256 (256 = 1.0x).
+#define MOUSE_GAIN_256 512          // 512/256 = 2.0x, flat
 static int mouse_accel_fp(int v) {
-    if (v == 0) return 0;
-    int a = v < 0 ? -v : v;
-    int sign = v < 0 ? -1 : 1;
-    int gain = 474 + a * 14;        // .8 fixed: 474/256 ≈ 1.85x base
-    if (gain > 900) gain = 900;     // ramp cap ≈ 3.5x for fast motion
-    return sign * a * gain;         // pixels * 256
+    return v * MOUSE_GAIN_256;      // pixels * 256
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
