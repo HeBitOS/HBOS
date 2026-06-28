@@ -47,7 +47,8 @@ extern int hbos_gcc_last_return(void);
 #define ACTION_W 116
 #define ACTION_H 28
 #define FILE_ACTION_COUNT 7
-#define GUI_MOUSE_POLL_BUDGET 16
+#define GUI_MOUSE_POLL_BUDGET 64   /* drain the queue fully so motion doesn't
+                                      back up into bursty "忽快忽慢" jumps */
 #define TASKBAR_H 50
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
@@ -970,16 +971,27 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
 }
 
 static int clamp_delta(int v) {
-    /* Safety cap to prevent runaway after acceleration */
-    if (v > 160) return 160;
-    if (v < -160) return -160;
+    /* Safety cap to prevent runaway after acceleration. Generous so fast flicks
+     * aren't clipped (clipping makes the speed feel inconsistent / "忽快忽慢"). */
+    if (v > 240) return 240;
+    if (v < -240) return -240;
     return v;
 }
 
-// Flat 1.4x pointer sensitivity — linear and predictable (the earlier quadratic
-// acceleration felt twitchy/inconsistent). Tune the 7/5 ratio to taste.
-static int mouse_accel(int v) {
-    return v * 7 / 5;
+// Pointer transfer function. Input: the per-frame summed raw delta of one axis.
+// Output: desired movement in .8 fixed point (pixels * 256) so the caller can
+// carry the sub-pixel remainder across frames. That carry is what kills the
+// low-speed jitter the old integer `v*7/5` had: it truncated fractional motion
+// (sum 1→1, 3→4) unevenly, so slow tracking shimmered. Gain starts ~1.85x for
+// easy precise tracking and ramps with speed up to ~3.5x so crossing a 1600px
+// screen takes one relaxed flick.
+static int mouse_accel_fp(int v) {
+    if (v == 0) return 0;
+    int a = v < 0 ? -v : v;
+    int sign = v < 0 ? -1 : 1;
+    int gain = 474 + a * 14;        // .8 fixed: 474/256 ≈ 1.85x base
+    if (gain > 900) gain = 900;     // ramp cap ≈ 3.5x for fast motion
+    return sign * a * gain;         // pixels * 256
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
@@ -4520,6 +4532,8 @@ static void cmd_gui(int argc, char **argv) {
     int h = (int)fb.height;
     int mx = w / 2;
     int my = h / 2;
+    int mouse_resid_x = 0;            // .8 fixed-point sub-pixel carry (anti-jitter)
+    int mouse_resid_y = 0;
     uint8_t last_buttons = 0;
     int dragging_window = -1;
     int drag_off_x = 0;
@@ -4657,8 +4671,17 @@ static void cmd_gui(int argc, char **argv) {
         }
 
         if (saw_mouse) {
-            acc_dx = clamp_delta(mouse_accel(acc_dx));
-            acc_dy = clamp_delta(mouse_accel(acc_dy));
+            /* Accelerate in .8 fixed point, carry the sub-pixel remainder across
+             * frames so slow tracking doesn't shimmer, then clamp the integer
+             * pixel step. */
+            mouse_resid_x += mouse_accel_fp(acc_dx);
+            mouse_resid_y += mouse_accel_fp(acc_dy);
+            int step_x = mouse_resid_x / 256;   // truncates toward zero
+            int step_y = mouse_resid_y / 256;
+            mouse_resid_x -= step_x * 256;
+            mouse_resid_y -= step_y * 256;
+            acc_dx = clamp_delta(step_x);
+            acc_dy = clamp_delta(step_y);
             int old_mx = mx;
             int old_my = my;
             mx += acc_dx;
