@@ -96,6 +96,13 @@ static int ps2_mouse_init(void) {
      * responses from port 0x60, causing timeouts. */
     int_disable();
 
+    /* Drain any stale bytes in the output buffer first. Otherwise the very
+     * next read_data() (for the 0x20 config response) can return a leftover
+     * keyboard/aux byte and we write back a corrupt controller config, leaving
+     * the mouse silent. This mattered once we boot straight into the GUI with
+     * no prior get_key() draining the buffer. */
+    flush_output();
+
     /*
      * CRITICAL: clear bit 5 (aux clock) BEFORE 0xA8.
      * VirtualBox checks bit 5 when processing 0xA8 and ignores

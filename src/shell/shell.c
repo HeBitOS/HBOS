@@ -1059,9 +1059,26 @@ void shell_run(void) {
         "输入 \x1b[0mhelp\x1b[90m 查看命令\x1b[0m\r\n\r\n"
     );
 
-    // Boot straight into the graphical desktop; exiting the GUI drops back here
-    // to the text shell. Runs once at startup only.
-    cmd_execute("gui");
+    // Boot selector: choose the graphical desktop or the text shell once at
+    // startup. Picking GUI also means a key is pressed before the GUI's
+    // mouse_init runs, which keeps the PS/2 controller state clean.
+    console_puts(
+        "\r\n  \x1b[1m\x1b[36m请选择启动模式 / Select boot mode\x1b[0m\r\n"
+        "    \x1b[32m[G / Enter]\x1b[0m 图形桌面 GUI       "
+        "\x1b[33m[T]\x1b[0m 命令行 Shell\r\n  > "
+    );
+    while (1) {
+        int c = get_key();
+        if (c == 't' || c == 'T') {
+            console_puts("Shell\r\n\r\n");
+            break;
+        }
+        if (c == 'g' || c == 'G' || c == '\n' || c == '\r') {
+            console_puts("GUI\r\n");
+            cmd_execute("gui");
+            break;
+        }
+    }
 
     while (1) {
         if (shell_exit_flag) {
