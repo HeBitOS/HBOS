@@ -1059,6 +1059,10 @@ void shell_run(void) {
         "输入 \x1b[0mhelp\x1b[90m 查看命令\x1b[0m\r\n\r\n"
     );
 
+    // Boot straight into the graphical desktop; exiting the GUI drops back here
+    // to the text shell. Runs once at startup only.
+    cmd_execute("gui");
+
     while (1) {
         if (shell_exit_flag) {
             console_puts("\x1b[33mShell exited.\x1b[0m\n");
