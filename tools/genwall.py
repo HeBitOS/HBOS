@@ -22,8 +22,8 @@ from PIL import Image
 
 # Stored resolution. 16:9 so widescreen panels get full quality; the runtime
 # cover-fit crops as needed for other aspect ratios.
-TARGET_W = 1280
-TARGET_H = 720
+TARGET_W = 1600
+TARGET_H = 900
 
 
 def cover_resize(im, tw, th):

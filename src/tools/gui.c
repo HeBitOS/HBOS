@@ -239,29 +239,6 @@ static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" :: "a"(val), "Nd"(port));
 }
 
-// Serial-only diagnostic (COM1) — does not touch the framebuffer.
-static void gui_serial_log(const char *s) {
-    while (*s) {
-        char c = *s++;
-        if (c == '\n') { while (!(inb(0x3F8 + 5) & 0x20)) {} outb(0x3F8, '\r'); }
-        while (!(inb(0x3F8 + 5) & 0x20)) {}
-        outb(0x3F8, (uint8_t)c);
-    }
-}
-static void gui_serial_log_int(const char *label, int v) {
-    gui_serial_log(label);
-    char tmp[12]; int n = 0;
-    if (v < 0) { gui_serial_log("-"); v = -v; }
-    if (v == 0) tmp[n++] = '0';
-    while (v) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
-    char out[14]; int m = 0;
-    while (n) out[m++] = tmp[--n];
-    out[m] = 0;
-    gui_serial_log(out);
-}
-
-static int g_dbg_mouse_events = 0;  // mouse events seen by the GUI loop
-
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
@@ -989,10 +966,18 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
 }
 
 static int clamp_delta(int v) {
-    /* Linear 1:1 mapping with a safety cap to prevent runaway */
-    if (v > 80) return 80;
-    if (v < -80) return -80;
+    /* Safety cap to prevent runaway after acceleration */
+    if (v > 160) return 160;
+    if (v < -160) return -160;
     return v;
+}
+
+// Pointer acceleration: ~1.6x base so the cursor keeps up with the hand, plus a
+// quadratic term that speeds up faster flicks while keeping slow motion precise.
+static int mouse_accel(int v) {
+    int a = v < 0 ? -v : v;
+    int s = v < 0 ? -1 : 1;
+    return v * 8 / 5 + s * (a * a) / 16;
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
@@ -4601,19 +4586,10 @@ static void cmd_gui(int argc, char **argv) {
         st.status = "图形缓冲分配失败";
     }
 
-    gui_serial_log("[GUI] mouse backend=");
-    gui_serial_log(mouse_backend_name());
-    gui_serial_log("  (move the mouse; watch mouse_events below)\n");
-
     st.splash_ticks = 90;
     gui_dirty_mark_full();
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
     while (1) {
-        if ((frame_tick % 120) == 0) {
-            gui_serial_log_int("[GUI] frame=", (int)frame_tick);
-            gui_serial_log_int("  mouse_events=", g_dbg_mouse_events);
-            gui_serial_log("\n");
-        }
         wm_update_animations(&st.wm);
 
         int key = key_poll();
@@ -4658,7 +4634,6 @@ static void cmd_gui(int argc, char **argv) {
         int mouse_budget = GUI_MOUSE_POLL_BUDGET;
         while (mouse_budget-- > 0 && mouse_poll(&ev)) {
             saw_mouse = 1;
-            g_dbg_mouse_events++;
             acc_dx += ev.dx;
             acc_dy += ev.dy;
             acc_dz += ev.dz;
@@ -4666,8 +4641,8 @@ static void cmd_gui(int argc, char **argv) {
         }
 
         if (saw_mouse) {
-            acc_dx = clamp_delta(acc_dx);
-            acc_dy = clamp_delta(acc_dy);
+            acc_dx = clamp_delta(mouse_accel(acc_dx));
+            acc_dy = clamp_delta(mouse_accel(acc_dy));
             int old_mx = mx;
             int old_my = my;
             mx += acc_dx;
