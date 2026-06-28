@@ -470,6 +470,9 @@ static void round_corner(int bx, int by, int r, int cxc, int cyc, uint32_t color
     if (x + w > g_gui_surface_w) w = g_gui_surface_w - x;
     if (y + h > g_gui_surface_h) h = g_gui_surface_h - y;
     uint32_t op = g_layer_opacity;
+    uint32_t base_a = (color >> 24) & 0xFF;
+    if (base_a == 0) base_a = 255;
+    uint32_t fa = base_a * op / 255;   // corner honors the color's own alpha too
     uint32_t sr = (color >> 16) & 0xFF, sg = (color >> 8) & 0xFF, sb = color & 0xFF;
     int rin = (r - 1) * (r - 1), rout = r * r;
     for (int yy = 0; yy < h; yy++) {
@@ -483,7 +486,8 @@ static void round_corner(int bx, int by, int r, int cxc, int cyc, uint32_t color
             else if (d2 >= rout) cov = 0;
             else cov = (uint32_t)((rout - d2) * 255 / (rout - rin));
             if (cov == 0) continue;
-            uint32_t a = cov * op / 255;
+            uint32_t a = cov * fa / 255;
+            if (a == 0) continue;
             uint32_t d = row[xx];
             uint32_t dr = (d >> 16) & 0xFF, dg = (d >> 8) & 0xFF, db = d & 0xFF;
             uint32_t inv = 255 - a;
@@ -1466,57 +1470,136 @@ static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
     }
 }
 
+static uint32_t app_accent(int mode) {
+    switch (mode) {
+        case GUI_APP_NOTES:   return rgb(46, 204, 113);
+        case GUI_APP_CALC:    return rgb(52, 152, 219);
+        case GUI_APP_UWC:     return rgb(241, 196, 15);
+        case GUI_APP_SNAKE:   return rgb(39, 174, 96);
+        case GUI_APP_BROWSER: return rgb(61, 174, 233);
+        case GUI_APP_CODE:    return rgb(155, 89, 182);
+        case GUI_APP_DIAG:    return rgb(230, 126, 34);
+        case GUI_APP_CLOCK:   return rgb(231, 76, 60);
+        default:              return rgb(61, 174, 233);
+    }
+}
+
+static int gui_app_grid_cols(int win_w) {
+    int cols = (win_w - 8) / 150;
+    if (cols < 2) cols = 2;
+    if (cols > 4) cols = 4;
+    return cols;
+}
+
+// Shared launcher-tile geometry so draw_apps_panel and hit_action stay in sync.
+static void gui_app_tile_rect(int tx, int ty, int win_w, uint32_t i,
+                              int *x, int *y, int *w, int *h) {
+    int gap = 14;
+    int cols = gui_app_grid_cols(win_w);
+    int tw = (win_w - 8 - gap * (cols - 1)) / cols;
+    int th = 112;
+    int col = (int)(i % (uint32_t)cols);
+    int row = (int)(i / (uint32_t)cols);
+    *x = tx + col * (tw + gap);
+    *y = ty + 64 + row * (th + gap);
+    *w = tw;
+    *h = th;
+}
+
+// A small white motif per app, drawn centered in the icon box (bx,by,sz,sz).
+static void draw_app_glyph(int bx, int by, int sz, int mode) {
+    uint32_t wc = rgb(255, 255, 255);
+    int cx = bx + sz / 2, cy = by + sz / 2;
+    switch (mode) {
+        case GUI_APP_NOTES:
+            rect(bx + 15, by + 15, sz - 30, 4, wc);
+            rect(bx + 15, by + 25, sz - 30, 4, wc);
+            rect(bx + 15, by + 35, sz - 40, 4, wc);
+            break;
+        case GUI_APP_CALC:
+            for (int r = 0; r < 2; r++)
+                for (int c = 0; c < 2; c++)
+                    rect(bx + 14 + c * 14, by + 14 + r * 14, 8, 8, wc);
+            break;
+        case GUI_APP_UWC:
+            rect(bx + 15, by + 28, 6, sz - 38, wc);
+            rect(bx + 24, by + 20, 6, sz - 30, wc);
+            rect(bx + 33, by + 24, 6, sz - 34, wc);
+            break;
+        case GUI_APP_SNAKE:
+            rect(bx + 14, by + 30, 8, 8, wc);
+            rect(bx + 22, by + 22, 8, 8, wc);
+            rect(bx + 30, by + 14, 8, 8, wc);
+            break;
+        case GUI_APP_BROWSER:
+            rect(bx + 14, by + 14, sz - 28, 3, wc);
+            rect(bx + 14, by + sz - 17, sz - 28, 3, wc);
+            rect(bx + 14, by + 14, 3, sz - 28, wc);
+            rect(bx + sz - 17, by + 14, 3, sz - 28, wc);
+            break;
+        case GUI_APP_CODE:
+            for (int k = 0; k < sz - 28; k++)
+                rect(bx + sz - 14 - k, by + 14 + k, 3, 2, wc);  // a "/" slash
+            break;
+        case GUI_APP_DIAG:
+            rect(bx + 15, by + 18, 3, 3, wc);
+            rect(bx + 18, by + 21, 3, 3, wc);
+            rect(bx + 15, by + 24, 3, 3, wc);
+            rect(bx + 24, by + 30, 14, 3, wc);              // ">_"
+            break;
+        case GUI_APP_CLOCK:
+            rect(cx - 1, by + 14, 3, sz / 2 - 6, wc);       // hands
+            rect(cx - 1, cy - 1, sz / 2 - 8, 3, wc);
+            break;
+        default:
+            rect(cx - 6, cy - 6, 12, 12, wc);
+            break;
+    }
+}
+
 static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
-    (void)win_w;
-    char line[96];
-    text(tx, ty, "应用程序", rgb(24, 112, 166), 1);
-    line_u32(line, sizeof(line), "图形应用: ", gui_app_count(), "");
-    text(tx + 112, ty + 2, line, rgb(94, 112, 124), 1);
-    draw_button(tx, ty + 42, "打开 Enter", rgb(23, 147, 209));
+    char line[64];
+    text(tx, ty, "应用程序", rgb(239, 240, 241), 1);
+    line_u32(line, sizeof(line), "共 ", gui_app_count(), " 个应用");
+    text(tx + 96, ty + 2, line, rgb(160, 167, 173), 1);
+
+    int cw = win_w - 60;  // content width (panel is inset 30px each side)
 
     int selected = st->selected_app;
     if (selected < 0) selected = 0;
     if ((uint32_t)selected >= gui_app_count()) selected = (int)gui_app_count() - 1;
-    uint32_t max = gui_app_count();
-    for (uint32_t i = 0; i < max; i++) {
+
+    for (uint32_t i = 0; i < gui_app_count(); i++) {
         const gui_app_meta_t *app = &gui_apps[i];
-        if (!app) continue;
-        int card_w = 250;
-        int card_h = 62;
-        int col = (int)(i & 1);
-        int row = (int)(i >> 1);
-        int x = tx + col * (card_w + 18);
-        int y = ty + 82 + row * (card_h + 10);
-        uint32_t accent = app->mode == GUI_APP_NOTES ? rgb(85, 180, 120) :
-                          app->mode == GUI_APP_CALC ? rgb(23, 147, 209) :
-                          app->mode == GUI_APP_UWC ? rgb(244, 194, 82) :
-                          app->mode == GUI_APP_SNAKE ? rgb(124, 220, 154) :
-                          app->mode == GUI_APP_CODE ? rgb(102, 214, 255) :
-                          app->mode == GUI_APP_DIAG ? rgb(240, 168, 90) :
-                                                        rgb(78, 192, 236);
-        if ((int)i == selected) {
-            vgradient(x, y, card_w, card_h, rgb_lift(accent, 8), rgb_lift(accent, -28));
-            border(x, y, card_w, card_h, rgb_lift(accent, 50));
-        } else {
-            vgradient(x, y, card_w, card_h, rgb(32, 44, 56), rgb(20, 30, 40));
-            border(x, y, card_w, card_h, rgb(46, 66, 84));
+        int x, y, w, h;
+        gui_app_tile_rect(tx, ty, cw, i, &x, &y, &w, &h);
+        uint32_t accent = app_accent(app->mode);
+        int sel = ((int)i == selected);
+
+        // Translucent glass tile; selected gets an accent wash + ring.
+        fill_round_rect(x, y, w, h, 10, sel ? 0x99203A4A : 0x66202428, RR_ALL);
+        if (sel) {
+            rect(x + 10, y, w - 20, 1, accent);
+            rect(x + 10, y + h - 1, w - 20, 1, accent);
+            rect(x, y + 10, 1, h - 20, accent);
+            rect(x + w - 1, y + 10, 1, h - 20, accent);
         }
-        rect(x, y, card_w, 1, (int)i == selected ? rgb_lift(accent, 80) : rgb(56, 78, 98));
-        rect(x, y, 6, card_h, accent);
-        rect(x, y + card_h - 1, card_w, 1, rgb(6, 10, 16));
-        vgradient(x + 20, y + 14, 30, 30, rgb_lift(accent, 24), rgb_lift(accent, -16));
-        border(x + 20, y + 14, 30, 30, rgb_lift(accent, -30));
-        rect(x + 27, y + 21, 16, 16, rgb(14, 22, 32));
-        if ((int)i == selected) {
-            rect(x + card_w - 30, y + card_h - 22, 14, 6, accent);
-        }
-        uint32_t pos = 0;
-        line[0] = 0;
-        append_str(line, sizeof(line), &pos, app->name);
-        text_clipped(x + 66, y + 14, x + card_w - 12, line, rgb(238, 246, 252), 1);
-        text_clipped(x + 66, y + 36, x + card_w - 12, app->description, rgb(168, 188, 202), 1);
+
+        int isz = 52, ix = x + (w - isz) / 2, iy = y + 16;
+        fill_round_rect(ix, iy, isz, isz, 12, accent, RR_ALL);
+        draw_app_glyph(ix, iy, isz, app->mode);
+
+        int tw = text_width(app->name, 1);
+        int lx = x + (w - tw) / 2;
+        if (lx < x + 4) lx = x + 4;
+        text(lx, y + h - 26, app->name,
+             sel ? rgb(255, 255, 255) : rgb(228, 232, 236), 1);
     }
-    text(tx, ty + 374, "方向键选择  Enter 打开  鼠标点击卡片选择", rgb(132, 150, 166), 1);
+    uint32_t cols = (uint32_t)gui_app_grid_cols(cw);
+    uint32_t rows = (gui_app_count() + cols - 1) / cols;
+    text(tx, ty + 64 + (int)rows * 126 + 6,
+         "单击图标启动 · 方向键选择 · Enter 打开",
+         rgb(200, 206, 212), 1);
 }
 
 static uint32_t count_file_lines(file_t *f) {
@@ -3747,16 +3830,11 @@ static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
         int y = ty + 194;
         if (mx >= tx && mx < tx + ACTION_W && my >= y && my < y + ACTION_H) return 5;
     } else if (panel == PANEL_APPS) {
-        int y = ty + 42;
-        if (mx >= tx && mx < tx + ACTION_W && my >= y && my < y + ACTION_H) return 6;
-        int card_w = 250;
-        int card_h = 62;
+        int cw = win_w - 60;
         for (uint32_t i = 0; i < gui_app_count(); i++) {
-            int col = (int)(i & 1);
-            int row = (int)(i >> 1);
-            int x = tx + col * (card_w + 18);
-            int cy = ty + 82 + row * (card_h + 10);
-            if (mx >= x && mx < x + card_w && my >= cy && my < cy + card_h)
+            int x, y, tw, th;
+            gui_app_tile_rect(tx, ty, cw, i, &x, &y, &tw, &th);
+            if (mx >= x && mx < x + tw && my >= y && my < y + th)
                 return APP_ACTION_BASE + (int)i;
         }
     }
