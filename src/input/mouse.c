@@ -132,6 +132,15 @@ static int ps2_mouse_init(void) {
             packet_i = 0;
             mouse_raw_head = 0;
             mouse_raw_tail = 0;
+            /* Unmask the cascade (IRQ2 on the master) and IRQ12 (mouse) on the
+             * slave PIC so mouse bytes are captured by the IRQ handler into the
+             * raw queue. Only IRQ1 (keyboard) was unmasked before, so the mouse
+             * ran on polling alone — fine for slow motion but the GUI loop can't
+             * poll the 1-byte i8042 buffer fast enough for a real mouse's byte
+             * stream, dropping bytes and desyncing packets (cursor freezes after
+             * the first move). */
+            outb(0x21, (uint8_t)(inb(0x21) & ~0x04));  /* IRQ2 cascade   */
+            outb(0xA1, (uint8_t)(inb(0xA1) & ~0x10));  /* IRQ12 mouse    */
             int_enable();
             return 0;
         }
@@ -216,7 +225,9 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
         if (queued >= 0) {
             b = (uint8_t)queued;
         } else {
-            /* If no queued bytes, check the physical port */
+            /* Fallback if no queued bytes (e.g. IRQ12 unavailable): poll the
+             * physical port. With IRQ12 unmasked the ISR fills the queue and
+             * this rarely runs. */
             int_disable();
             if (inb(PS2_STATUS) & 0x01) {
                 uint8_t status = inb(PS2_STATUS);
