@@ -9,6 +9,7 @@
 #include "../fs.h"
 #include "../graphics/font_cjk.h"
 #include "../graphics/gui_font.h"
+#include "../graphics/gui_wall.h"
 #include "../graphics/graphics.h"
 #include "../input/mouse.h"
 #include "../net.h"
@@ -501,10 +502,33 @@ static void draw_window_control_icon(int x, int y, int kind, int restore, uint32
     }
 }
 
+// Bilinearly sample the coverage map at the fractional source position that
+// dest offset `d` maps to under `scale` (8.8 fixed point). Used for scale>1 so
+// upscaled text (titles, clock) gets smooth anti-aliased edges instead of the
+// blocky staircase nearest-neighbour produces.
+static inline uint32_t cov_bilinear(const uint8_t *cov, int w, int h,
+                                    int dx, int dy, int scale) {
+    int fx = (dx * 256) / scale, fy = (dy * 256) / scale;
+    int sx0 = fx >> 8, sy0 = fy >> 8;
+    if (sx0 < 0) sx0 = 0;
+    if (sx0 > w - 1) sx0 = w - 1;
+    if (sy0 < 0) sy0 = 0;
+    if (sy0 > h - 1) sy0 = h - 1;
+    int sx1 = sx0 + 1 < w ? sx0 + 1 : sx0;
+    int sy1 = sy0 + 1 < h ? sy0 + 1 : sy0;
+    int tx = fx & 255, ty = fy & 255;
+    const uint8_t *r0 = cov + (uint32_t)sy0 * w;
+    const uint8_t *r1 = cov + (uint32_t)sy1 * w;
+    int top = r0[sx0] + (((int)r0[sx1] - (int)r0[sx0]) * tx >> 8);
+    int bot = r1[sx0] + (((int)r1[sx1] - (int)r1[sx0]) * tx >> 8);
+    int v = top + ((bot - top) * ty >> 8);
+    return v < 0 ? 0 : (v > 255 ? 255 : (uint32_t)v);
+}
+
 // Alpha-blend an 8-bit coverage glyph onto the GUI surface at (x, y) (the
-// glyph's top-left). `scale` nearest-upscales (rarely > 1). The foreground is
-// `color` (0x00RRGGBB), modulated per pixel by the glyph coverage and the
-// active layer opacity. Replaces the old hardcoded 5x7 / 1-bit blitters.
+// glyph's top-left). `scale` 1 samples 1:1; scale>1 bilinearly upscales for
+// crisp large text. Foreground is `color` (0x00RRGGBB), modulated per pixel by
+// the glyph coverage and the active layer opacity.
 static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int scale) {
     if (!g->coverage || g->width == 0 || g->height == 0) return;
     if (scale < 1) scale = 1;
@@ -522,6 +546,7 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
     uint32_t src_g = (color >> 8) & 0xFF;
     uint32_t src_b = color & 0xFF;
     int width = g->width;
+    int smooth = scale > 1;
 
     if (g_gui_surface) {
         if (cx < 0) { cw += cx; off_x -= cx; cx = 0; }
@@ -535,7 +560,10 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
             uint32_t *row = g_gui_surface +
                             (uint32_t)(cy + yy) * g_gui_surface_pitch + (uint32_t)cx;
             for (int xx = 0; xx < cw; xx++) {
-                uint32_t cov = cov_row[(off_x + xx) / scale];
+                uint32_t cov = smooth
+                    ? cov_bilinear(g->coverage, width, g->height,
+                                   off_x + xx, off_y + yy, scale)
+                    : cov_row[(off_x + xx) / scale];
                 if (cov == 0) continue;
                 uint32_t a = cov * fg_a / 255;
                 if (a == 0) continue;
@@ -997,20 +1025,61 @@ static const cc_gfx_t g_sgfx = {
     .get_key=sgfx_getkey,.wait_key=sgfx_waitkey
 };
 
+// Cover-fit the wallpaper across (0,0)-(DW,DH), sampling only the pixels inside
+// the current clip rect so cost scales with the damaged area, not the screen.
+static void blit_wallpaper(int DW, int DH) {
+    int sw = 0, sh = 0;
+    const uint32_t *src = gui_wall_pixels(&sw, &sh);
+    if (!src || !g_gui_surface || sw <= 0 || sh <= 0) {
+        rect(0, 0, DW, DH, rgb(31, 34, 37));
+        return;
+    }
+    int cx = 0, cy = 0, cw = DW, ch = DH;
+    if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
+    if (cx < 0) { cw += cx; cx = 0; }
+    if (cy < 0) { ch += cy; cy = 0; }
+    if (cx >= g_gui_surface_w || cy >= g_gui_surface_h) return;
+    if (cx + cw > g_gui_surface_w) cw = g_gui_surface_w - cx;
+    if (cy + ch > g_gui_surface_h) ch = g_gui_surface_h - cy;
+    if (cw <= 0 || ch <= 0) return;
+
+    // 16.16 fixed-point "cover" mapping (dest -> source), centered crop.
+    int64_t inv_x = ((int64_t)sw << 16) / DW;
+    int64_t inv_y = ((int64_t)sh << 16) / DH;
+    int64_t inv = inv_x < inv_y ? inv_x : inv_y;
+    int64_t cropx = (((int64_t)sw << 16) - (int64_t)DW * inv) / 2;
+    int64_t cropy = (((int64_t)sh << 16) - (int64_t)DH * inv) / 2;
+
+    for (int yy = 0; yy < ch; yy++) {
+        int dy = cy + yy;
+        int syi = (int)((cropy + (int64_t)dy * inv) >> 16);
+        if (syi < 0) syi = 0;
+        if (syi > sh - 1) syi = sh - 1;
+        const uint32_t *srow = src + (int64_t)syi * sw;
+        uint32_t *drow = g_gui_surface +
+                         (uint32_t)dy * g_gui_surface_pitch + (uint32_t)cx;
+        for (int xx = 0; xx < cw; xx++) {
+            int sxi = (int)((cropx + (int64_t)(cx + xx) * inv) >> 16);
+            if (sxi < 0) sxi = 0;
+            if (sxi > sw - 1) sxi = sw - 1;
+            drow[xx] = 0xFF000000 | (srow[sxi] & 0x00FFFFFF);
+        }
+    }
+}
+
 static void draw_wallpaper(int w, int h, int light) {
     char line[32];
     int tb_y = h - TASKBAR_H;
     int sb_x = 112;
     uint32_t accent = rgb(61, 174, 233);
 
-    // Flat Breeze desktop + dock column (no decorative grid/scanlines).
-    rect(0, 0, w, tb_y, light ? rgb(239, 240, 241) : rgb(31, 34, 37));
-    rect(0, 0, sb_x, tb_y, light ? rgb(227, 229, 232) : rgb(42, 46, 50));
-    rect(sb_x, 0, 1, tb_y, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
-
-    // Taskbar: flat panel with a single 1px top separator.
-    rect(0, tb_y, w, TASKBAR_H, light ? rgb(227, 229, 232) : rgb(42, 46, 50));
-    rect(0, tb_y, w, 1, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
+    // Photographic wallpaper across the whole screen; panels float on top.
+    blit_wallpaper(w, h);
+    // Dock column + taskbar: translucent dark glass over the wallpaper.
+    rect_alpha(0, 0, sb_x, tb_y, light ? 0xCCEFF0F1 : 0xD22A2E32);
+    rect(sb_x, 0, 1, tb_y, light ? 0xCCC4C8CC : 0x66000000);
+    rect_alpha(0, tb_y, w, TASKBAR_H, light ? 0xE6E3E5E8 : 0xE62A2E32);
+    rect(0, tb_y, w, 1, light ? rgb(196, 200, 204) : rgb(70, 75, 82));
 
     // Start button (flat, accent-filled).
     int by = h - 38;
@@ -2542,13 +2611,12 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     int box_w = win_w - 20;
     int box_h = win_h - 74;
 
-    // 半透明背景填充 (Alpha 0xD0, Obsidian Blue/Black)
-    rect_alpha(box_x, box_y, box_w, box_h, 0xD002050E);
-    // 霓虹青边框
-    border(box_x, box_y, box_w, box_h, cyber_neon_cyan(0));
+    // Flat Breeze terminal surface.
+    rect(box_x, box_y, box_w, box_h, rgb(27, 30, 33));
+    border(box_x, box_y, box_w, box_h, rgb(60, 64, 69));
 
     int scale = 1;
-    int row_h = 16;
+    int row_h = 18;
     int input_y = box_y + box_h - 24;
 
     // 自动根据可用高度计算最多绘制的历史记录行数，防止重叠
@@ -2565,28 +2633,33 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
         const char *line = st->console_history[i];
         uint32_t color = cyber_text(0);
         if (strncmp(line, "hpos_gui_shell:", 15) == 0 || strncmp(line, "hbos_gui_shell:", 15) == 0) {
-            color = rgb(0, 240, 255); // 霓虹蓝 prompt
+            color = rgb(39, 174, 96); // Breeze 绿 prompt
         } else if (strncmp(line, "hbos_shell:", 11) == 0) {
-            color = cyber_neon_pink(0); // 霓虹粉 error
+            color = rgb(218, 68, 83); // Breeze 红 error
         } else if (strncmp(line, "  ", 2) == 0) {
-            color = cyber_neon_yellow(0); // 琥珀黄细节
+            color = rgb(160, 167, 173); // 次要灰细节
         }
         text(box_x + 12, start_y, line, color, scale);
         start_y += row_h;
     }
 
-    // 绘制当前输入行
-    text(box_x + 12, input_y, "hbos_gui_shell:/# ", rgb(0, 255, 128), scale); // 霓虹绿 prompt
-    int prompt_w = 18 * 6 * scale;
+    // 绘制当前输入行（比例字体：用实测宽度定位，避免固定 6px 假设导致错位）
+    const char *prompt = "hbos_gui_shell:/# ";
+    text(box_x + 12, input_y, prompt, rgb(39, 174, 96), scale); // Breeze 绿
+    int prompt_w = text_width(prompt, scale);
     text(box_x + 12 + prompt_w, input_y, st->console_input, cyber_text(0), scale);
 
-    // 闪烁光标
+    // 闪烁光标（细竖线 caret，定位到输入光标处的真实像素宽度）
     static uint32_t cursor_ticks = 0;
     cursor_ticks++;
-    int cursor_visible = (cursor_ticks / 15) % 2;
-    if (cursor_visible) {
-        int cursor_x = box_x + 12 + prompt_w + st->console_cursor * 6 * scale;
-        rect(cursor_x, input_y + 1, 6 * scale, 8 * scale - 1, rgb(0, 255, 128));
+    if ((cursor_ticks / 15) % 2) {
+        char head[128];
+        uint32_t n = st->console_cursor;
+        if (n > sizeof(head) - 1) n = sizeof(head) - 1;
+        for (uint32_t k = 0; k < n; k++) head[k] = st->console_input[k];
+        head[n] = 0;
+        int cursor_x = box_x + 12 + prompt_w + text_width(head, scale);
+        rect(cursor_x, input_y, 2, gui_font_line_height() * scale - 2, rgb(39, 174, 96));
     }
 }
 
@@ -3025,12 +3098,14 @@ static void gui_damage_window(gui_state_t *st, int scr_w, int scr_h, int idx) {
 }
 
 static void gui_damage_cursor(int omx, int omy, int nmx, int nmy) {
-    gui_dirty_add(omx - 2, omy - 2, 22, 22);
-    gui_dirty_add(nmx - 2, nmy - 2, 22, 22);
+    // The cursor glyph spans x..x+14, y..y+22; the damage box must fully cover
+    // it (incl. the -2 top margin) or stray bottom pixels leave a dotted trail.
+    gui_dirty_add(omx - 2, omy - 2, 22, 27);
+    gui_dirty_add(nmx - 2, nmy - 2, 22, 27);
 }
 
 static int cursor_overlaps_rect(int mx, int my, int rx, int ry, int rw, int rh) {
-    return mx + 22 > rx && mx - 2 < rx + rw && my + 22 > ry && my - 2 < ry + rh;
+    return mx + 22 > rx && mx - 2 < rx + rw && my + 25 > ry && my - 2 < ry + rh;
 }
 
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
@@ -4191,6 +4266,7 @@ static void cmd_gui(int argc, char **argv) {
         console_puts("gui: GUI 字体加载失败\n");
         return;
     }
+    gui_wall_init();  // 壁纸可选，失败则回退纯色背景
 
     int w = (int)fb.width;
     int h = (int)fb.height;

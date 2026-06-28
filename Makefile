@@ -45,6 +45,9 @@ FONT_BIN = $(BUILD_DIR)/font_cjk.bin
 # change the GUI typeface; glyph coverage is decided by tools/genfont.py.
 GUI_FONT_TTF = fonts/HarmonyOS_Sans_SC_Regular.ttf
 GUI_FONT_BIN = $(BUILD_DIR)/gui_font.bin
+# Desktop wallpaper. Swap GUI_WALL_IMG to change it; genwall.py decodes/resizes.
+GUI_WALL_IMG = photo/壁纸.jpg
+GUI_WALL_BIN = $(BUILD_DIR)/gui_wall.bin
 
 # 所有 C 源文件
 APP_SRCS = $(wildcard $(SRC_DIR)/apps/*.c)
@@ -78,6 +81,7 @@ C_SRCS = \
 	$(SRC_DIR)/graphics/graphics.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
 	$(SRC_DIR)/graphics/gui_font.c \
+	$(SRC_DIR)/graphics/gui_wall.c \
 	$(SRC_DIR)/input/mouse.c \
 	$(SRC_DIR)/shell/shell.c \
 	$(SRC_DIR)/core/task.c \
@@ -128,6 +132,7 @@ ASM_SRCS = \
 	$(SRC_DIR)/core/interrupt_asm.asm \
 	$(SRC_DIR)/graphics/cjk_glyph.asm \
 	$(SRC_DIR)/graphics/gui_glyph.asm \
+	$(SRC_DIR)/graphics/gui_wallimg.asm \
 	$(SRC_DIR)/smp_trampoline.asm
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
@@ -168,7 +173,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/input $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps $(BUILD_DIR)/gui $(BUILD_DIR)/crypto
 
 # Font generation
-font: $(FONT_BIN) $(GUI_FONT_BIN)
+font: $(FONT_BIN) $(GUI_FONT_BIN) $(GUI_WALL_BIN)
 
 $(FONT_BIN): $(FONT_TTF) tools/genhzk.py
 	@echo "[MAKE] Generating CJK font bitmap..."
@@ -179,6 +184,11 @@ $(GUI_FONT_BIN): $(GUI_FONT_TTF) tools/genfont.py
 	@echo "[MAKE] Generating GUI proportional font atlas..."
 	python3 tools/genfont.py $(GUI_FONT_TTF) $(GUI_FONT_BIN)
 	@echo "[MAKE] GUI font: $(GUI_FONT_BIN)"
+
+$(GUI_WALL_BIN): $(GUI_WALL_IMG) tools/genwall.py
+	@echo "[MAKE] Generating desktop wallpaper..."
+	python3 tools/genwall.py "$(GUI_WALL_IMG)" $(GUI_WALL_BIN)
+	@echo "[MAKE] Wallpaper: $(GUI_WALL_BIN)"
 
 # NASM (.asm) — various directories
 $(BUILD_DIR)/boot.o: $(SRC_DIR)/boot.asm | $(BUILD_DIR)
@@ -193,7 +203,7 @@ $(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) $(GUI_FONT_BIN)
+$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) $(GUI_FONT_BIN) $(GUI_WALL_BIN)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 

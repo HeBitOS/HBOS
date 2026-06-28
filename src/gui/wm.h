@@ -45,6 +45,7 @@ enum {
     WM_ANIM_MINIMIZE = 1,
     WM_ANIM_MAXIMIZE = 2,
     WM_ANIM_RESTORE  = 3,
+    WM_ANIM_OPEN     = 4,  /**< 新窗口淡入 */
 };
 
 typedef struct {

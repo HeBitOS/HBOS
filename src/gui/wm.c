@@ -85,10 +85,10 @@ int wm_open_window(wm_state_t *wm, int kind, int mode, int unique) {
     win->y = 62 + (idx % 5) * 22;
     win->w = 0;
     win->h = 0;
-    win->anim_type = WM_ANIM_NONE;
+    win->anim_type = WM_ANIM_OPEN;  /* 打开时淡入 */
     win->anim_frame = 0;
-    win->anim_total = 0;
-    win->opacity = 255;  /* 完全不透明 */
+    win->anim_total = 10;
+    win->opacity = 40;   /* 起始淡显，update 会逐帧拉满 */
     wm->z_order[idx] = idx;
     wm_focus_window(wm, idx);
     return idx;
@@ -498,6 +498,11 @@ void wm_update_animations(wm_state_t *wm) {
                 case WM_ANIM_MINIMIZE:
                     /* 最小化：淡出 */
                     win->opacity = (uint8_t)(255 * (total - frame) / total);
+                    break;
+
+                case WM_ANIM_OPEN:
+                    /* 打开：缓动淡入 (40 -> 255) */
+                    win->opacity = (uint8_t)(40 + (215 * eased_scaled) / 512);
                     break;
                     
                 case WM_ANIM_MAXIMIZE:
