@@ -972,12 +972,13 @@ static int clamp_delta(int v) {
     return v;
 }
 
-// Pointer acceleration: ~1.6x base so the cursor keeps up with the hand, plus a
-// quadratic term that speeds up faster flicks while keeping slow motion precise.
+// Pointer acceleration: ~1.25x base so the cursor keeps up without feeling
+// twitchy, plus a mild quadratic term that only adds speed on fast flicks while
+// keeping slow motion precise.
 static int mouse_accel(int v) {
     int a = v < 0 ? -v : v;
     int s = v < 0 ? -1 : 1;
-    return v * 8 / 5 + s * (a * a) / 16;
+    return v * 5 / 4 + s * (a * a) / 48;
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
