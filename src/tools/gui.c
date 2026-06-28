@@ -454,6 +454,67 @@ static void border(int x, int y, int w, int h, uint32_t color) {
     rect(x + w - 1, y, 1, h, color);
 }
 
+enum { RR_TL = 1, RR_TR = 2, RR_BL = 4, RR_BR = 8,
+       RR_ALL = 15, RR_TOP = 3, RR_BOT = 12 };
+
+// Fill one r×r corner box, anti-aliasing a quarter-circle (center cxc,cyc) of
+// `color` over whatever is already in the surface — so rounded windows blend
+// cleanly against the wallpaper/desktop drawn beneath them.
+static void round_corner(int bx, int by, int r, int cxc, int cyc, uint32_t color) {
+    if (!g_gui_surface) { return; }
+    int x = bx, y = by, w = r, h = r;
+    if (!gui_clip_intersect(&x, &y, &w, &h)) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x >= g_gui_surface_w || y >= g_gui_surface_h) return;
+    if (x + w > g_gui_surface_w) w = g_gui_surface_w - x;
+    if (y + h > g_gui_surface_h) h = g_gui_surface_h - y;
+    uint32_t op = g_layer_opacity;
+    uint32_t sr = (color >> 16) & 0xFF, sg = (color >> 8) & 0xFF, sb = color & 0xFF;
+    int rin = (r - 1) * (r - 1), rout = r * r;
+    for (int yy = 0; yy < h; yy++) {
+        uint32_t *row = g_gui_surface +
+                        (uint32_t)(y + yy) * g_gui_surface_pitch + (uint32_t)x;
+        for (int xx = 0; xx < w; xx++) {
+            int dx = (x + xx) - cxc, dy = (y + yy) - cyc;
+            int d2 = dx * dx + dy * dy;
+            uint32_t cov;
+            if (d2 <= rin) cov = 255;
+            else if (d2 >= rout) cov = 0;
+            else cov = (uint32_t)((rout - d2) * 255 / (rout - rin));
+            if (cov == 0) continue;
+            uint32_t a = cov * op / 255;
+            uint32_t d = row[xx];
+            uint32_t dr = (d >> 16) & 0xFF, dg = (d >> 8) & 0xFF, db = d & 0xFF;
+            uint32_t inv = 255 - a;
+            row[xx] = 0xFF000000 |
+                      (((sr * a + dr * inv) / 255) << 16) |
+                      (((sg * a + dg * inv) / 255) << 8) |
+                      ((sb * a + db * inv) / 255);
+        }
+    }
+}
+
+// Filled rectangle with selectively rounded corners (RR_* mask).
+static void fill_round_rect(int x, int y, int w, int h, int r,
+                            uint32_t color, int corners) {
+    if (w <= 0 || h <= 0) return;
+    if (r < 1) { rect(x, y, w, h, color); return; }
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    rect(x, y + r, w, h - 2 * r, color);          // middle band, full width
+    rect(x + r, y, w - 2 * r, r, color);          // top band between corners
+    rect(x + r, y + h - r, w - 2 * r, r, color);  // bottom band between corners
+    if (corners & RR_TL) round_corner(x, y, r, x + r, y + r, color);
+    else rect(x, y, r, r, color);
+    if (corners & RR_TR) round_corner(x + w - r, y, r, x + w - r, y + r, color);
+    else rect(x + w - r, y, r, r, color);
+    if (corners & RR_BL) round_corner(x, y + h - r, r, x + r, y + h - r, color);
+    else rect(x, y + h - r, r, r, color);
+    if (corners & RR_BR) round_corner(x + w - r, y + h - r, r, x + w - r, y + h - r, color);
+    else rect(x + w - r, y + h - r, r, r, color);
+}
+
 static void draw_panel_shell(int x, int y, int w, int h, uint32_t top,
                              uint32_t bottom, uint32_t border_c, uint32_t accent) {
     if (w <= 0 || h <= 0) return;
@@ -2953,7 +3014,11 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
 }
 
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state, int light) {
-    if (state != WM_STATE_MAXIMIZED) soft_shadow(x, y, win_w, win_h);
+    int R = (state == WM_STATE_MAXIMIZED) ? 0 : 8;
+    if (state != WM_STATE_MAXIMIZED) {
+        soft_shadow(x, y, win_w, win_h);
+        soft_shadow(x + 2, y + 3, win_w - 4, win_h - 4);  // deeper drop shadow
+    }
 
     uint32_t body_bg  = active ? (light ? rgb(239, 240, 241) : rgb(42, 46, 50))
                                : (light ? rgb(239, 240, 241) : rgb(35, 38, 41));
@@ -2962,11 +3027,15 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
     uint32_t border_c = active ? rgb(61, 174, 233)
                                : (light ? rgb(188, 192, 196) : rgb(60, 64, 69));
 
-    // Flat Breeze frame: solid titlebar, a single 1px separator, opaque body.
-    rect(x + 1, y + 1, win_w - 2, WM_TITLE_H, title_bg);
+    // Rounded Breeze frame: rounded body, rounded-top titlebar, 1px separator,
+    // focus border on the straight edges (corners carried by the AA fill).
+    fill_round_rect(x, y, win_w, win_h, R, body_bg, RR_ALL);
+    fill_round_rect(x, y, win_w, WM_TITLE_H, R, title_bg, RR_TOP);
     rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
-    rect(x + 1, y + WM_TITLE_H + 1, win_w - 2, win_h - WM_TITLE_H - 2, body_bg);
-    border(x, y, win_w, win_h, border_c);
+    rect(x + R, y, win_w - 2 * R, 1, border_c);
+    rect(x + R, y + win_h - 1, win_w - 2 * R, 1, border_c);
+    rect(x, y + R, 1, win_h - 2 * R, border_c);
+    rect(x + win_w - 1, y + R, 1, win_h - 2 * R, border_c);
 
     // Window controls: flat, close=red, min/max neutral (no accent strip).
     uint32_t nbtn = active ? (light ? rgb(206, 209, 213) : rgb(66, 71, 77))
@@ -2991,10 +3060,15 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MIN, 0,
                              light ? rgb(60, 64, 69) : rgb(236, 242, 240));
 
-    rect(x + 13, y + 12, 10, 10, active ? cyber_neon_yellow(light) : (light ? rgb(160, 165, 170) : rgb(162, 172, 172)));
-    rect(x + 16, y + 15, 4, 4, light ? rgb(240, 244, 248) : rgb(18, 26, 28));
-    text_clipped(x + 31, y + 11, x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16,
-                 title, light ? rgb(255, 255, 255) : rgb(252, 254, 255), 1);
+    // Titlebar app icon (rounded accent square) + vertically-centered title.
+    int ico = 14, icy = y + (WM_TITLE_H - ico) / 2;
+    uint32_t icon_c = active ? rgb(61, 174, 233)
+                             : (light ? rgb(150, 156, 162) : rgb(110, 118, 126));
+    fill_round_rect(x + 12, icy, ico, ico, 3, icon_c, RR_ALL);
+    rect(x + 12 + 4, icy + 5, ico - 8, ico - 9, rgb(255, 255, 255));
+    int tty = y + (WM_TITLE_H - gui_font_line_height()) / 2;
+    text_clipped(x + 34, tty, x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16,
+                 title, active ? rgb(255, 255, 255) : (light ? rgb(90, 96, 102) : rgb(190, 196, 202)), 1);
 }
 
 static void draw_panel_window(int tx, int ty, int win_w, int w, int h, gui_state_t *st, int panel) {
