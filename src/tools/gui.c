@@ -48,7 +48,7 @@ extern int hbos_gcc_last_return(void);
 #define ACTION_H 28
 #define FILE_ACTION_COUNT 7
 #define GUI_MOUSE_POLL_BUDGET 16
-#define TASKBAR_H 44
+#define TASKBAR_H 56
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
 #define BROWSER_PAGE_CAP 2048
@@ -59,7 +59,7 @@ extern int hbos_gcc_last_return(void);
 #define SNAKE_H 10
 #define GUI_PAGE_SIZE 4096ULL
 #define FILE_LIST_ROWS 8
-#define FILE_ROW_H 26
+#define FILE_ROW_H 32
 #define NOTE_FILE_ROWS 7
 #define GUI_PATH_MAX 256
 #define CODE_CMD_SAVE    1
@@ -972,13 +972,10 @@ static int clamp_delta(int v) {
     return v;
 }
 
-// Pointer acceleration: ~1.25x base so the cursor keeps up without feeling
-// twitchy, plus a mild quadratic term that only adds speed on fast flicks while
-// keeping slow motion precise.
+// Flat 1.4x pointer sensitivity — linear and predictable (the earlier quadratic
+// acceleration felt twitchy/inconsistent). Tune the 7/5 ratio to taste.
 static int mouse_accel(int v) {
-    int a = v < 0 ? -v : v;
-    int s = v < 0 ? -1 : 1;
-    return v * 5 / 4 + s * (a * a) / 48;
+    return v * 7 / 5;
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
@@ -3191,7 +3188,7 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 }
 
 // ---- Windows 11-style centered taskbar ----
-#define TB_BTN 40
+#define TB_BTN 50
 #define TB_GAP 8
 #define TBHIT_NONE  -1
 #define TBHIT_START -2
@@ -3422,9 +3419,9 @@ static const desktop_icon_t g_desktop_icons[] = {
 #define DESKTOP_ICON_COUNT ((int)(sizeof(g_desktop_icons) / sizeof(g_desktop_icons[0])))
 
 static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
-    *w = 84; *h = 86;
-    *x = 40;
-    *y = 40 + i * 100;
+    *w = 104; *h = 108;
+    *x = 44;
+    *y = 48 + i * 124;
 }
 
 static uint32_t desktop_icon_color(const desktop_icon_t *d) {
@@ -3439,8 +3436,8 @@ static void draw_desktop_icons(void) {
         int x, y, w, h;
         desktop_icon_rect(i, &x, &y, &w, &h);
         uint32_t c = desktop_icon_color(d);
-        int isz = 52, ix = x + (w - isz) / 2, iy = y;
-        fill_round_rect(ix, iy, isz, isz, 12, c, RR_ALL);
+        int isz = 64, ix = x + (w - isz) / 2, iy = y;
+        fill_round_rect(ix, iy, isz, isz, 14, c, RR_ALL);
         if (d->kind == WM_WIN_PANEL) {
             uint32_t wc = rgb(255, 255, 255);   // folder motif
             rect(ix + 12, iy + 16, (isz - 24) / 2 + 4, 5, wc);

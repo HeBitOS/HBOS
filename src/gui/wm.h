@@ -5,9 +5,9 @@
 
 #define WM_MAX_WINDOWS 16
 #define WM_TASKBAR_H   44
-#define WM_TITLE_H     34
+#define WM_TITLE_H     42
 #define WM_BORDER_W    4
-#define WM_BTN_W       22
+#define WM_BTN_W       28
 #define WM_BTN_GAP     4
 
 enum {

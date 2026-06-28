@@ -358,13 +358,18 @@ smoke:
 
 run-hdd: run-hdd-bios
 
+# Display backend. SDL grabs the relative PS/2 pointer reliably (the GTK default
+# drops continuous motion under Wayland, which made the mouse look "dead").
+# Override on the command line if needed, e.g.  make run DISPLAY_OPT='-display gtk'
+DISPLAY_OPT ?= -display sdl
+
 run-hdd-bios: $(INSTALL_IMG_BIOS)
 	$(QEMU_ENV) $(QEMU) -m 512M \
 		-device ich9-ahci,id=ahci \
 		-drive file=$(INSTALL_IMG_BIOS),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
 		-netdev user,id=net0 -device e1000,netdev=net0 \
-		-boot c -serial stdio -vga std -monitor none
+		-boot c -serial stdio -vga std -monitor none $(DISPLAY_OPT)
 
 run-hdd-uefi: $(INSTALL_IMG_UEFI)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_HDD.fd

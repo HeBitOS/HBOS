@@ -35,8 +35,8 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-BASE_PX = 16
-LARGE_PX = 32
+BASE_PX = 20
+LARGE_PX = 40
 
 # Full coverage for the base size.
 BASE_RANGES = [
