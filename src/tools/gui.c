@@ -1184,17 +1184,6 @@ static void draw_wallpaper(int w, int h, int light) {
          light ? cyber_text(1) : rgb(239, 240, 241), 1);
 }
 
-static void draw_desktop_tile(int x, int y, int w, int h, const char *title,
-                              const char *value, uint32_t accent, int light) {
-    soft_shadow(x, y, w, h);
-    draw_panel_shell(x, y, w, h, cyber_card_bg_top(light), cyber_card_bg_bot(light),
-                     cyber_border(light), accent);
-    rect(x + 14, y + 12, 18, 4, accent);
-    rect(x + 14, y + 19, 30, 1, rgb_lift(accent, -32));
-    text(x + 16, y + 30, title, cyber_text_muted(light), 1);
-    text_clipped(x + 16, y + 52, x + w - 12, value, cyber_text(light), 1);
-}
-
 static void draw_usage_bar(int x, int y, int w, int h, uint32_t used, uint32_t total, uint32_t color) {
     uint32_t filled = total ? (used * (uint32_t)w) / total : 0;
     if (filled > (uint32_t)w) filled = (uint32_t)w;
@@ -3310,81 +3299,70 @@ static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, i
     gui_dirty_reset();
 }
 
+// Desktop shortcut icons over the wallpaper. Single click opens the target.
+typedef struct { const char *label; int kind; int mode; } desktop_icon_t;
+static const desktop_icon_t g_desktop_icons[] = {
+    {"文件管理器", WM_WIN_PANEL, PANEL_FILES},
+    {"应用",       WM_WIN_PANEL, PANEL_APPS},
+    {"控制台",     WM_WIN_APP,   GUI_APP_DIAG},
+    {"计算器",     WM_WIN_APP,   GUI_APP_CALC},
+};
+#define DESKTOP_ICON_COUNT ((int)(sizeof(g_desktop_icons) / sizeof(g_desktop_icons[0])))
+
+static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
+    *w = 84; *h = 86;
+    *x = 132;
+    *y = 88 + i * 100;
+}
+
+static uint32_t desktop_icon_color(const desktop_icon_t *d) {
+    if (d->kind == WM_WIN_PANEL)
+        return d->mode == PANEL_FILES ? rgb(241, 196, 15) : rgb(52, 152, 219);
+    return app_accent(d->mode);
+}
+
+static void draw_desktop_icons(void) {
+    for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+        const desktop_icon_t *d = &g_desktop_icons[i];
+        int x, y, w, h;
+        desktop_icon_rect(i, &x, &y, &w, &h);
+        uint32_t c = desktop_icon_color(d);
+        int isz = 52, ix = x + (w - isz) / 2, iy = y;
+        fill_round_rect(ix, iy, isz, isz, 12, c, RR_ALL);
+        if (d->kind == WM_WIN_PANEL) {
+            uint32_t wc = rgb(255, 255, 255);   // folder motif
+            rect(ix + 12, iy + 16, (isz - 24) / 2 + 4, 5, wc);
+            rect(ix + 12, iy + 20, isz - 24, isz - 32, wc);
+            rect(ix + 15, iy + 24, isz - 30, isz - 38, c);
+        } else {
+            draw_app_glyph(ix, iy, isz, d->mode);
+        }
+        int tw = text_width(d->label, 1);
+        int lx = x + (w - tw) / 2;
+        text(lx + 1, iy + isz + 6, d->label, rgb(0, 0, 0), 1);          // shadow
+        text(lx, iy + isz + 5, d->label, rgb(245, 247, 250), 1);
+    }
+}
+
+static int hit_desktop_icon(int mx, int my) {
+    for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+        int x, y, w, h;
+        desktop_icon_rect(i, &x, &y, &w, &h);
+        if (mx >= x && mx < x + w && my >= y && my < y + h + 16) return i;
+    }
+    return -1;
+}
+
 static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h, st->theme_light);
-    char line[96];
 
-    draw_panel_shell(126, 12, w - 138, 60,
-                     cyber_card_bg_top(st->theme_light),
-                     cyber_card_bg_bot(st->theme_light),
-                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
-    rect(146, 44, 118, 2, cyber_neon_cyan(st->theme_light));
-    text(146, 16, "系统概览", cyber_text(st->theme_light), 2);
-    text(148, 56, "左侧启动栏打开工具，桌面直接显示当前状态", cyber_text_muted(st->theme_light), 1);
-
+    // Clean desktop: dock + desktop icons over the wallpaper (no dashboard).
     draw_icon(15, 92, st->active == PANEL_FILES, "文件", rgb(85, 180, 120), st->theme_light);
     draw_icon(15, 162, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74), st->theme_light);
     draw_icon(15, 232, st->active == PANEL_SYS, "资源", rgb(196, 116, 230), st->theme_light);
     draw_icon(15, 302, st->active == PANEL_APPS, "应用", rgb(23, 147, 209), st->theme_light);
 
-    uint64_t total = pmm_get_total_mem();
-    uint64_t free = pmm_get_free_mem();
-    uint64_t used = total > free ? total - free : 0;
-    line_u32(line, sizeof(line), "", (uint32_t)(used / 1024), "K used");
-    draw_desktop_tile(142, 88, 150, 74, "内存", line, cyber_neon_purple(st->theme_light), st->theme_light);
-
-    line_u32(line, sizeof(line), "", fs_get_count(), " files");
-    draw_desktop_tile(310, 88, 150, 74, "文件", line, rgb(85, 180, 120), st->theme_light);
-
-    line2(line, sizeof(line), "FS: ", fs_backend_name());
-    draw_desktop_tile(478, 88, 190, 74, "文件系统", line, cyber_neon_cyan(st->theme_light), st->theme_light);
-
-    line2(line, sizeof(line), "Block: ", block_backend_name());
-    draw_desktop_tile(142, 182, 246, 74, "磁盘", line, rgb(230, 184, 74), st->theme_light);
-
-    line_u32(line, sizeof(line), "", (uint32_t)task_get_count(), " tasks");
-    draw_desktop_tile(406, 182, 126, 74, "任务", line, rgb(124, 220, 154), st->theme_light);
-
-    line_u32(line, sizeof(line), "", gui_app_count(), " apps");
-    draw_desktop_tile(550, 182, 118, 74, "应用", line, cyber_neon_cyan(st->theme_light), st->theme_light);
-
-    soft_shadow(142, 282, 250, 126);
-    draw_panel_shell(142, 282, 250, 126,
-                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
-                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
-                     cyber_border(st->theme_light), rgb(85, 180, 120));
-    rect(160, 316, 48, 2, rgb(85, 180, 120));
-    text(160, 298, "最近文件", cyber_text(st->theme_light), 1);
-    char entry[VFS_MAX_NAME];
-    uint32_t entry_type;
-    uint32_t count = 0;
-    while (vfs_readdir_at("/", count, entry, &entry_type) == 0) count++;
-    if (count == 0) {
-        text(160, 330, "根目录为空", cyber_text_muted(st->theme_light), 1);
-        text(160, 354, "按 N 或点文件中新建", cyber_text_muted(st->theme_light), 1);
-    } else {
-        uint32_t shown = count > 4 ? 4 : count;
-        for (uint32_t i = 0; i < shown; i++) {
-            if (vfs_readdir_at("/", i, entry, &entry_type) < 0) continue;
-            line[0] = 0;
-            uint32_t pos = 0;
-            append_str(line, sizeof(line), &pos, entry);
-            append_str(line, sizeof(line), &pos, "  ");
-            append_str(line, sizeof(line), &pos, gui_node_type_label(entry_type));
-            text_clipped(160, 328 + (int)i * 20, 380, line, cyber_text(st->theme_light), 1);
-        }
-    }
-
-    soft_shadow(418, 282, 250, 126);
-    draw_panel_shell(418, 282, 250, 126,
-                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
-                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
-                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
-    rect(436, 316, 48, 2, cyber_neon_cyan(st->theme_light));
-    text(436, 298, "快捷操作", cyber_text(st->theme_light), 1);
-    text(436, 328, "N 新建文件", cyber_text_muted(st->theme_light), 1);
-    text(436, 350, "Enter 打开当前项", cyber_text_muted(st->theme_light), 1);
-    text(436, 372, "Tab/Space 切换窗口", cyber_text_muted(st->theme_light), 1);
+    draw_desktop_icons();
 
     for (int i = 0; i < st->wm.window_count; i++) {
         draw_one_window(w, h, st, st->wm.z_order[i]);
@@ -4507,7 +4485,7 @@ static void cmd_gui(int argc, char **argv) {
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";
     else st.status = mouse_backend_name();
-    gui_open_panel_window(&st, PANEL_FILES);
+    // Boot to a clean desktop (wallpaper + icons); user opens apps from there.
 
     uint64_t surface_bytes = (uint64_t)w * (uint64_t)h * sizeof(uint32_t);
     size_t surface_pages = (size_t)((surface_bytes + GUI_PAGE_SIZE - 1) / GUI_PAGE_SIZE);
@@ -4812,8 +4790,15 @@ static void cmd_gui(int argc, char **argv) {
                                     }
                                 }
                             } else {
+                                int dico = hit_desktop_icon(mx, my);
                                 int panel = hit_panel_shortcut(w, h, mx, my);
-                                if (panel >= 0) {
+                                if (dico >= 0) {
+                                    const desktop_icon_t *d = &g_desktop_icons[dico];
+                                    if (d->kind == WM_WIN_PANEL)
+                                        gui_open_panel_window(&st, d->mode);
+                                    else
+                                        gui_open_window(&st, WM_WIN_APP, d->mode, 0);
+                                } else if (panel >= 0) {
                                     gui_open_panel_window(&st, panel);
                                 } else if (mx >= 10 && mx < 106 && my >= h - 36 && my <= h) {
                                     wm_toggle_start_menu(&st.wm);
