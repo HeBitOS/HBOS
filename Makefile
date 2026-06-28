@@ -207,6 +207,12 @@ $(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) 
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
+# The incbin objects must REASSEMBLE when their embedded blob changes — a normal
+# (not order-only) prerequisite, otherwise a regenerated blob is silently stale.
+$(BUILD_DIR)/graphics/cjk_glyph.o: $(FONT_BIN)
+$(BUILD_DIR)/graphics/gui_glyph.o: $(GUI_FONT_BIN)
+$(BUILD_DIR)/graphics/gui_wallimg.o: $(GUI_WALL_BIN)
+
 # C rules — one generic rule for all subdirectories
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)

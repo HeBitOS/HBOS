@@ -658,18 +658,50 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
 
 // Draw one codepoint with its top at `y`, returning the pen advance. Latin and
 // CJK share a baseline (y + ascent), so mixed text aligns naturally.
+// Resolve a codepoint+scale to a concrete glyph. Prefer the native large size
+// (idx 1 = 2x base px) for even scales when the glyph exists, so titles and big
+// digits render crisply instead of being upscaled from the 16px base. *out_idx
+// is the chosen size, *out_sub the residual draw scale. Because the large size
+// is exactly 2x the base, baselines/advances line up with the base path, so a
+// string mixing both sizes (e.g. a scaled title with a rare uncovered glyph)
+// still aligns on one baseline.
+static int gui_resolve_glyph(uint32_t cp, int scale, gui_glyph_t *g,
+                             int *out_idx, int *out_sub) {
+    if (scale >= 2 && gui_font_size_count() > 1) {
+        int base = gui_font_size_px(0), large = gui_font_size_px(1);
+        if (base > 0 && large > 0 && (scale * base) % large == 0) {
+            int sub = scale * base / large;
+            if (sub >= 1 && gui_font_lookup_n(cp, 1, g)) {
+                *out_idx = 1; *out_sub = sub; return 1;
+            }
+        }
+    }
+    if (gui_font_lookup_n(cp, 0, g)) { *out_idx = 0; *out_sub = scale; return 1; }
+    return 0;
+}
+
+static int gui_cp_advance(uint32_t cp, int scale) {
+    gui_glyph_t g;
+    int idx, sub;
+    if (!gui_resolve_glyph(cp, scale, &g, &idx, &sub)) return 6 * scale;
+    int adv = (int)g.advance * sub;
+    if (adv <= 0) adv = (g.width ? (g.width + 1) : 4) * sub;
+    return adv;
+}
+
 static int draw_text_codepoint(int x, int y, uint32_t cp, uint32_t color, int scale) {
     if (scale < 1) scale = 1;
     gui_glyph_t g;
-    if (!gui_font_lookup(cp, &g)) {
-        if (!gui_font_lookup('?', &g)) return 6 * scale;
+    int idx, sub;
+    if (!gui_resolve_glyph(cp, scale, &g, &idx, &sub)) {
+        if (!gui_resolve_glyph('?', scale, &g, &idx, &sub)) return 6 * scale;
     }
-    int baseline = y + gui_font_ascent() * scale;
-    int gx = x + (int)g.bearing_x * scale;
-    int gy = baseline - (int)g.bearing_y * scale;
-    blit_glyph(gx, gy, &g, color, scale);
-    int adv = (int)g.advance * scale;
-    if (adv <= 0) adv = (g.width ? (g.width + 1) : 4) * scale;
+    int baseline = y + gui_font_ascent_n(idx) * sub;
+    int gx = x + (int)g.bearing_x * sub;
+    int gy = baseline - (int)g.bearing_y * sub;
+    blit_glyph(gx, gy, &g, color, sub);
+    int adv = (int)g.advance * sub;
+    if (adv <= 0) adv = (g.width ? (g.width + 1) : 4) * sub;
     return adv;
 }
 
@@ -685,11 +717,7 @@ static int text_width(const char *s, int scale) {
         int ok = utf8_feed(&utf8, (uint8_t)*s++, &cp);
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
-        gui_glyph_t g;
-        if (!gui_font_lookup(cp, &g)) { w += 6 * scale; continue; }
-        int adv = (int)g.advance * scale;
-        if (adv <= 0) adv = (g.width ? (g.width + 1) : 4) * scale;
-        w += adv;
+        w += gui_cp_advance(cp, scale);
     }
     return w;
 }
@@ -717,14 +745,7 @@ static void text_clipped(int x, int y, int max_x, const char *s, uint32_t color,
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
 
-        gui_glyph_t g;
-        int advance;
-        if (gui_font_lookup(cp, &g)) {
-            advance = (int)g.advance * scale;
-            if (advance <= 0) advance = (g.width ? (g.width + 1) : 4) * scale;
-        } else {
-            advance = 6 * scale;
-        }
+        int advance = gui_cp_advance(cp, scale);
         if (x + advance > max_x) break;
         draw_text_codepoint(x, y, cp, color, scale);
         x += advance;

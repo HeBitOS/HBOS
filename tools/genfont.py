@@ -1,101 +1,94 @@
 #!/usr/bin/env python3
 """
-HBOS GUI Font Generator
-=======================
-Renders an anti-aliased (8-bit grayscale), proportionally-spaced font atlas
-from a TrueType font for use by the GUI compositor. Unlike genhzk.py (which
-produces 1-bit fixed-cell bitmaps for the TUI), this emits per-glyph metrics
-so text can be laid out with real advances/bearings on a shared baseline.
+HBOS GUI Font Generator (multi-size)
+====================================
+Renders anti-aliased (8-bit grayscale), proportionally-spaced glyph atlases from
+a TrueType font for the GUI compositor. Two sizes are baked:
 
-Everything that decides *what* goes into the atlas lives in CONFIG below —
-swap the font or edit the ranges and rebuild; no C changes required.
+  * size 0 (BASE_PX): the full codepoint coverage used for normal 1x text.
+  * size 1 (LARGE_PX = 2x BASE_PX): a smaller set used so scaled-up text (titles,
+    the calculator/clock displays) renders at native resolution instead of being
+    blurrily upscaled from the base size. It covers ASCII/Latin/CJK-punct plus
+    every CJK ideograph that actually appears in the GUI source (so static
+    Chinese titles are crisp) — keeping it tiny.
 
-Binary format ("GFN1", little-endian)
---------------------------------------
-Header (16 bytes):
-  [0x00] u32  magic = 'GFN1'  (bytes 'G','F','N','1')
-  [0x04] u32  glyph_count
-  [0x08] u16  line_height     (recommended vertical advance between lines)
-  [0x0A] u16  ascent          (baseline distance from the top of the line box)
-  [0x0C] u32  reserved (0)
-Glyph table: glyph_count records of 16 bytes, sorted by codepoint:
-  [0x00] u32  codepoint
-  [0x04] u32  bitmap_offset   (byte offset into the bitmap section)
-  [0x08] u8   width           (coverage bitmap width, px)
-  [0x09] u8   height          (coverage bitmap height, px)
-  [0x0A] s8   bearing_x       (left side bearing from the pen, px)
-  [0x0B] s8   bearing_y       (top of glyph above the baseline, px; +up)
-  [0x0C] u8   advance         (pen advance, px)
-  [0x0D] u8[3] pad
-Bitmap section: for each glyph, width*height bytes of 8-bit coverage (0..255),
-row-major, top to bottom.
+Because LARGE_PX is exactly 2x BASE_PX, the renderer can substitute a size-1
+glyph drawn at half the requested scale and the baseline/advance metrics line up
+with what the base size would have produced.
+
+Binary format ("GFN2", little-endian)
+  [0x00] u32 magic = 'GFN2'  (bytes 'G','F','N','2')
+  [0x04] u32 num_sizes
+  Size directory, num_sizes entries of 20 bytes:
+    u16 px, u16 line_height, u16 ascent, u16 reserved,
+    u32 glyph_count, u32 table_offset(abs), u32 bitmap_offset(abs)
+  Then, per size: glyph table (16-byte records sorted by codepoint, bitmap
+  offset relative to that size's bitmap section) followed by the bitmap section.
+  Record: u32 codepoint, u32 bitmap_offset, u8 w, u8 h, s8 bearing_x,
+          s8 bearing_y, u8 advance, u8[3] pad.  Bitmap: w*h bytes coverage.
 """
 
+import glob
 import os
 import struct
 import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-# ---------------------------------------------------------------------------
-# CONFIG — edit this to change the GUI font without touching any C code.
-# ---------------------------------------------------------------------------
-FONT_SIZE = 16  # pixel size used to rasterize (CJK cell ends up ~16px)
+BASE_PX = 16
+LARGE_PX = 32
 
-# Codepoint ranges to include (inclusive start, exclusive end).
-RANGES = [
-    (0x0020, 0x007F),  # Basic Latin (ASCII printable)
-    (0x00A0, 0x0100),  # Latin-1 Supplement (é, ®, °, …)
-    (0x2000, 0x206F),  # General Punctuation (— “ ” … • etc.)
-    (0x2190, 0x21FF),  # Arrows
-    (0x2460, 0x24FF),  # Enclosed alphanumerics (①②…)
-    (0x25A0, 0x25FF),  # Geometric shapes (■ ▲ ● …)
-    (0x2600, 0x26FF),  # Misc symbols
-    (0x3000, 0x3040),  # CJK symbols & punctuation (。、「」…)
-    (0x4E00, 0xA000),  # CJK Unified Ideographs
-    (0xFE30, 0xFE50),  # CJK Compatibility Forms
-    (0xFF00, 0xFFEF),  # Fullwidth Forms (，。！？【】…)
+# Full coverage for the base size.
+BASE_RANGES = [
+    (0x0020, 0x007F), (0x00A0, 0x0100), (0x2000, 0x206F), (0x2190, 0x21FF),
+    (0x2460, 0x24FF), (0x25A0, 0x25FF), (0x2600, 0x26FF), (0x3000, 0x3040),
+    (0x4E00, 0xA000), (0xFE30, 0xFE50), (0xFF00, 0xFFEF),
+]
+
+# Always-included ranges for the large size (latin, digits, punctuation).
+LARGE_BASE_RANGES = [
+    (0x0020, 0x007F), (0x00A0, 0x0100), (0x2000, 0x206F),
+    (0x3000, 0x3040), (0xFF00, 0xFFEF),
 ]
 
 
-def main():
-    font_path = sys.argv[1] if len(sys.argv) > 1 else \
-        'fonts/HarmonyOS_Sans_SC_Regular.ttf'
-    out_path = sys.argv[2] if len(sys.argv) > 2 else 'build/gui_font.bin'
+def scan_source_cjk(roots=('src',)):
+    """Collect CJK codepoints that appear in the GUI source so titles drawn at a
+    large scale render natively. Bounded to whatever the UI actually uses."""
+    found = set()
+    for root in roots:
+        for path in glob.glob(os.path.join(root, '**', '*.c'), recursive=True) + \
+                    glob.glob(os.path.join(root, '**', '*.h'), recursive=True):
+            try:
+                with open(path, encoding='utf-8', errors='ignore') as f:
+                    text = f.read()
+            except OSError:
+                continue
+            for ch in text:
+                cp = ord(ch)
+                if 0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF:
+                    found.add(cp)
+    return found
 
-    print(f"[genfont] Loading font: {font_path} @ {FONT_SIZE}px")
-    font = ImageFont.truetype(font_path, FONT_SIZE)
+
+def render_size(font_path, px, codepoints):
+    """Render one atlas size. Returns (records, line_height, ascent)."""
+    font = ImageFont.truetype(font_path, px)
     ascent, descent = font.getmetrics()
     line_height = ascent + descent
-    pad = FONT_SIZE  # canvas margin so negative bearings still fit
-
-    # Collect candidate codepoints the font actually supports.
-    candidates = []
-    for start, end in RANGES:
-        for cp in range(start, end):
-            candidates.append(cp)
-
-    print(f"[genfont] {len(candidates)} candidate codepoints; rasterizing...")
-
-    records = []      # (cp, w, h, bearing_x, bearing_y, advance, coverage_bytes)
-    canvas_w = pad * 2 + FONT_SIZE * 3
+    pad = px
+    canvas_w = pad * 2 + px * 3
     canvas_h = pad * 2 + line_height
     baseline_y = pad + ascent
 
-    for i, cp in enumerate(candidates):
-        if i and i % 4000 == 0:
-            print(f"[genfont]   {i}/{len(candidates)}...")
+    records = []
+    for cp in sorted(codepoints):
         ch = chr(cp)
         img = Image.new('L', (canvas_w, canvas_h), 0)
-        draw = ImageDraw.Draw(img)
-        # Default anchor 'la': left edge at x=pad, ascender top at y=pad.
-        draw.text((pad, pad), ch, font=font, fill=255)
+        ImageDraw.Draw(img).text((pad, pad), ch, font=font, fill=255)
         bbox = img.getbbox()
-        advance = int(round(font.getlength(ch)))
-        if advance < 0:
-            advance = 0
+        advance = max(0, int(round(font.getlength(ch))))
         if bbox is None:
-            # Whitespace / zero-ink glyph (e.g. space): keep advance, no bitmap.
             if cp == 0x20 or advance > 0:
                 records.append((cp, 0, 0, 0, 0, min(advance, 255), b''))
             continue
@@ -103,42 +96,80 @@ def main():
         w, h = r - l, b - t
         if w <= 0 or h <= 0 or w > 255 or h > 255:
             continue
-        bearing_x = l - pad
-        bearing_y = baseline_y - t  # rows above the baseline (positive up)
-        # Clamp signed bearings to int8.
-        bearing_x = max(-128, min(127, bearing_x))
-        bearing_y = max(-128, min(127, bearing_y))
-        coverage = bytes(img.crop((l, t, r, b)).tobytes())
-        records.append((cp, w, h, bearing_x, bearing_y,
-                        min(advance, 255), coverage))
+        bx = max(-128, min(127, l - pad))
+        by = max(-128, min(127, baseline_y - t))
+        cov = bytes(img.crop((l, t, r, b)).tobytes())
+        records.append((cp, w, h, bx, by, min(advance, 255), cov))
+    return records, line_height, ascent
 
-    records.sort(key=lambda rec: rec[0])
-    print(f"[genfont] {len(records)} glyphs kept")
 
-    if not records:
-        print("[genfont] ERROR: font produced no glyphs")
-        sys.exit(1)
+def codepoints_from_ranges(ranges):
+    s = set()
+    for a, b in ranges:
+        s.update(range(a, b))
+    return s
 
-    # Lay out bitmap section and compute offsets.
-    table = bytearray()
-    bitmaps = bytearray()
-    for cp, w, h, bx, by, adv, cov in records:
-        off = len(bitmaps)
-        table += struct.pack('<IIBBbbB3x', cp, off, w, h, bx, by, adv)
-        bitmaps += cov
+
+def main():
+    font_path = sys.argv[1] if len(sys.argv) > 1 else \
+        'fonts/HarmonyOS_Sans_SC_Regular.ttf'
+    out_path = sys.argv[2] if len(sys.argv) > 2 else 'build/gui_font.bin'
+
+    print(f"[genfont] Loading font: {font_path}")
+    sizes = []  # (px, records, line_height, ascent)
+
+    base_cps = codepoints_from_ranges(BASE_RANGES)
+    print(f"[genfont] base {BASE_PX}px: {len(base_cps)} candidates")
+    recs, lh, asc = render_size(font_path, BASE_PX, base_cps)
+    sizes.append((BASE_PX, recs, lh, asc))
+    print(f"[genfont]   -> {len(recs)} glyphs")
+
+    large_cps = codepoints_from_ranges(LARGE_BASE_RANGES)
+    src_cjk = scan_source_cjk()
+    large_cps |= src_cjk
+    print(f"[genfont] large {LARGE_PX}px: {len(large_cps)} candidates "
+          f"({len(src_cjk)} CJK scanned from source)")
+    recs, lh, asc = render_size(font_path, LARGE_PX, large_cps)
+    sizes.append((LARGE_PX, recs, lh, asc))
+    print(f"[genfont]   -> {len(recs)} glyphs")
+
+    # Assemble. Compute payload offsets after the header + size directory.
+    header_len = 8 + len(sizes) * 20
+    tables = []
+    bitmaps = []
+    for px, recs, lh, asc in sizes:
+        recs.sort(key=lambda r: r[0])
+        table = bytearray()
+        bitmap = bytearray()
+        for cp, w, h, bx, by, adv, cov in recs:
+            off = len(bitmap)
+            table += struct.pack('<IIBBbbB3x', cp, off, w, h, bx, by, adv)
+            bitmap += cov
+        tables.append(bytes(table))
+        bitmaps.append(bytes(bitmap))
+
+    # Lay out: for each size, table then bitmap, sequentially.
+    offset = header_len
+    dir_entries = []
+    payload = bytearray()
+    for i, (px, recs, lh, asc) in enumerate(sizes):
+        table_off = offset + len(payload)
+        payload += tables[i]
+        bitmap_off = offset + len(payload)
+        payload += bitmaps[i]
+        dir_entries.append((px, lh, asc, len(recs), table_off, bitmap_off))
 
     os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
     with open(out_path, 'wb') as f:
-        f.write(b'GFN1')
-        f.write(struct.pack('<I', len(records)))
-        f.write(struct.pack('<HH', line_height, ascent))
-        f.write(struct.pack('<I', 0))
-        f.write(table)
-        f.write(bitmaps)
+        f.write(b'GFN2')
+        f.write(struct.pack('<I', len(sizes)))
+        for px, lh, asc, count, t_off, b_off in dir_entries:
+            f.write(struct.pack('<HHHHIII', px, lh, asc, 0, count, t_off, b_off))
+        f.write(payload)
 
     total = os.path.getsize(out_path)
     print(f"[genfont] Output: {out_path} ({total:,} bytes, "
-          f"{len(records)} glyphs, line_height={line_height}, ascent={ascent})")
+          f"sizes={[d[0] for d in dir_entries]})")
 
 
 if __name__ == '__main__':
