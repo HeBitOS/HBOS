@@ -4408,43 +4408,48 @@ static void draw_start_menu(gui_state_t *st) {
     if (!wm->start_menu_open) return;
     int mx = wm->menu_x, my = wm->menu_y, mw = wm->menu_w, mh = wm->menu_h;
 
+    int light = st->theme_light;
     soft_shadow(mx, my, mw, mh);
-    draw_panel_shell(mx, my, mw, mh,
-                     0xD0000000 | (cyber_card_bg_top(st->theme_light) & 0x00FFFFFF),
-                     0xD0000000 | (cyber_card_bg_bot(st->theme_light) & 0x00FFFFFF),
-                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
-    vgradient(mx + 1, my + 2, mw - 2, 30, cyber_neon_pink(st->theme_light), st->theme_light ? rgb(160, 0, 70) : rgb(180, 0, 90));
-    rect(mx + 1, my + 2, mw - 2, 1, st->theme_light ? rgb(255, 120, 200) : rgb(255, 100, 180));
-    rect(mx + 1, my + 32, mw - 2, 1, st->theme_light ? rgb(200, 205, 210) : rgb(9, 20, 24));
-    rect(mx + 15, my + 25, 78, 2, cyber_neon_yellow(st->theme_light));
-    text(mx + 16, my + 11, "HBOS 工作站", rgb(255, 255, 255), 1);
+    soft_shadow(mx + 2, my + 3, mw - 4, mh - 4);
+
+    // Flat Breeze glass panel + straight border (rounded corners via AA fill).
+    fill_round_rect(mx, my, mw, mh, 10, light ? 0xF4F4F5F7 : 0xF41B1F24, RR_ALL);
+    uint32_t bd = light ? rgb(206, 210, 214) : rgb(58, 63, 70);
+    rect(mx + 10, my, mw - 20, 1, bd);
+    rect(mx + 10, my + mh - 1, mw - 20, 1, bd);
+    rect(mx, my + 10, 1, mh - 20, bd);
+    rect(mx + mw - 1, my + 10, 1, mh - 20, bd);
+
+    // Header.
+    uint32_t accent = rgb(61, 174, 233);
+    int hy = my + (44 - gui_font_line_height()) / 2;
+    text(mx + 16, hy, "HBOS", accent, 1);
+    text(mx + 16 + text_width("HBOS ", 1), hy, "工作站",
+         light ? rgb(120, 126, 132) : rgb(150, 156, 162), 1);
+    rect(mx + 12, my + 43, mw - 24, 1, bd);
 
     static const char *menu_items[] = {
         "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
         "记事本", "计算器", "贪吃蛇", "浏览器", "代码工作台",
         "控制台终端", "时钟", "返回 Shell", "关机"
     };
-    uint32_t menu_colors[13] = {
-        rgb(85, 180, 120), rgb(230, 184, 74), rgb(196, 116, 230),
-        rgb(23, 147, 209), rgb(85, 180, 120), rgb(102, 214, 255),
-        rgb(124, 220, 154), rgb(78, 192, 236), rgb(102, 214, 255),
-        rgb(240, 168, 90), rgb(102, 214, 255), rgb(204, 156, 74),
-        rgb(226, 86, 84)
+    static const uint32_t menu_colors[13] = {
+        0xF1C40F, 0xE67E22, 0x9B59B6, 0x3498DB, 0x2ECC71, 0x3498DB,
+        0x27AE60, 0x3DAEE9, 0x9B59B6, 0xE67E22, 0xE74C3C, 0x95A5A6,
+        0xDA4453
     };
     int count = sizeof(menu_items) / sizeof(menu_items[0]);
     for (int i = 0; i < count; i++) {
-        int iy = my + 40 + i * 28;
-        uint32_t accent = menu_colors[i];
-        if (iy + 26 > my + mh) break;
-        uint32_t item_top = i >= 11 ? (st->theme_light ? rgb(250, 230, 220) : rgb(40, 15, 20)) : (st->theme_light ? rgb(240, 244, 248) : rgb(20, 12, 28));
-        uint32_t item_bot = i >= 11 ? (st->theme_light ? rgb(240, 215, 205) : rgb(25, 8, 12)) : (st->theme_light ? rgb(225, 230, 236) : rgb(12, 8, 18));
-        draw_panel_shell(mx + 6, iy, mw - 12, 26,
-                         0xD0000000 | (item_top & 0x00FFFFFF),
-                         0xD0000000 | (item_bot & 0x00FFFFFF),
-                         st->theme_light ? rgb(190, 195, 200) : rgb(60, 0, 90), accent);
-        rect(mx + 18, iy + 8, 10, 10, accent);
-        rect(mx + 21, iy + 11, 4, 4, st->theme_light ? rgb(240, 244, 248) : rgb(18, 24, 26));
-        text(mx + 38, iy + 8, menu_items[i], cyber_text(st->theme_light), 1);
+        int iy = my + 44 + i * 32;
+        if (iy + 32 > my + mh) break;
+        // small rounded app-colored icon
+        int isz = 22, ix = mx + 12, icy = iy + (32 - isz) / 2;
+        fill_round_rect(ix, icy, isz, isz, 6, menu_colors[i] | 0xFF000000, RR_ALL);
+        rect(ix + isz / 2 - 3, icy + isz / 2 - 3, 6, 6, rgb(255, 255, 255));
+        uint32_t tc = (i == 12) ? rgb(218, 68, 83)                      // 关机 red
+                    : (i == 11) ? (light ? rgb(120, 126, 132) : rgb(170, 176, 182))
+                                : (light ? rgb(40, 44, 48) : rgb(228, 232, 236));
+        text(mx + 44, iy + (32 - gui_font_line_height()) / 2, menu_items[i], tc, 1);
     }
 }
 
@@ -4813,6 +4818,19 @@ static void cmd_gui(int argc, char **argv) {
                         int tb = taskbar_hit(w, h, &st, mx, my);
                         if (tb == TBHIT_START) {
                             wm_toggle_start_menu(&st.wm);
+                            if (st.wm.start_menu_open) {
+                                // Anchor the menu above the centered Start button.
+                                int wins[WM_MAX_WINDOWS];
+                                int n = taskbar_windows(&st, wins, WM_MAX_WINDOWS);
+                                int bx, by;
+                                taskbar_item_xy(0, 1 + TB_PIN_COUNT + n, w, h, &bx, &by);
+                                st.wm.menu_x = bx;
+                                if (st.wm.menu_x + st.wm.menu_w > w - 8)
+                                    st.wm.menu_x = w - 8 - st.wm.menu_w;
+                                if (st.wm.menu_x < 8) st.wm.menu_x = 8;
+                                st.wm.menu_y = h - TASKBAR_H - st.wm.menu_h - 8;
+                                if (st.wm.menu_y < 8) st.wm.menu_y = 8;
+                            }
                             st.status = "开始菜单";
                         } else if (tb >= TBHIT_WIN_BASE) {
                             int slot = tb - TBHIT_WIN_BASE;

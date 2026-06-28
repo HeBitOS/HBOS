@@ -293,10 +293,13 @@ void wm_snap_window(wm_state_t *wm, int idx, int side) {
 void wm_toggle_start_menu(wm_state_t *wm) {
     wm->start_menu_open = !wm->start_menu_open;
     if (wm->start_menu_open) {
+        /* Size only; the GUI repositions x/y to sit above the centered Start
+         * button (header 44 + 32px rows, kept in sync with draw_start_menu /
+         * wm_hit_start_menu). */
+        wm->menu_w = 240;
+        wm->menu_h = 44 + WM_START_MENU_ROWS * 32 + 8;
         wm->menu_x = 10;
-        wm->menu_h = 420;
-        wm->menu_y = wm->desk_h - WM_TASKBAR_H - wm->menu_h;
-        wm->menu_w = 220;
+        wm->menu_y = wm->desk_h - 50 - wm->menu_h;
         if (wm->menu_y < 10) wm->menu_y = 10;
     }
 }
@@ -450,7 +453,7 @@ int wm_hit_start_menu(wm_state_t *wm, int mx, int my) {
     if (!wm->start_menu_open) return -1;
     if (mx >= wm->menu_x && mx < wm->menu_x + wm->menu_w &&
         my >= wm->menu_y && my < wm->menu_y + wm->menu_h) {
-        int row = (my - wm->menu_y - 40) / 28;
+        int row = (my - wm->menu_y - 44) / 32;
         if (row >= 0 && row < WM_START_MENU_ROWS) return row;
     }
     return -1;
