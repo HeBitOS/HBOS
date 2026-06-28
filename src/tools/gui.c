@@ -985,7 +985,7 @@ static int clamp_delta(int v) {
 // acceleration): a speed-dependent ramp made the cursor feel "一会儿快一会儿慢"
 // because variable frame timing binned the same hand speed into different gains.
 // Constant gain = constant feel. Tune MOUSE_GAIN_256 (256 = 1.0x).
-#define MOUSE_GAIN_256 512          // 512/256 = 2.0x, flat
+#define MOUSE_GAIN_256 640          // 640/256 = 2.5x, flat
 static int mouse_accel_fp(int v) {
     return v * MOUSE_GAIN_256;      // pixels * 256
 }
@@ -2369,18 +2369,28 @@ static int code_is_keyword(const char *s, uint32_t len) {
            code_word_eq(s, len, "delete");
 }
 
+// Monospace cell width for the code editor, derived from the active GUI font so
+// it tracks the runtime font-size switch (F2/F3). The editor is column-based, so
+// every glyph must occupy a fixed cell — otherwise the proportional renderer
+// makes characters overlap (advances < glyph widths) and the cursor drifts.
+static int code_cell_w(void) {
+    gui_glyph_t g;
+    if (gui_font_lookup('0', &g) && g.advance > 0) return (int)g.advance + 1;
+    int px = gui_font_size_px(gui_font_active_base_idx());
+    return px > 0 ? px * 3 / 5 : 11;   // ~0.6em fallback
+}
+
+// Draw a syntax span in fixed monospace cells (one glyph per cell, left-aligned).
 static int code_draw_span(int x, int y, int max_x, const char *s,
                           uint32_t start, uint32_t len, uint32_t color) {
-    char tmp[48];
-    while (len > 0 && x < max_x) {
-        uint32_t n = len;
-        if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
-        memcpy(tmp, s + start, n);
-        tmp[n] = 0;
-        text_clipped(x, y, max_x, tmp, color, 1);
-        x += (int)n * 6;
-        start += n;
-        len -= n;
+    int cell = code_cell_w();
+    for (uint32_t k = 0; k < len && x < max_x; k++) {
+        char c = s[start + k];
+        if (c != ' ' && c != '\t') {
+            char tmp[2] = { c, 0 };
+            text_clipped(x, y, max_x, tmp, color, 1);
+        }
+        x += cell;
     }
     return x;
 }
@@ -2543,7 +2553,7 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
                                    l.editor_x + l.editor_w - 10, line, n);
     }
     if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + l.view_rows) {
-        int cx = l.editor_x + l.line_no_w + 10 + (int)cursor_col * 6;
+        int cx = l.editor_x + l.line_no_w + 10 + (int)cursor_col * code_cell_w();
         int cy = l.editor_y + 10 + ((int)cursor_line - st->code_scroll) * l.row_h;
         if (cx > l.editor_x + l.editor_w - 12) cx = l.editor_x + l.editor_w - 12;
         rect(cx, cy - 2, 2, 14, rgb(102, 214, 255));
@@ -4026,7 +4036,7 @@ static int hit_code_editor(int w, int h, gui_state_t *st, int mx, int my, uint32
     uint32_t line = (uint32_t)(st->code_scroll + row);
     uint32_t total = code_line_count(st);
     if (line >= total) line = total ? total - 1 : 0;
-    int col = (mx - (l.editor_x + l.line_no_w + 10)) / 6;
+    int col = (mx - (l.editor_x + l.line_no_w + 10)) / code_cell_w();
     if (col < 0) col = 0;
     if (off) *off = code_offset_for_line_col(st, line, (uint32_t)col);
     return 1;
