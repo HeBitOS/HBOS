@@ -446,18 +446,6 @@ int wm_hit_border(wm_state_t *wm, int mx, int my, int *edge) {
     return -1;
 }
 
-int wm_hit_taskbar(wm_state_t *wm, int mx, int my) {
-    int ty = wm->desk_h - WM_TASKBAR_H;
-    if (my < ty || my >= ty + 32) return -1;
-    int x = 118;
-    for (int i = 0; i < wm->window_count && x < 610; i++) {
-        if (!wm->windows[i].used) continue;
-        if (mx >= x && mx < x + 104) return i;
-        x += 112;
-    }
-    return -1;
-}
-
 int wm_hit_start_menu(wm_state_t *wm, int mx, int my) {
     if (!wm->start_menu_open) return -1;
     if (mx >= wm->menu_x && mx < wm->menu_x + wm->menu_w &&

@@ -1033,33 +1033,6 @@ static void draw_file_action_bar(int tx, int ty, int content_w) {
     }
 }
 
-static void draw_task_button(int x, int y, int w, const char *label, int active, uint32_t color, int light) {
-    (void)color;
-    // Flat Breeze taskbar entry: accent fill when active, neutral otherwise.
-    uint32_t fill = active ? rgb(61, 174, 233) : (light ? rgb(214, 217, 221) : rgb(54, 58, 63));
-    uint32_t bord = active ? rgb(41, 128, 185) : (light ? rgb(196, 200, 204) : rgb(66, 71, 77));
-    rect(x, y, w, 32, fill);
-    border(x, y, w, 32, bord);
-    uint32_t fg = active ? rgb(255, 255, 255) : cyber_text(light);
-    int ty = y + (32 - gui_font_line_height()) / 2;
-    text_clipped(x + 10, ty, x + w - 8, label, fg, 1);
-}
-
-static void draw_icon(int x, int y, int active, const char *label, uint32_t color, int light) {
-    if (active) soft_shadow(x, y, 82, 58);
-    draw_panel_shell(x, y, 82, 58,
-                     active ? rgb_lift(color, 12) : (light ? rgb(240, 244, 248) : rgb(30, 37, 42)),
-                     active ? rgb_lift(color, -28) : (light ? rgb(220, 225, 230) : rgb(15, 19, 23)),
-                     active ? rgb_lift(color, 48) : (light ? rgb(180, 185, 192) : rgb(39, 50, 58)),
-                     color);
-    int gx = x + 14, gy = y + 12;
-    vgradient(gx, gy, 22, 22, rgb_lift(color, 30), rgb_lift(color, -10));
-    border(gx, gy, 22, 22, rgb_lift(color, -30));
-    rect(gx + 5, gy + 7, 12, 8, light ? rgb(20, 30, 40) : rgb(240, 248, 252));
-    text_clipped(x + 42, y + 22, x + 78, label,
-                 active ? cyber_text(light) : cyber_text_muted(light), 1);
-}
-
 static void draw_cursor(int x, int y, int edge) {
     uint32_t c = rgb(238, 246, 255);
     uint32_t d = rgb(20, 27, 34);
@@ -1154,34 +1127,14 @@ static void blit_wallpaper(int DW, int DH) {
 }
 
 static void draw_wallpaper(int w, int h, int light) {
-    char line[32];
     int tb_y = h - TASKBAR_H;
-    int sb_x = 112;
-    uint32_t accent = rgb(61, 174, 233);
 
     // Photographic wallpaper across the whole screen; panels float on top.
     blit_wallpaper(w, h);
-    // Dock column + taskbar: translucent dark glass over the wallpaper.
-    rect_alpha(0, 0, sb_x, tb_y, light ? 0xCCEFF0F1 : 0xD22A2E32);
-    rect(sb_x, 0, 1, tb_y, light ? 0xCCC4C8CC : 0x66000000);
-    rect_alpha(0, tb_y, w, TASKBAR_H, light ? 0xE6E3E5E8 : 0xE62A2E32);
-    rect(0, tb_y, w, 1, light ? rgb(196, 200, 204) : rgb(70, 75, 82));
-
-    // Start button (flat, accent-filled).
-    int by = h - 38;
-    rect(8, by, 100, 32, accent);
-    border(8, by, 100, 32, rgb(41, 128, 185));
-    rect(20, h - 27, 8, 8, rgb(255, 255, 255));
-    text(40, by + (32 - gui_font_line_height()) / 2, "开始", rgb(255, 255, 255), 1);
-
-    // Clock panel (flat).
-    time_line(line, sizeof(line));
-    int cw = 94, cx = w - 8 - cw;
-    rect(cx, by, cw, 32, light ? rgb(214, 217, 221) : rgb(49, 54, 59));
-    border(cx, by, cw, 32, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
-    int tw = text_width(line, 1);
-    text(cx + (cw - tw) / 2, by + (32 - gui_font_line_height()) / 2, line,
-         light ? cyber_text(1) : rgb(239, 240, 241), 1);
+    // Windows 11-style floating taskbar bar (translucent glass); its centered
+    // icon cluster + clock are drawn by draw_taskbar().
+    rect_alpha(0, tb_y, w, TASKBAR_H, light ? 0xF0E9EBEE : 0xEE20242A);
+    rect(0, tb_y, w, 1, light ? rgb(206, 210, 214) : rgb(58, 63, 70));
 }
 
 static void draw_usage_bar(int x, int y, int w, int h, uint32_t used, uint32_t total, uint32_t color) {
@@ -3228,18 +3181,168 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     gui_set_layer_opacity(saved_opacity);
 }
 
-static void draw_taskbar_windows(int h, const gui_state_t *st) {
-    int x = 118;
-    int task_y = h - 36;
-    for (int i = 0; i < st->wm.window_count && x < 610; i++) {
+// ---- Windows 11-style centered taskbar ----
+#define TB_BTN 40
+#define TB_GAP 8
+#define TBHIT_NONE  -1
+#define TBHIT_START -2
+#define TBHIT_WIN_BASE 100
+
+static const struct { const char *label; int panel; } g_taskbar_pins[] = {
+    {"文件", PANEL_FILES},
+    {"磁盘", PANEL_DISK},
+    {"资源", PANEL_SYS},
+    {"应用", PANEL_APPS},
+};
+#define TB_PIN_COUNT ((int)(sizeof(g_taskbar_pins) / sizeof(g_taskbar_pins[0])))
+
+static int taskbar_windows(const gui_state_t *st, int *out, int max) {
+    int n = 0;
+    for (int i = 0; i < st->wm.window_count && n < max; i++) {
         wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, i);
-        if (!win) continue;
-        uint32_t color = cyber_neon_cyan(st->theme_light);
-        int width = 104;
-        draw_task_button(x, task_y, width, gui_window_title(win),
-                         i == st->wm.active_window, color, st->theme_light);
-        x += width + 8;
+        if (win && win->used) out[n++] = i;
     }
+    return n;
+}
+
+static void taskbar_item_xy(int idx, int item_count, int w, int h, int *rx, int *ry) {
+    int total = item_count * TB_BTN + (item_count - 1) * TB_GAP;
+    int sx = (w - total) / 2;
+    if (sx < 8) sx = 8;
+    *rx = sx + idx * (TB_BTN + TB_GAP);
+    *ry = h - TASKBAR_H + (TASKBAR_H - TB_BTN) / 2;
+}
+
+static uint32_t taskbar_panel_color(int panel) {
+    switch (panel) {
+        case PANEL_FILES: return rgb(241, 196, 15);
+        case PANEL_DISK:  return rgb(230, 126, 34);
+        case PANEL_SYS:   return rgb(155, 89, 182);
+        case PANEL_APPS:  return rgb(52, 152, 219);
+        default:          return rgb(61, 174, 233);
+    }
+}
+
+// Small white motif for a panel, tuned for a ~28px icon box.
+static void draw_panel_glyph(int bx, int by, int sz, int panel) {
+    uint32_t wc = rgb(255, 255, 255);
+    switch (panel) {
+        case PANEL_FILES:
+            rect(bx + 5, by + 6, (sz - 10) / 2 + 2, 3, wc);
+            rect(bx + 5, by + 9, sz - 10, sz - 16, wc);
+            rect(bx + 8, by + 12, sz - 16, sz - 21, taskbar_panel_color(panel));
+            break;
+        case PANEL_DISK:
+            fill_round_rect(bx + 5, by + 5, sz - 10, sz - 10, (sz - 10) / 2, wc, RR_ALL);
+            rect(bx + sz / 2 - 1, by + sz / 2 - 1, 3, 3, taskbar_panel_color(panel));
+            break;
+        case PANEL_SYS:
+            rect(bx + 6, by + 10, 4, sz - 16, wc);
+            rect(bx + sz / 2 - 2, by + 6, 4, sz - 12, wc);
+            rect(bx + sz - 10, by + 8, 4, sz - 14, wc);
+            break;
+        case PANEL_APPS:
+        default: {
+            int d = (sz - 14) / 2;
+            for (int r = 0; r < 2; r++)
+                for (int c = 0; c < 2; c++)
+                    rect(bx + 5 + c * (d + 4), by + 5 + r * (d + 4), d, d, wc);
+            break;
+        }
+    }
+}
+
+// Small white motif for an app window icon, tuned for a ~28px icon box.
+static void draw_app_glyph_small(int bx, int by, int sz, int mode) {
+    uint32_t wc = rgb(255, 255, 255);
+    switch (mode) {
+        case GUI_APP_CALC: {
+            int d = (sz - 14) / 2;
+            for (int r = 0; r < 2; r++)
+                for (int c = 0; c < 2; c++)
+                    rect(bx + 5 + c * (d + 4), by + 5 + r * (d + 4), d, d, wc);
+            break;
+        }
+        case GUI_APP_DIAG:
+            rect(bx + 6, by + 8, 3, 3, wc);
+            rect(bx + 9, by + 11, 3, 3, wc);
+            rect(bx + 6, by + 14, 3, 3, wc);
+            rect(bx + 13, by + 17, sz - 19, 3, wc);
+            break;
+        case GUI_APP_NOTES:
+            rect(bx + 6, by + 7, sz - 12, 3, wc);
+            rect(bx + 6, by + 13, sz - 12, 3, wc);
+            rect(bx + 6, by + 19, sz - 16, 3, wc);
+            break;
+        default:
+            fill_round_rect(bx + 8, by + 8, sz - 16, sz - 16, 3, wc, RR_ALL);
+            break;
+    }
+}
+
+static void draw_taskbar(int w, int h, const gui_state_t *st) {
+    int light = st->theme_light;
+    uint32_t accent = rgb(61, 174, 233);
+    int wins[WM_MAX_WINDOWS];
+    int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
+    int item_count = 1 + TB_PIN_COUNT + n;
+
+    for (int i = 0; i < item_count; i++) {
+        int rx, ry;
+        taskbar_item_xy(i, item_count, w, h, &rx, &ry);
+        if (i == 0) {
+            if (st->wm.start_menu_open)
+                fill_round_rect(rx, ry, TB_BTN, TB_BTN, 8, 0x44FFFFFF, RR_ALL);
+            int s = 7, gx = rx + TB_BTN / 2 - 8, gy = ry + TB_BTN / 2 - 8;
+            rect(gx, gy, s, s, accent);
+            rect(gx + s + 2, gy, s, s, accent);
+            rect(gx, gy + s + 2, s, s, accent);
+            rect(gx + s + 2, gy + s + 2, s, s, accent);
+        } else if (i <= TB_PIN_COUNT) {
+            int panel = g_taskbar_pins[i - 1].panel;
+            int isz = 28, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2;
+            fill_round_rect(ix, iy, isz, isz, 7, taskbar_panel_color(panel), RR_ALL);
+            draw_panel_glyph(ix, iy, isz, panel);
+        } else {
+            int slot = wins[i - 1 - TB_PIN_COUNT];
+            wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, slot);
+            int act = (slot == st->wm.active_window);
+            int isz = 28, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2 - 2;
+            if (win->kind == WM_WIN_PANEL) {
+                fill_round_rect(ix, iy, isz, isz, 7, taskbar_panel_color(win->mode), RR_ALL);
+                draw_panel_glyph(ix, iy, isz, win->mode);
+            } else {
+                fill_round_rect(ix, iy, isz, isz, 7, app_accent(win->mode), RR_ALL);
+                draw_app_glyph_small(ix, iy, isz, win->mode);
+            }
+            rect(rx + TB_BTN / 2 - 7, ry + TB_BTN - 1, 14, 3,
+                 act ? accent : (light ? rgb(150, 154, 158) : rgb(150, 155, 160)));
+        }
+    }
+
+    char line[32];
+    time_line(line, sizeof(line));
+    int tw = text_width(line, 1);
+    text(w - 16 - tw, h - TASKBAR_H + (TASKBAR_H - gui_font_line_height()) / 2,
+         line, light ? cyber_text(1) : rgb(235, 238, 242), 1);
+}
+
+static int taskbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
+    int wins[WM_MAX_WINDOWS];
+    int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
+    int item_count = 1 + TB_PIN_COUNT + n;
+    int ry = h - TASKBAR_H + (TASKBAR_H - TB_BTN) / 2;
+    if (my < ry || my >= ry + TB_BTN) return TBHIT_NONE;
+    for (int i = 0; i < item_count; i++) {
+        int rx, ryy;
+        taskbar_item_xy(i, item_count, w, h, &rx, &ryy);
+        if (mx >= rx && mx < rx + TB_BTN) {
+            if (i == 0) return TBHIT_START;
+            if (i <= TB_PIN_COUNT) return i - 1;            // pin index
+            return TBHIT_WIN_BASE + wins[i - 1 - TB_PIN_COUNT];
+        }
+    }
+    return TBHIT_NONE;
 }
 
 static void draw_gui_screen(int w, int h, gui_state_t *st) {
@@ -3311,8 +3414,8 @@ static const desktop_icon_t g_desktop_icons[] = {
 
 static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
     *w = 84; *h = 86;
-    *x = 132;
-    *y = 88 + i * 100;
+    *x = 40;
+    *y = 40 + i * 100;
 }
 
 static uint32_t desktop_icon_color(const desktop_icon_t *d) {
@@ -3356,12 +3459,8 @@ static int hit_desktop_icon(int mx, int my) {
 static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h, st->theme_light);
 
-    // Clean desktop: dock + desktop icons over the wallpaper (no dashboard).
-    draw_icon(15, 92, st->active == PANEL_FILES, "文件", rgb(85, 180, 120), st->theme_light);
-    draw_icon(15, 162, st->active == PANEL_DISK, "磁盘", rgb(230, 184, 74), st->theme_light);
-    draw_icon(15, 232, st->active == PANEL_SYS, "资源", rgb(196, 116, 230), st->theme_light);
-    draw_icon(15, 302, st->active == PANEL_APPS, "应用", rgb(23, 147, 209), st->theme_light);
-
+    // Clean desktop: just shortcut icons over the wallpaper (launchers live on
+    // the Windows 11-style bottom taskbar now, not a left dock).
     draw_desktop_icons();
 
     for (int i = 0; i < st->wm.window_count; i++) {
@@ -3381,7 +3480,7 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
         rect(px + pw - 7, py + 4, 3, ph - 8, accent);
     }
 
-    draw_taskbar_windows(h, st);
+    draw_taskbar(w, h, st);
 }
 
 static file_t *selected_file(gui_state_t *st) {
@@ -3939,23 +4038,6 @@ static int hit_code_file(int w, int h, const gui_state_t *st, int mx, int my) {
     uint32_t file_idx = start + (uint32_t)idx;
     if (idx >= 0 && idx < l.file_rows && file_idx < count) return (int)file_idx;
     return -1;
-}
-
-static int hit_panel_shortcut(int w, int h, int mx, int my) {
-    (void)w;
-    (void)h;
-    if (mx >= 15 && mx < 97) {
-        if (my >= 92 && my < 150) return PANEL_FILES;
-        if (my >= 162 && my < 220) return PANEL_DISK;
-        if (my >= 232 && my < 290) return PANEL_SYS;
-        if (my >= 302 && my < 360) return PANEL_APPS;
-    }
-    return -1;
-}
-
-static int hit_task_window(int h, const gui_state_t *st, int mx, int my) {
-    (void)h;
-    return wm_hit_taskbar((wm_state_t *)&st->wm, mx, my);
 }
 
 static void snake_move(gui_state_t *st, int dx, int dy) {
@@ -4722,14 +4804,20 @@ static void cmd_gui(int argc, char **argv) {
                             }
                         }
                     } else {
-                        int task_idx = hit_task_window(h, &st, mx, my);
-                        if (task_idx >= 0) {
-                            wm_window_t *tw = wm_get_window(&st.wm, task_idx);
+                        int tb = taskbar_hit(w, h, &st, mx, my);
+                        if (tb == TBHIT_START) {
+                            wm_toggle_start_menu(&st.wm);
+                            st.status = "开始菜单";
+                        } else if (tb >= TBHIT_WIN_BASE) {
+                            int slot = tb - TBHIT_WIN_BASE;
+                            wm_window_t *tw = wm_get_window(&st.wm, slot);
                             if (tw && tw->state == WM_STATE_MINIMIZED) {
-                                wm_restore_window(&st.wm, task_idx);
+                                wm_restore_window(&st.wm, slot);
                             }
-                            gui_focus_window(&st, task_idx);
+                            gui_focus_window(&st, slot);
                             st.status = "已切换窗口";
+                        } else if (tb >= 0 && tb < TB_PIN_COUNT) {
+                            gui_open_panel_window(&st, g_taskbar_pins[tb].panel);
                         } else {
                             int title_idx = hit_window_titlebar(w, h, &st, mx, my);
                             if (title_idx >= 0) {
@@ -4791,18 +4879,12 @@ static void cmd_gui(int argc, char **argv) {
                                 }
                             } else {
                                 int dico = hit_desktop_icon(mx, my);
-                                int panel = hit_panel_shortcut(w, h, mx, my);
                                 if (dico >= 0) {
                                     const desktop_icon_t *d = &g_desktop_icons[dico];
                                     if (d->kind == WM_WIN_PANEL)
                                         gui_open_panel_window(&st, d->mode);
                                     else
                                         gui_open_window(&st, WM_WIN_APP, d->mode, 0);
-                                } else if (panel >= 0) {
-                                    gui_open_panel_window(&st, panel);
-                                } else if (mx >= 10 && mx < 106 && my >= h - 36 && my <= h) {
-                                    wm_toggle_start_menu(&st.wm);
-                                    st.status = "开始菜单";
                                 } else {
                                     int action = hit_action(w, h, &st, mx, my);
                                     if (action >= FILE_ACTION_BASE) {

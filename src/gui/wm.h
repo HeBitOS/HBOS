@@ -102,7 +102,6 @@ int          wm_hit_close(wm_state_t *wm, int mx, int my);
 int          wm_hit_minimize(wm_state_t *wm, int mx, int my);
 int          wm_hit_maximize(wm_state_t *wm, int mx, int my);
 int          wm_hit_border(wm_state_t *wm, int mx, int my, int *edge);
-int          wm_hit_taskbar(wm_state_t *wm, int mx, int my);
 int          wm_hit_start_menu(wm_state_t *wm, int mx, int my);
 void         wm_update_animations(wm_state_t *wm);
 int          wm_has_active_animations(wm_state_t *wm);
