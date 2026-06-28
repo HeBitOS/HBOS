@@ -35,8 +35,10 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-BASE_PX = 20
-LARGE_PX = 40
+# GUI base font size. This is the single knob for overall text size; the chrome
+# constants in gui.c / wm.h are tuned to roughly match it. LARGE_PX must stay 2x.
+BASE_PX = 18
+LARGE_PX = 36
 
 # Full coverage for the base size.
 BASE_RANGES = [

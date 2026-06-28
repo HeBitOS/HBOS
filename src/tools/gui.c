@@ -48,7 +48,7 @@ extern int hbos_gcc_last_return(void);
 #define ACTION_H 28
 #define FILE_ACTION_COUNT 7
 #define GUI_MOUSE_POLL_BUDGET 16
-#define TASKBAR_H 56
+#define TASKBAR_H 50
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
 #define BROWSER_PAGE_CAP 2048
@@ -59,7 +59,7 @@ extern int hbos_gcc_last_return(void);
 #define SNAKE_H 10
 #define GUI_PAGE_SIZE 4096ULL
 #define FILE_LIST_ROWS 8
-#define FILE_ROW_H 32
+#define FILE_ROW_H 30
 #define NOTE_FILE_ROWS 7
 #define GUI_PATH_MAX 256
 #define CODE_CMD_SAVE    1
@@ -3188,7 +3188,7 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 }
 
 // ---- Windows 11-style centered taskbar ----
-#define TB_BTN 50
+#define TB_BTN 46
 #define TB_GAP 8
 #define TBHIT_NONE  -1
 #define TBHIT_START -2
@@ -3419,9 +3419,9 @@ static const desktop_icon_t g_desktop_icons[] = {
 #define DESKTOP_ICON_COUNT ((int)(sizeof(g_desktop_icons) / sizeof(g_desktop_icons[0])))
 
 static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
-    *w = 104; *h = 108;
-    *x = 44;
-    *y = 48 + i * 124;
+    *w = 96; *h = 100;
+    *x = 42;
+    *y = 46 + i * 112;
 }
 
 static uint32_t desktop_icon_color(const desktop_icon_t *d) {
@@ -3436,8 +3436,8 @@ static void draw_desktop_icons(void) {
         int x, y, w, h;
         desktop_icon_rect(i, &x, &y, &w, &h);
         uint32_t c = desktop_icon_color(d);
-        int isz = 64, ix = x + (w - isz) / 2, iy = y;
-        fill_round_rect(ix, iy, isz, isz, 14, c, RR_ALL);
+        int isz = 58, ix = x + (w - isz) / 2, iy = y;
+        fill_round_rect(ix, iy, isz, isz, 13, c, RR_ALL);
         if (d->kind == WM_WIN_PANEL) {
             uint32_t wc = rgb(255, 255, 255);   // folder motif
             rect(ix + 12, iy + 16, (isz - 24) / 2 + 4, 5, wc);
