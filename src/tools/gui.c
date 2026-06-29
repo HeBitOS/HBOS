@@ -3281,27 +3281,54 @@ static void draw_panel_glyph(int bx, int by, int sz, int panel) {
     }
 }
 
-// Small white motif for an app window icon, tuned for a ~28px icon box.
+// Small white motif for an app window icon, tuned for a ~28px icon box. Every
+// app mode gets a distinct, recognizable shape — without this the taskbar drew
+// most running apps as an identical featureless white square.
 static void draw_app_glyph_small(int bx, int by, int sz, int mode) {
     uint32_t wc = rgb(255, 255, 255);
+    int cx = bx + sz / 2, cy = by + sz / 2;
     switch (mode) {
-        case GUI_APP_CALC: {
+        case GUI_APP_NOTES:                              // 三行文字
+            rect(bx + 6, by + 7, sz - 12, 3, wc);
+            rect(bx + 6, by + 13, sz - 12, 3, wc);
+            rect(bx + 6, by + 19, sz - 16, 3, wc);
+            break;
+        case GUI_APP_CALC: {                             // 2x2 按键
             int d = (sz - 14) / 2;
             for (int r = 0; r < 2; r++)
                 for (int c = 0; c < 2; c++)
                     rect(bx + 5 + c * (d + 4), by + 5 + r * (d + 4), d, d, wc);
             break;
         }
-        case GUI_APP_DIAG:
+        case GUI_APP_UWC:                                // 柱状图
+            rect(bx + 6,  by + 14, 4, 8,  wc);
+            rect(bx + 12, by + 8,  4, 14, wc);
+            rect(bx + 18, by + 11, 4, 11, wc);
+            break;
+        case GUI_APP_SNAKE:                              // 阶梯方块
+            rect(bx + 5,  by + 17, 6, 6, wc);
+            rect(bx + 11, by + 11, 6, 6, wc);
+            rect(bx + 17, by + 5,  6, 6, wc);
+            break;
+        case GUI_APP_BROWSER:                            // 窗口/地球边框
+            rect(bx + 5,  by + 6,  sz - 10, 3, wc);
+            rect(bx + 5,  by + 19, sz - 10, 3, wc);
+            rect(bx + 5,  by + 6,  3, sz - 13, wc);
+            rect(bx + sz - 8, by + 6, 3, sz - 13, wc);
+            break;
+        case GUI_APP_CODE:                               // "/" 斜杠
+            for (int k = 0; k < sz - 14; k++)
+                rect(bx + sz - 9 - k, by + 6 + k, 3, 2, wc);
+            break;
+        case GUI_APP_DIAG:                               // ">_" 提示符
             rect(bx + 6, by + 8, 3, 3, wc);
             rect(bx + 9, by + 11, 3, 3, wc);
             rect(bx + 6, by + 14, 3, 3, wc);
             rect(bx + 13, by + 17, sz - 19, 3, wc);
             break;
-        case GUI_APP_NOTES:
-            rect(bx + 6, by + 7, sz - 12, 3, wc);
-            rect(bx + 6, by + 13, sz - 12, 3, wc);
-            rect(bx + 6, by + 19, sz - 16, 3, wc);
+        case GUI_APP_CLOCK:                              // 时钟指针
+            rect(cx - 1, by + 6, 3, sz / 2 - 6, wc);
+            rect(cx - 1, cy - 1, sz / 2 - 7, 3, wc);
             break;
         default:
             fill_round_rect(bx + 8, by + 8, sz - 16, sz - 16, 3, wc, RR_ALL);
