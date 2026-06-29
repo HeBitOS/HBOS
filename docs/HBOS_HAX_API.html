@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  @page { size: A4; margin: 2cm 2.2cm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans CJK SC", "WenQuanYi Zen Hei", "HarmonyOS Sans SC", "Source Han Sans SC", sans-serif;
+         color: #1a1a1a; font-size: 10.5pt; line-height: 1.55; }
+  h1.cover-title { font-size: 38pt; font-weight: 800; margin: 0; letter-spacing: 1px; }
+  .cover { height: 25.6cm; position: relative; page-break-after: always; }
+  .cover .brand { font-size: 13pt; font-weight: 800; color: #0aa6dd; letter-spacing: 2px; }
+  .cover .sub { font-size: 17pt; font-weight: 600; color: #333; margin-top: 4px; }
+  .cover .tag { font-size: 13pt; color: #0aa6dd; font-weight:700; }
+  .cover .block { position: absolute; top: 9cm; left: 0; right: 0; }
+  .cover .diag { position: absolute; left: -2.2cm; right: -2.2cm; bottom: 0; height: 9cm;
+                 background: linear-gradient(115deg, #14a6e0 0%, #14a6e0 60%, #0f86c0 60%, #0f86c0 100%); }
+  .cover .foot { position: absolute; bottom: 0.6cm; left: 0; color: #fff; font-size: 9pt; z-index: 2; }
+  h1 { font-size: 23pt; font-weight: 800; color: #111; border: none; margin: 0 0 2px; }
+  h1 .en { display:block; font-size: 13pt; font-weight: 700; color: #0aa6dd; letter-spacing:1px; }
+  h2 { font-size: 15pt; font-weight: 800; color: #0c6fa6; margin: 18px 0 6px; }
+  h3 { font-size: 12pt; font-weight: 700; color: #222; margin: 13px 0 4px;
+       font-family: ui-monospace, "DejaVu Sans Mono", monospace; }
+  .chapter { page-break-before: always; }
+  p { margin: 5px 0; }
+  code, .mono { font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size: 9.5pt; }
+  pre { background: #f3f6f9; border-left: 3px solid #14a6e0; padding: 9px 12px; margin: 8px 0;
+        font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size: 9pt; line-height:1.45;
+        white-space: pre-wrap; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 9.5pt; }
+  th { background: #c9d4dc; text-align: left; padding: 5px 8px; font-weight: 700; }
+  td { border-bottom: 1px solid #dde3e8; padding: 5px 8px; vertical-align: top; }
+  tr:nth-child(even) td { background: #f6f8fa; }
+  .toc div { margin: 2px 0; }
+  .toc .c { font-weight: 800; color: #0c6fa6; margin-top: 10px; font-size: 11.5pt; }
+  .toc .s { margin-left: 18px; color:#333; }
+  .note { background:#eef7fc; border:1px solid #bfe3f4; padding:7px 10px; border-radius:4px; margin:8px 0; font-size:9.5pt;}
+  .kbd { background:#222; color:#fff; border-radius:3px; padding:1px 6px; font-size:9pt; font-family:ui-monospace,monospace;}
+  .small { color:#666; font-size: 9pt; }
+</style>
+</head>
+<body>
+
+<!-- ── 封面 ── -->
+<div style="page-break-after: always;">
+  <div style="height:5.5cm;"></div>
+  <div style="font-size:13pt; font-weight:800; color:#0aa6dd; letter-spacing:2px;">HBOS · 鸿蒙裸机内核操作系统</div>
+  <div style="font-size:40pt; font-weight:800; color:#111; margin:6px 0;">HBOS 应用开发手册</div>
+  <div style="font-size:16pt; font-weight:600; color:#333;">HAX Application Development Guide &nbsp;·&nbsp; <span style="color:#0aa6dd;font-weight:700;">.hax / C 版</span></div>
+  <div style="height:5cm;"></div>
+  <div style="background:#14a6e0; color:#fff; padding:22px 18px; font-size:11pt; font-weight:600;">
+    XINGJI · HBOS OPERATING SYSTEM<br>
+    <span style="font-size:9.5pt; font-weight:400;">2026/06/29 &nbsp;·&nbsp; VERSION 1.0 &nbsp;·&nbsp; HBOS v0.1-beta3</span>
+  </div>
+</div>
+
+<!-- ── 目录 ── -->
+<div class="chapter" style="page-break-before: always;">
+<h1 style="page-break-before:always;">目录<span class="en">CONTENTS</span></h1>
+<div class="toc">
+  <div class="c">第 1 章 — 关于、编译与专有类型</div>
+  <div class="s">1.1 关于本手册</div>
+  <div class="s">1.2 什么是 HAX 应用（.hax）</div>
+  <div class="s">1.3 自动导入机制：把应用放进 ./app</div>
+  <div class="s">1.4 编译为 HAX 应用</div>
+  <div class="s">1.5 专有类型概览</div>
+  <div class="s">1.6 应用元数据 HAX_APP()</div>
+  <div class="c">第 2 章 — HAX SDK（终端/通用）</div>
+  <div class="s">2.1 文本输入输出</div>
+  <div class="s">2.2 文件操作</div>
+  <div class="s">2.3 系统服务</div>
+  <div class="c">第 3 章 — 运行与发现</div>
+  <div class="s">3.1 TUI 与 GUI 应用</div>
+  <div class="s">3.2 apps / run 命令</div>
+  <div class="s">3.3 在图形桌面运行</div>
+  <div class="c">第 4 章 — 完整示例</div>
+  <div class="s">4.1 hello —— 最小应用</div>
+  <div class="s">4.2 guess —— 猜数字游戏</div>
+  <div class="c">附录 A — 底层 POSIX 系统调用</div>
+</div>
+</div>
+
+<!-- ── 第 1 章 ── -->
+<div class="chapter" style="page-break-before: always;">
+<h1 style="page-break-before:always;">第 1 章<span class="en">ABOUT, COMPILE &amp; TYPES</span></h1>
+<p>本章介绍 HAX 应用格式、它的自动导入机制、如何编译，以及 SDK 提供的专有类型。</p>
+
+<h2>1.1 关于本手册</h2>
+<p>本手册面向想在 HBOS 上开发应用的用户。HBOS 提供一套名为 <b>HAX</b>（HBOS Application
+eXecutable）的应用机制：你只需用 C 写一个 <code>main()</code>，包含 <code>&lt;hax.h&gt;</code>，
+把源码放进项目的 <code>./app</code> 目录，执行 <code>make</code>，应用就会被编译、打包并在系统启动后
+<b>自动出现</b>——无需改动内核、无需手动注册。应用可在终端（TUI）运行，也可从图形桌面（GUI）启动。</p>
+
+<h2>1.2 什么是 HAX 应用（.hax）</h2>
+<p>一个 <code>.hax</code> 文件在底层就是<b>标准 ELF64 用户态可执行程序</b>，运行在
+<code>0x1000000000</code> 起始的用户地址空间，通过 <code>int 0x80</code> 进入内核。它与普通 ELF 的唯一区别是
+携带了一段自描述元数据 <code>.haxmeta</code>，使系统能识别应用名、描述和类型。扩展名 <code>.hax</code>
+是 HBOS 专用的标记，<b>与示范规范中的 .epf / .elf 不同</b>，用于让构建系统区分“需要自动导入的应用”。</p>
+
+<h2>1.3 自动导入机制：把应用放进 ./app</h2>
+<p>核心逻辑非常简单：<b>只要 <code>./app</code> 目录里有编译产物（.hax），它就会被加入系统。</b></p>
+<table>
+<tr><th>步骤</th><th>发生了什么</th></tr>
+<tr><td>① 编译</td><td><code>make</code> 把每个 <code>app/*.c</code> 用 HAX 运行时链接为 <code>build/app/&lt;名&gt;.hax</code></td></tr>
+<tr><td>② 打包</td><td><code>tools/genhax.py</code> 读取每个 <code>.hax</code> 的 <code>.haxmeta</code> 段，拼接二进制并生成应用清单</td></tr>
+<tr><td>③ 嵌入</td><td>清单与二进制 blob 一并编译进内核镜像</td></tr>
+<tr><td>④ 注册</td><td>系统启动后，应用表立即可用——<code>apps</code> 能看到它，<code>run &lt;名&gt;</code> 能运行它</td></tr>
+</table>
+<div class="note">你也可以把别处<b>预编译好的</b> <code>.hax</code>（标准 ELF64 + <code>.haxmeta</code>）直接丢进
+<code>./app</code>，下次 <code>make</code> 会一并打包进系统。</div>
+
+<h2>1.4 编译为 HAX 应用</h2>
+<p>通常你什么都不用做——<code>make</code> 会自动构建 <code>./app</code> 下的所有应用。若要单独构建：</p>
+<pre>make hax-apps          # 仅构建所有 .hax 应用
+make                   # 构建整个系统（含 .hax 自动打包）</pre>
+<p>手动编译时，HAX 应用等价于一个链接了 HBOS 用户态 libc + crt0 的 ELF64：</p>
+<pre>gcc -c -m64 -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone \
+    -mno-sse -mno-sse2 -Iapp/include -Isrc/user -Isrc/user/libc \
+    app/hello.c -o hello.o
+ld  -m elf_x86_64 -static -nostdlib -T user.ld \
+    &lt;用户态 libc 目标文件...&gt; hello.o -o hello.hax</pre>
+
+<h2>1.5 专有类型概览</h2>
+<p><code>&lt;hax.h&gt;</code> 定义了一组统一的定宽类型与颜色类型：</p>
+<table>
+<tr><th>类型</th><th>长度（字节）</th><th>说明</th></tr>
+<tr><td><code>HI8 / HU8</code></td><td>1</td><td>8 位有/无符号整型</td></tr>
+<tr><td><code>HI16 / HU16</code></td><td>2</td><td>16 位有/无符号整型</td></tr>
+<tr><td><code>HI32 / HU32</code></td><td>4</td><td>32 位有/无符号整型</td></tr>
+<tr><td><code>HI64 / HU64</code></td><td>8</td><td>64 位有/无符号整型</td></tr>
+<tr><td><code>HCOLOR</code></td><td>4</td><td>0xRRGGBB 颜色值</td></tr>
+<tr><td><code>hax_meta_t</code></td><td>104</td><td>应用自描述元数据（见 1.6）</td></tr>
+</table>
+
+<h2>1.6 应用元数据 HAX_APP()</h2>
+<p>在源文件顶层调用一次 <code>HAX_APP()</code> 宏，声明应用名、描述与类型。它会把一个
+<code>hax_meta_t</code> 结构放进 <code>.haxmeta</code> 段，仅供构建工具识别，不参与运行时加载。</p>
+<pre>HAX_APP("hello", "我的第一个 HBOS 应用", HAX_KIND_TUI);</pre>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td><code>name</code></td><td>应用名（&le;31 字节），<code>run</code> 命令使用，须唯一</td></tr>
+<tr><td><code>desc</code></td><td>一句话描述（&le;63 字节）</td></tr>
+<tr><td><code>kind</code></td><td><code>HAX_KIND_TUI</code> / <code>HAX_KIND_GUI</code> / <code>HAX_KIND_BOTH</code></td></tr>
+</table>
+</div>
+
+<!-- ── 第 2 章 ── -->
+<div class="chapter" style="page-break-before: always;">
+<h1 style="page-break-before:always;">第 2 章<span class="en">HAX SDK</span></h1>
+<p>SDK 是对 HBOS 用户态 libc 与系统调用的轻量封装，让常见操作一行搞定。所有函数声明在
+<code>&lt;hax.h&gt;</code>。</p>
+
+<h2>2.1 文本输入输出</h2>
+
+<h3>void hax_print(const char *s);</h3>
+<p>输出字符串，不换行。</p>
+
+<h3>void hax_println(const char *s);</h3>
+<p>输出字符串并换行。</p>
+
+<h3>hax_printf(fmt, ...);</h3>
+<p>格式化输出，用法同标准 <code>printf</code>。支持 <code>%d %u %x %s %c %p</code> 等。</p>
+<pre>hax_printf("PID=%d 名称=%s\n", hax_pid(), "demo");</pre>
+
+<h3>int hax_input(char *buf, int cap);</h3>
+<p>从标准输入读取一行到 <code>buf</code>（自动去除结尾换行），返回字符串长度；读到 EOF 返回 <code>-1</code>。</p>
+<pre>char name[64];
+hax_print("你叫什么名字? ");
+if (hax_input(name, sizeof(name)) &gt;= 0)
+    hax_printf("你好，%s！\n", name);</pre>
+
+<h3>int hax_getch(void);</h3>
+<p>读取一个字符，无字符返回 <code>-1</code>。</p>
+
+<h2>2.2 文件操作</h2>
+
+<h3>long hax_read_file(const char *path, void *buf, long cap);</h3>
+<p>读取整个文件到 <code>buf</code>（最多 <code>cap</code> 字节），返回读到的字节数；失败返回 <code>-1</code>。</p>
+
+<h3>long hax_write_file(const char *path, const void *buf, long len);</h3>
+<p>把 <code>buf</code> 的 <code>len</code> 字节写入文件（覆盖创建），返回写入字节数；失败返回 <code>-1</code>。</p>
+<pre>const char *msg = "hello hbos\n";
+hax_write_file("/tmp/note.txt", msg, 11);
+
+char buf[256];
+long n = hax_read_file("/tmp/note.txt", buf, sizeof(buf));
+hax_printf("读到 %ld 字节\n", n);</pre>
+
+<h2>2.3 系统服务</h2>
+<table>
+<tr><th>函数</th><th>说明</th></tr>
+<tr><td><code>void hax_sleep(unsigned sec);</code></td><td>休眠指定秒数</td></tr>
+<tr><td><code>void hax_exit(int code);</code></td><td>以状态码退出应用</td></tr>
+<tr><td><code>int&nbsp; hax_pid(void);</code></td><td>返回当前进程 ID</td></tr>
+</table>
+<p>更底层的能力（fork/socket/mmap 等）可直接使用 libc 或 POSIX 系统调用，见附录 A。</p>
+</div>
+
+<!-- ── 第 3 章 ── -->
+<div class="chapter" style="page-break-before: always;">
+<h1 style="page-break-before:always;">第 3 章<span class="en">RUN &amp; DISCOVERY</span></h1>
+
+<h2>3.1 TUI 与 GUI 应用</h2>
+<table>
+<tr><th>kind</th><th>含义</th><th>入口</th></tr>
+<tr><td><code>HAX_KIND_TUI</code></td><td>终端应用</td><td>命令行 <code>run</code>，或在 GUI 终端窗口运行</td></tr>
+<tr><td><code>HAX_KIND_GUI</code></td><td>图形/桌面应用</td><td>出现在桌面启动器，启动到终端窗口运行</td></tr>
+<tr><td><code>HAX_KIND_BOTH</code></td><td>两者皆可</td><td>两种入口都注册</td></tr>
+</table>
+<div class="note">当前版本中，GUI 类应用在 HBOS 图形终端窗口内运行其文本界面。直接对窗口
+framebuffer 绘制的 GUI 窗体 API（创建窗口、画点/线/文本、按钮控件等）为后续版本预留。</div>
+
+<h2>3.2 apps / run 命令</h2>
+<pre>HBOS&gt; apps
+hello - 最小 HAX 示例：问候并回显参数  [TUI .hax]
+guess - 猜数字小游戏（1-100）          [GUI .hax]
+
+HBOS&gt; run hello 星际 你好
+你好，HBOS！这是一个 .hax 应用。
+我的 PID 是 7
+收到参数: 星际 你好</pre>
+<table>
+<tr><th>命令</th><th>作用</th></tr>
+<tr><td><code>apps</code></td><td>列出所有应用（含自动发现的 .hax，带 [TUI]/[GUI] 标签）</td></tr>
+<tr><td><code>run &lt;名&gt; [参数...]</code></td><td>运行应用；先匹配内建应用，未命中再匹配 .hax 应用</td></tr>
+</table>
+
+<h2>3.3 在图形桌面运行</h2>
+<p>在 GUI 桌面打开“终端”窗口，即可像命令行一样输入 <code>apps</code> 与 <code>run &lt;名&gt;</code>。
+GUI 类应用的输出会显示在终端窗口中。</p>
+</div>
+
+<!-- ── 第 4 章 ── -->
+<div class="chapter" style="page-break-before: always;">
+<h1 style="page-break-before:always;">第 4 章<span class="en">EXAMPLES</span></h1>
+
+<h2>4.1 hello —— 最小应用</h2>
+<pre>#include &lt;hax.h&gt;
+
+HAX_APP("hello", "最小 HAX 示例：问候并回显参数", HAX_KIND_TUI);
+
+int main(int argc, char **argv) {
+    hax_println("你好，HBOS！这是一个 .hax 应用。");
+    hax_printf("我的 PID 是 %d\n", hax_pid());
+
+    if (argc &gt; 1) {
+        hax_print("收到参数:");
+        for (int i = 1; i &lt; argc; i++) hax_printf(" %s", argv[i]);
+        hax_print("\n");
+    }
+    return 0;
+}</pre>
+
+<h2>4.2 guess —— 猜数字游戏</h2>
+<pre>#include &lt;hax.h&gt;
+
+HAX_APP("guess", "猜数字小游戏（1-100）", HAX_KIND_GUI);
+
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    int secret = (hax_pid() * 37 + 11) % 100 + 1;   /* 简易种子 */
+    char line[32];
+    hax_println("我想了一个 1-100 的数，来猜！(q 退出)");
+    for (int tries = 1; ; tries++) {
+        hax_print("你的猜测&gt; ");
+        if (hax_input(line, sizeof(line)) &lt; 0 || line[0]=='q') break;
+        int v = atoi(line);
+        if (v &lt; secret)      hax_println("太小了。");
+        else if (v &gt; secret) hax_println("太大了。");
+        else { hax_printf("猜对了！用了 %d 次。\n", tries); break; }
+    }
+    return 0;
+}</pre>
+<p class="small">提示：把这两个文件放进 <code>./app</code>，执行 <code>make</code>，重启系统后
+<code>apps</code> 即可看到它们。</p>
+</div>
+
+<!-- ── 附录 A ── -->
+<div class="chapter" style="page-break-before: always;">
+<h1 style="page-break-before:always;">附录 A<span class="en">POSIX SYSCALLS</span></h1>
+<p>除 SDK 外，HAX 应用可直接使用 HBOS 用户态 libc 暴露的 POSIX 接口（声明在
+<code>&lt;libc/syscall.h&gt;</code> 与 <code>&lt;libc/stdio.h&gt;</code> 等）。下表为常用子集。</p>
+<table>
+<tr><th>类别</th><th>接口</th></tr>
+<tr><td>文件 I/O</td><td><code>open close read write lseek fstat stat unlink</code></td></tr>
+<tr><td>进程控制</td><td><code>getpid getppid exit sleep usleep fork execve waitpid kill</code></td></tr>
+<tr><td>文件系统</td><td><code>mkdir rmdir getcwd chdir access ftruncate readlink</code></td></tr>
+<tr><td>内存</td><td><code>sbrk brk mmap munmap mprotect malloc free</code></td></tr>
+<tr><td>网络</td><td><code>socket bind listen accept connect send recv</code></td></tr>
+<tr><td>标准库</td><td><code>printf fopen fread fwrite fgets atoi memcpy strlen ...</code></td></tr>
+</table>
+<div class="note">网络相关：HBOS 在链路未提供 DNS 时会自动回退公共 DNS（8.8.8.8），
+因此即便“网络未配置 DNS”，域名解析仍可工作。</div>
+<p class="small" style="margin-top:18px">© 2026 HBOS Project · 本手册随 HBOS v0.1-beta3 发布。SDK 头文件：app/include/hax.h。</p>
+</div>
+
+</body>
+</html>

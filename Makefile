@@ -577,6 +577,13 @@ $(BUILD_DIR)/user/hax_blob.o: $(SRC_DIR)/user/hax_blob.asm $(HAX_BLOB) | $(BUILD
 hax-apps: $(HAX_ALL_BINS)
 	@echo "✓ All .hax apps built: $(HAX_ALL_BINS)"
 
+# 由 HTML 源经 LibreOffice 无头渲染生成应用开发手册 PDF
+.PHONY: hax-doc
+hax-doc: docs/HBOS_HAX_API.html
+	soffice --headless --convert-to pdf:writer_web_pdf_Export --outdir docs docs/HBOS_HAX_API.html
+	mv -f docs/HBOS_HAX_API.pdf HBOS_HAX_API.pdf
+	@echo "✓ 应用开发手册: HBOS_HAX_API.pdf"
+
 # ── HBFS file injection ──────────────────────────────────────────
 # Copy a file into a standalone HBFS image:  make hbfs-copy DISK=build/hbos_disk.img FILE=hello.c
 hbfs-copy:
