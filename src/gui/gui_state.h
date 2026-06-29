@@ -99,9 +99,9 @@ typedef struct gui_state {
     uint8_t clock_last_sec;
     int switcher_ticks;
     int theme_light;
-    char console_input[80];
+    char console_input[120];
     uint32_t console_input_len;
-    char console_history[16][80];
+    char console_history[64][120];
     uint32_t console_line_count;
     uint32_t console_cursor;
     int console_history_idx;

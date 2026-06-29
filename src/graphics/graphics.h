@@ -29,6 +29,11 @@ void console_putchar(char c);
 // 输出原始字符（绕过 UTF-8 解码器和回滚捕获，用于行编辑重绘）
 void console_putchar_raw(char c);
 
+// Redirect all console output (puts/write/putchar) to a sink callback instead of
+// the terminal — used by the GUI terminal to capture real shell command output.
+// Pass NULL to restore normal terminal rendering.
+void console_set_sink(void (*fn)(char));
+
 // 清除屏幕
 void console_clear(void);
 

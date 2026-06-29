@@ -799,6 +799,34 @@ static void text(int x, int y, const char *s, uint32_t color, int scale) {
     }
 }
 
+// Terminal-style text: ASCII in the crisp 8x16 console bitmap font (fixed 8px
+// cells, like the real TUI), any CJK falls back to the proportional GUI font so
+// shell output containing Chinese still renders. y is the TOP of the cell.
+// Returns the end pen x.
+static int text_mono(int x, int y, int max_x, const char *s, uint32_t color) {
+    if (!s) return x;
+    utf8_state_t utf8;
+    utf8_init(&utf8);
+    while (*s) {
+        uint32_t cp = 0;
+        int ok = utf8_feed(&utf8, (uint8_t)*s++, &cp);
+        if (ok < 0) continue;
+        if (ok == 0) cp = '?';
+        if (cp < 0x80) {
+            if (x + MONO_GLYPH_W > max_x) break;
+            draw_mono_char(x, y, (char)cp, color);
+            x += MONO_GLYPH_W;
+        } else {
+            int adv = gui_cp_advance(cp, 1);
+            if (x + adv > max_x) break;
+            // Align the proportional baseline near the bottom of the mono cell.
+            draw_text_codepoint(x, y + MONO_GLYPH_H - gui_font_ascent() - 2, cp, color, 1);
+            x += adv;
+        }
+    }
+    return x;
+}
+
 static void text_clipped(int x, int y, int max_x, const char *s, uint32_t color, int scale) {
     if (!s || max_x <= x) return;
     utf8_state_t utf8;
@@ -2628,27 +2656,61 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
 
 
 
+#define GUI_CON_ROWS 64
+#define GUI_CON_COLS 120
+
 static void console_append_history(gui_state_t *st, const char *line) {
-    if (st->console_line_count < 16) {
-        strncpy(st->console_history[st->console_line_count], line, 79);
-        st->console_history[st->console_line_count][79] = 0;
+    if (st->console_line_count < GUI_CON_ROWS) {
+        strncpy(st->console_history[st->console_line_count], line, GUI_CON_COLS - 1);
+        st->console_history[st->console_line_count][GUI_CON_COLS - 1] = 0;
         st->console_line_count++;
     } else {
-        for (int i = 0; i < 15; i++) {
+        for (int i = 0; i < GUI_CON_ROWS - 1; i++) {
             strcpy(st->console_history[i], st->console_history[i + 1]);
         }
-        strncpy(st->console_history[15], line, 79);
-        st->console_history[15][79] = 0;
+        strncpy(st->console_history[GUI_CON_ROWS - 1], line, GUI_CON_COLS - 1);
+        st->console_history[GUI_CON_ROWS - 1][GUI_CON_COLS - 1] = 0;
     }
 }
 
-static void console_exec_cmd(gui_state_t *st) {
-    if (st->console_input_len == 0) {
-        console_append_history(st, "hbos_gui_shell:/#");
+// ── Real shell output capture ───────────────────────────────
+// The GUI terminal runs the actual shell (cmd_execute) and captures its console
+// output here, instead of reimplementing a handful of commands. The sink strips
+// ANSI escape sequences and splits on newlines into history lines.
+static gui_state_t *g_con_sink_st;
+static char         g_con_sink_line[GUI_CON_COLS];
+static uint32_t     g_con_sink_pos;
+static int          g_con_sink_esc;     // inside an ESC [...] sequence
+
+static void gui_console_flush_line(void) {
+    g_con_sink_line[g_con_sink_pos] = 0;
+    console_append_history(g_con_sink_st, g_con_sink_line);
+    g_con_sink_pos = 0;
+}
+
+static void gui_console_sink(char c) {
+    if (g_con_sink_esc) {                       // swallow ESC [ ... <final>
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) g_con_sink_esc = 0;
         return;
     }
+    if (c == 0x1B) { g_con_sink_esc = 1; return; }
+    if (c == '\r') return;
+    if (c == '\n') { gui_console_flush_line(); return; }
+    if (c == '\t') {
+        do {
+            if (g_con_sink_pos < GUI_CON_COLS - 1) g_con_sink_line[g_con_sink_pos++] = ' ';
+        } while (g_con_sink_pos % 4 && g_con_sink_pos < GUI_CON_COLS - 1);
+        return;
+    }
+    if ((unsigned char)c < 0x20) return;        // drop other control bytes
+    g_con_sink_line[g_con_sink_pos++] = c;
+    if (g_con_sink_pos >= GUI_CON_COLS - 1) gui_console_flush_line();
+}
 
-    char cmd_line[120];
+static void console_exec_cmd(gui_state_t *st) {
+    // Echo the prompt + typed command. The "hbos_gui_shell:/# " prefix (18 chars)
+    // is also what the up-arrow history search keys off, so keep it exact.
+    char cmd_line[GUI_CON_COLS];
     uint32_t cpos = 0;
     cmd_line[0] = 0;
     append_str(cmd_line, sizeof(cmd_line), &cpos, "hbos_gui_shell:/# ");
@@ -2657,131 +2719,26 @@ static void console_exec_cmd(gui_state_t *st) {
 
     char *cmd = st->console_input;
     while (*cmd == ' ') cmd++;
-    
-    if (strcmp(cmd, "help") == 0) {
-        console_append_history(st, "Available commands:");
-        console_append_history(st, "  help      Show this help message");
-        console_append_history(st, "  ls        List files in root directory");
-        console_append_history(st, "  cat <f>   Display contents of file <f>");
-        console_append_history(st, "  mem       Show memory usage info");
-        console_append_history(st, "  tasks     List running processes");
-        console_append_history(st, "  clear     Clear screen history");
-        console_append_history(st, "  neofetch  Show system neofetch/logo");
-    } else if (strcmp(cmd, "clear") == 0) {
+
+    if (*cmd == 0) {
+        // empty line — just a fresh prompt
+    } else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "cls") == 0) {
         st->console_line_count = 0;
-    } else if (strcmp(cmd, "ls") == 0) {
-        char entry[VFS_MAX_NAME];
-        uint32_t entry_type;
-        uint32_t idx = 0;
-        while (vfs_readdir_at("/", idx, entry, &entry_type) == 0) {
-            char line[80];
-            uint32_t pos = 0;
-            append_str(line, sizeof(line), &pos, entry_type == VFS_NODE_DIR ? "[DIR]  " : "[FILE] ");
-            append_str(line, sizeof(line), &pos, entry);
-            console_append_history(st, line);
-            idx++;
-        }
-        if (idx == 0) {
-            console_append_history(st, "Directory is empty.");
-        }
-    } else if (strncmp(cmd, "cat ", 4) == 0) {
-        const char *arg = cmd + 4;
-        while (*arg == ' ') arg++;
-        if (*arg == 0) {
-            console_append_history(st, "Usage: cat <filename>");
-        } else {
-            char full_path[128];
-            full_path[0] = 0;
-            uint32_t pos = 0;
-            if (arg[0] != '/') {
-                append_str(full_path, sizeof(full_path), &pos, "/");
-            }
-            append_str(full_path, sizeof(full_path), &pos, arg);
-
-            vfs_node_t *node = vfs_lookup(full_path);
-            if (!node) {
-                console_append_history(st, "cat: File not found.");
-            } else {
-                char buf[512];
-                int got = vfs_read(node, 0, buf, sizeof(buf) - 1);
-                if (got < 0) {
-                    console_append_history(st, "cat: Read error.");
-                } else {
-                    buf[got] = 0;
-                    char *line_start = buf;
-                    for (int i = 0; i <= got; i++) {
-                        if (buf[i] == '\n' || buf[i] == '\r' || i == got) {
-                            char old_c = buf[i];
-                            buf[i] = 0;
-                            if (strlen(line_start) > 0) {
-                                console_append_history(st, line_start);
-                            }
-                            buf[i] = old_c;
-                            line_start = buf + i + 1;
-                        }
-                    }
-                }
-            }
-        }
-    } else if (strcmp(cmd, "mem") == 0) {
-        uint64_t total = pmm_get_total_mem();
-        uint64_t free = pmm_get_free_mem();
-        uint64_t used = total > free ? total - free : 0;
-        char line[80];
-        uint32_t pos = 0;
-        
-        pos = 0; line[0] = 0;
-        append_str(line, sizeof(line), &pos, "Total Memory: ");
-        append_uint(line, sizeof(line), &pos, (uint32_t)(total / 1024));
-        append_str(line, sizeof(line), &pos, " KB");
-        console_append_history(st, line);
-
-        pos = 0; line[0] = 0;
-        append_str(line, sizeof(line), &pos, "Used Memory:  ");
-        append_uint(line, sizeof(line), &pos, (uint32_t)(used / 1024));
-        append_str(line, sizeof(line), &pos, " KB");
-        console_append_history(st, line);
-
-        pos = 0; line[0] = 0;
-        append_str(line, sizeof(line), &pos, "Free Memory:  ");
-        append_uint(line, sizeof(line), &pos, (uint32_t)(free / 1024));
-        append_str(line, sizeof(line), &pos, " KB");
-        console_append_history(st, line);
-    } else if (strcmp(cmd, "tasks") == 0) {
-        uint32_t count = (uint32_t)task_get_count();
-        char line[80];
-        uint32_t pos = 0;
-        append_str(line, sizeof(line), &pos, "Active Tasks: ");
-        append_uint(line, sizeof(line), &pos, count);
-        console_append_history(st, line);
-        for (uint32_t i = 0; i < count && i < 10; i++) {
-            const task_t *task = task_get_active(i);
-            if (task) {
-                pos = 0;
-                line[0] = 0;
-                append_str(line, sizeof(line), &pos, " PID: ");
-                append_uint(line, sizeof(line), &pos, task->id);
-                append_str(line, sizeof(line), &pos, " | ");
-                append_str(line, sizeof(line), &pos, task->name);
-                append_str(line, sizeof(line), &pos, " (");
-                append_str(line, sizeof(line), &pos, task_state_name(task->state));
-                append_str(line, sizeof(line), &pos, ")");
-                console_append_history(st, line);
-            }
-        }
-    } else if (strcmp(cmd, "neofetch") == 0) {
-        console_append_history(st, "   /\\_/\\      HBOS (HeBitOS) v0.1");
-        console_append_history(st, "  ( o.o )     Kernel: Coop-Multitasking");
-        console_append_history(st, "   > ^ <      Arch: x86_64");
-        console_append_history(st, "  /     \\     UI: Cyberpunk Neon Terminal");
-        console_append_history(st, " |       |    Status: Online & Ready");
+    } else if (strcmp(cmd, "gui") == 0 || strcmp(cmd, "startx") == 0 ||
+               strcmp(cmd, "exit") == 0 || strcmp(cmd, "reboot") == 0 ||
+               strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) {
+        // Block commands that would recurse into the GUI or end the session.
+        console_append_history(st, "（该命令在图形终端中不可用）");
     } else {
-        char err[120];
-        uint32_t pos = 0;
-        err[0] = 0;
-        append_str(err, sizeof(err), &pos, "hbos_shell: command not found: ");
-        append_str(err, sizeof(err), &pos, cmd);
-        console_append_history(st, err);
+        // Run the REAL shell command and capture its console output into the
+        // terminal history — the full command set, no reimplementation.
+        g_con_sink_st  = st;
+        g_con_sink_pos = 0;
+        g_con_sink_esc = 0;
+        console_set_sink(gui_console_sink);
+        cmd_execute(st->console_input);
+        console_set_sink(NULL);
+        if (g_con_sink_pos > 0) gui_console_flush_line();  // trailing partial line
     }
 
     st->console_input_len = 0;
@@ -2800,9 +2757,9 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     rect(box_x, box_y, box_w, box_h, rgb(27, 30, 33));
     border(box_x, box_y, box_w, box_h, rgb(60, 64, 69));
 
-    int scale = 1;
-    int row_h = 18;
+    int row_h = MONO_GLYPH_H + 2;          // 8x16 console font + 2px leading
     int input_y = box_y + box_h - 24;
+    int max_x = box_x + box_w - 12;
 
     // 自动根据可用高度计算最多绘制的历史记录行数，防止重叠
     int max_lines = (input_y - (box_y + 12)) / row_h;
@@ -2812,39 +2769,33 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
         start_idx = st->console_line_count - (uint32_t)max_lines;
     }
 
-    // 绘制命令历史
+    // 绘制命令历史（控制台位图字体，与真 TUI 一致）
     int start_y = box_y + 12;
     for (uint32_t i = start_idx; i < st->console_line_count; i++) {
         const char *line = st->console_history[i];
         uint32_t color = cyber_text(0);
-        if (strncmp(line, "hpos_gui_shell:", 15) == 0 || strncmp(line, "hbos_gui_shell:", 15) == 0) {
+        if (strncmp(line, "hbos_gui_shell:", 15) == 0) {
             color = rgb(39, 174, 96); // Breeze 绿 prompt
         } else if (strncmp(line, "hbos_shell:", 11) == 0) {
             color = rgb(218, 68, 83); // Breeze 红 error
         } else if (strncmp(line, "  ", 2) == 0) {
             color = rgb(160, 167, 173); // 次要灰细节
         }
-        text(box_x + 12, start_y, line, color, scale);
+        text_mono(box_x + 12, start_y, max_x, line, color);
         start_y += row_h;
     }
 
-    // 绘制当前输入行（比例字体：用实测宽度定位，避免固定 6px 假设导致错位）
+    // 绘制当前输入行（固定 8px 等宽 cell，光标按 cell 对齐）
     const char *prompt = "hbos_gui_shell:/# ";
-    text(box_x + 12, input_y, prompt, rgb(39, 174, 96), scale); // Breeze 绿
-    int prompt_w = text_width(prompt, scale);
-    text(box_x + 12 + prompt_w, input_y, st->console_input, cyber_text(0), scale);
+    int px = text_mono(box_x + 12, input_y, max_x, prompt, rgb(39, 174, 96));
+    text_mono(px, input_y, max_x, st->console_input, cyber_text(0));
 
-    // 闪烁光标（细竖线 caret，定位到输入光标处的真实像素宽度）
+    // 闪烁光标（细竖线 caret）
     static uint32_t cursor_ticks = 0;
     cursor_ticks++;
     if ((cursor_ticks / 15) % 2) {
-        char head[128];
-        uint32_t n = st->console_cursor;
-        if (n > sizeof(head) - 1) n = sizeof(head) - 1;
-        for (uint32_t k = 0; k < n; k++) head[k] = st->console_input[k];
-        head[n] = 0;
-        int cursor_x = box_x + 12 + prompt_w + text_width(head, scale);
-        rect(cursor_x, input_y, 2, gui_font_line_height() * scale - 2, rgb(39, 174, 96));
+        int cursor_x = px + (int)st->console_cursor * MONO_GLYPH_W;
+        rect(cursor_x, input_y, 2, MONO_GLYPH_H - 2, rgb(39, 174, 96));
     }
 }
 
@@ -4610,24 +4561,21 @@ static void cmd_gui(int argc, char **argv) {
     int drag_last_x = 0, drag_last_y = 0, drag_last_w = 0, drag_last_h = 0;
     int resize_bounds_valid = 0;
     int resize_last_x = 0, resize_last_y = 0, resize_last_w = 0, resize_last_h = 0;
-    gui_state_t st = {
-        .active = PANEL_FILES,
-        .selected_file = 0,
-        .selected_app = 0,
-        .app_mode = GUI_APP_NONE,
-        .calc_value = 0,
-        .snake_x = 5,
-        .snake_y = 3,
-        .snake_tx = 9,
-        .snake_ty = 5,
-        .snake_score = 0,
-        .clicks = 0,
-        .buttons = 0,
-        .last_clicked_file = -1,
-        .delete_confirm_index = -1,
-        .status = "就绪",
-        .theme_light = 0,
-    };
+    // Static storage (not a stack local): gui_state_t is large (~14KB with the
+    // terminal scrollback) and the GUI is a single non-reentrant instance, so
+    // keeping it off the stack avoids overflow — especially now the terminal
+    // nests cmd_execute(). memset gives a fresh state on every entry.
+    static gui_state_t st;
+    memset(&st, 0, sizeof(st));
+    st.active = PANEL_FILES;
+    st.app_mode = GUI_APP_NONE;
+    st.snake_x = 5;
+    st.snake_y = 3;
+    st.snake_tx = 9;
+    st.snake_ty = 5;
+    st.last_clicked_file = -1;
+    st.delete_confirm_index = -1;
+    st.status = "就绪";
     wm_init(&st.wm, w, h);
     st.console_input[0] = 0;
     st.console_input_len = 0;

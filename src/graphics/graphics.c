@@ -14,6 +14,10 @@
 static struct flanterm_context *g_term = NULL;
 static bool g_initialized = false;
 
+// When set, console output is captured here instead of going to the terminal.
+static void (*g_console_sink)(char) = NULL;
+void console_set_sink(void (*fn)(char)) { g_console_sink = fn; }
+
 #define VGA_MEM     ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25
@@ -412,6 +416,10 @@ int graphics_init(void *mbi) {
 
 void console_write(const char *str, uint64_t len) {
     if (!g_initialized) return;
+    if (g_console_sink) {
+        for (uint64_t i = 0; i < len; i++) g_console_sink(str[i]);
+        return;
+    }
     if (g_term) {
         // Fast path: pure ASCII
         int has_high = 0;
@@ -443,6 +451,7 @@ void console_puts(const char *str) {
 
 void console_putchar(char c) {
     if (!g_initialized) return;
+    if (g_console_sink) { g_console_sink(c); return; }
     serial_mirror_char(c);
 
     if (g_term) {
