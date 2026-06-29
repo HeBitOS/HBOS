@@ -96,6 +96,7 @@ C_SRCS = \
 	$(SRC_DIR)/user/app_runtime.c \
 	$(SRC_DIR)/user/syscall.c \
 	$(SRC_DIR)/user/ldso.c \
+	$(SRC_DIR)/user/hax.c \
 	$(SRC_DIR)/tools/help.c \
 	$(SRC_DIR)/tools/system.c \
 	$(SRC_DIR)/tools/debug.c \
@@ -143,7 +144,18 @@ ASM_SRCS = \
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
-ALL_OBJS = $(C_OBJS) $(ASM_OBJS)
+# ── HAX 应用：./app/*.c 自动编译为 .hax 并打包进内核 ───────────────────
+# “只要 app 里有编译产物，就加入系统”：扫描 app/ 下的源码与预编译 .hax，
+# 由 genhax.py 读取各自的 .haxmeta 段，生成清单与二进制 blob 嵌入内核。
+HAX_APP_SRCS = $(wildcard app/*.c)
+HAX_APP_BINS = $(HAX_APP_SRCS:app/%.c=$(BUILD_DIR)/app/%.hax)
+HAX_PREBUILT = $(wildcard app/*.hax)
+HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT)
+HAX_BLOB     = $(BUILD_DIR)/hax_blob.bin
+HAX_MANIFEST = $(BUILD_DIR)/hax_manifest.c
+HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
+
+ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS)
 
 .PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
 
@@ -536,6 +548,34 @@ user-progs: $(USER_PROG_BINS)
 user-progs-clean:
 	rm -rf $(USER_BUILD_DIR) $(BUILD_DIR)/user
 	@echo "✓ User programs cleaned"
+
+# ── HAX 应用构建（./app/*.c -> build/app/*.hax -> blob + manifest） ──
+# 每个 app 源码用 HAX 运行时（= 用户态 libc + crt0）链接成标准 ELF64，
+# 扩展名 .hax。SDK 头在 app/include。
+HAX_CFLAGS = $(USER_CFLAGS) -Iapp/include
+
+$(BUILD_DIR)/app/%.hax: app/%.c $(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(HAX_CFLAGS) $< -o $(BUILD_DIR)/app/$*.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/app/$*.o -o $@
+	@echo "✓ hax app: $@"
+
+# 生成清单与 blob（grouped target：一次调用产出两者，GNU Make >= 4.3）
+$(HAX_BLOB) $(HAX_MANIFEST) &: $(HAX_ALL_BINS) tools/genhax.py | $(BUILD_DIR)
+	python3 tools/genhax.py --blob $(HAX_BLOB) --manifest $(HAX_MANIFEST) $(HAX_ALL_BINS)
+
+# 编译生成的清单 C（位于 build/，需显式规则）
+$(BUILD_DIR)/hax_manifest.o: $(HAX_MANIFEST) | $(BUILD_DIR)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+# 汇编 incbin blob —— blob 变化时必须重新汇编（普通先决条件）
+$(BUILD_DIR)/user/hax_blob.o: $(SRC_DIR)/user/hax_blob.asm $(HAX_BLOB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
+
+.PHONY: hax-apps
+hax-apps: $(HAX_ALL_BINS)
+	@echo "✓ All .hax apps built: $(HAX_ALL_BINS)"
 
 # ── HBFS file injection ──────────────────────────────────────────
 # Copy a file into a standalone HBFS image:  make hbfs-copy DISK=build/hbos_disk.img FILE=hello.c

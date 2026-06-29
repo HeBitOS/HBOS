@@ -7,6 +7,7 @@
 #include "../string.h"
 #include "../unistd.h"
 #include "../user/app.h"
+#include "../user/hax_app.h"
 #include "../vfs.h"
 #include "tool.h"
 
@@ -87,7 +88,8 @@ static void cmd_apps(int argc, char **argv) {
     (void)argc;
     (void)argv;
     uint32_t count = hbos_app_count();
-    if (count == 0) {
+    uint32_t hcount = hax_app_count();
+    if (count == 0 && hcount == 0) {
         console_puts("No apps registered\n");
         return;
     }
@@ -99,6 +101,15 @@ static void cmd_apps(int argc, char **argv) {
         console_puts(app->description ? app->description : "");
         console_putchar('\n');
     }
+    /* 自动发现的 .hax 应用（来自 ./app） */
+    for (uint32_t i = 0; i < hcount; i++) {
+        const hax_app_entry_t *e = hax_app_at(i);
+        if (!e) continue;
+        console_puts(e->name);
+        console_puts(" - ");
+        console_puts(e->desc ? e->desc : "");
+        console_puts((e->kind & HAX_KIND_GUI) ? "  [GUI .hax]\n" : "  [TUI .hax]\n");
+    }
 }
 
 static void cmd_run(int argc, char **argv) {
@@ -107,6 +118,20 @@ static void cmd_run(int argc, char **argv) {
         return;
     }
     int ret = hbos_app_run(argv[1], argc - 1, argv + 1);
+    /* 内建应用未命中时，尝试 ./app 自动发现的 .hax 应用 */
+    if (ret < 0 && hax_app_find(argv[1])) {
+        int hret = hax_app_run(argv[1], argc - 1, argv + 1);
+        if (hret < 0) {
+            console_puts("run: cannot load .hax app\n");
+            return;
+        }
+        if (hret != 0) {
+            console_puts("run: exit ");
+            print_uint((uint32_t)hret);
+            console_putchar('\n');
+        }
+        return;
+    }
     if (ret < 0) {
         size_t size = 0;
         int err = read_elf_image(argv[1], &size);
