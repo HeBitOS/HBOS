@@ -1057,24 +1057,15 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
     append_str(buf, cap, &pos, b);
 }
 
+// Pure 1:1 pointer mapping with a safety cap — the v0.1-beta3-pre3 feel. Every
+// raw mouse count moves exactly one pixel, applied immediately with NO sub-pixel
+// carry and NO acceleration. The carry/gain we tried later held back part of a
+// small nudge until enough accumulated, which made short movements feel numb
+// ("短移动不灵敏"). Direct integer mapping = crisp, responsive short moves.
 static int clamp_delta(int v) {
-    /* Safety cap to prevent runaway after acceleration. Generous so fast flicks
-     * aren't clipped (clipping makes the speed feel inconsistent / "忽快忽慢"). */
-    if (v > 240) return 240;
-    if (v < -240) return -240;
+    if (v > 80) return 80;
+    if (v < -80) return -80;
     return v;
-}
-
-// Pointer transfer function. Input: the per-frame summed raw delta of one axis.
-// Output: desired movement in .8 fixed point (pixels * 256) so the caller can
-// carry the sub-pixel remainder across frames — that carry keeps slow motion
-// smooth without the integer-divide shimmer. The gain is FLAT (no speed-based
-// acceleration): a speed-dependent ramp made the cursor feel "一会儿快一会儿慢"
-// because variable frame timing binned the same hand speed into different gains.
-// Constant gain = constant feel. Tune MOUSE_GAIN_256 (256 = 1.0x).
-#define MOUSE_GAIN_256 640          // 640/256 = 2.5x, flat
-static int mouse_accel_fp(int v) {
-    return v * MOUSE_GAIN_256;      // pixels * 256
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
@@ -4566,8 +4557,6 @@ static void cmd_gui(int argc, char **argv) {
     int h = (int)fb.height;
     int mx = w / 2;
     int my = h / 2;
-    int mouse_resid_x = 0;            // .8 fixed-point sub-pixel carry (anti-jitter)
-    int mouse_resid_y = 0;
     uint8_t last_buttons = 0;
     int dragging_window = -1;
     int drag_off_x = 0;
@@ -4702,17 +4691,10 @@ static void cmd_gui(int argc, char **argv) {
         }
 
         if (saw_mouse) {
-            /* Accelerate in .8 fixed point, carry the sub-pixel remainder across
-             * frames so slow tracking doesn't shimmer, then clamp the integer
-             * pixel step. */
-            mouse_resid_x += mouse_accel_fp(acc_dx);
-            mouse_resid_y += mouse_accel_fp(acc_dy);
-            int step_x = mouse_resid_x / 256;   // truncates toward zero
-            int step_y = mouse_resid_y / 256;
-            mouse_resid_x -= step_x * 256;
-            mouse_resid_y -= step_y * 256;
-            acc_dx = clamp_delta(step_x);
-            acc_dy = clamp_delta(step_y);
+            /* Direct 1:1 mapping (v0.1-beta3-pre3 feel) — apply the raw per-frame
+             * delta immediately, capped. No carry, no gain. */
+            acc_dx = clamp_delta(acc_dx);
+            acc_dy = clamp_delta(acc_dy);
             int old_mx = mx;
             int old_my = my;
             mx += acc_dx;
