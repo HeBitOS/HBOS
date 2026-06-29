@@ -341,16 +341,29 @@ void wm_get_window_rect(wm_state_t *wm, int idx, int *x, int *y, int *w, int *h)
         return;
     }
 
-    if (win->anim_type == WM_ANIM_MAXIMIZE || win->anim_type == WM_ANIM_RESTORE ||
-        win->anim_type == WM_ANIM_MINIMIZE) {
+    if (win->anim_type == WM_ANIM_MAXIMIZE || win->anim_type == WM_ANIM_RESTORE) {
+        /* Ease (cubic ease-out) from the captured start rect toward the target
+         * rect (win->x/y/w/h), non-destructively — win->* keep the final values. */
+        int total = win->anim_total > 0 ? win->anim_total : 8;
+        int frame = win->anim_frame; if (frame > total) frame = total;
+        int F = total - frame;
+        int e = 512 - ((F * F * F) * 512) / (total * total * total);  /* 0..512 */
+        int tx = win->x, ty = win->y, tw = win->w > 0 ? win->w : def_w,
+            th = win->h > 0 ? win->h : def_h;
+        *x = win->anim_start_x + ((tx - win->anim_start_x) * e) / 512;
+        *y = win->anim_start_y + ((ty - win->anim_start_y) * e) / 512;
+        *w = win->anim_start_w + ((tw - win->anim_start_w) * e) / 512;
+        *h = win->anim_start_h + ((th - win->anim_start_h) * e) / 512;
+        if (*w < 80) *w = 80;
+        if (*h < 60) *h = 60;
+        return;
+    }
+    if (win->anim_type == WM_ANIM_MINIMIZE) {
+        /* Minimize is an opacity fade; geometry stays put. */
         *x = win->x ? win->x : def_x + idx * 24;
         *y = win->y ? win->y : def_y + idx * 18;
         *w = win->w > 0 ? win->w : def_w;
         *h = win->h > 0 ? win->h : def_h;
-        if (*x + *w > wm->desk_w - 4) *x = wm->desk_w - *w - 4;
-        if (*y + *h > wm->desk_h - WM_TASKBAR_H - 4) *y = wm->desk_h - WM_TASKBAR_H - *h - 4;
-        if (*x < 4) *x = 4;
-        if (*y < 4) *y = 4;
         return;
     }
 
@@ -498,19 +511,9 @@ void wm_update_animations(wm_state_t *wm) {
                     
                 case WM_ANIM_MAXIMIZE:
                 case WM_ANIM_RESTORE:
-                    /* 最大化/还原：平滑过渡位置和大小 */
-                    {
-                        int target_x = win->x;
-                        int target_y = win->y;
-                        int target_w = win->w;
-                        int target_h = win->h;
-                        
-                        /* 临时设置动画中的位置（用于渲染） */
-                        win->x = win->anim_start_x + ((target_x - win->anim_start_x) * eased_scaled) / 512;
-                        win->y = win->anim_start_y + ((target_y - win->anim_start_y) * eased_scaled) / 512;
-                        win->w = win->anim_start_w + ((target_w - win->anim_start_w) * eased_scaled) / 512;
-                        win->h = win->anim_start_h + ((target_h - win->anim_start_h) * eased_scaled) / 512;
-                    }
+                    /* 几何过渡在 wm_get_window_rect 里按 anim_frame 插值计算，
+                     * 这里绝不能改 win->x/y/w/h —— 它们保存的是最终目标，之前
+                     * 在此自引用地覆盖目标，导致永远收敛不到全屏并产生拖影。 */
                     break;
             }
         }

@@ -3464,6 +3464,10 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
         int px = 0, py = 0, pw = w, ph = h - TASKBAR_H;
         if (st->snap_preview == WM_SNAP_LEFT) { pw = w / 2; }
         else if (st->snap_preview == WM_SNAP_RIGHT) { px = w / 2; pw = w - w / 2; }
+        else if (st->snap_preview == WM_SNAP_BOTTOM) {
+            // 最小化预览：贴近任务栏的小框，提示窗口将收起
+            pw = w / 5; px = (w - pw) / 2; ph = 64; py = h - TASKBAR_H - ph - 8;
+        }
         uint32_t accent = cyber_neon_cyan(st->theme_light);
         for (int yy = py + 4; yy < py + ph - 4; yy += 3)
             rect(px + 6, yy, pw - 12, 1, st->theme_light ? rgb(200, 215, 220) : rgb(40, 70, 92));
@@ -4715,12 +4719,15 @@ static void cmd_gui(int argc, char **argv) {
                 gui_store_focus(&st);
                 // 根据指针靠近的屏幕边缘预测吸附目标
                 int prev_hint = snap_hint;
-                if (my <= 4) snap_hint = WM_SNAP_TOP;
+                if (my <= 4) snap_hint = WM_SNAP_TOP;                      // 顶部→最大化
+                else if (my >= h - TASKBAR_H - 4) snap_hint = WM_SNAP_BOTTOM; // 底部→最小化
                 else if (mx <= 4) snap_hint = WM_SNAP_LEFT;
                 else if (mx >= w - 5) snap_hint = WM_SNAP_RIGHT;
                 else snap_hint = WM_SNAP_NONE;
                 st.snap_preview = snap_hint;
-                st.status = snap_hint != WM_SNAP_NONE ? "松开吸附窗口" : "窗口已移动";
+                st.status = snap_hint == WM_SNAP_TOP    ? "松开最大化" :
+                            snap_hint == WM_SNAP_BOTTOM ? "松开最小化" :
+                            snap_hint != WM_SNAP_NONE   ? "松开吸附窗口" : "窗口已移动";
                 drag_pending = 1;
                 int moved = mx - drag_last_draw_x;
                 if (moved < 0) moved = -moved;
@@ -4734,10 +4741,14 @@ static void cmd_gui(int argc, char **argv) {
                 }
             } else if (!left_down) {
                 if (dragging_window >= 0) {
-                    if (snap_hint != WM_SNAP_NONE) {
+                    if (snap_hint == WM_SNAP_BOTTOM) {
+                        wm_minimize_window(&st.wm, dragging_window);
+                        gui_sync_focus(&st);
+                        st.status = "窗口已最小化";
+                    } else if (snap_hint != WM_SNAP_NONE) {
                         wm_snap_window(&st.wm, dragging_window, snap_hint);
                         gui_sync_focus(&st);
-                        st.status = "窗口已吸附";
+                        st.status = snap_hint == WM_SNAP_TOP ? "窗口已最大化" : "窗口已吸附";
                     }
                     if (drag_pending || snap_hint != WM_SNAP_NONE) redraw = 1;
                 }
@@ -4996,11 +5007,26 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (wm_has_active_animations(&st.wm)) {
-            gui_dirty_reset();
+            /* If any window is moving/resizing (maximize/restore), repaint the
+             * whole frame — per-window damage only covers the CURRENT rect, so a
+             * growing/shrinking window leaves trails of its previous frames.
+             * Opacity-only animations (open/minimize fade) can use cheap
+             * per-window damage. */
+            int geom_anim = 0;
             for (int i = 0; i < st.wm.window_count; i++) {
                 wm_window_t *win = wm_get_window(&st.wm, i);
-                if (win && win->anim_type != WM_ANIM_NONE)
-                    gui_damage_window(&st, w, h, i);
+                if (win && (win->anim_type == WM_ANIM_MAXIMIZE ||
+                            win->anim_type == WM_ANIM_RESTORE)) { geom_anim = 1; break; }
+            }
+            if (geom_anim) {
+                gui_dirty_mark_full();
+            } else {
+                gui_dirty_reset();
+                for (int i = 0; i < st.wm.window_count; i++) {
+                    wm_window_t *win = wm_get_window(&st.wm, i);
+                    if (win && win->anim_type != WM_ANIM_NONE)
+                        gui_damage_window(&st, w, h, i);
+                }
             }
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }

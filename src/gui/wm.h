@@ -34,10 +34,11 @@ enum {
 };
 
 enum {
-    WM_SNAP_NONE  = 0,
-    WM_SNAP_LEFT  = 1,
-    WM_SNAP_RIGHT = 2,
-    WM_SNAP_TOP   = 3,
+    WM_SNAP_NONE   = 0,
+    WM_SNAP_LEFT   = 1,
+    WM_SNAP_RIGHT  = 2,
+    WM_SNAP_TOP    = 3,   // 顶部：最大化
+    WM_SNAP_BOTTOM = 4,   // 底部：最小化
 };
 
 enum {
