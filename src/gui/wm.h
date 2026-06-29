@@ -21,7 +21,7 @@
 #define SM_GRID_TOP      76   /* grid cells top */
 #define SM_GRID_COLS      5   /* columns */
 #define SM_GRID_ROWS      3   /* rows (13 pinned apps) */
-#define SM_CELL_W       (SM_W / SM_GRID_COLS)   /* 108px */
+#define SM_CELL_W       ((SM_W - 2*SM_PAD) / SM_GRID_COLS)   /* 101px */
 #define SM_CELL_H        76   /* cell height */
 #define SM_GRID_H       (SM_GRID_ROWS * SM_CELL_H)  /* 228px */
 #define SM_SEP_Y        (SM_GRID_TOP + SM_GRID_H)   /* 304px */

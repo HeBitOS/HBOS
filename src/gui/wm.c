@@ -335,15 +335,15 @@ void wm_get_window_rect(wm_state_t *wm, int idx, int *x, int *y, int *w, int *h)
     }
     if (win->anim_type == WM_ANIM_MINIMIZE) {
         /* Minimize is an opacity fade; geometry stays put. */
-        *x = win->x ? win->x : def_x + idx * 24;
-        *y = win->y ? win->y : def_y + idx * 18;
+        *x = (win->x || win->w > 0) ? win->x : def_x + idx * 24;
+        *y = (win->y || win->h > 0) ? win->y : def_y + idx * 18;
         *w = win->w > 0 ? win->w : def_w;
         *h = win->h > 0 ? win->h : def_h;
         return;
     }
 
-    *x = win->x ? win->x : def_x + idx * 24;
-    *y = win->y ? win->y : def_y + idx * 18;
+    *x = (win->x || win->w > 0) ? win->x : def_x + idx * 24;
+    *y = (win->y || win->h > 0) ? win->y : def_y + idx * 18;
     *w = def_w;
     *h = def_h;
 

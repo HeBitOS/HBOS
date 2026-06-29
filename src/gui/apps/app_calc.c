@@ -4,13 +4,13 @@
 
 /* ── layout constants ───────────────────────────────────────── */
 #define CALC_BW   56   /* button width  */
-#define CALC_BH   40   /* button height */
-#define CALC_GAP   6   /* gap between buttons */
+#define CALC_BH   38   /* button height */
+#define CALC_GAP   5   /* gap between buttons */
 #define CALC_COLS  4
 #define CALC_ROWS  5
 /* grid origin relative to window content (tx,ty) */
 #define CALC_GX    8
-#define CALC_GY  168
+#define CALC_GY   98
 
 /* ── button table ──────────────────────────────────────────── */
 typedef struct { const char *label; char action; } CalcBtn;
@@ -52,7 +52,8 @@ static void calc_digit(gui_state_t *st, int digit) {
         st->calc_value = 0; st->calc_just_evaluated = 0;
     }
     if (!st->calc_has_input) { st->calc_input = 0; st->calc_has_input = 1; }
-    if (st->calc_input < 10000000) st->calc_input = st->calc_input * 10 + digit;
+    if (st->calc_input > -10000000 && st->calc_input < 10000000)
+        st->calc_input = st->calc_input * 10 + digit;
     st->calc_value = st->calc_input;
     st->status = "输入数字";
 }
@@ -181,8 +182,8 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
             gui_border(bx, by, CALC_BW, CALC_BH,
                        action == '=' ? gui_rgb(30, 100, 170)
                                      : gui_rgb(55, 75, 95));
-            int tw = (int)strlen(BTNS[row][col].label);
-            int lx = bx + (CALC_BW - tw * 6) / 2;
+            int tw = gui_text_width(BTNS[row][col].label, 1);
+            int lx = bx + (CALC_BW - tw) / 2;
             int ly = by + (CALC_BH - 10) / 2;
             gui_text(lx, ly, BTNS[row][col].label, gui_rgb(235, 242, 250), 1);
         }

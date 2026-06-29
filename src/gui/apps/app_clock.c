@@ -112,17 +112,18 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
                         3, gui_rgb(235, 242, 250));
 
     /* minute hand */
+    int ms = m % 60, ss = s % 60;
     int mlen = cr - 20;
     gui_draw_thick_line(cx, cy,
-                        cx + SIN60[m] * mlen / 1000,
-                        cy - cos60(m) * mlen / 1000,
+                        cx + SIN60[ms] * mlen / 1000,
+                        cy - cos60(ms) * mlen / 1000,
                         2, gui_rgb(180, 210, 235));
 
     /* second hand */
     int slen = cr - 14;
     gui_draw_line(cx, cy,
-                  cx + SIN60[s] * slen / 1000,
-                  cy - cos60(s) * slen / 1000,
+                  cx + SIN60[ss] * slen / 1000,
+                  cy - cos60(ss) * slen / 1000,
                   gui_rgb(61, 174, 233));
 
     /* center dot */

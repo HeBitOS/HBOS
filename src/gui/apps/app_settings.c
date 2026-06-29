@@ -14,8 +14,8 @@ static void draw_sb(int x, int y, int w, const char *label, uint32_t color) {
                           (color & 0xff) + 14),
                   color);
     gui_border(x, y, w, SB_H, gui_rgb(20, 30, 42));
-    int tw = (int)strlen(label);
-    gui_text(x + (w - tw * 6) / 2, y + (SB_H - 10) / 2, label,
+    int tw = gui_text_width(label, 1);
+    gui_text(x + (w - tw) / 2, y + (SB_H - 10) / 2, label,
              gui_rgb(235, 242, 250), 1);
 }
 

@@ -63,7 +63,6 @@ extern int hbos_gcc_last_return(void);
 #define FILE_LIST_ROWS 8
 #define FILE_ROW_H 30
 #define NOTE_FILE_ROWS 7
-#define GUI_PATH_MAX 256
 #define CODE_CMD_SAVE    1
 #define CODE_CMD_RUN     2
 #define CODE_CMD_OPEN    3
@@ -890,6 +889,8 @@ static int text_width(const char *s, int scale) {
     }
     return w;
 }
+
+int gui_text_width(const char *s, int scale) { return text_width(s, scale); }
 
 static void text(int x, int y, const char *s, uint32_t color, int scale) {
     utf8_state_t utf8;
@@ -4491,13 +4492,6 @@ static void draw_start_menu(gui_state_t *st) {
         int row = i / SM_GRID_COLS;
         int cx = ox + SM_PAD + col * cell_w + cell_w / 2;
         int cy = oy + SM_GRID_TOP + row * SM_CELL_H;
-
-        /* hover highlight */
-        int hov = 0;  /* could track hover with st->win_x but skip for now */
-        if (hov) {
-            fill_round_rect(cx - cell_w / 2 + 4, cy + 2, cell_w - 8, SM_CELL_H - 4,
-                            6, light ? 0x18000000 : 0x20FFFFFF, RR_ALL);
-        }
 
         /* icon */
         int isz = 36;

@@ -23,6 +23,7 @@ void gui_draw_panel_shell(int x, int y, int w, int h, uint32_t top, uint32_t bot
                           uint32_t border_c, uint32_t accent);
 void gui_text(int x, int y, const char *s, uint32_t color, int scale);
 void gui_text_clipped(int x, int y, int max_x, const char *s, uint32_t color, int scale);
+int  gui_text_width(const char *s, int scale);
 
 void gui_append_char(char *buf, uint32_t cap, uint32_t *pos, char c);
 void gui_append_str(char *buf, uint32_t cap, uint32_t *pos, const char *s);

@@ -36,9 +36,9 @@ static void fm_path_enter(gui_state_t *st, const char *name) {
     }
     if (bl + nl + 1 < GUI_PATH_MAX) {
         memcpy(st->fm_path + bl, name, (uint32_t)nl + 1);
+        st->fm_selected = 0;
+        st->fm_scroll = 0;
     }
-    st->fm_selected = 0;
-    st->fm_scroll = 0;
 }
 
 /* ── entry count ──────────────────────────────────────────── */
@@ -105,7 +105,7 @@ static void app_files_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     }
 
     /* scrollbar */
-    if ((int)total > visible) {
+    if ((int)total > visible && lh > 14) {
         int sb_x = lx + lw - 10, sb_y = ly + 1, sb_h = lh - 2;
         gui_rect(sb_x, sb_y, 8, sb_h, gui_rgb(14, 20, 28));
         int th = sb_h * visible / (int)total;
