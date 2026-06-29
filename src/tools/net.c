@@ -283,8 +283,9 @@ static void cmd_nettest(int argc, char **argv) {
         }
     }
 
-    if (dev->dns) {
+    {
         uint32_t ip;
+        if (!dev->dns) console_puts("[nettest] (no DNS from DHCP, using 8.8.8.8 fallback)\n");
         console_puts("[nettest] dns example.com... ");
         if (net_dns_resolve("example.com", &ip) == 0) {
             console_puts("OK ");

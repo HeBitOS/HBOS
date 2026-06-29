@@ -75,6 +75,9 @@
 #define DHCP_SERVER_PORT 67
 /** @brief DNS 服务端口号 */
 #define DNS_PORT 53
+/** @brief 默认公共 DNS 服务器（8.8.8.8），当链路未提供 DNS 时兜底使用。
+ *  四个八位组都是 8，网络字节序与主机字节序相同，可直接用字面量。 */
+#define DNS_FALLBACK_SERVER 0x08080808u
 /** @brief DHCP 报文固定部分长度（含选项前缀） */
 #define DHCP_FIXED_LEN 240
 /** @brief 邻居缓存（ARP 表）条目数 */
@@ -1283,12 +1286,11 @@ int net_dns_resolve(const char *name, uint32_t *out_ip) {
     if (literal) { *out_ip = literal; return 0; }
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
     uint8_t mac[6];
-    if (!primary.dns) {
-        set_error("dns server missing");
-        return -1;
-    }
+    /* 链路未提供 DNS（DHCP 未下发或静态配置留空）时，兜底用公共 DNS 8.8.8.8，
+     * 这样"网络未配置 DNS"也能解析域名，而不是直接报错。 */
+    uint32_t dns_server = primary.dns ? primary.dns : DNS_FALLBACK_SERVER;
     uint32_t next_hop;
-    if (net_route_next_hop(primary.dns, &next_hop) < 0) return -1;
+    if (net_route_next_hop(dns_server, &next_hop) < 0) return -1;
     if (arp_resolve(next_hop, mac) < 0) return -1;
     uint8_t msg[300];
     memset(msg, 0, sizeof(msg));
@@ -1309,7 +1311,7 @@ int net_dns_resolve(const char *name, uint32_t *out_ip) {
         if (next_port < 49152) next_port = 49152;
         uint16_t sport = next_port++;
         dns_wait_t w = {id, 0, 0};
-        send_udp_raw(mac, primary.ip, primary.dns, sport, DNS_PORT, msg, (uint16_t)len);
+        send_udp_raw(mac, primary.ip, dns_server, sport, DNS_PORT, msg, (uint16_t)len);
         for (int i = 0; i < 8 && !w.found; i++) net_poll(dns_cb, &w, 80000);
         if (w.found) {
             *out_ip = w.ip;
