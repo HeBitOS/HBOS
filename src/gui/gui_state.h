@@ -14,7 +14,9 @@
 #define GUI_APP_BROWSER 4
 #define GUI_APP_CODE 5
 #define GUI_APP_DIAG 6
-#define GUI_APP_CLOCK 7
+#define GUI_APP_CLOCK    7
+#define GUI_APP_SETTINGS 8
+#define GUI_APP_FILES    9
 
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
@@ -106,6 +108,10 @@ typedef struct gui_state {
     uint32_t console_cursor;
     int console_history_idx;
     int console_scroll;
+    /* file manager */
+    char fm_path[GUI_PATH_MAX];
+    int  fm_selected;
+    int  fm_scroll;
 } gui_state_t;
 
 #endif

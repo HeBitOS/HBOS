@@ -124,6 +124,8 @@ static const gui_app_meta_t gui_apps[] = {
     {"代码工作台", "编辑、保存、运行 C 文件", GUI_APP_CODE},
     {"控制台终端", "运行命令与系统交互", GUI_APP_DIAG},
     {"时钟", "实时时钟与日期", GUI_APP_CLOCK},
+    {"设置", "主题与字体", GUI_APP_SETTINGS},
+    {"文件管理器", "浏览文件系统", GUI_APP_FILES},
 };
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
@@ -796,8 +798,10 @@ static int app_icon_id(int mode) {
         case GUI_APP_BROWSER: return ICON_BROWSER;
         case GUI_APP_CODE:    return ICON_CODE;
         case GUI_APP_DIAG:    return ICON_TERM;
-        case GUI_APP_CLOCK:   return ICON_CLOCK;
-        default:              return ICON_APPS;
+        case GUI_APP_CLOCK:    return ICON_CLOCK;
+        case GUI_APP_SETTINGS: return ICON_SYS;
+        case GUI_APP_FILES:    return ICON_FILES;
+        default:               return ICON_APPS;
     }
 }
 static int panel_icon_id(int panel) {
@@ -1641,8 +1645,10 @@ static uint32_t app_accent(int mode) {
         case GUI_APP_BROWSER: return rgb(61, 174, 233);
         case GUI_APP_CODE:    return rgb(155, 89, 182);
         case GUI_APP_DIAG:    return rgb(230, 126, 34);
-        case GUI_APP_CLOCK:   return rgb(231, 76, 60);
-        default:              return rgb(61, 174, 233);
+        case GUI_APP_CLOCK:    return rgb(231, 76, 60);
+        case GUI_APP_SETTINGS: return rgb(149, 165, 166);
+        case GUI_APP_FILES:    return rgb(52, 152, 219);
+        default:               return rgb(61, 174, 233);
     }
 }
 
@@ -4455,12 +4461,13 @@ static void draw_start_menu(gui_state_t *st) {
     static const char *menu_items[] = {
         "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
         "记事本", "计算器", "贪吃蛇", "浏览器", "代码工作台",
-        "控制台终端", "时钟", "返回 Shell", "关机"
+        "控制台终端", "时钟", "设置", "文件管理器(App)",
+        "返回 Shell", "关机"
     };
-    static const uint32_t menu_colors[13] = {
+    static const uint32_t menu_colors[15] = {
         0xF1C40F, 0xE67E22, 0x9B59B6, 0x3498DB, 0x2ECC71, 0x3498DB,
         0x27AE60, 0x3DAEE9, 0x9B59B6, 0xE67E22, 0xE74C3C, 0x95A5A6,
-        0xDA4453
+        0x3498DB, 0x95A5A6, 0xDA4453
     };
     int count = sizeof(menu_items) / sizeof(menu_items[0]);
     for (int i = 0; i < count; i++) {
@@ -4596,6 +4603,8 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_CODE, "代码工作台");
     wm_set_app_title(GUI_APP_DIAG, "控制台终端");
     wm_set_app_title(GUI_APP_CLOCK, "时钟");
+    wm_set_app_title(GUI_APP_SETTINGS, "设置");
+    wm_set_app_title(GUI_APP_FILES, "文件管理器");
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";
@@ -4821,8 +4830,10 @@ static void cmd_gui(int argc, char **argv) {
                         else if (item == 8) gui_open_window(&st, WM_WIN_APP, GUI_APP_CODE, 0);
                         else if (item == 9) gui_open_window(&st, WM_WIN_APP, GUI_APP_DIAG, 0);
                         else if (item == 10) gui_open_window(&st, WM_WIN_APP, GUI_APP_CLOCK, 0);
-                        else if (item == 11) break;
-                        else if (item == 12) { acpi_poweroff(); break; }
+                        else if (item == 11) gui_open_window(&st, WM_WIN_APP, GUI_APP_SETTINGS, 0);
+                        else if (item == 12) gui_open_window(&st, WM_WIN_APP, GUI_APP_FILES, 0);
+                        else if (item == 13) break;
+                        else if (item == 14) { acpi_poweroff(); break; }
                         redraw = 1;
                     } else {
                         wm_close_start_menu(&st.wm);

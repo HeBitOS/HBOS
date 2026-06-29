@@ -2,10 +2,14 @@
 
 extern const gui_app_module_t gui_app_calc;
 extern const gui_app_module_t gui_app_clock;
+extern const gui_app_module_t gui_app_settings;
+extern const gui_app_module_t gui_app_files;
 
 static const gui_app_module_t *const g_modules[] = {
     &gui_app_calc,
     &gui_app_clock,
+    &gui_app_settings,
+    &gui_app_files,
 };
 
 const gui_app_module_t *gui_app_by_mode(int mode) {
