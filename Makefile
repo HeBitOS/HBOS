@@ -48,6 +48,8 @@ GUI_FONT_BIN = $(BUILD_DIR)/gui_font.bin
 # Desktop wallpaper. Swap GUI_WALL_IMG to change it; genwall.py decodes/resizes.
 GUI_WALL_IMG = photo/壁纸.jpg
 GUI_WALL_BIN = $(BUILD_DIR)/gui_wall.bin
+# Flat anti-aliased GUI icons. Designs live in tools/genicon.py.
+GUI_ICON_BIN = $(BUILD_DIR)/gui_icons.bin
 
 # 所有 C 源文件
 APP_SRCS = $(wildcard $(SRC_DIR)/apps/*.c)
@@ -82,6 +84,7 @@ C_SRCS = \
 	$(SRC_DIR)/graphics/font_cjk.c \
 	$(SRC_DIR)/graphics/gui_font.c \
 	$(SRC_DIR)/graphics/gui_wall.c \
+	$(SRC_DIR)/graphics/gui_icons.c \
 	$(SRC_DIR)/input/mouse.c \
 	$(SRC_DIR)/shell/shell.c \
 	$(SRC_DIR)/core/task.c \
@@ -133,6 +136,7 @@ ASM_SRCS = \
 	$(SRC_DIR)/graphics/cjk_glyph.asm \
 	$(SRC_DIR)/graphics/gui_glyph.asm \
 	$(SRC_DIR)/graphics/gui_wallimg.asm \
+	$(SRC_DIR)/graphics/gui_iconsimg.asm \
 	$(SRC_DIR)/smp_trampoline.asm
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
@@ -173,7 +177,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/graphics $(BUILD_DIR)/input $(BUILD_DIR)/shell $(BUILD_DIR)/core $(BUILD_DIR)/tools $(BUILD_DIR)/lib $(BUILD_DIR)/user $(BUILD_DIR)/apps $(BUILD_DIR)/gui $(BUILD_DIR)/crypto
 
 # Font generation
-font: $(FONT_BIN) $(GUI_FONT_BIN) $(GUI_WALL_BIN)
+font: $(FONT_BIN) $(GUI_FONT_BIN) $(GUI_WALL_BIN) $(GUI_ICON_BIN)
 
 $(FONT_BIN): $(FONT_TTF) tools/genhzk.py
 	@echo "[MAKE] Generating CJK font bitmap..."
@@ -190,6 +194,11 @@ $(GUI_WALL_BIN): $(GUI_WALL_IMG) tools/genwall.py
 	python3 tools/genwall.py "$(GUI_WALL_IMG)" $(GUI_WALL_BIN)
 	@echo "[MAKE] Wallpaper: $(GUI_WALL_BIN)"
 
+$(GUI_ICON_BIN): tools/genicon.py
+	@echo "[MAKE] Generating flat GUI icons..."
+	python3 tools/genicon.py $(GUI_ICON_BIN)
+	@echo "[MAKE] Icons: $(GUI_ICON_BIN)"
+
 # NASM (.asm) — various directories
 $(BUILD_DIR)/boot.o: $(SRC_DIR)/boot.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
@@ -203,7 +212,7 @@ $(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) $(GUI_FONT_BIN) $(GUI_WALL_BIN)
+$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) $(GUI_FONT_BIN) $(GUI_WALL_BIN) $(GUI_ICON_BIN)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -212,6 +221,7 @@ $(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) 
 $(BUILD_DIR)/graphics/cjk_glyph.o: $(FONT_BIN)
 $(BUILD_DIR)/graphics/gui_glyph.o: $(GUI_FONT_BIN)
 $(BUILD_DIR)/graphics/gui_wallimg.o: $(GUI_WALL_BIN)
+$(BUILD_DIR)/graphics/gui_iconsimg.o: $(GUI_ICON_BIN)
 
 # C rules — one generic rule for all subdirectories
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)

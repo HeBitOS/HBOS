@@ -9,3 +9,4 @@ build/
 .roomodes
 
 fonts/HarmonyOS-Sans/
+tools/__pycache__/

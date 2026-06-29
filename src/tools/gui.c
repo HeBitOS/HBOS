@@ -10,6 +10,7 @@
 #include "../graphics/font_cjk.h"
 #include "../graphics/gui_font.h"
 #include "../graphics/gui_wall.h"
+#include "../graphics/gui_icons.h"
 #include "../graphics/graphics.h"
 #include "../input/mouse.h"
 #include "../net.h"
@@ -706,6 +707,106 @@ static void blit_mono_glyph(int x, int y, const uint8_t *glyph, uint32_t color, 
             uint32_t out_b = (src_b * fg_a + (dst & 0xFF) * inv) / 255;
             row[xx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
         }
+    }
+}
+
+// Blit a flat icon tile (RGBA, from the atlas), bilinearly scaled to sz×sz and
+// alpha-blended onto the surface. Premultiplied-alpha bilinear keeps the edges
+// smooth when downscaling the 64px master to taskbar/launcher sizes. Replaces
+// the old hand-drawn rect motifs + their colored backing square.
+static void blit_icon(int x, int y, int sz, int id) {
+    int tile = 0;
+    const uint32_t *src = gui_icon_tile(id, &tile);
+    if (!src || tile <= 0 || sz <= 0 || !g_gui_surface) return;
+    int cx = x, cy = y, cw = sz, ch = sz;
+    if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
+    int off_x = cx - x, off_y = cy - y;
+    if (cx + cw > g_gui_surface_w) cw = g_gui_surface_w - cx;
+    if (cy + ch > g_gui_surface_h) ch = g_gui_surface_h - cy;
+
+    // 16.16 source coordinate of each dest pixel center: (d+0.5)*tile/sz - 0.5.
+    uint32_t scale = ((uint32_t)tile << 16) / (uint32_t)sz;
+    int bias = (int)(scale >> 1) - 32768;          // +0.5 dst, -0.5 src
+    int maxc = (tile - 1) << 16;
+
+    for (int yy = 0; yy < ch; yy++) {
+        int fy = (off_y + yy) * (int)scale + bias;
+        if (fy < 0) fy = 0;
+        else if (fy > maxc) fy = maxc;
+        int sy0 = fy >> 16, sy1 = sy0 + 1;
+        if (sy1 >= tile) sy1 = tile - 1;
+        uint32_t wy = (uint32_t)(fy & 0xFFFF);
+        const uint32_t *r0 = src + (uint32_t)sy0 * tile;
+        const uint32_t *r1 = src + (uint32_t)sy1 * tile;
+        uint32_t *drow = g_gui_surface +
+                         (uint32_t)(cy + yy) * g_gui_surface_pitch + (uint32_t)cx;
+        for (int xx = 0; xx < cw; xx++) {
+            int fx = (off_x + xx) * (int)scale + bias;
+            if (fx < 0) fx = 0;
+            else if (fx > maxc) fx = maxc;
+            int sx0 = fx >> 16, sx1 = sx0 + 1;
+            if (sx1 >= tile) sx1 = tile - 1;
+            uint32_t wx = (uint32_t)(fx & 0xFFFF);
+
+            // Bilerp in premultiplied space. Weights are .14 fixed (each axis
+            // weight >>9 = .7, product = .14, sum of the 4 ≈ 16384) — chosen so
+            // rgb*a*weight stays inside uint32.
+            uint32_t pr = 0, pg = 0, pb = 0, pa = 0;
+            const uint32_t *rows[2] = { r0, r1 };
+            int sxs[2] = { sx0, sx1 };
+            uint32_t wxs[2] = { (65536 - wx) >> 9, wx >> 9 };
+            uint32_t wys[2] = { (65536 - wy) >> 9, wy >> 9 };
+            for (int j = 0; j < 2; j++) {
+                for (int i = 0; i < 2; i++) {
+                    uint32_t px = rows[j][sxs[i]];
+                    uint32_t a = (px >> 24) & 0xFF;
+                    uint32_t wgt = wxs[i] * wys[j];           // .14
+                    uint32_t am = a * wgt;                    // <= 255*16384
+                    pa += am;
+                    pr += ((px >> 16) & 0xFF) * am / 255;
+                    pg += ((px >> 8) & 0xFF) * am / 255;
+                    pb += (px & 0xFF) * am / 255;
+                }
+            }
+            uint32_t a = pa >> 14;                            // back to 0..255
+            a = a * g_layer_opacity / 255;
+            if (a == 0) continue;
+            if (a > 255) a = 255;
+            // premultiplied rgb (already * alpha) for over-opaque compositing:
+            uint32_t sr = pr >> 14, sg = pg >> 14, sb = pb >> 14;
+            uint32_t dst = drow[xx], inv = 255 - a;
+            uint32_t orr = sr + ((dst >> 16) & 0xFF) * inv / 255;
+            uint32_t og  = sg + ((dst >> 8) & 0xFF) * inv / 255;
+            uint32_t ob  = sb + (dst & 0xFF) * inv / 255;
+            if (orr > 255) orr = 255;
+            if (og > 255) og = 255;
+            if (ob > 255) ob = 255;
+            drow[xx] = 0xFF000000 | (orr << 16) | (og << 8) | ob;
+        }
+    }
+}
+
+// Map an app mode / panel id to its atlas icon id.
+static int app_icon_id(int mode) {
+    switch (mode) {
+        case GUI_APP_NOTES:   return ICON_NOTES;
+        case GUI_APP_CALC:    return ICON_CALC;
+        case GUI_APP_UWC:     return ICON_UWC;
+        case GUI_APP_SNAKE:   return ICON_SNAKE;
+        case GUI_APP_BROWSER: return ICON_BROWSER;
+        case GUI_APP_CODE:    return ICON_CODE;
+        case GUI_APP_DIAG:    return ICON_TERM;
+        case GUI_APP_CLOCK:   return ICON_CLOCK;
+        default:              return ICON_APPS;
+    }
+}
+static int panel_icon_id(int panel) {
+    switch (panel) {
+        case PANEL_FILES: return ICON_FILES;
+        case PANEL_DISK:  return ICON_DISK;
+        case PANEL_SYS:   return ICON_SYS;
+        case PANEL_APPS:
+        default:          return ICON_APPS;
     }
 }
 
@@ -1565,56 +1666,6 @@ static void gui_app_tile_rect(int tx, int ty, int win_w, uint32_t i,
     *h = th;
 }
 
-// A small white motif per app, drawn centered in the icon box (bx,by,sz,sz).
-static void draw_app_glyph(int bx, int by, int sz, int mode) {
-    uint32_t wc = rgb(255, 255, 255);
-    int cx = bx + sz / 2, cy = by + sz / 2;
-    switch (mode) {
-        case GUI_APP_NOTES:
-            rect(bx + 15, by + 15, sz - 30, 4, wc);
-            rect(bx + 15, by + 25, sz - 30, 4, wc);
-            rect(bx + 15, by + 35, sz - 40, 4, wc);
-            break;
-        case GUI_APP_CALC:
-            for (int r = 0; r < 2; r++)
-                for (int c = 0; c < 2; c++)
-                    rect(bx + 14 + c * 14, by + 14 + r * 14, 8, 8, wc);
-            break;
-        case GUI_APP_UWC:
-            rect(bx + 15, by + 28, 6, sz - 38, wc);
-            rect(bx + 24, by + 20, 6, sz - 30, wc);
-            rect(bx + 33, by + 24, 6, sz - 34, wc);
-            break;
-        case GUI_APP_SNAKE:
-            rect(bx + 14, by + 30, 8, 8, wc);
-            rect(bx + 22, by + 22, 8, 8, wc);
-            rect(bx + 30, by + 14, 8, 8, wc);
-            break;
-        case GUI_APP_BROWSER:
-            rect(bx + 14, by + 14, sz - 28, 3, wc);
-            rect(bx + 14, by + sz - 17, sz - 28, 3, wc);
-            rect(bx + 14, by + 14, 3, sz - 28, wc);
-            rect(bx + sz - 17, by + 14, 3, sz - 28, wc);
-            break;
-        case GUI_APP_CODE:
-            for (int k = 0; k < sz - 28; k++)
-                rect(bx + sz - 14 - k, by + 14 + k, 3, 2, wc);  // a "/" slash
-            break;
-        case GUI_APP_DIAG:
-            rect(bx + 15, by + 18, 3, 3, wc);
-            rect(bx + 18, by + 21, 3, 3, wc);
-            rect(bx + 15, by + 24, 3, 3, wc);
-            rect(bx + 24, by + 30, 14, 3, wc);              // ">_"
-            break;
-        case GUI_APP_CLOCK:
-            rect(cx - 1, by + 14, 3, sz / 2 - 6, wc);       // hands
-            rect(cx - 1, cy - 1, sz / 2 - 8, 3, wc);
-            break;
-        default:
-            rect(cx - 6, cy - 6, 12, 12, wc);
-            break;
-    }
-}
 
 static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     char line[64];
@@ -1645,8 +1696,7 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         }
 
         int isz = 52, ix = x + (w - isz) / 2, iy = y + 16;
-        fill_round_rect(ix, iy, isz, isz, 12, accent, RR_ALL);
-        draw_app_glyph(ix, iy, isz, app->mode);
+        blit_icon(ix, iy, isz, app_icon_id(app->mode));
 
         int tw = text_width(app->name, 1);
         int lx = x + (w - tw) / 2;
@@ -3233,99 +3283,10 @@ static void taskbar_item_xy(int idx, int item_count, int w, int h, int *rx, int 
     *ry = h - TASKBAR_H + (TASKBAR_H - TB_BTN) / 2;
 }
 
-static uint32_t taskbar_panel_color(int panel) {
-    switch (panel) {
-        case PANEL_FILES: return rgb(241, 196, 15);
-        case PANEL_DISK:  return rgb(230, 126, 34);
-        case PANEL_SYS:   return rgb(155, 89, 182);
-        case PANEL_APPS:  return rgb(52, 152, 219);
-        default:          return rgb(61, 174, 233);
-    }
-}
 
-// Small white motif for a panel, tuned for a ~28px icon box.
-static void draw_panel_glyph(int bx, int by, int sz, int panel) {
-    uint32_t wc = rgb(255, 255, 255);
-    switch (panel) {
-        case PANEL_FILES:
-            rect(bx + 5, by + 6, (sz - 10) / 2 + 2, 3, wc);
-            rect(bx + 5, by + 9, sz - 10, sz - 16, wc);
-            rect(bx + 8, by + 12, sz - 16, sz - 21, taskbar_panel_color(panel));
-            break;
-        case PANEL_DISK:
-            fill_round_rect(bx + 5, by + 5, sz - 10, sz - 10, (sz - 10) / 2, wc, RR_ALL);
-            rect(bx + sz / 2 - 1, by + sz / 2 - 1, 3, 3, taskbar_panel_color(panel));
-            break;
-        case PANEL_SYS:
-            rect(bx + 6, by + 10, 4, sz - 16, wc);
-            rect(bx + sz / 2 - 2, by + 6, 4, sz - 12, wc);
-            rect(bx + sz - 10, by + 8, 4, sz - 14, wc);
-            break;
-        case PANEL_APPS:
-        default: {
-            int d = (sz - 14) / 2;
-            for (int r = 0; r < 2; r++)
-                for (int c = 0; c < 2; c++)
-                    rect(bx + 5 + c * (d + 4), by + 5 + r * (d + 4), d, d, wc);
-            break;
-        }
-    }
-}
 
 // Small white motif for an app window icon, tuned for a ~28px icon box. Every
 // app mode gets a distinct, recognizable shape — without this the taskbar drew
-// most running apps as an identical featureless white square.
-static void draw_app_glyph_small(int bx, int by, int sz, int mode) {
-    uint32_t wc = rgb(255, 255, 255);
-    int cx = bx + sz / 2, cy = by + sz / 2;
-    switch (mode) {
-        case GUI_APP_NOTES:                              // 三行文字
-            rect(bx + 6, by + 7, sz - 12, 3, wc);
-            rect(bx + 6, by + 13, sz - 12, 3, wc);
-            rect(bx + 6, by + 19, sz - 16, 3, wc);
-            break;
-        case GUI_APP_CALC: {                             // 2x2 按键
-            int d = (sz - 14) / 2;
-            for (int r = 0; r < 2; r++)
-                for (int c = 0; c < 2; c++)
-                    rect(bx + 5 + c * (d + 4), by + 5 + r * (d + 4), d, d, wc);
-            break;
-        }
-        case GUI_APP_UWC:                                // 柱状图
-            rect(bx + 6,  by + 14, 4, 8,  wc);
-            rect(bx + 12, by + 8,  4, 14, wc);
-            rect(bx + 18, by + 11, 4, 11, wc);
-            break;
-        case GUI_APP_SNAKE:                              // 阶梯方块
-            rect(bx + 5,  by + 17, 6, 6, wc);
-            rect(bx + 11, by + 11, 6, 6, wc);
-            rect(bx + 17, by + 5,  6, 6, wc);
-            break;
-        case GUI_APP_BROWSER:                            // 窗口/地球边框
-            rect(bx + 5,  by + 6,  sz - 10, 3, wc);
-            rect(bx + 5,  by + 19, sz - 10, 3, wc);
-            rect(bx + 5,  by + 6,  3, sz - 13, wc);
-            rect(bx + sz - 8, by + 6, 3, sz - 13, wc);
-            break;
-        case GUI_APP_CODE:                               // "/" 斜杠
-            for (int k = 0; k < sz - 14; k++)
-                rect(bx + sz - 9 - k, by + 6 + k, 3, 2, wc);
-            break;
-        case GUI_APP_DIAG:                               // ">_" 提示符
-            rect(bx + 6, by + 8, 3, 3, wc);
-            rect(bx + 9, by + 11, 3, 3, wc);
-            rect(bx + 6, by + 14, 3, 3, wc);
-            rect(bx + 13, by + 17, sz - 19, 3, wc);
-            break;
-        case GUI_APP_CLOCK:                              // 时钟指针
-            rect(cx - 1, by + 6, 3, sz / 2 - 6, wc);
-            rect(cx - 1, cy - 1, sz / 2 - 7, 3, wc);
-            break;
-        default:
-            fill_round_rect(bx + 8, by + 8, sz - 16, sz - 16, 3, wc, RR_ALL);
-            break;
-    }
-}
 
 static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int light = st->theme_light;
@@ -3347,21 +3308,17 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
             rect(gx + s + 2, gy + s + 2, s, s, accent);
         } else if (i <= TB_PIN_COUNT) {
             int panel = g_taskbar_pins[i - 1].panel;
-            int isz = 28, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2;
-            fill_round_rect(ix, iy, isz, isz, 7, taskbar_panel_color(panel), RR_ALL);
-            draw_panel_glyph(ix, iy, isz, panel);
+            int isz = 30, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2;
+            blit_icon(ix, iy, isz, panel_icon_id(panel));
         } else {
             int slot = wins[i - 1 - TB_PIN_COUNT];
             wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, slot);
             int act = (slot == st->wm.active_window);
-            int isz = 28, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2 - 2;
-            if (win->kind == WM_WIN_PANEL) {
-                fill_round_rect(ix, iy, isz, isz, 7, taskbar_panel_color(win->mode), RR_ALL);
-                draw_panel_glyph(ix, iy, isz, win->mode);
-            } else {
-                fill_round_rect(ix, iy, isz, isz, 7, app_accent(win->mode), RR_ALL);
-                draw_app_glyph_small(ix, iy, isz, win->mode);
-            }
+            int isz = 30, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2 - 2;
+            if (win->kind == WM_WIN_PANEL)
+                blit_icon(ix, iy, isz, panel_icon_id(win->mode));
+            else
+                blit_icon(ix, iy, isz, app_icon_id(win->mode));
             rect(rx + TB_BTN / 2 - 7, ry + TB_BTN - 1, 14, 3,
                  act ? accent : (light ? rgb(150, 154, 158) : rgb(150, 155, 160)));
         }
@@ -3465,28 +3422,17 @@ static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
     *y = 46 + i * 112;
 }
 
-static uint32_t desktop_icon_color(const desktop_icon_t *d) {
-    if (d->kind == WM_WIN_PANEL)
-        return d->mode == PANEL_FILES ? rgb(241, 196, 15) : rgb(52, 152, 219);
-    return app_accent(d->mode);
-}
 
 static void draw_desktop_icons(void) {
     for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
         const desktop_icon_t *d = &g_desktop_icons[i];
         int x, y, w, h;
         desktop_icon_rect(i, &x, &y, &w, &h);
-        uint32_t c = desktop_icon_color(d);
         int isz = 58, ix = x + (w - isz) / 2, iy = y;
-        fill_round_rect(ix, iy, isz, isz, 13, c, RR_ALL);
-        if (d->kind == WM_WIN_PANEL) {
-            uint32_t wc = rgb(255, 255, 255);   // folder motif
-            rect(ix + 12, iy + 16, (isz - 24) / 2 + 4, 5, wc);
-            rect(ix + 12, iy + 20, isz - 24, isz - 32, wc);
-            rect(ix + 15, iy + 24, isz - 30, isz - 38, c);
-        } else {
-            draw_app_glyph(ix, iy, isz, d->mode);
-        }
+        if (d->kind == WM_WIN_PANEL)
+            blit_icon(ix, iy, isz, panel_icon_id(d->mode));
+        else
+            blit_icon(ix, iy, isz, app_icon_id(d->mode));
         int tw = text_width(d->label, 1);
         int lx = x + (w - tw) / 2;
         text(lx + 1, iy + isz + 6, d->label, rgb(0, 0, 0), 1);          // shadow
@@ -4551,7 +4497,8 @@ static void cmd_gui(int argc, char **argv) {
         console_puts("gui: GUI 字体加载失败\n");
         return;
     }
-    gui_wall_init();  // 壁纸可选，失败则回退纯色背景
+    gui_wall_init();   // 壁纸可选，失败则回退纯色背景
+    gui_icons_init();  // 扁平图标图集；失败则图标不绘制（不影响其余 UI）
 
     int w = (int)fb.width;
     int h = (int)fb.height;
