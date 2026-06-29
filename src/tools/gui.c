@@ -657,6 +657,65 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
     }
 }
 
+// Crisp 1-bit monospace glyph from the classic 8x16 VGA console font (the same
+// font the TUI uses). No anti-aliasing — solid foreground pixels — so the code
+// editor reads like a real terminal instead of the soft proportional GUI font.
+extern const uint8_t *fb_console_glyph(uint32_t cp);
+#define MONO_GLYPH_W 8
+#define MONO_GLYPH_H 16
+static void blit_mono_glyph(int x, int y, const uint8_t *glyph, uint32_t color, int scale) {
+    if (!glyph) return;
+    if (scale < 1) scale = 1;
+    int dw = MONO_GLYPH_W * scale, dh = MONO_GLYPH_H * scale;
+    int cx = x, cy = y, cw = dw, ch = dh;
+    if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
+    int off_x = cx - x, off_y = cy - y;
+
+    uint32_t base_a = (color >> 24) & 0xFF;
+    if (base_a == 0) base_a = 255;
+    uint32_t fg_a = base_a * g_layer_opacity / 255;
+    if (fg_a == 0) return;
+    uint32_t src_r = (color >> 16) & 0xFF;
+    uint32_t src_g = (color >> 8) & 0xFF;
+    uint32_t src_b = color & 0xFF;
+
+    if (!g_gui_surface) {
+        for (int yy = 0; yy < ch; yy++) {
+            uint8_t bits = glyph[(off_y + yy) / scale];
+            for (int xx = 0; xx < cw; xx++)
+                if (bits & (0x80 >> ((off_x + xx) / scale)))
+                    fb_put_pixel((uint64_t)(cx + xx), (uint64_t)(cy + yy), color);
+        }
+        return;
+    }
+    if (cx < 0) { cw += cx; off_x -= cx; cx = 0; }
+    if (cy < 0) { ch += cy; off_y -= cy; cy = 0; }
+    if (cx >= g_gui_surface_w || cy >= g_gui_surface_h) return;
+    if (cx + cw > g_gui_surface_w) cw = g_gui_surface_w - cx;
+    if (cy + ch > g_gui_surface_h) ch = g_gui_surface_h - cy;
+    for (int yy = 0; yy < ch; yy++) {
+        uint8_t bits = glyph[(off_y + yy) / scale];
+        uint32_t *row = g_gui_surface +
+                        (uint32_t)(cy + yy) * g_gui_surface_pitch + (uint32_t)cx;
+        for (int xx = 0; xx < cw; xx++) {
+            if (!(bits & (0x80 >> ((off_x + xx) / scale)))) continue;
+            if (fg_a >= 255) { row[xx] = 0xFF000000 | (color & 0xFFFFFF); continue; }
+            uint32_t dst = row[xx], inv = 255 - fg_a;
+            uint32_t out_r = (src_r * fg_a + ((dst >> 16) & 0xFF) * inv) / 255;
+            uint32_t out_g = (src_g * fg_a + ((dst >> 8) & 0xFF) * inv) / 255;
+            uint32_t out_b = (src_b * fg_a + (dst & 0xFF) * inv) / 255;
+            row[xx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+        }
+    }
+}
+
+// Draw one printable ASCII char in the mono console font; returns the cell width.
+static int draw_mono_char(int x, int y, char c, uint32_t color) {
+    if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F)
+        blit_mono_glyph(x, y, fb_console_glyph((uint32_t)(unsigned char)c), color, 1);
+    return MONO_GLYPH_W;
+}
+
 // Draw one codepoint with its top at `y`, returning the pen advance. Latin and
 // CJK share a baseline (y + ascent), so mixed text aligns naturally.
 // Resolve a codepoint+scale to a concrete glyph. Prefer the native large size
@@ -2369,28 +2428,19 @@ static int code_is_keyword(const char *s, uint32_t len) {
            code_word_eq(s, len, "delete");
 }
 
-// Monospace cell width for the code editor, derived from the active GUI font so
-// it tracks the runtime font-size switch (F2/F3). The editor is column-based, so
-// every glyph must occupy a fixed cell — otherwise the proportional renderer
-// makes characters overlap (advances < glyph widths) and the cursor drifts.
-static int code_cell_w(void) {
-    gui_glyph_t g;
-    if (gui_font_lookup('0', &g) && g.advance > 0) return (int)g.advance + 1;
-    int px = gui_font_size_px(gui_font_active_base_idx());
-    return px > 0 ? px * 3 / 5 : 11;   // ~0.6em fallback
-}
+// The code editor renders source in the classic 8x16 mono console font (same as
+// the TUI), so the cell width is the fixed glyph width. Column-based positioning
+// (cursor, click-to-column) all key off this.
+static int code_cell_w(void) { return MONO_GLYPH_W; }
 
-// Draw a syntax span in fixed monospace cells (one glyph per cell, left-aligned).
+// Draw a syntax span in fixed monospace cells using the crisp console bitmap
+// font. One byte per cell keeps the column math byte-aligned with the editor's
+// offset model (code_offset_for_line_col counts bytes).
 static int code_draw_span(int x, int y, int max_x, const char *s,
                           uint32_t start, uint32_t len, uint32_t color) {
-    int cell = code_cell_w();
     for (uint32_t k = 0; k < len && x < max_x; k++) {
-        char c = s[start + k];
-        if (c != ' ' && c != '\t') {
-            char tmp[2] = { c, 0 };
-            text_clipped(x, y, max_x, tmp, color, 1);
-        }
-        x += cell;
+        draw_mono_char(x, y, s[start + k], color);
+        x += MONO_GLYPH_W;
     }
     return x;
 }

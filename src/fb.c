@@ -283,6 +283,15 @@ static const uint8_t builtin_font[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+/* Classic 8x16 VGA console font, exposed so the GUI code editor can render its
+ * source text in the same crisp monospace bitmap the TUI uses (instead of the
+ * proportional GUI font). Returns the 16-byte glyph (1 byte/row, MSB = leftmost
+ * pixel) for codepoints 0x00-0xFF, or NULL. */
+const uint8_t *fb_console_glyph(uint32_t cp) {
+    if (cp > 0xFF) return (const uint8_t *)0;
+    return &builtin_font[cp * 16];
+}
+
 static inline uint32_t convert_colour(struct flanterm_context *_ctx, uint32_t colour) {
     struct flanterm_fb_context *ctx = (void *)_ctx;
     uint32_t r                      = (colour >> 16) & 0xff;
