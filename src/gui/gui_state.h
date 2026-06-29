@@ -105,6 +105,7 @@ typedef struct gui_state {
     uint32_t console_line_count;
     uint32_t console_cursor;
     int console_history_idx;
+    int console_scroll;
 } gui_state_t;
 
 #endif

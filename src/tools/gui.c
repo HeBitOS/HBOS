@@ -2791,9 +2791,10 @@ static void console_exec_cmd(gui_state_t *st) {
 }
 
 static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
+    int sb_w = 10;                          // scrollbar width
     int box_x = tx - 20;
     int box_y = ty - 4;
-    int box_w = win_w - 20;
+    int box_w = win_w - 20 - sb_w - 4;
     int box_h = win_h - 74;
 
     // Flat Breeze terminal surface.
@@ -2807,22 +2808,31 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     // 自动根据可用高度计算最多绘制的历史记录行数，防止重叠
     int max_lines = (input_y - (box_y + 12)) / row_h;
     if (max_lines < 1) max_lines = 1;
+
+    // clamp scroll offset
+    int total = (int)st->console_line_count;
+    int max_scroll = total - max_lines;
+    if (max_scroll < 0) max_scroll = 0;
+    if (st->console_scroll > max_scroll) st->console_scroll = max_scroll;
+    if (st->console_scroll < 0) st->console_scroll = 0;
+
     uint32_t start_idx = 0;
-    if (st->console_line_count > (uint32_t)max_lines) {
-        start_idx = st->console_line_count - (uint32_t)max_lines;
+    if (total > max_lines) {
+        int bottom_start = total - max_lines;
+        start_idx = (uint32_t)(bottom_start - st->console_scroll);
     }
 
     // 绘制命令历史（控制台位图字体，与真 TUI 一致）
     int start_y = box_y + 12;
-    for (uint32_t i = start_idx; i < st->console_line_count; i++) {
+    for (uint32_t i = start_idx; i < st->console_line_count && start_y < input_y; i++) {
         const char *line = st->console_history[i];
         uint32_t color = cyber_text(0);
         if (strncmp(line, "hbos_gui_shell:", 15) == 0) {
-            color = rgb(39, 174, 96); // Breeze 绿 prompt
+            color = rgb(39, 174, 96);
         } else if (strncmp(line, "hbos_shell:", 11) == 0) {
-            color = rgb(218, 68, 83); // Breeze 红 error
+            color = rgb(218, 68, 83);
         } else if (strncmp(line, "  ", 2) == 0) {
-            color = rgb(160, 167, 173); // 次要灰细节
+            color = rgb(160, 167, 173);
         }
         text_mono(box_x + 12, start_y, max_x, line, color);
         start_y += row_h;
@@ -2839,6 +2849,21 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     if ((cursor_ticks / 15) % 2) {
         int cursor_x = px + (int)st->console_cursor * MONO_GLYPH_W;
         rect(cursor_x, input_y, 2, MONO_GLYPH_H - 2, rgb(39, 174, 96));
+    }
+
+    // 垂直滚动条
+    int sb_x = box_x + box_w + 4;
+    int sb_y = box_y;
+    int sb_h = box_h;
+    rect(sb_x, sb_y, sb_w, sb_h, rgb(22, 26, 30));
+    border(sb_x, sb_y, sb_w, sb_h, rgb(50, 58, 65));
+    if (max_scroll > 0) {
+        int thumb_h = sb_h * max_lines / (total > 0 ? total : 1);
+        if (thumb_h < 16) thumb_h = 16;
+        if (thumb_h > sb_h) thumb_h = sb_h;
+        int thumb_range = sb_h - thumb_h;
+        int thumb_y = sb_y + thumb_range - (thumb_range * st->console_scroll / max_scroll);
+        rect(sb_x + 2, thumb_y + 1, sb_w - 4, thumb_h - 2, rgb(61, 174, 233));
     }
 }
 
@@ -4256,7 +4281,13 @@ static void handle_app_key(gui_state_t *st, int key) {
                     st->console_history_idx = -1;
                 }
             }
+        } else if (key == GUI_KEY_PGUP) {
+            st->console_scroll += 8;
+        } else if (key == GUI_KEY_PGDOWN) {
+            st->console_scroll -= 8;
+            if (st->console_scroll < 0) st->console_scroll = 0;
         } else if (key >= 32 && key <= 126) {
+            st->console_scroll = 0;  // typing snaps back to bottom
             if (st->console_input_len + 1 < 80) {
                 for (uint32_t j = st->console_input_len; j > st->console_cursor; j--) {
                     st->console_input[j] = st->console_input[j - 1];
@@ -4596,6 +4627,14 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
+        /* F4: toggle light/dark theme. */
+        if (key == KB_KEY_F4) {
+            st.theme_light = !st.theme_light;
+            st.status = st.theme_light ? "已切换为浅色主题" : "已切换为深色主题";
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         if (st.splash_ticks > 0 && key) {
             st.splash_ticks = 0;
             gui_dirty_mark_full();
@@ -4917,7 +4956,12 @@ static void cmd_gui(int argc, char **argv) {
                                                 code_ensure_visible(&st);
                                                 st.status = "已移动代码光标";
                                             } else {
-                                                st.status = "应用已聚焦";
+                                                int aw_x, aw_y, aw_w, aw_h;
+                                                int aw = st.wm.active_window;
+                                                gui_window_metrics(&st, w, h, NULL, aw, &aw_x, &aw_y, &aw_w, &aw_h);
+                                                int atx = aw_x + 30, aty = aw_y + 42;
+                                                if (!gui_app_on_click(&st, mx, my, atx, aty, aw_w, aw_h))
+                                                    st.status = "应用已聚焦";
                                             }
                                         }
                                     }
@@ -5083,3 +5127,59 @@ void gui_append_char(char *buf, uint32_t cap, uint32_t *pos, char c) { append_ch
 void gui_append_str(char *buf, uint32_t cap, uint32_t *pos, const char *s) { append_str(buf, cap, pos, s); }
 void gui_append_int(char *buf, uint32_t cap, uint32_t *pos, int v) { append_int(buf, cap, pos, v); }
 void gui_append_uint(char *buf, uint32_t cap, uint32_t *pos, uint32_t v) { append_uint(buf, cap, pos, v); }
+
+void gui_draw_line(int x0, int y0, int x1, int y1, uint32_t color) {
+    int dx = x1 - x0, dy = y1 - y0;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    int sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
+    int err = adx - ady;
+    while (1) {
+        rect(x0, y0, 1, 1, color);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -ady) { err -= ady; x0 += sx; }
+        if (e2 <  adx) { err += adx; y0 += sy; }
+    }
+}
+
+void gui_draw_thick_line(int x0, int y0, int x1, int y1, int thickness, uint32_t color) {
+    if (thickness <= 1) { gui_draw_line(x0, y0, x1, y1, color); return; }
+    int half = thickness / 2;
+    /* draw several parallel offsets for thickness */
+    int dx = x1 - x0, dy = y1 - y0;
+    /* perpendicular direction */
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    if (ady > adx) {
+        /* mostly vertical: spread horizontally */
+        for (int i = -half; i <= half; i++)
+            gui_draw_line(x0 + i, y0, x1 + i, y1, color);
+    } else {
+        /* mostly horizontal: spread vertically */
+        for (int i = -half; i <= half; i++)
+            gui_draw_line(x0, y0 + i, x1, y1 + i, color);
+    }
+}
+
+void gui_fill_circle(int cx, int cy, int r, uint32_t color) {
+    for (int dy = -r; dy <= r; dy++) {
+        int dx = 0;
+        while (dx * dx + dy * dy <= r * r) dx++;
+        rect(cx - dx + 1, cy + dy, 2 * dx - 2, 1, color);
+    }
+}
+
+void gui_draw_circle(int cx, int cy, int r, uint32_t color) {
+    int x = 0, y = r, d = 3 - 2 * r;
+    while (x <= y) {
+        rect(cx + x, cy - y, 1, 1, color); rect(cx - x, cy - y, 1, 1, color);
+        rect(cx + x, cy + y, 1, 1, color); rect(cx - x, cy + y, 1, 1, color);
+        rect(cx + y, cy - x, 1, 1, color); rect(cx - y, cy - x, 1, 1, color);
+        rect(cx + y, cy + x, 1, 1, color); rect(cx - y, cy + x, 1, 1, color);
+        if (d < 0) d += 4 * x + 6; else { d += 4 * (x - y) + 10; y--; }
+        x++;
+    }
+}
+
+void gui_fill_round_rect(int x, int y, int w, int h, int r, uint32_t color) {
+    fill_round_rect(x, y, w, h, r, color, RR_TL | RR_TR | RR_BL | RR_BR);
+}

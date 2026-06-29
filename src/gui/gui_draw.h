@@ -29,4 +29,10 @@ void gui_append_str(char *buf, uint32_t cap, uint32_t *pos, const char *s);
 void gui_append_int(char *buf, uint32_t cap, uint32_t *pos, int v);
 void gui_append_uint(char *buf, uint32_t cap, uint32_t *pos, uint32_t v);
 
+void gui_draw_line(int x0, int y0, int x1, int y1, uint32_t color);
+void gui_draw_thick_line(int x0, int y0, int x1, int y1, int thickness, uint32_t color);
+void gui_fill_circle(int cx, int cy, int r, uint32_t color);
+void gui_draw_circle(int cx, int cy, int r, uint32_t color);
+void gui_fill_round_rect(int x, int y, int w, int h, int r, uint32_t color);
+
 #endif

@@ -88,6 +88,7 @@ int kb_poll_key(void);
 #define KB_KEY_F1      0x10A
 #define KB_KEY_F2      0x10B
 #define KB_KEY_F3      0x10C
+#define KB_KEY_F4      0x10D
 
 // NumLock 状态查询
 bool kb_is_numlock(void);

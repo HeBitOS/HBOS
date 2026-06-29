@@ -28,6 +28,12 @@ int gui_app_handle_key(gui_state_t *st, int key) {
     return app->on_key(st, key);
 }
 
+int gui_app_on_click(gui_state_t *st, int mx, int my, int tx, int ty, int win_w, int win_h) {
+    const gui_app_module_t *app = gui_app_by_mode(st->app_mode);
+    if (!app || !app->on_click) return 0;
+    return app->on_click(st, mx, my, tx, ty, win_w, win_h);
+}
+
 int gui_app_tick(gui_state_t *st) {
     int redraw = 0;
     for (uint32_t i = 0; i < sizeof(g_modules) / sizeof(g_modules[0]); i++) {
