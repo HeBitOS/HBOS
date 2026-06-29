@@ -1158,14 +1158,16 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
     append_str(buf, cap, &pos, b);
 }
 
-// Pure 1:1 pointer mapping with a safety cap — the v0.1-beta3-pre3 feel. Every
-// raw mouse count moves exactly one pixel, applied immediately with NO sub-pixel
-// carry and NO acceleration. The carry/gain we tried later held back part of a
-// small nudge until enough accumulated, which made short movements feel numb
-// ("短移动不灵敏"). Direct integer mapping = crisp, responsive short moves.
+// Direct integer pointer mapping: each raw mouse count moves MOUSE_GAIN pixels,
+// applied IMMEDIATELY — no sub-pixel carry, no division, no acceleration. The
+// carry we tried earlier held back part of a small nudge until it accumulated,
+// which made short moves feel numb; a flat integer multiply keeps short moves
+// crisp AND gives enough speed to cross the screen. Tune MOUSE_GAIN to taste.
+#define MOUSE_GAIN 2
 static int clamp_delta(int v) {
-    if (v > 80) return 80;
-    if (v < -80) return -80;
+    v *= MOUSE_GAIN;
+    if (v > 200) return 200;
+    if (v < -200) return -200;
     return v;
 }
 
@@ -4861,11 +4863,23 @@ static void cmd_gui(int argc, char **argv) {
                                     last_title_idx = -1;
                                     st.status = "窗口已最大化/还原";
                                 } else {
-                                    int win_x, win_y, win_w, win_h;
-                                    gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
                                     dragging_window = title_idx;
-                                    drag_off_x = mx - win_x;
-                                    drag_off_y = my - win_y;
+                                    // Dragging a maximized window restores it
+                                    // first so it follows the cursor (standard
+                                    // behavior) instead of staying stuck fullscreen.
+                                    wm_window_t *dw = wm_get_window(&st.wm, title_idx);
+                                    int win_x, win_y, win_w, win_h;
+                                    if (dw && dw->state == WM_STATE_MAXIMIZED) {
+                                        wm_restore_window(&st.wm, title_idx);
+                                        gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
+                                        drag_off_x = win_w / 2;
+                                        drag_off_y = WM_TITLE_H / 2;
+                                        gui_set_active_window_pos(&st, mx - drag_off_x, my - drag_off_y);
+                                    } else {
+                                        gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
+                                        drag_off_x = mx - win_x;
+                                        drag_off_y = my - win_y;
+                                    }
                                     drag_last_draw_x = mx;
                                     drag_last_draw_y = my;
                                     drag_pending = 0;

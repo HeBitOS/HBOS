@@ -181,15 +181,8 @@ void wm_minimize_window(wm_state_t *wm, int idx) {
         win->prev_h = win->h;
     }
     
-    /* 启动最小化动画 */
-    win->anim_type = WM_ANIM_MINIMIZE;
-    win->anim_frame = 0;
-    win->anim_total = 10;  /* 10帧动画 */
-    win->anim_start_x = win->x;
-    win->anim_start_y = win->y;
-    win->anim_start_w = win->w;
-    win->anim_start_h = win->h;
-    
+    /* 瞬时最小化。 */
+    win->anim_type = WM_ANIM_NONE;
     win->state = WM_STATE_MINIMIZED;
 
     int next = -1;
@@ -218,16 +211,8 @@ void wm_maximize_window(wm_state_t *wm, int idx) {
         win->prev_w = win->w;
         win->prev_h = win->h;
     }
-    
-    /* 启动最大化动画 */
-    win->anim_type = WM_ANIM_MAXIMIZE;
-    win->anim_frame = 0;
-    win->anim_total = 8;  /* 8帧动画 */
-    win->anim_start_x = win->x;
-    win->anim_start_y = win->y;
-    win->anim_start_w = win->w;
-    win->anim_start_h = win->h;
-    
+    /* 瞬时最大化（几何动画反复出 bug，改为直接铺满）。 */
+    win->anim_type = WM_ANIM_NONE;
     win->state = WM_STATE_MAXIMIZED;
     win->x = 0;
     win->y = 0;
@@ -240,16 +225,8 @@ void wm_restore_window(wm_state_t *wm, int idx) {
     wm_window_t *win = &wm->windows[idx];
     if (!win->used) return;
     if (win->state == WM_STATE_NORMAL) return;
-    
-    /* 启动还原动画 */
-    win->anim_type = WM_ANIM_RESTORE;
-    win->anim_frame = 0;
-    win->anim_total = 8;  /* 8帧动画 */
-    win->anim_start_x = win->x;
-    win->anim_start_y = win->y;
-    win->anim_start_w = win->w;
-    win->anim_start_h = win->h;
-    
+    /* 瞬时还原。 */
+    win->anim_type = WM_ANIM_NONE;
     win->state = WM_STATE_NORMAL;
     if (win->prev_w > 0 && win->prev_h > 0) {
         win->x = win->prev_x;
