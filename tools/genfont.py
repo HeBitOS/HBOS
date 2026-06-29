@@ -42,7 +42,7 @@ from PIL import Image, ImageDraw, ImageFont
 #
 # Layout in the GFN2 blob: all bases first (indices 0..N-1), then their large
 # companions in the same order (indices N..2N-1). gui_font.c derives the pairing.
-BASE_SIZES = [16, 18, 20]
+BASE_SIZES = [15]
 
 # Full coverage for the base size.
 BASE_RANGES = [
