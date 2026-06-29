@@ -4436,51 +4436,138 @@ static void draw_window_switcher(int w, int h, gui_state_t *st) {
 static void draw_start_menu(gui_state_t *st) {
     wm_state_t *wm = &st->wm;
     if (!wm->start_menu_open) return;
-    int mx = wm->menu_x, my = wm->menu_y, mw = wm->menu_w, mh = wm->menu_h;
-
+    int ox = wm->menu_x, oy = wm->menu_y;
     int light = st->theme_light;
-    soft_shadow(mx, my, mw, mh);
-    soft_shadow(mx + 2, my + 3, mw - 4, mh - 4);
 
-    // Flat Breeze glass panel + straight border (rounded corners via AA fill).
-    fill_round_rect(mx, my, mw, mh, 10, light ? 0xF4F4F5F7 : 0xF41B1F24, RR_ALL);
-    uint32_t bd = light ? rgb(206, 210, 214) : rgb(58, 63, 70);
-    rect(mx + 10, my, mw - 20, 1, bd);
-    rect(mx + 10, my + mh - 1, mw - 20, 1, bd);
-    rect(mx, my + 10, 1, mh - 20, bd);
-    rect(mx + mw - 1, my + 10, 1, mh - 20, bd);
+    /* ── panel background ── */
+    soft_shadow(ox - 4, oy - 4, SM_W + 8, SM_H + 8);
+    uint32_t bg = light ? 0xF6F5F6F8 : 0xF6202428;
+    fill_round_rect(ox, oy, SM_W, SM_H, 12, bg, RR_ALL);
+    uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
+    /* top/bottom border lines for rounded rect */
+    rect(ox + 12, oy, SM_W - 24, 1, bd);
+    rect(ox + 12, oy + SM_H - 1, SM_W - 24, 1, bd);
+    rect(ox, oy + 12, 1, SM_H - 24, bd);
+    rect(ox + SM_W - 1, oy + 12, 1, SM_H - 24, bd);
 
-    // Header.
-    uint32_t accent = rgb(61, 174, 233);
-    int hy = my + (44 - gui_font_line_height()) / 2;
-    text(mx + 16, hy, "HBOS", accent, 1);
-    text(mx + 16 + text_width("HBOS ", 1), hy, "工作站",
-         light ? rgb(120, 126, 132) : rgb(150, 156, 162), 1);
-    rect(mx + 12, my + 43, mw - 24, 1, bd);
+    /* ── search bar ── */
+    int sx = ox + SM_PAD, sy = oy + SM_SEARCH_TOP;
+    int sw = SM_W - 2 * SM_PAD;
+    vgradient(sx, sy, sw, SM_SEARCH_H,
+              light ? rgb(240, 242, 244) : rgb(34, 40, 48),
+              light ? rgb(232, 235, 238) : rgb(28, 34, 42));
+    border(sx, sy, sw, SM_SEARCH_H, light ? rgb(190, 195, 200) : rgb(55, 65, 78));
+    text(sx + 12, sy + (SM_SEARCH_H - gui_font_line_height()) / 2,
+         "搜索应用...", light ? rgb(160, 166, 172) : rgb(100, 110, 122), 1);
+    /* magnifier icon */
+    int mg = sy + SM_SEARCH_H / 2;
+    int mr = 6;
+    /* simple circle + line for magnifier */
+    rect(sx + sw - 22 + mr/2 + 2, mg - mr, 1, mr * 2, light ? rgb(140,146,152) : rgb(90,100,112));
+    rect(sx + sw - 22 - mr, mg - 1, mr * 2, 1, light ? rgb(140,146,152) : rgb(90,100,112));
 
-    static const char *menu_items[] = {
-        "文件管理器", "磁盘管理器", "资源管理器", "应用程序",
-        "记事本", "计算器", "贪吃蛇", "浏览器", "代码工作台",
-        "控制台终端", "时钟", "设置", "文件管理器(App)",
-        "返回 Shell", "关机"
+    /* ── "已固定" section label ── */
+    int lty = oy + SM_PIN_TOP;
+    text(ox + SM_PAD, lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
+         "已固定", light ? rgb(60, 66, 72) : rgb(180, 186, 192), 1);
+    text(ox + SM_W - SM_PAD - text_width("全部 >", 1),
+         lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
+         "全部 >", light ? rgb(61, 174, 233) : rgb(61, 174, 233), 1);
+
+    /* ── pinned app icon grid ── */
+    static const char *pinned_names[] = {
+        "文件管理器", "磁盘", "资源", "应用", "记事本",
+        "计算器", "贪吃蛇", "浏览器", "代码", "终端",
+        "时钟", "设置", "文件(App)"
     };
-    static const uint32_t menu_colors[15] = {
-        0xF1C40F, 0xE67E22, 0x9B59B6, 0x3498DB, 0x2ECC71, 0x3498DB,
-        0x27AE60, 0x3DAEE9, 0x9B59B6, 0xE67E22, 0xE74C3C, 0x95A5A6,
-        0x3498DB, 0x95A5A6, 0xDA4453
+    static const int pinned_icons[] = {
+        ICON_FILES, ICON_DISK, ICON_SYS, ICON_APPS, ICON_NOTES,
+        ICON_CALC, ICON_SNAKE, ICON_BROWSER, ICON_CODE, ICON_TERM,
+        ICON_CLOCK, ICON_SYS, ICON_FILES
     };
-    int count = sizeof(menu_items) / sizeof(menu_items[0]);
-    for (int i = 0; i < count; i++) {
-        int iy = my + 44 + i * 32;
-        if (iy + 32 > my + mh) break;
-        // small rounded app-colored icon
-        int isz = 22, ix = mx + 12, icy = iy + (32 - isz) / 2;
-        fill_round_rect(ix, icy, isz, isz, 6, menu_colors[i] | 0xFF000000, RR_ALL);
-        rect(ix + isz / 2 - 3, icy + isz / 2 - 3, 6, 6, rgb(255, 255, 255));
-        uint32_t tc = (i == 12) ? rgb(218, 68, 83)                      // 关机 red
-                    : (i == 11) ? (light ? rgb(120, 126, 132) : rgb(170, 176, 182))
-                                : (light ? rgb(40, 44, 48) : rgb(228, 232, 236));
-        text(mx + 44, iy + (32 - gui_font_line_height()) / 2, menu_items[i], tc, 1);
+    int cell_w = (SM_W - 2 * SM_PAD) / SM_GRID_COLS;
+    for (int i = 0; i < SM_PINNED_COUNT; i++) {
+        int col = i % SM_GRID_COLS;
+        int row = i / SM_GRID_COLS;
+        int cx = ox + SM_PAD + col * cell_w + cell_w / 2;
+        int cy = oy + SM_GRID_TOP + row * SM_CELL_H;
+
+        /* hover highlight */
+        int hov = 0;  /* could track hover with st->win_x but skip for now */
+        if (hov) {
+            fill_round_rect(cx - cell_w / 2 + 4, cy + 2, cell_w - 8, SM_CELL_H - 4,
+                            6, light ? 0x18000000 : 0x20FFFFFF, RR_ALL);
+        }
+
+        /* icon */
+        int isz = 36;
+        int ix = cx - isz / 2;
+        int iy = cy + 4;
+        blit_icon(ix, iy, isz, pinned_icons[i]);
+
+        /* label centered below icon */
+        const char *lbl = pinned_names[i];
+        int tw = text_width(lbl, 1);
+        int lx = cx - tw / 2;
+        if (lx < ox + SM_PAD) lx = ox + SM_PAD;
+        text_clipped(lx, iy + isz + 4, ox + SM_W - SM_PAD,
+                     lbl, light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+    }
+
+    /* ── separator ── */
+    int sep_y = oy + SM_SEP_Y + 2;
+    rect(ox + SM_PAD, sep_y, SM_W - 2 * SM_PAD, 1,
+         light ? rgb(210, 214, 218) : rgb(48, 56, 64));
+
+    /* ── bottom bar ── */
+    int bar_y = oy + SM_BAR_TOP;
+    /* left: user icon + name */
+    int uisz = 28;
+    int uix = ox + SM_PAD, uiy = bar_y + (SM_BAR_H - uisz) / 2;
+    fill_round_rect(uix, uiy, uisz, uisz, uisz / 2,
+                    light ? rgb(61, 120, 180) : rgb(50, 100, 160), RR_ALL);
+    /* silhouette */
+    rect(uix + uisz/2 - 4, uiy + 4, 8, 8, rgb(255,255,255));
+    rect(uix + 4, uiy + uisz - 10, uisz - 8, 8, rgb(255,255,255));
+    text(uix + uisz + 8, bar_y + (SM_BAR_H - gui_font_line_height()) / 2,
+         "用户", light ? rgb(40, 44, 48) : rgb(210, 218, 226), 1);
+
+    /* right: Shell + Power buttons */
+    int btn_w = 88, btn_h = 30, gap = 8;
+    int power_x = ox + SM_W - SM_PAD - btn_w;
+    int shell_x = power_x - btn_w - gap;
+    int btn_y = bar_y + (SM_BAR_H - btn_h) / 2;
+
+    /* Shell button */
+    vgradient(shell_x, btn_y, btn_w, btn_h,
+              light ? rgb(220, 226, 232) : rgb(44, 54, 66),
+              light ? rgb(208, 214, 220) : rgb(36, 44, 56));
+    border(shell_x, btn_y, btn_w, btn_h, light ? rgb(180, 186, 192) : rgb(60, 72, 86));
+    {
+        int tw = text_width("返回Shell", 1);
+        text(shell_x + (btn_w - tw) / 2, btn_y + (btn_h - gui_font_line_height()) / 2,
+             "返回Shell", light ? rgb(40, 44, 48) : rgb(200, 210, 222), 1);
+    }
+
+    /* Power button */
+    vgradient(power_x, btn_y, btn_w, btn_h,
+              light ? rgb(240, 80, 80) : rgb(180, 30, 30),
+              light ? rgb(220, 60, 60) : rgb(150, 20, 20));
+    border(power_x, btn_y, btn_w, btn_h, light ? rgb(180, 40, 40) : rgb(120, 15, 15));
+    {
+        /* power symbol: circle arc + vertical bar */
+        int pcx = power_x + btn_w / 2;
+        int pcy = btn_y + btn_h / 2;
+        rect(pcx - 1, pcy - 7, 2, 8, rgb(255, 255, 255));
+        /* arc approximation via horizontal lines */
+        for (int dy = -5; dy <= 5; dy++) {
+            int dx = dy < 0 ? (6 - dy/2) : (6 + dy/2);
+            if (dx > 8) dx = 8;
+            rect(pcx - dx, pcy + dy, 1, 1, rgb(255, 255, 255));
+            rect(pcx + dx, pcy + dy, 1, 1, rgb(255, 255, 255));
+        }
+        text(power_x + 20, btn_y + (btn_h - gui_font_line_height()) / 2,
+             "关机", rgb(255, 255, 255), 1);
     }
 }
 
@@ -4878,16 +4965,10 @@ static void cmd_gui(int argc, char **argv) {
                         if (tb == TBHIT_START) {
                             wm_toggle_start_menu(&st.wm);
                             if (st.wm.start_menu_open) {
-                                // Anchor the menu above the centered Start button.
-                                int wins[WM_MAX_WINDOWS];
-                                int n = taskbar_windows(&st, wins, WM_MAX_WINDOWS);
-                                int bx, by;
-                                taskbar_item_xy(0, 1 + TB_PIN_COUNT + n, w, h, &bx, &by);
-                                st.wm.menu_x = bx;
-                                if (st.wm.menu_x + st.wm.menu_w > w - 8)
-                                    st.wm.menu_x = w - 8 - st.wm.menu_w;
+                                /* Win11 style: center horizontally above taskbar */
+                                st.wm.menu_x = (w - SM_W) / 2;
                                 if (st.wm.menu_x < 8) st.wm.menu_x = 8;
-                                st.wm.menu_y = h - TASKBAR_H - st.wm.menu_h - 8;
+                                st.wm.menu_y = h - TASKBAR_H - SM_H - 8;
                                 if (st.wm.menu_y < 8) st.wm.menu_y = 8;
                             }
                             st.status = "开始菜单";

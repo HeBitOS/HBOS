@@ -10,6 +10,28 @@
 #define WM_BTN_W       26
 #define WM_BTN_GAP     4
 
+/* ── Win11-style start-menu layout (shared by wm.c draw and hit-test) ─── */
+#define SM_W            540   /* total panel width  */
+#define SM_H            368   /* total panel height */
+#define SM_PAD           16   /* horizontal padding */
+#define SM_SEARCH_TOP     8   /* search bar top */
+#define SM_SEARCH_H      36   /* search bar height */
+#define SM_PIN_TOP       52   /* "已固定" label top */
+#define SM_PIN_LABEL_H   22   /* section label height */
+#define SM_GRID_TOP      76   /* grid cells top */
+#define SM_GRID_COLS      5   /* columns */
+#define SM_GRID_ROWS      3   /* rows (13 pinned apps) */
+#define SM_CELL_W       (SM_W / SM_GRID_COLS)   /* 108px */
+#define SM_CELL_H        76   /* cell height */
+#define SM_GRID_H       (SM_GRID_ROWS * SM_CELL_H)  /* 228px */
+#define SM_SEP_Y        (SM_GRID_TOP + SM_GRID_H)   /* 304px */
+#define SM_BAR_TOP      (SM_SEP_Y + 8)              /* 312px */
+#define SM_BAR_H        (SM_H - SM_BAR_TOP)         /* 56px */
+#define SM_PINNED_COUNT  13   /* items 0..12 = pinned apps */
+/* items 13 = 返回Shell, 14 = 关机; hit-tested in bottom bar */
+#define SM_SHELL_ITEM   13
+#define SM_POWER_ITEM   14
+
 enum {
     WM_WIN_PANEL = 0,
     WM_WIN_APP   = 1,

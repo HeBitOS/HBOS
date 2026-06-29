@@ -7,8 +7,7 @@
 
 static int g_titles_ready = 0;
 
-#define WM_APP_TITLE_COUNT 8
-#define WM_START_MENU_ROWS 13
+#define WM_APP_TITLE_COUNT 16
 
 static const char *panel_titles[4];
 static const char *app_titles[WM_APP_TITLE_COUNT];
@@ -270,14 +269,13 @@ void wm_snap_window(wm_state_t *wm, int idx, int side) {
 void wm_toggle_start_menu(wm_state_t *wm) {
     wm->start_menu_open = !wm->start_menu_open;
     if (wm->start_menu_open) {
-        /* Size only; the GUI repositions x/y to sit above the centered Start
-         * button (header 44 + 32px rows, kept in sync with draw_start_menu /
-         * wm_hit_start_menu). */
-        wm->menu_w = 240;
-        wm->menu_h = 44 + WM_START_MENU_ROWS * 32 + 8;
-        wm->menu_x = 10;
-        wm->menu_y = wm->desk_h - 50 - wm->menu_h;
-        if (wm->menu_y < 10) wm->menu_y = 10;
+        wm->menu_w = SM_W;
+        wm->menu_h = SM_H;
+        /* center horizontally above the taskbar */
+        wm->menu_x = (wm->desk_w - SM_W) / 2;
+        if (wm->menu_x < 8) wm->menu_x = 8;
+        wm->menu_y = wm->desk_h - WM_TASKBAR_H - SM_H - 8;
+        if (wm->menu_y < 8) wm->menu_y = 8;
     }
 }
 
@@ -441,12 +439,30 @@ int wm_hit_border(wm_state_t *wm, int mx, int my, int *edge) {
 
 int wm_hit_start_menu(wm_state_t *wm, int mx, int my) {
     if (!wm->start_menu_open) return -1;
-    if (mx >= wm->menu_x && mx < wm->menu_x + wm->menu_w &&
-        my >= wm->menu_y && my < wm->menu_y + wm->menu_h) {
-        int row = (my - wm->menu_y - 44) / 32;
-        if (row >= 0 && row < WM_START_MENU_ROWS) return row;
+    int ox = wm->menu_x, oy = wm->menu_y;
+    if (mx < ox || mx >= ox + SM_W || my < oy || my >= oy + SM_H) return -1;
+    int lx = mx - ox, ly = my - oy;
+
+    /* pinned app grid */
+    if (ly >= SM_GRID_TOP && ly < SM_GRID_TOP + SM_GRID_H) {
+        int col = (lx - SM_PAD) * SM_GRID_COLS / (SM_W - 2 * SM_PAD);
+        int row = (ly - SM_GRID_TOP) / SM_CELL_H;
+        if (col < 0) col = 0;
+        if (col >= SM_GRID_COLS) col = SM_GRID_COLS - 1;
+        int item = row * SM_GRID_COLS + col;
+        if (item >= 0 && item < SM_PINNED_COUNT) return item;
     }
-    return -1;
+
+    /* bottom bar — Shell and Power buttons */
+    if (ly >= SM_BAR_TOP) {
+        /* Shell button is in the right half, Power is far right */
+        int btn_w = 88, gap = 8;
+        int power_x = SM_W - SM_PAD - btn_w;
+        int shell_x = power_x - btn_w - gap;
+        if (lx >= power_x && lx < power_x + btn_w) return SM_POWER_ITEM;
+        if (lx >= shell_x && lx < shell_x + btn_w) return SM_SHELL_ITEM;
+    }
+    return -1;  /* click inside menu but not on an item */
 }
 
 /* ================================================================
