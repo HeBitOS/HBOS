@@ -34,6 +34,11 @@ void console_putchar_raw(char c);
 // Pass NULL to restore normal terminal rendering.
 void console_set_sink(void (*fn)(char));
 
+// 是否存在活跃的输出重定向（GUI 终端正在同步执行命令）。命令实现可据此判断
+// 自己是否运行在“单线程阻塞式”环境中——此时不应进入自有的阻塞式按键循环
+// （kb_get_key 在紧循环中读键），否则会冻结整个 GUI 合成器且无任何画面反馈。
+bool console_has_sink(void);
+
 // 清除屏幕
 void console_clear(void);
 
@@ -61,6 +66,10 @@ void console_cursor_blink(void);
 // 检查是否工作在高分辨率 Framebuffer 模式（可显示 CJK）
 // VGA 文本模式回退时中文无法渲染，返回 false
 bool console_is_framebuffer(void);
+
+// 把 TUI 的离屏缓冲一次性刷到真实硬件帧缓冲（消除逐字符直写导致的画面撕裂）。
+// TUI 输出路径已在每次操作后自动调用；GUI 罕见的 no-surface 兜底路径也会调用。
+void console_present(void);
 
 // ============================================================
 // 回滚浏览 API (PgUp/PgDn)

@@ -4,7 +4,77 @@ LD = ld
 
 BUILD_DIR = build
 SRC_DIR = src
-HBOS_VERSION = v0.1-beta3-pre3
+
+# ── 版本命名规则 ────────────────────────────────────────────────
+#   完整版本号:  v<MAJOR>.<MINOR>-beta<BETA>-pre<PRE>   例: v0.1-beta4-pre4
+#     · MAJOR 大版本 / MINOR 中版本 — 里程碑号（当前 0.1，目标大版本 1.0）
+#     · BETA  每次对外更新 +1
+#     · PRE   内部小版本号（迭代构建）
+#   src/version.h 由下面这些值自动生成（仅在变化时重写），请勿手改 version.h。
+#   设版本有三种方式：
+#     · `make ver`  交互式询问并写入 version.mk（推荐）
+#     · `make ask`  先询问版本再完整构建
+#     · 命令行覆盖  make HBOS_VER_BETA=5
+#   普通 `make` 不询问，沿用 version.mk（或下面的默认值），便于脚本/IDE 构建。
+#   ISO 文件名: hbos-{bios|uefi}-v<...>_<YYYYMMDD>.iso
+-include version.mk
+HBOS_VER_MAJOR ?= 0
+HBOS_VER_MINOR ?= 1
+HBOS_VER_BETA  ?= 4
+HBOS_VER_PRE   ?= 4
+
+# 派生的各种格式
+HBOS_VERSION     = v$(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)
+HBOS_VERSION_REL = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)
+HBOS_VERSION_STR = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR) beta$(HBOS_VER_BETA) pre$(HBOS_VER_PRE)
+
+# 默认目标仍为 all（下面的 version.h 规则在前，避免它抢占默认目标）
+.DEFAULT_GOAL := all
+
+# 交互式设置版本号 → version.mk（回车保留当前值）
+.PHONY: ver ask
+ver:
+	@echo '── 设置 HBOS 构建版本号（直接回车保留当前值）──'; \
+	 printf '  大版本 MAJOR [%s]: ' '$(HBOS_VER_MAJOR)'; read M; M=$${M:-$(HBOS_VER_MAJOR)}; \
+	 printf '  中版本 MINOR [%s]: ' '$(HBOS_VER_MINOR)'; read N; N=$${N:-$(HBOS_VER_MINOR)}; \
+	 printf '  beta  号  [%s]: ' '$(HBOS_VER_BETA)'; read B; B=$${B:-$(HBOS_VER_BETA)}; \
+	 printf '  pre   号  [%s]: ' '$(HBOS_VER_PRE)'; read P; P=$${P:-$(HBOS_VER_PRE)}; \
+	 printf 'HBOS_VER_MAJOR = %s\nHBOS_VER_MINOR = %s\nHBOS_VER_BETA = %s\nHBOS_VER_PRE = %s\n' \
+	        "$$M" "$$N" "$$B" "$$P" > version.mk; \
+	 echo "✓ 已写入 version.mk:  v$$M.$$N-beta$$B-pre$$P"
+
+# 先询问版本，再完整构建
+ask: ver
+	@$(MAKE) --no-print-directory all
+
+# version.mk 缺失时不报错（占位规则）
+version.mk: ;
+
+# 由上面的版本变量自动生成 src/version.h（内容不变则不重写，避免无谓重编译）
+.PHONY: version
+version: $(SRC_DIR)/version.h
+$(SRC_DIR)/version.h: Makefile version.mk
+	@printf '%s\n' \
+	  '#ifndef HBOS_VERSION_H' \
+	  '#define HBOS_VERSION_H' \
+	  '' \
+	  '/* 本文件由 Makefile 的版本变量自动生成，请勿手改；改版本请编辑 Makefile。 */' \
+	  '#define HBOS_VERSION     "$(HBOS_VERSION_STR)"' \
+	  '#define HBOS_VERSION_REL "$(HBOS_VERSION_REL)"' \
+	  '#define HBOS_VERSION_TAG "$(HBOS_VERSION)"' \
+	  '#define HBOS_VERSION_NAME "HBOS - He Bit OS " HBOS_VERSION' \
+	  '' \
+	  '#endif /* HBOS_VERSION_H */' > $@.tmp
+	@if cmp -s $@.tmp $@ 2>/dev/null; then rm -f $@.tmp; \
+	 else mv $@.tmp $@; echo "✓ version.h → $(HBOS_VERSION)"; fi
+
+# 引用 version.h 的目标显式依赖它，使版本变化时重新编译
+$(BUILD_DIR)/kernel.o: $(SRC_DIR)/version.h
+$(BUILD_DIR)/syscall.o: $(SRC_DIR)/version.h
+$(BUILD_DIR)/tools/system.o: $(SRC_DIR)/version.h
+$(BUILD_DIR)/shell/shell.o: $(SRC_DIR)/version.h
+$(BUILD_DIR)/tools/gui.o: $(SRC_DIR)/version.h
+$(BUILD_DIR)/gui/apps/app_settings.o: $(SRC_DIR)/version.h
 
 KERNEL_BIOS = $(BUILD_DIR)/hbos-bios.bin
 ISO_BIOS = $(BUILD_DIR)/hbos-bios.iso
@@ -112,6 +182,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/python.c \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/gui/wm.c \
+	$(SRC_DIR)/gui/winsrv.c \
 	$(SRC_DIR)/gui/compositor.c \
 	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gui/gui_dirty.c \
@@ -287,7 +358,7 @@ $(ISO_BIOS): $(KERNEL_BIOS)
 	@rm -rf $(BUILD_DIR)/isodir-bios
 	@mkdir -p $(BUILD_DIR)/isodir-bios/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-bios/boot/hbos.bin
-	@printf 'set timeout=5\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1600x900x32,1440x900x32,1280x800x32,1024x768x32,auto\n' > $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
+	@printf 'set timeout=5\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1920x1080x32,1680x1050x32,1600x900x32,1440x900x32,1366x768x32,1280x800x32,1024x768x32,auto\n' > $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios 2>/dev/null
@@ -525,6 +596,7 @@ USER_LIBC_SRCS = \
 	$(USER_LIBC_DIR)/stdio.c \
 	$(USER_LIBC_DIR)/socket.c \
 	$(USER_LIBC_DIR)/dlfcn.c \
+	$(USER_LIBC_DIR)/dirent.c \
 	$(USER_LIBC_DIR)/unistd.c
 
 USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)

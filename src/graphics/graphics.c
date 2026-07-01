@@ -14,9 +14,61 @@
 static struct flanterm_context *g_term = NULL;
 static bool g_initialized = false;
 
+// ============================================================
+// TUI back-buffer — fixes visible tearing on real-time displays
+// ============================================================
+// Both flanterm's own glyph/scroll rendering (fb.c, via ctx->framebuffer)
+// and our CJK overlay (cjk_render_at_cursor below, via fb_put_pixel) draw
+// character-by-character straight onto the live framebuffer with no
+// atomic "present" step. A real-time display (SDL/GTK window, a physical
+// monitor) can sample VRAM mid-draw — background erased but glyph not
+// yet painted, or half a multi-pixel glyph painted — showing a torn/
+// incomplete character. A `screendump`-style full-VRAM snapshot never
+// catches this because it always reads a fully-settled frame, which is
+// why this class of bug is invisible to headless testing.
+//
+// Fix: point flanterm (and fb_put_pixel/fb_fill_rect) at an off-screen
+// back-buffer instead of the real framebuffer, then blit the whole
+// back-buffer to the real framebuffer in one shot (console_present)
+// after each logical console operation completes. fb_get_info() keeps
+// returning the REAL hardware target unchanged, so the GUI compositor
+// (which does its own independent double-buffering via g_gui_surface)
+// is unaffected.
+//
+// graphics_init() runs before pmm_init() (see kernel.c), so the back
+// buffer can't be allocated dynamically — it's a static BSS array sized
+// for the largest resolution GRUB is configured to offer (1920x1080).
+#define TUI_BACKBUF_MAX_W 1920
+#define TUI_BACKBUF_MAX_H 1080
+static uint32_t g_back_buffer[TUI_BACKBUF_MAX_W * TUI_BACKBUF_MAX_H];
+static bool     g_backbuf_active = false;
+static uint32_t *g_real_fb = NULL;
+static uint64_t g_real_fb_pitch = 0;
+static uint64_t g_real_fb_width = 0, g_real_fb_height = 0;
+
+// Blit the back-buffer to the real hardware framebuffer in one pass.
+// Cheap no-op when the back-buffer isn't in use (VGA fallback, or a
+// resolution too large for the static buffer). Exposed (not static) so
+// gui.c's rare no-g_gui_surface fallback path — which draws straight
+// through fb_put_pixel/fb_fill_rect, now redirected at the back-buffer
+// too — can flush itself to the screen; see draw_gui_frame().
+void console_present(void) {
+    if (!g_backbuf_active || !g_term) return;
+    struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
+    uint64_t w = fc->width, h = fc->height;
+    uint64_t src_pitch_px = fc->pitch / 4;
+    uint64_t dst_pitch_px = g_real_fb_pitch / 4;
+    for (uint64_t y = 0; y < h; y++) {
+        const volatile uint32_t *src = fc->framebuffer + y * src_pitch_px;
+        uint32_t *dst = g_real_fb + y * dst_pitch_px;
+        for (uint64_t x = 0; x < w; x++) dst[x] = src[x];
+    }
+}
+
 // When set, console output is captured here instead of going to the terminal.
 static void (*g_console_sink)(char) = NULL;
 void console_set_sink(void (*fn)(char)) { g_console_sink = fn; }
+bool console_has_sink(void) { return g_console_sink != NULL; }
 
 #define VGA_MEM     ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH   80
@@ -326,6 +378,7 @@ static void sb_redraw(void) {
     // Clear screen and move cursor to top
     flanterm_write(g_term, "\033[2J\033[H", 8);
     flanterm_flush(g_term);
+    console_present();
 
     // Print scrollback lines from top to bottom of screen
     for (uint64_t r = 0; r < rows; r++) {
@@ -341,6 +394,7 @@ static void sb_redraw(void) {
     }
 
     flanterm_flush(g_term);
+    console_present();
     sb_no_capture = 0;
 }
 
@@ -363,6 +417,7 @@ void console_scroll_down(int lines) {
         console_clear();
         if (g_term->full_refresh) g_term->full_refresh(g_term);
         flanterm_flush(g_term);
+        console_present();
         sb_no_capture = 0;
         return;
     }
@@ -379,6 +434,7 @@ void console_scroll_reset(void) {
     console_clear();
     if (g_term->full_refresh) g_term->full_refresh(g_term);
     flanterm_flush(g_term);
+    console_present();
     sb_no_capture = 0;
 }
 
@@ -392,9 +448,24 @@ int graphics_init(void *mbi) {
     if (fb && fb->framebuffer_addr && fb->framebuffer_bpp == 32) {
         uint32_t ansi[8] = {0x000000,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa};
         uint32_t bright[8] = {0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff};
+
+        g_real_fb        = (uint32_t*)(uintptr_t)fb->framebuffer_addr;
+        g_real_fb_pitch  = fb->framebuffer_pitch;
+        g_real_fb_width  = fb->framebuffer_width;
+        g_real_fb_height = fb->framebuffer_height;
+
+        uint32_t *term_target = g_real_fb;
+        uint64_t term_pitch = fb->framebuffer_pitch;
+        if (fb->framebuffer_width <= TUI_BACKBUF_MAX_W &&
+            fb->framebuffer_height <= TUI_BACKBUF_MAX_H) {
+            term_target = g_back_buffer;
+            term_pitch = fb->framebuffer_width * 4;
+            g_backbuf_active = true;
+        }
+
         g_term = flanterm_fb_init(NULL, NULL,
-            (uint32_t*)(uintptr_t)fb->framebuffer_addr,
-            fb->framebuffer_width, fb->framebuffer_height, fb->framebuffer_pitch,
+            term_target,
+            fb->framebuffer_width, fb->framebuffer_height, term_pitch,
             8,16, 8,8, 8,0, NULL, ansi, bright,
             NULL,NULL, NULL,NULL, NULL, 0,0,0, 0,0, 16, 256);
         if (g_term) {
@@ -403,6 +474,7 @@ int graphics_init(void *mbi) {
             cjk_font_init();
             return 0;
         }
+        g_backbuf_active = false;
     }
     use_vga_fallback = true;
     g_initialized = true;
@@ -430,6 +502,7 @@ void console_write(const char *str, uint64_t len) {
             for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
             flanterm_write(g_term, str, len);
             flanterm_flush(g_term);
+            console_present();
         } else {
             // Slow path: process byte-by-byte through UTF-8 decoder
             for (uint64_t i = 0; i < len; i++) {
@@ -484,6 +557,7 @@ void console_putchar(char c) {
             // overpaints the glyph bitmap if available in the font table.
             cjk_render_at_cursor(codepoint);
         }
+        console_present();
     } else {
         // VGA text mode fallback
         vga_putc_fallback(c);
@@ -495,18 +569,19 @@ void console_putchar_raw(char c) {
     if (g_term) {
         flanterm_putchar(g_term, (uint8_t)c);
         flanterm_flush(g_term);
+        console_present();
     } else {
         vga_putc_fallback(c);
     }
 }
 
 void console_flush(void) {
-    if (g_term) flanterm_flush(g_term);
+    if (g_term) { flanterm_flush(g_term); console_present(); }
 }
 
 void console_clear(void) {
     if (!g_initialized) return;
-    if (g_term) { flanterm_write(g_term, "\033[2J\033[H", 8); flanterm_flush(g_term); }
+    if (g_term) { flanterm_write(g_term, "\033[2J\033[H", 8); flanterm_flush(g_term); console_present(); }
     else vga_clear_fallback();
 }
 
@@ -539,6 +614,7 @@ void console_reset_terminal(void) {
         fc->grid[i] = empty;
 
     if (g_term->full_refresh) g_term->full_refresh(g_term);
+    console_present();
 }
 
 void console_set_title(const char *title) {
@@ -550,12 +626,14 @@ void console_set_fg(uint32_t color) {
     if (!g_term) return;
     g_term->set_text_fg_rgb(g_term, color);
     flanterm_flush(g_term);
+    console_present();
 }
 
 void console_set_bg(uint32_t color) {
     if (!g_term) return;
     g_term->set_text_bg_rgb(g_term, color);
     flanterm_flush(g_term);
+    console_present();
 }
 
 void console_get_size(uint64_t *cols, uint64_t *rows) {
@@ -589,6 +667,7 @@ void console_cursor_blink(void) {
         g_blink_last_tsc = now;
         g_term->cursor_enabled = !g_term->cursor_enabled;
         flanterm_flush(g_term);
+        console_present();
     }
 }
 
@@ -615,6 +694,14 @@ void fb_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t color
 
 int fb_get_info(fb_info_t *info) {
     if (!g_term) return -1;
+    if (g_backbuf_active) {
+        // Consumers of fb_get_info() (the GUI compositor) expect the
+        // REAL hardware target, not the TUI's private back-buffer.
+        info->addr = g_real_fb;
+        info->width = g_real_fb_width; info->height = g_real_fb_height;
+        info->pitch = g_real_fb_pitch; info->bpp = 32;
+        return 0;
+    }
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     info->addr = (uint32_t*)(uintptr_t)fc->framebuffer;
     info->width = fc->width; info->height = fc->height;

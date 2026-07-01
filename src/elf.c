@@ -98,6 +98,10 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
     uint64_t old_pml4 = vmm_get_pml4();
     uint64_t app_pml4 = vmm_create_address_space();
     if (!app_pml4) return elf_fail("address space create failed");
+    /* pml4 临时切换到 app_pml4 期间必须禁止抢占：否则 PIT(100Hz) 触发 →
+     * task_schedule 把 pml4 换成别的任务 → 后续 memcpy 写进错误地址空间，
+     * 应用的段/栈从未写入 app_pml4，一运行即缺页崩溃。 */
+    task_preempt_disable();
     vmm_set_pml4(app_pml4);
 
     uint16_t phnum     = ehdr->e_phnum;
@@ -113,6 +117,7 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
             ph->p_memsz < ph->p_filesz ||
             ph->p_vaddr + ph->p_memsz < ph->p_vaddr) {
             vmm_set_pml4(old_pml4);
+            task_preempt_enable();
             vmm_destroy_address_space(app_pml4);
             return elf_fail("segment out of file");
         }
@@ -121,6 +126,7 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
         uint64_t mem_end = ph->p_vaddr + ph->p_memsz;
         if (mem_end > UINT64_MAX - (PAGE_SIZE - 1)) {
             vmm_set_pml4(old_pml4);
+            task_preempt_enable();
             vmm_destroy_address_space(app_pml4);
             return elf_fail("segment address overflow");
         }
@@ -130,6 +136,7 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
         for (uint64_t va = va_start; va < va_end; va += PAGE_SIZE) {
             if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) {
                 vmm_set_pml4(old_pml4);
+                task_preempt_enable();
                 vmm_destroy_address_space(app_pml4);
                 return elf_fail("segment map failed");
             }
@@ -147,6 +154,7 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
     for (uint64_t va = USER_STACK_BASE; va < USER_STACK_TOP; va += PAGE_SIZE) {
         if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) {
             vmm_set_pml4(old_pml4);
+            task_preempt_enable();
             vmm_destroy_address_space(app_pml4);
             return elf_fail("stack map failed");
         }
@@ -156,6 +164,7 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
     int envc = count_strs_limited(envp, ELF_ENV_MAX);
     if (argc < 0 || envc < 0) {
         vmm_set_pml4(old_pml4);
+        task_preempt_enable();
         vmm_destroy_address_space(app_pml4);
         return elf_fail("too many args");
     }
@@ -166,6 +175,7 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
     size_t ptr_bytes = (size_t)(1 + envc + 1 + argc + 1) * sizeof(uint64_t);
     if (total_strs + ptr_bytes + 16 > USER_STACK_SIZE) {
         vmm_set_pml4(old_pml4);
+        task_preempt_enable();
         vmm_destroy_address_space(app_pml4);
         return elf_fail("args too large");
     }
@@ -204,6 +214,7 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
     uint64_t user_argv = (uint64_t)(uintptr_t)&stack[1];
 
     vmm_set_pml4(old_pml4);
+    task_preempt_enable();
 
     int new_id = task_create_ring3_full(task_name ? task_name : "elf_app",
                                         ehdr->e_entry, user_rsp,

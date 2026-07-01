@@ -149,6 +149,25 @@ typedef enum {
     HBOS_SYS_SHMDT,          /**< shmdt(shmaddr) */
     HBOS_SYS_SHMCTL,         /**< shmctl(shmid, cmd, buf) */
 
+    // ---- GUI 窗体绘制 (77-83) ----
+    HBOS_SYS_GUI_INFO,       /**< gui_info(int* w, int* h) -> 1=可用 0=不可用 */
+    HBOS_SYS_GUI_CLEAR,      /**< gui_clear(color) 整屏填充 */
+    HBOS_SYS_GUI_RECT,       /**< gui_rect(x,y,w,h,color) 填充矩形 */
+    HBOS_SYS_GUI_TEXT,       /**< gui_text(x,y,str,color,scale) 绘制文本 */
+    HBOS_SYS_GUI_PRESENT,    /**< gui_present() 提交到屏幕 */
+    HBOS_SYS_GUI_POLLKEY,    /**< gui_pollkey() -> 键值或 -1 */
+    HBOS_SYS_GUI_POLLMOUSE,  /**< gui_pollmouse(int* x,int* y) -> 按键位 */
+
+    // ---- 并发窗口服务 (84-91) ----
+    HBOS_SYS_WIN_OPEN,       /**< win_open(title,w,h) -> id 或 -1 */
+    HBOS_SYS_WIN_INFO,       /**< win_info(int*w,int*h) -> 1=活动 0=应关闭/无 */
+    HBOS_SYS_WIN_CLEAR,      /**< win_clear(color) */
+    HBOS_SYS_WIN_FILL,       /**< win_fill(x,y,w,h,color) */
+    HBOS_SYS_WIN_TEXT,       /**< win_text(x,y,str,color) */
+    HBOS_SYS_WIN_PRESENT,    /**< win_present() 提交并让出 */
+    HBOS_SYS_WIN_POLL,       /**< win_poll(int*ev4) -> 事件类型或 0 */
+    HBOS_SYS_WIN_CLOSE,      /**< win_close() 关闭窗口 */
+
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;
 

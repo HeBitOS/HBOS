@@ -17,6 +17,7 @@
 ;   'P' = 分页已启用
 ;   'OK' = 进入 64 位模式，即将调用 kmain
 ; ============================================================
+; this file all write of linpinf & claude
 
 ; ---- Multiboot2 头部 ----
 ; GRUB 在加载内核时解析此头部，获取所需信息
@@ -29,14 +30,14 @@ header_start:
     dd 0x100000000 - (0xE85250D6 + 0 + (header_end - header_start))  ; 校验和
 
     ; Framebuffer 请求标签 (type 5) — 可选
-    ; 请求 1600x900x32；引导器（GRUB gfxmode / Limine RESOLUTION）据此设置模式。
-    ; 不支持时自动回退到较低分辨率，GUI 按 w/h 自适应布局。
+    ; 请求 1920x1080x32；引导器（GRUB gfxmode / Limine RESOLUTION）据此设置模式。
+    ; 不支持时自动回退到较低分辨率；GUI 按 w/h 自适应布局并按分辨率做 DPI 缩放。
     align 8
     dw 5                                 ; 标签类型: framebuffer
     dw 1                                 ; 标志: 可选
     dd 20                                ; 标签大小
-    dd 1600                              ; 首选宽度
-    dd 900                               ; 首选高度
+    dd 1920                              ; 首选宽度
+    dd 1080                              ; 首选高度
     dd 32                                ; 首选色深 (bpp)
 
     ; 结束标签

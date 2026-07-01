@@ -32,7 +32,8 @@ const hax_app_entry_t *hax_app_find(const char *name) {
     return 0;
 }
 
-int hax_app_run(const char *name, int argc, char **argv) {
+/* 公共加载逻辑：组装 argv 并生成任务，返回 pid 或 -1（不等待） */
+static int hax_spawn_internal(const char *name, int argc, char **argv) {
     const hax_app_entry_t *e = hax_app_find(name);
     if (!e) return -1;
 
@@ -48,7 +49,15 @@ int hax_app_run(const char *name, int argc, char **argv) {
     spawn_argv[n] = 0;
 
     const uint8_t *image = _binary_build_hax_blob_bin_start + e->offset;
-    int pid = elf64_load_and_spawn(image, e->size, spawn_argv, 0, e->name);
+    return elf64_load_and_spawn(image, e->size, spawn_argv, 0, e->name);
+}
+
+int hax_app_spawn(const char *name, int argc, char **argv) {
+    return hax_spawn_internal(name, argc, argv);
+}
+
+int hax_app_run(const char *name, int argc, char **argv) {
+    int pid = hax_spawn_internal(name, argc, argv);
     if (pid < 0) return -1;
 
     int status = 0;

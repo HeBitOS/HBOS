@@ -12,6 +12,12 @@
 #define CALC_GX    8
 #define CALC_GY   98
 
+/* ── history panel layout (right of the keypad) ─────────────── */
+#define CALC_HIST_X    300   /* panel left, relative to tx */
+#define CALC_HIST_TOP   34   /* first row top, relative to ty */
+#define CALC_HIST_ROW   28   /* per-row height */
+#define CALC_HIST_MIN_W 150  /* min panel width to bother drawing */
+
 /* ── button table ──────────────────────────────────────────── */
 typedef struct { const char *label; char action; } CalcBtn;
 /* action: '0'-'9' digit; 'C'=clear; 'N'=negate; '%'=pct;
@@ -70,6 +76,16 @@ static void calc_operator(gui_state_t *st, char op) {
     st->status = "已选择运算符";
 }
 
+/* 把一次完成的运算推入历史环形缓冲 */
+static void calc_hist_push(gui_state_t *st, int lhs, char op, int rhs, int res) {
+    int i = st->calc_hist_count % CALC_HIST_N;
+    st->calc_hist_lhs[i] = lhs;
+    st->calc_hist_op[i]  = op;
+    st->calc_hist_rhs[i] = rhs;
+    st->calc_hist_res[i] = res;
+    st->calc_hist_count++;
+}
+
 static void calc_equal(gui_state_t *st) {
     if (st->calc_error) return;
     int rhs = st->calc_has_input ? st->calc_input : st->calc_acc;
@@ -77,6 +93,7 @@ static void calc_equal(gui_state_t *st) {
     st->calc_value = calc_apply(st, rhs);
     if (st->calc_error) { st->status = "不能除以 0"; return; }
     st->calc_last_lhs = lhs; st->calc_last_rhs = rhs; st->calc_last_op = op;
+    if (op) calc_hist_push(st, lhs, op, rhs, st->calc_value);  /* 仅记录真实运算 */
     st->calc_acc = st->calc_value; st->calc_input = st->calc_value;
     st->calc_has_input = 1; st->calc_op = 0; st->calc_just_evaluated = 1;
     st->status = "计算完成";
@@ -125,9 +142,34 @@ static uint32_t btn_color(char action, int is_light) {
     return gui_rgb(34, 46, 60);
 }
 
+/* ── history helpers ───────────────────────────────────────── */
+static int calc_hist_visible(const gui_state_t *st) {
+    return st->calc_hist_count < CALC_HIST_N ? st->calc_hist_count : CALC_HIST_N;
+}
+
+/* 把可见行号（0=最新）映射到环形缓冲下标 */
+static int calc_hist_ring_idx(const gui_state_t *st, int row) {
+    int idx = (st->calc_hist_count - 1 - row) % CALC_HIST_N;
+    if (idx < 0) idx += CALC_HIST_N;
+    return idx;
+}
+
+static void calc_hist_format(const gui_state_t *st, int ring, char *buf, int cap) {
+    uint32_t pos = 0; buf[0] = 0;
+    gui_append_int(buf, cap, &pos, st->calc_hist_lhs[ring]);
+    gui_append_char(buf, cap, &pos, ' ');
+    char op = st->calc_hist_op[ring];
+    const char *os = (op == '*') ? "×" : (op == '/') ? "÷" :
+                     (op == '-') ? "−" : (op == '+') ? "+" : "?";
+    gui_append_str(buf, cap, &pos, os);
+    gui_append_char(buf, cap, &pos, ' ');
+    gui_append_int(buf, cap, &pos, st->calc_hist_rhs[ring]);
+    gui_append_str(buf, cap, &pos, " = ");
+    gui_append_int(buf, cap, &pos, st->calc_hist_res[ring]);
+}
+
 /* ── draw ──────────────────────────────────────────────────── */
 static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) {
-    (void)win_w; (void)win_h;
     char line[96];
     uint32_t pos = 0;
 
@@ -188,6 +230,29 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
             gui_text(lx, ly, BTNS[row][col].label, gui_rgb(235, 242, 250), 1);
         }
     }
+
+    /* history panel (right of the keypad, only if the window is wide enough) */
+    int panel_x = tx + CALC_HIST_X;
+    int panel_w = win_w - CALC_HIST_X - 12;
+    if (panel_w >= CALC_HIST_MIN_W) {
+        gui_text(panel_x, ty + 10, "历史记录", gui_rgb(132, 196, 232), 1);
+        int vis = calc_hist_visible(st);
+        if (vis == 0) {
+            gui_text(panel_x, ty + CALC_HIST_TOP, "（暂无计算）", gui_rgb(110, 130, 150), 1);
+        } else {
+            int max_rows = (win_h - CALC_HIST_TOP - 12) / CALC_HIST_ROW;
+            if (max_rows > vis) max_rows = vis;
+            for (int r = 0; r < max_rows; r++) {
+                int ring = calc_hist_ring_idx(st, r);
+                int ry = ty + CALC_HIST_TOP + r * CALC_HIST_ROW;
+                gui_border(panel_x, ry, panel_w, CALC_HIST_ROW - 4, gui_rgb(40, 56, 72));
+                char hb[64];
+                calc_hist_format(st, ring, hb, sizeof(hb));
+                gui_text_clipped(panel_x + 6, ry + 5, panel_x + panel_w - 6, hb,
+                                 gui_rgb(210, 224, 238), 1);
+            }
+        }
+    }
 }
 
 /* ── key ───────────────────────────────────────────────────── */
@@ -210,7 +275,6 @@ static int app_calc_key(gui_state_t *st, int key) {
 
 /* ── click ─────────────────────────────────────────────────── */
 static int app_calc_click(gui_state_t *st, int mx, int my, int tx, int ty, int win_w, int win_h) {
-    (void)win_w; (void)win_h;
     int gx = tx + CALC_GX;
     int gy = ty + CALC_GY;
     for (int row = 0; row < CALC_ROWS; row++) {
@@ -219,6 +283,29 @@ static int app_calc_click(gui_state_t *st, int mx, int my, int tx, int ty, int w
             int by = gy + row * (CALC_BH + CALC_GAP);
             if (mx >= bx && mx < bx + CALC_BW && my >= by && my < by + CALC_BH) {
                 calc_dispatch(st, BTNS[row][col].action);
+                return 1;
+            }
+        }
+    }
+
+    /* click a history row to recall its result */
+    int panel_x = tx + CALC_HIST_X;
+    int panel_w = win_w - CALC_HIST_X - 12;
+    if (panel_w >= CALC_HIST_MIN_W) {
+        int vis = calc_hist_visible(st);
+        int max_rows = (win_h - CALC_HIST_TOP - 12) / CALC_HIST_ROW;
+        if (max_rows > vis) max_rows = vis;
+        for (int r = 0; r < max_rows; r++) {
+            int ry = ty + CALC_HIST_TOP + r * CALC_HIST_ROW;
+            if (mx >= panel_x && mx < panel_x + panel_w &&
+                my >= ry && my < ry + CALC_HIST_ROW - 4) {
+                int ring = calc_hist_ring_idx(st, r);
+                st->calc_value = st->calc_hist_res[ring];
+                st->calc_input = st->calc_value;
+                st->calc_acc   = st->calc_value;
+                st->calc_has_input = 1; st->calc_op = 0;
+                st->calc_just_evaluated = 1; st->calc_error = 0;
+                st->status = "已从历史调用结果";
                 return 1;
             }
         }

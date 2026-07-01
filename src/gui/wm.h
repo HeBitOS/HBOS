@@ -3,34 +3,47 @@
 
 #include <stdint.h>
 
+/* ── DPI 缩放 ───────────────────────────────────────────────────────
+ * 所有像素尺寸常量都经 ui_s() 按屏幕分辨率缩放（基准 1080p = 100%），
+ * 故下面这些 #define 在使用处自动变为缩放后的运行时值，无需改调用点。
+ * g_ui_scale 在 GUI 启动时按 fb 高度设置（见 gui.c）。计数/索引不缩放。 */
+extern int g_ui_scale;          /* 百分比，100 = 基准 */
+int ui_s(int v);                /* 返回 v 缩放后的像素值 */
+
 #define WM_MAX_WINDOWS 16
-#define WM_TASKBAR_H   44
-#define WM_TITLE_H     38
-#define WM_BORDER_W    4
-#define WM_BTN_W       26
-#define WM_BTN_GAP     4
+#define WM_TASKBAR_H   ui_s(44)
+#define WM_TITLE_H     ui_s(38)
+#define WM_BORDER_W    ui_s(4)
+#define WM_BTN_W       ui_s(26)
+#define WM_BTN_GAP     ui_s(4)
 
 /* ── Win11-style start-menu layout (shared by wm.c draw and hit-test) ─── */
-#define SM_W            540   /* total panel width  */
-#define SM_H            368   /* total panel height */
-#define SM_PAD           16   /* horizontal padding */
-#define SM_SEARCH_TOP     8   /* search bar top */
-#define SM_SEARCH_H      36   /* search bar height */
-#define SM_PIN_TOP       52   /* "已固定" label top */
-#define SM_PIN_LABEL_H   22   /* section label height */
-#define SM_GRID_TOP      76   /* grid cells top */
-#define SM_GRID_COLS      5   /* columns */
-#define SM_GRID_ROWS      3   /* rows (13 pinned apps) */
-#define SM_CELL_W       ((SM_W - 2*SM_PAD) / SM_GRID_COLS)   /* 101px */
-#define SM_CELL_H        76   /* cell height */
-#define SM_GRID_H       (SM_GRID_ROWS * SM_CELL_H)  /* 228px */
-#define SM_SEP_Y        (SM_GRID_TOP + SM_GRID_H)   /* 304px */
-#define SM_BAR_TOP      (SM_SEP_Y + 8)              /* 312px */
-#define SM_BAR_H        (SM_H - SM_BAR_TOP)         /* 56px */
-#define SM_PINNED_COUNT  13   /* items 0..12 = pinned apps */
+#define SM_W            ui_s(540)   /* total panel width  */
+#define SM_H            ui_s(368)   /* total panel height */
+#define SM_PAD          ui_s(16)    /* horizontal padding */
+#define SM_SEARCH_TOP   ui_s(8)     /* search bar top */
+#define SM_SEARCH_H     ui_s(36)    /* search bar height */
+#define SM_PIN_TOP      ui_s(52)    /* "已固定" label top */
+#define SM_PIN_LABEL_H  ui_s(22)    /* section label height */
+#define SM_GRID_TOP     ui_s(76)    /* grid cells top */
+#define SM_GRID_COLS      5   /* columns（计数，不缩放） */
+#define SM_GRID_ROWS      3   /* rows（计数，不缩放） */
+#define SM_CELL_W       ((SM_W - 2*SM_PAD) / SM_GRID_COLS)
+#define SM_CELL_H       ui_s(76)    /* cell height */
+#define SM_GRID_H       (SM_GRID_ROWS * SM_CELL_H)
+#define SM_SEP_Y        (SM_GRID_TOP + SM_GRID_H)
+#define SM_BAR_TOP      (SM_SEP_Y + ui_s(8))
+#define SM_BAR_H        (SM_H - SM_BAR_TOP)
+#define SM_PINNED_COUNT  12   /* items 0..11 = pinned apps */
 /* items 13 = 返回Shell, 14 = 关机; hit-tested in bottom bar */
 #define SM_SHELL_ITEM   13
 #define SM_POWER_ITEM   14
+/* 动态追加的 .hax GUI 应用：网格命中返回 SM_HAX_BASE+k（避开 13/14） */
+#define SM_HAX_BASE    100
+#define SM_HAX_MAX       7   /* 启动器最多展示的 .hax GUI 应用数（限面板高度） */
+/* 网格命中返回 SM_CELL_BASE+可见单元格序号；gui.c 据搜索过滤映射为实际应用 */
+#define SM_CELL_BASE   200
+#define SM_SEARCH_ITEM  15   /* 点中搜索框（保持菜单打开） */
 
 enum {
     WM_WIN_PANEL = 0,

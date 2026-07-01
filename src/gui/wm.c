@@ -440,21 +440,30 @@ int wm_hit_border(wm_state_t *wm, int mx, int my, int *edge) {
 int wm_hit_start_menu(wm_state_t *wm, int mx, int my) {
     if (!wm->start_menu_open) return -1;
     int ox = wm->menu_x, oy = wm->menu_y;
-    if (mx < ox || mx >= ox + SM_W || my < oy || my >= oy + SM_H) return -1;
+    if (mx < ox || mx >= ox + SM_W || my < oy || my >= oy + wm->menu_h) return -1;
     int lx = mx - ox, ly = my - oy;
 
-    /* pinned app grid */
-    if (ly >= SM_GRID_TOP && ly < SM_GRID_TOP + SM_GRID_H) {
+    /* 搜索框：保持菜单打开，由 gui.c 处理 */
+    if (ly >= SM_SEARCH_TOP && ly < SM_SEARCH_TOP + SM_SEARCH_H)
+        return SM_SEARCH_ITEM;
+
+    /* 动态额外高度（gui.c 开菜单时按应用数写入 menu_h） */
+    int extra = wm->menu_h - SM_H;
+    if (extra < 0) extra = 0;
+    int grid_h = SM_GRID_H + extra;
+
+    /* 应用网格：返回可见单元格序号（gui.c 据搜索过滤映射为实际应用） */
+    if (ly >= SM_GRID_TOP && ly < SM_GRID_TOP + grid_h) {
         int col = (lx - SM_PAD) * SM_GRID_COLS / (SM_W - 2 * SM_PAD);
         int row = (ly - SM_GRID_TOP) / SM_CELL_H;
         if (col < 0) col = 0;
         if (col >= SM_GRID_COLS) col = SM_GRID_COLS - 1;
-        int item = row * SM_GRID_COLS + col;
-        if (item >= 0 && item < SM_PINNED_COUNT) return item;
+        int cell = row * SM_GRID_COLS + col;
+        return SM_CELL_BASE + cell;
     }
 
-    /* bottom bar — Shell and Power buttons */
-    if (ly >= SM_BAR_TOP) {
+    /* bottom bar — Shell and Power buttons（随额外高度下移） */
+    if (ly >= SM_BAR_TOP + extra) {
         /* Shell button is in the right half, Power is far right */
         int btn_w = 88, gap = 8;
         int power_x = SM_W - SM_PAD - btn_w;

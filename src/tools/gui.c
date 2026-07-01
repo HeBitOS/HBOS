@@ -20,8 +20,11 @@
 #include "../tls.h"
 #include "../unistd.h"
 #include "../user/app.h"
+#include "../user/hax_app.h"
+#include "../version.h"
 #include "../vfs.h"
 #include "../gui/wm.h"
+#include "../gui/winsrv.h"
 #include "../gui/gui_state.h"
 #include "../gui/gui_dirty.h"
 #include "../gui/gui_draw.h"
@@ -45,12 +48,16 @@ extern int hbos_gcc_last_return(void);
 #define FILE_ACTION_BASE 100
 #define APP_ACTION_BASE  200
 
-#define ACTION_W 116
-#define ACTION_H 28
+/* ── DPI 缩放（g_ui_scale 在 GUI 启动时按分辨率设置；声明在 wm.h） ── */
+int g_ui_scale = 100;
+int ui_s(int v) { return v * g_ui_scale / 100; }
+
+#define ACTION_W ui_s(116)
+#define ACTION_H ui_s(28)
 #define FILE_ACTION_COUNT 7
 #define GUI_MOUSE_POLL_BUDGET 64   /* drain the queue fully so motion doesn't
                                       back up into bursty "忽快忽慢" jumps */
-#define TASKBAR_H 50
+#define TASKBAR_H ui_s(50)
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
 #define BROWSER_PAGE_CAP 2048
@@ -124,7 +131,6 @@ static const gui_app_meta_t gui_apps[] = {
     {"控制台终端", "运行命令与系统交互", GUI_APP_DIAG},
     {"时钟", "实时时钟与日期", GUI_APP_CLOCK},
     {"设置", "主题与字体", GUI_APP_SETTINGS},
-    {"文件管理器", "浏览文件系统", GUI_APP_FILES},
 };
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
@@ -146,6 +152,7 @@ static void gui_select_file(gui_state_t *st, int index);
 static int gui_select_path(gui_state_t *st, const char *path);
 static void draw_desktop(int w, int h, gui_state_t *st);
 static void draw_start_menu(gui_state_t *st);
+static void draw_context_menu(gui_state_t *st);
 static void draw_window_switcher(int w, int h, gui_state_t *st);
 static void gui_sync_focus(gui_state_t *st);
 
@@ -209,10 +216,27 @@ static void gui_focus_window(gui_state_t *st, int idx) {
     gui_sync_focus(st);
 }
 
+#define TOAST_TICKS 130   /* toast 显示帧数（约 2 秒 @ ~60fps 上限） */
+
+/* 弹出一条 toast 通知（msg = a + b 拼接，无外部 helper 依赖） */
+static void gui_toast(gui_state_t *st, const char *a, const char *b) {
+    uint32_t n = 0;
+    while (a && *a && n < sizeof(st->toast_msg) - 1) st->toast_msg[n++] = *a++;
+    while (b && *b && n < sizeof(st->toast_msg) - 1) st->toast_msg[n++] = *b++;
+    st->toast_msg[n] = 0;
+    st->toast_ticks = TOAST_TICKS;
+}
+
 static int gui_open_window(gui_state_t *st, int kind, int mode, int unique) {
     int idx = wm_open_window(&st->wm, kind, mode, unique);
-    if (idx >= 0) gui_sync_focus(st);
-    else st->status = "窗口数量已满";
+    if (idx >= 0) {
+        gui_sync_focus(st);
+        const char *t = wm_window_title(wm_get_window(&st->wm, idx));
+        gui_toast(st, "已打开 ", t ? t : "窗口");
+    } else {
+        st->status = "窗口数量已满";
+        gui_toast(st, "窗口数量已满", "");
+    }
     return idx;
 }
 
@@ -248,6 +272,7 @@ static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
 
 static void rect(int x, int y, int w, int h, uint32_t color);
 static void draw_splash_window(int w, int h, int ticks, int light);
+static void draw_toast(int w, int h, gui_state_t *st);
 
 static uint8_t clamp8(int v) {
     if (v < 0) return 0;
@@ -1148,6 +1173,36 @@ static void time_line(char *buf, uint32_t cap) {
     append_uint(buf, cap, &pos, sec);
 }
 
+/* 日期串 "YYYY/MM/DD 周X"（Win11 任务栏第二行） */
+static void date_line(char *buf, uint32_t cap) {
+    uint8_t status_b = cmos_read(0x0b);
+    uint8_t day   = cmos_read(0x07);
+    uint8_t month = cmos_read(0x08);
+    uint8_t year  = cmos_read(0x09);
+    uint8_t wday  = cmos_read(0x06);   /* 星期几 1=周日..7=周六 */
+    if ((status_b & 0x04) == 0) {
+        day   = bcd_to_bin(day);
+        month = bcd_to_bin(month);
+        year  = bcd_to_bin(year);
+        wday  = bcd_to_bin(wday);
+    }
+    static const char *const WD[8] = {"", "日", "一", "二", "三", "四", "五", "六"};
+    uint32_t pos = 0;
+    buf[0] = 0;
+    append_uint(buf, cap, &pos, 2000 + year);
+    append_char(buf, cap, &pos, '/');
+    if (month < 10) append_char(buf, cap, &pos, '0');
+    append_uint(buf, cap, &pos, month);
+    append_char(buf, cap, &pos, '/');
+    if (day < 10) append_char(buf, cap, &pos, '0');
+    append_uint(buf, cap, &pos, day);
+    if (wday >= 1 && wday <= 7) {
+        append_char(buf, cap, &pos, ' ');
+        append_str(buf, cap, &pos, "周");
+        append_str(buf, cap, &pos, WD[wday]);
+    }
+}
+
 static void line2(char *buf, uint32_t cap, const char *a, const char *b) {
     uint32_t pos = 0;
     buf[0] = 0;
@@ -1163,17 +1218,29 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
     append_str(buf, cap, &pos, b);
 }
 
-// Direct integer pointer mapping: each raw mouse count moves MOUSE_GAIN pixels,
-// applied IMMEDIATELY — no sub-pixel carry, no division, no acceleration. The
-// carry we tried earlier held back part of a small nudge until it accumulated,
-// which made short moves feel numb; a flat integer multiply keeps short moves
-// crisp AND gives enough speed to cross the screen. Tune MOUSE_GAIN to taste.
-#define MOUSE_GAIN 2
+// Integer pointer mapping with a light acceleration curve, applied IMMEDIATELY
+// (no sub-pixel carry — carry made short nudges feel numb). Small moves get a
+// higher base gain so short-distance motion actually travels; larger flicks
+// accelerate so crossing the screen stays fast.
+//
+// Three tiers instead of two: each step up in gain (4 -> 5 -> 7 px/count) is
+// smaller than a single 3 -> 5 jump would be, so crossing a tier boundary
+// during a flick doesn't feel like a sudden gear-change. Every tier's formula
+// is exact at its lower bound (no leftover rounding carried from a prior
+// division), which avoids the +/-1px jitter a single post-hoc "* 7/5" scale
+// would add as `a` grows.
 static int clamp_delta(int v) {
-    v *= MOUSE_GAIN;
-    if (v > 200) return 200;
-    if (v < -200) return -200;
-    return v;
+    int s = v < 0 ? -1 : 1;
+    int a = v < 0 ? -v : v;
+    if (a == 0) return 0;
+    int out;
+    if (a <= 3)       out = a * 4;               // 精细控制：每计数 4px
+    else if (a <= 8)  out = 16 + (a - 4) * 5;     // 过渡：每计数 5px
+    else              out = 36 + (a - 8) * 7;     // 快速甩动：每计数 7px，便于跨屏
+    out *= s;
+    if (out > 260)  return 260;
+    if (out < -260) return -260;
+    return out;
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
@@ -1237,25 +1304,35 @@ static void draw_file_action_bar(int tx, int ty, int content_w) {
     }
 }
 
+// Cursor silhouette: a plain triangular arrow — straight vertical back on the
+// left, a diagonal front edge widening down to a shoulder, then tapering back
+// to a point. Returns the rightmost filled column for a glyph row (0 means
+// the row is a single outline pixel), or -1 past the bottom of the glyph.
+#define CURSOR_ARROW_ROWS 17
+static int cursor_arrow_width(int row) {
+    if (row < 0) return -1;
+    if (row <= 11) return (9 * row) / 11;
+    if (row <= 16) return (9 * (16 - row)) / 5;
+    return -1;
+}
+
 static void draw_cursor(int x, int y, int edge) {
     uint32_t c = rgb(238, 246, 255);
     uint32_t d = rgb(20, 27, 34);
 
-    if (edge == WM_EDGE_NONE || edge == WM_EDGE_N || edge == WM_EDGE_S) {
-        for (int i = 0; i < 18; i++) rect(x, y + i, 2, 2, c);
-        for (int i = 0; i < 12; i++) rect(x + i, y + i, 2, 2, c);
-        rect(x + 5, y + 13, 9, 3, d);
-        rect(x + 8, y + 15, 4, 7, d);
-    } else if (edge == WM_EDGE_W || edge == WM_EDGE_E) {
+    if (edge == WM_EDGE_W || edge == WM_EDGE_E) {
         for (int i = 0; i < 18; i++) rect(x + 8, y + i, 2, 2, c);
         for (int i = 0; i < 12; i++) rect(x + 8, y + i, 2, 2, c);
         rect(x + 2, y + 4, 12, 2, c);
         rect(x + 2, y + 14, 12, 2, c);
-    } else {
-        for (int i = 0; i < 18; i++) rect(x, y + i, 2, 2, c);
-        for (int i = 0; i < 12; i++) rect(x + i, y + i, 2, 2, c);
-        rect(x + 5, y + 13, 9, 3, d);
-        rect(x + 8, y + 15, 4, 7, d);
+        return;
+    }
+
+    for (int row = 0; row < CURSOR_ARROW_ROWS; row++) {
+        int w = cursor_arrow_width(row);
+        rect(x, y + row, 1, 1, d);
+        if (w > 1) rect(x + 1, y + row, w - 1, 1, c);
+        if (w > 0) rect(x + w, y + row, 1, 1, d);
     }
 }
 
@@ -1287,6 +1364,108 @@ static const cc_gfx_t g_sgfx = {
     .screen_w=sgfx_sw,.screen_h=sgfx_sh,
     .get_key=sgfx_getkey,.wait_key=sgfx_waitkey
 };
+
+/* ── HAX GUI 应用画布接口（供内核 syscall 层调用） ───────────────────
+ * 用户态 .hax 应用通过 int 0x80 调用这些函数，直接绘制到 GUI 的离屏表面
+ * （g_gui_surface），再 present 到真实帧缓冲。当 GUI 未运行时 g_gui_surface
+ * 为 NULL，gui_app_info 返回 0，应用据此可回退到文本模式。
+ *
+ * 注意：应用运行期间 GUI 主循环阻塞在 task_wait（见 console_exec_cmd），
+ * 故应用在此期间“独占”整屏画布；退出后 GUI 重新接管并重绘。 */
+static int     g_guiapp_mx = 0, g_guiapp_my = 0;
+static uint8_t g_guiapp_btn = 0;
+
+/* 全屏画布应用的"屏幕所有者"任务 id：非 0 时合成器让位（不绘制、不读输入），
+ * 由该全屏应用独占 g_gui_surface 并自行 present；应用退出后由主循环清零。 */
+uint32_t g_screen_owner_task = 0;
+
+int gui_app_info(int *w, int *h) {
+    if (!g_gui_surface) return 0;
+    if (w) *w = g_gui_surface_w;
+    if (h) *h = g_gui_surface_h;
+    /* 首次查询时把鼠标置于画布中心，并登记为屏幕所有者 */
+    if (g_guiapp_mx == 0 && g_guiapp_my == 0) {
+        g_guiapp_mx = g_gui_surface_w / 2;
+        g_guiapp_my = g_gui_surface_h / 2;
+    }
+    /* 合成器让位后不会再跑到帧尾的 gui_clip_clear()，若接手时恰好有一个残留的
+     * 局部脏矩形处于激活状态，应用自己的 clear(0,0,W,H) 会被裁剪到那个旧矩形
+     * 里——画面看起来像“只清空了一小块，其余仍是桌面残影”。取得屏幕所有权时
+     * 主动清掉裁剪区，保证应用拿到的是完整无裁剪的画布。 */
+    gui_clip_clear();
+    g_screen_owner_task = task_get_id();
+    return 1;
+}
+
+void gui_app_clear(uint32_t color) {
+    if (!g_gui_surface) return;
+    rect(0, 0, g_gui_surface_w, g_gui_surface_h, color);
+}
+
+void gui_app_rect(int x, int y, int w, int h, uint32_t color) {
+    if (!g_gui_surface) return;
+    rect(x, y, w, h, color);
+}
+
+void gui_app_text(int x, int y, const char *s, uint32_t color, int scale) {
+    if (!g_gui_surface || !s) return;
+    if (scale < 1) scale = 1;
+    text(x, y, s, color, scale);
+}
+
+// 全屏画布应用独占 g_gui_surface 并自行 present（见上方注释），合成器的正常
+// 光标叠加不会运行；若直接把光标画进 g_gui_surface，会被应用当成画布内容
+// 永久保留（如 paint 会留下箭头形状的笔迹）。因此改为在 blit 到真实
+// framebuffer 之后，直接在硬件帧缓冲上叠一份光标像素——不进入应用的画布。
+static void present_screen_owner_cursor(const fb_info_t *fb, int x, int y) {
+    uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
+    int fbw = (int)fb->width, fbh = (int)fb->height;
+    uint32_t c = rgb(238, 246, 255);
+    uint32_t d = rgb(20, 27, 34);
+#define OWNER_CURSOR_PX(px, py, col) do { \
+        int _x = (px), _y = (py); \
+        if (_x >= 0 && _y >= 0 && _x < fbw && _y < fbh) \
+            fb->addr[(uint32_t)_y * fb_pitch + (uint32_t)_x] = (col); \
+    } while (0)
+    for (int row = 0; row < CURSOR_ARROW_ROWS; row++) {
+        int w = cursor_arrow_width(row);
+        OWNER_CURSOR_PX(x, y + row, d);
+        for (int xx = 1; xx < w; xx++) OWNER_CURSOR_PX(x + xx, y + row, c);
+        if (w > 0) OWNER_CURSOR_PX(x + w, y + row, d);
+    }
+#undef OWNER_CURSOR_PX
+}
+
+void gui_app_present(void) {
+    if (!g_gui_surface) return;
+    fb_info_t fb;
+    if (fb_get_info(&fb) < 0) return;
+    gui_present_surface(&fb);
+    present_screen_owner_cursor(&fb, g_guiapp_mx, g_guiapp_my);
+}
+
+int gui_app_pollkey(void) {
+    int k = key_poll();
+    return k ? k : -1;
+}
+
+int gui_app_pollmouse(int *x, int *y) {
+    mouse_event_t ev;
+    while (mouse_poll(&ev)) {
+        g_guiapp_mx += ev.dx;          /* 主循环约定：dy 正为下 */
+        g_guiapp_my += ev.dy;
+        g_guiapp_btn = ev.buttons;
+    }
+    if (g_guiapp_mx < 0) g_guiapp_mx = 0;
+    if (g_guiapp_my < 0) g_guiapp_my = 0;
+    if (g_gui_surface) {
+        if (g_guiapp_mx > g_gui_surface_w - 1) g_guiapp_mx = g_gui_surface_w - 1;
+        if (g_guiapp_my > g_gui_surface_h - 1) g_guiapp_my = g_gui_surface_h - 1;
+    }
+    if (x) *x = g_guiapp_mx;
+    if (y) *y = g_guiapp_my;
+    return (int)g_guiapp_btn;
+}
 
 // Cover-fit the wallpaper across (0,0)-(DW,DH), sampling only the pixels inside
 // the current clip rect so cost scales with the damaged area, not the screen.
@@ -1654,9 +1833,9 @@ static uint32_t app_accent(int mode) {
 }
 
 static int gui_app_grid_cols(int win_w) {
-    int cols = (win_w - 8) / 150;
+    int cols = (win_w - 8) / 132;
     if (cols < 2) cols = 2;
-    if (cols > 4) cols = 4;
+    if (cols > 5) cols = 5;   /* 5 列：9 个内置应用排 2 行，不溢出底部状态栏 */
     return cols;
 }
 
@@ -1704,7 +1883,7 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
             rect(x + w - 1, y + 10, 1, h - 20, accent);
         }
 
-        int isz = 52, ix = x + (w - isz) / 2, iy = y + 16;
+        int isz = ui_s(52), ix = x + (w - isz) / 2, iy = y + ui_s(16);
         blit_icon(ix, iy, isz, app_icon_id(app->mode));
 
         int tw = text_width(app->name, 1);
@@ -3028,11 +3207,178 @@ static void browser_text_from_html(const char *html, char *out, uint32_t cap, ui
     if (out_len) *out_len = pos;
 }
 
+// ── 浏览器分块渲染：把 HTML 转成 [1字节块类型][文本]\n... 的标记流，
+// 供 draw_rendered_page 按标题/链接/列表/代码/分隔线等样式分别绘制，
+// 而不是把所有内容拉平成一坨纯文字。browser_page 仍保留纯文本（供“保存网页”）。
+enum {
+    BRK_P      = '0',
+    BRK_H1     = '1',
+    BRK_H2     = '2',
+    BRK_H3     = '3',
+    BRK_LI     = '4',
+    BRK_LINK   = '5',
+    BRK_CODE   = '6',
+    BRK_HR     = '7',
+    BRK_STRONG = '8',
+    BRK_QUOTE  = '9',
+};
+#define BR_STACK_MAX 8
+
+static int tag_ci_eq(const char *name, int len, const char *lit) {
+    int i = 0;
+    for (; i < len; i++) {
+        char a = name[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (!lit[i] || a != lit[i]) return 0;
+    }
+    return lit[i] == 0;
+}
+
+static int browser_style_for_tag(const char *name, int len) {
+    if (tag_ci_eq(name, len, "h1")) return BRK_H1;
+    if (tag_ci_eq(name, len, "h2")) return BRK_H2;
+    if (len == 2 && (name[0] == 'h' || name[0] == 'H') && name[1] >= '3' && name[1] <= '6') return BRK_H3;
+    if (tag_ci_eq(name, len, "li")) return BRK_LI;
+    if (tag_ci_eq(name, len, "a")) return BRK_LINK;
+    if (tag_ci_eq(name, len, "strong") || tag_ci_eq(name, len, "b")) return BRK_STRONG;
+    if (tag_ci_eq(name, len, "pre") || tag_ci_eq(name, len, "code")) return BRK_CODE;
+    if (tag_ci_eq(name, len, "blockquote")) return BRK_QUOTE;
+    return -1;
+}
+
+static void browser_render_from_html(const char *html, char *out, uint32_t cap, uint32_t *out_len) {
+    uint32_t pos = 0;
+    int space = 1;
+    int need_prefix = 1;
+    int style_stack[BR_STACK_MAX];
+    int stack_n = 0;
+    int cur_style = BRK_P;
+    int skip_mode = 0;
+    const char *skip_close = "";
+
+#define BREMIT(c) do { if (pos + 1 < cap) out[pos++] = (char)(c); } while (0)
+#define BRFLUSH() do { if (!space) { BREMIT('\n'); space = 1; need_prefix = 1; } } while (0)
+
+    for (uint32_t i = 0; html[i] && pos + 2 < cap; i++) {
+        char c = html[i];
+
+        if (skip_mode) {
+            if (c == '<' && html[i + 1] == '/') {
+                uint32_t j = i + 2;
+                char nm[16]; int nl = 0;
+                while (html[j] && html[j] != '>' && nl < 15) nm[nl++] = html[j++];
+                if (tag_ci_eq(nm, nl, skip_close)) { skip_mode = 0; i = j; }
+            }
+            continue;
+        }
+
+        if (c == '<') {
+            int closing = (html[i + 1] == '/');
+            uint32_t j = i + 1 + (closing ? 1 : 0);
+            char nm[16]; int nl = 0;
+            while (html[j] && html[j] != '>' && html[j] != ' ' && html[j] != '\t' &&
+                   html[j] != '\n' && html[j] != '/' && nl < 15)
+                nm[nl++] = html[j++];
+            while (html[j] && html[j] != '>') j++;
+
+            if (!closing && (tag_ci_eq(nm, nl, "script") || tag_ci_eq(nm, nl, "style"))) {
+                BRFLUSH();
+                skip_mode = 1;
+                skip_close = tag_ci_eq(nm, nl, "script") ? "script" : "style";
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "br")) {
+                BRFLUSH();
+                BREMIT(BRK_P); BREMIT('\n');
+                need_prefix = 1; space = 1;
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "hr")) {
+                BRFLUSH();
+                BREMIT(BRK_HR); BREMIT('\n');
+                need_prefix = 1; space = 1;
+                i = j;
+                continue;
+            }
+            int st = browser_style_for_tag(nm, nl);
+            int old_style = cur_style;
+            int new_style = cur_style;
+            int do_push = 0, do_pop = 0;
+            if (!closing) {
+                if (st >= 0) { new_style = st; do_push = 1; }
+            } else if (st >= 0 && stack_n > 0 && style_stack[stack_n - 1] == st) {
+                do_pop = 1;
+                new_style = (stack_n > 1) ? style_stack[stack_n - 2] : BRK_P;
+            }
+            if (new_style != old_style) {
+                /* 样式切换：即使前面文字以空格结尾也强制换行，否则新样式的
+                 * 前缀字节不会被写出（比如 "Hello <strong>world"）。 */
+                if (!need_prefix) BREMIT('\n');
+                space = 1; need_prefix = 1;
+            } else {
+                BRFLUSH();
+            }
+            if (do_push && stack_n < BR_STACK_MAX) style_stack[stack_n++] = st;
+            if (do_pop) stack_n--;
+            cur_style = new_style;
+            i = j;
+            continue;
+        }
+
+        char ch = c;
+        if (ch == '&') {
+            if (strncmp(html + i, "&amp;", 5) == 0) { ch = '&'; i += 4; }
+            else if (strncmp(html + i, "&lt;", 4) == 0) { ch = '<'; i += 3; }
+            else if (strncmp(html + i, "&gt;", 4) == 0) { ch = '>'; i += 3; }
+            else if (strncmp(html + i, "&nbsp;", 6) == 0) { ch = ' '; i += 5; }
+            else if (strncmp(html + i, "&quot;", 6) == 0) { ch = '"'; i += 5; }
+        }
+        if (ch == '\r') continue;
+        if (ch == '\n' || ch == '\t') ch = ' ';
+        if (ch == ' ') {
+            if (space) continue;
+            space = 1;
+        } else {
+            space = 0;
+        }
+        if (need_prefix) { BREMIT(cur_style); need_prefix = 0; }
+        BREMIT(ch);
+    }
+    BRFLUSH();
+    out[pos < cap ? pos : cap - 1] = 0;
+    if (out_len) *out_len = pos;
+#undef BREMIT
+#undef BRFLUSH
+}
+
+// 把纯文本消息同时写入 browser_page（保存用）与 browser_render（渲染用，单个
+// 普通段落块），用于错误提示/初始占位文本，二者始终保持一致。
+static void browser_set_plain(gui_state_t *st, const char *msg) {
+    uint32_t n = (uint32_t)strlen(msg);
+    if (n >= BROWSER_PAGE_CAP) n = BROWSER_PAGE_CAP - 1;
+    memcpy(st->browser_page, msg, n);
+    st->browser_page[n] = 0;
+    st->browser_page_len = n;
+    uint32_t rn = n;
+    if (rn > BROWSER_PAGE_CAP - 2) rn = BROWSER_PAGE_CAP - 2;
+    st->browser_render[0] = (char)BRK_P;
+    memcpy(st->browser_render + 1, msg, rn);
+    st->browser_render[1 + rn] = 0;
+    st->browser_render_len = 1 + rn;
+}
+
+static void browser_set_plain2(gui_state_t *st, const char *a, const char *b) {
+    char buf[192];
+    line2(buf, sizeof(buf), a, b);
+    browser_set_plain(st, buf);
+}
+
 static void browser_init(gui_state_t *st) {
     if (st->browser_loaded) return;
     strcpy(st->browser_url, "https://example.com/");
-    strcpy(st->browser_page, "输入网址后按 Enter 加载。当前 HTTPS 支持 TLS 1.3 + ChaCha20-Poly1305；部分网站会自动尝试 HTTP。");
-    st->browser_page_len = (uint32_t)strlen(st->browser_page);
+    browser_set_plain(st, "输入网址后按 Enter 加载。当前 HTTPS 支持 TLS 1.3 + ChaCha20-Poly1305；部分网站会自动尝试 HTTP。");
     st->browser_scroll = 0;
     st->browser_loaded = 1;
 }
@@ -3045,22 +3391,19 @@ static void browser_load(gui_state_t *st) {
     int https = 0;
     const char *err = gui_parse_url(st->browser_url, &https, host, sizeof(host), &port, &path);
     if (err) {
-        strcpy(st->browser_page, err);
-        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        browser_set_plain(st, err);
         st->status = "浏览器 URL 错误";
         return;
     }
     st->status = "浏览器加载中";
     if (!net_primary()->dhcp_ok && net_dhcp() < 0) {
-        line2(st->browser_page, BROWSER_PAGE_CAP, "网络未配置: ", net_last_error());
-        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        browser_set_plain2(st, "网络未配置: ", net_last_error());
         st->status = "浏览器网络失败";
         return;
     }
     uint32_t ip = 0;
     if (net_dns_resolve(host, &ip) < 0) {
-        line2(st->browser_page, BROWSER_PAGE_CAP, "DNS 失败: ", net_last_error());
-        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        browser_set_plain2(st, "DNS 失败: ", net_last_error());
         st->status = "浏览器 DNS 失败";
         return;
     }
@@ -3075,12 +3418,13 @@ static void browser_load(gui_state_t *st) {
         if (ok == 0) st->status = "HTTPS 失败，已用 HTTP 回退";
     }
     if (ok < 0) {
-        line2(st->browser_page, BROWSER_PAGE_CAP, "加载失败: ", https ? tls_error : net_last_error());
-        st->browser_page_len = (uint32_t)strlen(st->browser_page);
+        browser_set_plain2(st, "加载失败: ", https ? tls_error : net_last_error());
         st->status = "浏览器加载失败";
         return;
     }
-    browser_text_from_html(http_body_ptr(response), st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
+    const char *body = http_body_ptr(response);
+    browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
+    browser_render_from_html(body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
     st->browser_scroll = 0;
     if (!https || strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
         st->status = "浏览器加载完成";
@@ -3106,29 +3450,112 @@ static void browser_save_page(gui_state_t *st) {
     st->status = "网页已保存到文件";
 }
 
-static void draw_wrapped_text(int x, int y, int w, int h, const char *body, int scroll) {
-    char line[96];
-    uint32_t line_pos = 0;
-    int max_cols = w / 8;
-    if (max_cols < 16) max_cols = 16;
-    if (max_cols > 90) max_cols = 90;
-    int current_line = 0;
-    int drawn = 0;
-    int max_lines = h / 18;
-    for (uint32_t i = 0;; i++) {
-        char c = body[i];
-        int flush = c == 0 || c == '\n' || line_pos >= (uint32_t)max_cols;
-        if (!flush && c) line[line_pos++] = c;
-        if (flush) {
-            line[line_pos] = 0;
-            if (current_line >= scroll && drawn < max_lines) {
-                text(x, y + drawn * 18, line, rgb(218, 230, 238), 1);
-                drawn++;
+// 每种块类型对应的绘制样式：颜色、字号倍率、缩进、项目符号、等宽字体、
+// 加粗（双次偏移描边模拟）、下划线（链接）、分隔线。让浏览器渲染标题/
+// 列表/链接/代码块时有真实的视觉层次，而不是清一色的纯文字。
+typedef struct {
+    uint32_t color;
+    int scale;
+    int indent;
+    int bullet;
+    int mono;
+    int bold;
+    int underline;
+    int is_hr;
+    int gap_after;   /* 块结束后追加的空行数（标题留白） */
+} browser_style_t;
+
+static void browser_style_get(int type, browser_style_t *s) {
+    uint32_t body_col = rgb(218, 230, 238);
+    s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
+    s->mono = 0; s->bold = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
+    switch (type) {
+        case BRK_H1: s->color = rgb(255, 255, 255); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
+        case BRK_H2: s->color = rgb(120, 200, 255); s->bold = 1; s->gap_after = 1; break;
+        case BRK_H3: s->color = rgb(150, 190, 225); s->bold = 1; break;
+        case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
+        case BRK_LINK: s->color = rgb(78, 192, 236); s->underline = 1; break;
+        case BRK_CODE: s->color = rgb(150, 235, 170); s->mono = 1; break;
+        case BRK_HR: s->is_hr = 1; break;
+        case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
+        case BRK_QUOTE: s->color = rgb(150, 160, 170); s->indent = 12; break;
+        default: break;
+    }
+}
+
+// 按块类型渲染标记流（见 browser_render_from_html）：标题更大更亮、链接带
+// 下划线、列表带圆点、代码用等宽字体、<hr> 画分隔线——而非纯文本平铺。
+static void draw_rendered_page(int x, int y, int w, int h, const char *buf, uint32_t len, int scroll) {
+    if (!len) return;
+    int rh = gui_font_line_height() + 3;
+    int max_lines = h / rh;
+    if (max_lines < 1) max_lines = 1;
+    int row_unit = 0;
+    int drawn_rows = 0;
+    int cy = y;
+    uint32_t i = 0;
+    while (i < len && drawn_rows < max_lines) {
+        int type = (unsigned char)buf[i++];
+        browser_style_t bs;
+        browser_style_get(type, &bs);
+        uint32_t start = i;
+        while (i < len && buf[i] != '\n') i++;
+        uint32_t seg_len = i - start;
+        if (i < len) i++;
+
+        if (bs.is_hr) {
+            if (row_unit >= scroll && drawn_rows < max_lines) {
+                rect(x, cy + rh / 2, w, 2, rgb(70, 90, 105));
+                cy += rh; drawn_rows++;
             }
-            current_line++;
-            line_pos = 0;
-            if (c == 0 || drawn >= max_lines) break;
-            if (c != '\n') i--;
+            row_unit++;
+            continue;
+        }
+        if (seg_len == 0) {
+            if (row_unit >= scroll && drawn_rows < max_lines) { cy += rh; drawn_rows++; }
+            row_unit++;
+            continue;
+        }
+
+        int text_x = x + bs.indent + (bs.bullet ? 14 : 0);
+        int avail_w = w - bs.indent - (bs.bullet ? 14 : 0);
+        int px_per_char = (bs.mono ? MONO_GLYPH_W : 8) * bs.scale;
+        int max_cols = avail_w / (px_per_char > 0 ? px_per_char : 8);
+        if (max_cols < 6) max_cols = 6;
+        if (max_cols > 150) max_cols = 150;
+
+        char line[160];
+        uint32_t p = start;
+        int first_row = 1;
+        while (p < start + seg_len && drawn_rows < max_lines) {
+            uint32_t lp = 0;
+            while (p < start + seg_len && lp < (uint32_t)max_cols && lp + 1 < sizeof(line))
+                line[lp++] = buf[p++];
+            line[lp] = 0;
+
+            if (row_unit >= scroll) {
+                int rowh = rh * bs.scale;
+                if (bs.bullet && first_row)
+                    text(x + bs.indent, cy, "•", bs.color, 1);
+                if (bs.mono) {
+                    text_mono(text_x, cy, text_x + avail_w, line, bs.color);
+                } else {
+                    if (bs.bold) text(text_x + 1, cy, line, bs.color, bs.scale);
+                    text(text_x, cy, line, bs.color, bs.scale);
+                    if (bs.underline) {
+                        int tw = text_width(line, bs.scale);
+                        rect(text_x, cy + rowh - 3, tw, 1, bs.color);
+                    }
+                }
+                cy += rowh;
+                drawn_rows++;
+            }
+            row_unit += bs.scale;
+            first_row = 0;
+        }
+        if (bs.gap_after && drawn_rows < max_lines) {
+            if (row_unit >= scroll) { cy += rh; drawn_rows++; }
+            row_unit++;
         }
     }
 }
@@ -3160,7 +3587,7 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     text_clipped(tx + 190, ty + 112, tx + view_w - 8, line, rgb(168, 190, 204), 1);
     rect(tx, ty + 146, view_w, 196, rgb(4, 9, 14));
     border(tx, ty + 146, view_w, 196, rgb(50, 74, 90));
-    draw_wrapped_text(tx + 12, ty + 158, view_w - 24, 172, st->browser_page, st->browser_scroll);
+    draw_rendered_page(tx + 12, ty + 158, view_w - 24, 172, st->browser_render, st->browser_render_len, st->browser_scroll);
 }
 
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state, int light) {
@@ -3286,8 +3713,8 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 }
 
 // ---- Windows 11-style centered taskbar ----
-#define TB_BTN 46
-#define TB_GAP 8
+#define TB_BTN ui_s(46)
+#define TB_GAP ui_s(8)
 #define TBHIT_NONE  -1
 #define TBHIT_START -2
 #define TBHIT_WIN_BASE 100
@@ -3322,6 +3749,20 @@ static void taskbar_item_xy(int idx, int item_count, int w, int h, int *rx, int 
 // Small white motif for an app window icon, tuned for a ~28px icon box. Every
 // app mode gets a distinct, recognizable shape — without this the taskbar drew
 
+// HBOS 品牌标志：字母 "H" 造型（取代 Win11 四方格），用于开始按钮/欢迎窗口等处。
+// x,y,size 为外框左上角与边长；纯 rect 拼接，任意缩放不失真。
+static void draw_hbos_logo(int x, int y, int size, uint32_t color) {
+    int bar_w = size * 3 / 10;
+    if (bar_w < 2) bar_w = 2;
+    int mid_h = size * 2 / 10;
+    if (mid_h < 2) mid_h = 2;
+    int right_x = x + size - bar_w;
+    rect(x, y, bar_w, size, color);
+    rect(right_x, y, bar_w, size, color);
+    int mid_y = y + (size - mid_h) / 2;
+    rect(x + bar_w, mid_y, right_x - (x + bar_w), mid_h, color);
+}
+
 static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int light = st->theme_light;
     uint32_t accent = rgb(61, 174, 233);
@@ -3335,20 +3776,17 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
         if (i == 0) {
             if (st->wm.start_menu_open)
                 fill_round_rect(rx, ry, TB_BTN, TB_BTN, 8, 0x44FFFFFF, RR_ALL);
-            int s = 7, gx = rx + TB_BTN / 2 - 8, gy = ry + TB_BTN / 2 - 8;
-            rect(gx, gy, s, s, accent);
-            rect(gx + s + 2, gy, s, s, accent);
-            rect(gx, gy + s + 2, s, s, accent);
-            rect(gx + s + 2, gy + s + 2, s, s, accent);
+            int lsz = ui_s(18);
+            draw_hbos_logo(rx + (TB_BTN - lsz) / 2, ry + (TB_BTN - lsz) / 2, lsz, accent);
         } else if (i <= TB_PIN_COUNT) {
             int panel = g_taskbar_pins[i - 1].panel;
-            int isz = 30, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2;
+            int isz = ui_s(30), ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2;
             blit_icon(ix, iy, isz, panel_icon_id(panel));
         } else {
             int slot = wins[i - 1 - TB_PIN_COUNT];
             wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, slot);
             int act = (slot == st->wm.active_window);
-            int isz = 30, ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2 - 2;
+            int isz = ui_s(30), ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2 - 2;
             if (win->kind == WM_WIN_PANEL)
                 blit_icon(ix, iy, isz, panel_icon_id(win->mode));
             else
@@ -3358,11 +3796,18 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
         }
     }
 
-    char line[32];
-    time_line(line, sizeof(line));
-    int tw = text_width(line, 1);
-    text(w - 16 - tw, h - TASKBAR_H + (TASKBAR_H - gui_font_line_height()) / 2,
-         line, light ? cyber_text(1) : rgb(235, 238, 242), 1);
+    /* Win11 风格：时间在上、日期在下，各自右对齐 */
+    char tline[32], dline[40];
+    time_line(tline, sizeof(tline));
+    date_line(dline, sizeof(dline));
+    uint32_t tcol = light ? cyber_text(1) : rgb(235, 238, 242);
+    int lh = gui_font_line_height();
+    int tw = text_width(tline, 1);
+    int dw = text_width(dline, 1);
+    int total_h = lh * 2;
+    int top = h - TASKBAR_H + (TASKBAR_H - total_h) / 2;
+    text(w - 16 - tw, top,      tline, tcol, 1);
+    text(w - 16 - dw, top + lh, dline, tcol, 1);
 }
 
 static int taskbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
@@ -3383,13 +3828,58 @@ static int taskbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
     return TBHIT_NONE;
 }
 
+/* ── 并发应用窗口合成 ───────────────────────────────────────── */
+#define APPWIN_TITLE_H ui_s(26)
+
+/* 把应用窗口表面（不透明）贴到桌面背缓冲 */
+static void blit_app_surface(int dx, int dy, const uint32_t *src, int sw, int sh) {
+    if (!g_gui_surface || !src) return;
+    for (int yy = 0; yy < sh; yy++) {
+        int py = dy + yy;
+        if (py < 0 || py >= g_gui_surface_h) continue;
+        uint32_t *drow = g_gui_surface + (uint32_t)py * g_gui_surface_pitch;
+        const uint32_t *srow = src + (uint32_t)yy * sw;
+        for (int xx = 0; xx < sw; xx++) {
+            int px = dx + xx;
+            if (px < 0 || px >= g_gui_surface_w) continue;
+            drow[px] = srow[xx] | 0xFF000000;
+        }
+    }
+}
+
+/* 画一个应用窗口：标题栏（标题 + 关闭按钮）+ 内容表面 + 边框 */
+static void draw_one_app_window(winsrv_window_t *win) {
+    int wx = win->x, wy = win->y, ww = win->w, wh = win->h;
+    int th = APPWIN_TITLE_H;
+    soft_shadow(wx - 2, wy - th - 2, ww + 4, wh + th + 6);
+    fill_round_rect(wx, wy - th, ww, th, 6, rgb(34, 40, 48), RR_TOP);
+    text(wx + 10, wy - th + (th - gui_font_line_height()) / 2,
+         win->title[0] ? win->title : "应用", rgb(235, 240, 245), 1);
+    /* 关闭按钮 */
+    int cbx = wx + ww - 20;
+    text(cbx, wy - th + (th - gui_font_line_height()) / 2, "✕", rgb(240, 120, 120), 1);
+    /* 内容 */
+    blit_app_surface(wx, wy, win->surface, ww, wh);
+    border(wx, wy, ww, wh, rgb(52, 62, 74));
+}
+
+static void draw_app_windows(void) {
+    for (int i = 0; i < WINSRV_MAX; i++) {
+        winsrv_window_t *win = winsrv_get(i);
+        if (win) draw_one_app_window(win);
+    }
+}
+
 static void draw_gui_screen(int w, int h, gui_state_t *st) {
     gui_sync_focus(st);
     draw_desktop(w, h, st);
+    draw_app_windows();
     draw_start_menu(st);
     draw_window_switcher(w, h, st);
     if (st->splash_ticks > 0)
         draw_splash_window(w, h, st->splash_ticks, st->theme_light);
+    draw_context_menu(st);
+    draw_toast(w, h, st);
 }
 
 static void draw_gui_screen(int w, int h, gui_state_t *st);
@@ -3422,6 +3912,12 @@ static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, i
         draw_gui_screen(w, h, st);
         draw_cursor(mx, my, edge);
         gui_present_surface(fb);
+        /* g_gui_surface alloc failed (OOM): draw_gui_screen drew straight
+         * through fb_put_pixel/fb_fill_rect, which now land in the TUI's
+         * off-screen back-buffer instead of the real framebuffer (see
+         * graphics.c). gui_present_surface() no-ops without a surface, so
+         * flush that back-buffer to the screen ourselves. */
+        if (!g_gui_surface) console_present();
         gui_dirty_reset();
         return;
     }
@@ -3436,6 +3932,7 @@ static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, i
             draw_cursor(mx, my, edge);
         gui_present_rect(fb, rx, ry, rw, rh);
     }
+    if (!g_gui_surface) console_present();
     gui_clip_clear();
     gui_dirty_reset();
 }
@@ -3451,9 +3948,9 @@ static const desktop_icon_t g_desktop_icons[] = {
 #define DESKTOP_ICON_COUNT ((int)(sizeof(g_desktop_icons) / sizeof(g_desktop_icons[0])))
 
 static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
-    *w = 96; *h = 100;
-    *x = 42;
-    *y = 46 + i * 112;
+    *w = ui_s(96); *h = ui_s(100);
+    *x = ui_s(42);
+    *y = ui_s(46) + i * ui_s(112);
 }
 
 
@@ -3462,7 +3959,7 @@ static void draw_desktop_icons(void) {
         const desktop_icon_t *d = &g_desktop_icons[i];
         int x, y, w, h;
         desktop_icon_rect(i, &x, &y, &w, &h);
-        int isz = 58, ix = x + (w - isz) / 2, iy = y;
+        int isz = ui_s(58), ix = x + (w - isz) / 2, iy = y;
         if (d->kind == WM_WIN_PANEL)
             blit_icon(ix, iy, isz, panel_icon_id(d->mode));
         else
@@ -4434,22 +4931,214 @@ static void draw_window_switcher(int w, int h, gui_state_t *st) {
     }
 }
 
+/* ── 启动器中的 .hax GUI 应用枚举 ──────────────────────────────
+ * 仅 GUI 类应用进入启动器；数量受 SM_HAX_MAX 限制以约束面板高度。 */
+static int gui_hax_count(void) {
+    uint32_t n = hax_app_count();
+    int c = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const hax_app_entry_t *e = hax_app_at(i);
+        if (e && (e->kind & HAX_KIND_GUI)) c++;
+    }
+    if (c > SM_HAX_MAX) c = SM_HAX_MAX;
+    return c;
+}
+
+/* 返回第 k 个 GUI 类 .hax 应用（k 从 0 起），越界返回 NULL */
+static const hax_app_entry_t *gui_hax_at(int k) {
+    uint32_t n = hax_app_count();
+    int seen = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const hax_app_entry_t *e = hax_app_at(i);
+        if (e && (e->kind & HAX_KIND_GUI)) {
+            if (seen == k) return e;
+            seen++;
+        }
+    }
+    return 0;
+}
+
+/* 启动器动态总高度：内置 13 项 + 追加的 .hax 行 */
+/* ── 开始菜单：统一应用条目（内置 + .hax）+ 搜索过滤 ──────────────
+ * 键盘是 ASCII，应用名是中文，故每个内置应用附带 ASCII/拼音关键词供搜索。 */
+enum { SM_K_PANEL = 0, SM_K_APP = 1, SM_K_HAX = 2 };
+typedef struct {
+    const char *name; const char *kw; int kind; int mode; int icon;
+} sm_entry_t;
+
+static const sm_entry_t sm_builtin[] = {
+    {"文件管理器", "file files fm wenjian",    SM_K_PANEL, PANEL_FILES,     ICON_FILES},
+    {"磁盘",       "disk cipan",               SM_K_PANEL, PANEL_DISK,      ICON_DISK},
+    {"资源",       "resource sys ziyuan",      SM_K_PANEL, PANEL_SYS,       ICON_SYS},
+    {"应用",       "app apps yingyong",        SM_K_PANEL, PANEL_APPS,      ICON_APPS},
+    {"记事本",     "note notes jishi",         SM_K_APP,   GUI_APP_NOTES,   ICON_NOTES},
+    {"计算器",     "calc calculator jisuan",   SM_K_APP,   GUI_APP_CALC,    ICON_CALC},
+    {"贪吃蛇",     "snake game tanchishe",     SM_K_APP,   GUI_APP_SNAKE,   ICON_SNAKE},
+    {"浏览器",     "web browser liulan",       SM_K_APP,   GUI_APP_BROWSER, ICON_BROWSER},
+    {"代码",       "code daima",               SM_K_APP,   GUI_APP_CODE,    ICON_CODE},
+    {"终端",       "term terminal shell",      SM_K_APP,   GUI_APP_DIAG,    ICON_TERM},
+    {"时钟",       "clock time shizhong",      SM_K_APP,   GUI_APP_CLOCK,   ICON_CLOCK},
+    {"设置",       "settings config shezhi",   SM_K_APP,   GUI_APP_SETTINGS,ICON_SYS},
+};
+#define SM_BUILTIN_N ((int)(sizeof(sm_builtin) / sizeof(sm_builtin[0])))
+
+static int sm_total_entries(void) { return SM_BUILTIN_N + gui_hax_count(); }
+
+static int sm_entry_at(int idx, sm_entry_t *out) {
+    if (idx < 0) return 0;
+    if (idx < SM_BUILTIN_N) { *out = sm_builtin[idx]; return 1; }
+    const hax_app_entry_t *e = gui_hax_at(idx - SM_BUILTIN_N);
+    if (!e) return 0;
+    out->name = e->name; out->kw = e->name;
+    out->kind = SM_K_HAX; out->mode = idx - SM_BUILTIN_N; out->icon = ICON_APPS;
+    return 1;
+}
+
+static char sm_lc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+
+/* q（已小写）是否为 hay 的子串（忽略大小写） */
+static int sm_match(const char *hay, const char *q) {
+    if (!q || !q[0]) return 1;
+    if (!hay) return 0;
+    for (int i = 0; hay[i]; i++) {
+        int j = 0;
+        while (q[j] && hay[i + j] && sm_lc(hay[i + j]) == q[j]) j++;
+        if (!q[j]) return 1;
+    }
+    return 0;
+}
+
+static int sm_entry_matches(const sm_entry_t *e, const char *q) {
+    return sm_match(e->name, q) || sm_match(e->kw, q);
+}
+
+static void sm_query_lc(const gui_state_t *st, char *q, int cap) {
+    int n = 0;
+    for (; st->sm_search[n] && n < cap - 1; n++) q[n] = sm_lc(st->sm_search[n]);
+    q[n] = 0;
+}
+
+/* 取过滤后第 k 个可见条目 */
+static int sm_visible_at(const gui_state_t *st, int k, sm_entry_t *out) {
+    char q[24]; sm_query_lc(st, q, sizeof(q));
+    int seen = 0, total = sm_total_entries();
+    for (int i = 0; i < total; i++) {
+        sm_entry_t e;
+        if (!sm_entry_at(i, &e) || !sm_entry_matches(&e, q)) continue;
+        if (seen == k) { *out = e; return 1; }
+        seen++;
+    }
+    return 0;
+}
+
+static int sm_visible_count(const gui_state_t *st) {
+    char q[24]; sm_query_lc(st, q, sizeof(q));
+    int seen = 0, total = sm_total_entries();
+    for (int i = 0; i < total; i++) {
+        sm_entry_t e;
+        if (sm_entry_at(i, &e) && sm_entry_matches(&e, q)) seen++;
+    }
+    return seen;
+}
+
+static void sm_launch(gui_state_t *st, const sm_entry_t *e) {
+    if (e->kind == SM_K_PANEL) gui_open_panel_window(st, e->mode);
+    else if (e->kind == SM_K_APP) gui_open_window(st, WM_WIN_APP, e->mode, 0);
+    else {
+        const hax_app_entry_t *he = gui_hax_at(e->mode);
+        if (he) {
+            char *av[1]; av[0] = (char *)he->name;
+            hax_app_spawn(he->name, 1, av);
+            gui_toast(st, "启动 ", he->name);
+        }
+    }
+}
+
+static int gui_start_menu_h(void) {
+    int total = sm_total_entries();
+    int rows = (total + SM_GRID_COLS - 1) / SM_GRID_COLS;
+    int extra_rows = rows - SM_GRID_ROWS;
+    if (extra_rows < 0) extra_rows = 0;
+    return SM_H + extra_rows * SM_CELL_H;
+}
+
+/* ── 右键上下文菜单 ─────────────────────────────────────────── */
+#define CTX_ITEM_H ui_s(28)
+#define CTX_W     ui_s(176)
+
+static const char *const ctx_desktop_items[] = { "刷新桌面", "切换主题", "打开开始菜单" };
+static const char *const ctx_window_items[]  = { "最小化", "最大化 / 还原", "关闭窗口" };
+#define CTX_DESKTOP_N 3
+#define CTX_WINDOW_N  3
+
+static int ctx_item_count(int kind) {
+    return kind == 2 ? CTX_WINDOW_N : CTX_DESKTOP_N;
+}
+static const char *ctx_item_label(int kind, int i) {
+    return kind == 2 ? ctx_window_items[i] : ctx_desktop_items[i];
+}
+
+/* 返回光标下最顶层（z 序最高）未最小化窗口索引，无则 -1 */
+static int gui_window_at(gui_state_t *st, int w, int h, int mx, int my) {
+    for (int i = st->wm.window_count - 1; i >= 0; i--) {
+        int idx = st->wm.z_order[i];
+        wm_window_t *win = wm_get_window(&st->wm, idx);
+        if (!win || !win->used || win->state == WM_STATE_MINIMIZED) continue;
+        int wx, wy, ww, wh;
+        gui_window_metrics(st, w, h, win, idx, &wx, &wy, &ww, &wh);
+        if (mx >= wx && mx < wx + ww && my >= wy && my < wy + wh) return idx;
+    }
+    return -1;
+}
+
+static void draw_context_menu(gui_state_t *st) {
+    if (!st->ctx_open) return;
+    int light = st->theme_light;
+    int n = ctx_item_count(st->ctx_open);
+    int mw = CTX_W, mh = n * CTX_ITEM_H + 8;
+    int ox = st->ctx_x, oy = st->ctx_y;
+    soft_shadow(ox, oy, mw, mh);
+    fill_round_rect(ox, oy, mw, mh, 8, light ? 0xF8F4F6F8 : 0xF8222A33, RR_ALL);
+    border(ox, oy, mw, mh, light ? rgb(200, 206, 212) : rgb(52, 62, 74));
+    for (int i = 0; i < n; i++) {
+        int iy = oy + 4 + i * CTX_ITEM_H;
+        text(ox + 14, iy + (CTX_ITEM_H - gui_font_line_height()) / 2,
+             ctx_item_label(st->ctx_open, i),
+             light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+    }
+}
+
+/* 命中测试：返回 item 索引，未命中返回 -1 */
+static int ctx_hit(gui_state_t *st, int mx, int my) {
+    if (!st->ctx_open) return -1;
+    int n = ctx_item_count(st->ctx_open);
+    int mw = CTX_W, mh = n * CTX_ITEM_H + 8;
+    int ox = st->ctx_x, oy = st->ctx_y;
+    if (mx < ox || mx >= ox + mw || my < oy || my >= oy + mh) return -1;
+    int i = (my - oy - 4) / CTX_ITEM_H;
+    if (i < 0 || i >= n) return -1;
+    return i;
+}
+
 static void draw_start_menu(gui_state_t *st) {
     wm_state_t *wm = &st->wm;
     if (!wm->start_menu_open) return;
     int ox = wm->menu_x, oy = wm->menu_y;
     int light = st->theme_light;
+    int mh = wm->menu_h > 0 ? wm->menu_h : SM_H;   /* 动态面板高度 */
+    int extra = mh - SM_H;
+    if (extra < 0) extra = 0;
 
     /* ── panel background ── */
-    soft_shadow(ox - 4, oy - 4, SM_W + 8, SM_H + 8);
+    soft_shadow(ox - 4, oy - 4, SM_W + 8, mh + 8);
     uint32_t bg = light ? 0xF6F5F6F8 : 0xF6202428;
-    fill_round_rect(ox, oy, SM_W, SM_H, 12, bg, RR_ALL);
+    fill_round_rect(ox, oy, SM_W, mh, 12, bg, RR_ALL);
     uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
     /* top/bottom border lines for rounded rect */
     rect(ox + 12, oy, SM_W - 24, 1, bd);
-    rect(ox + 12, oy + SM_H - 1, SM_W - 24, 1, bd);
-    rect(ox, oy + 12, 1, SM_H - 24, bd);
-    rect(ox + SM_W - 1, oy + 12, 1, SM_H - 24, bd);
+    rect(ox + 12, oy + mh - 1, SM_W - 24, 1, bd);
+    rect(ox, oy + 12, 1, mh - 24, bd);
+    rect(ox + SM_W - 1, oy + 12, 1, mh - 24, bd);
 
     /* ── search bar ── */
     int sx = ox + SM_PAD, sy = oy + SM_SEARCH_TOP;
@@ -4458,8 +5147,17 @@ static void draw_start_menu(gui_state_t *st) {
               light ? rgb(240, 242, 244) : rgb(34, 40, 48),
               light ? rgb(232, 235, 238) : rgb(28, 34, 42));
     border(sx, sy, sw, SM_SEARCH_H, light ? rgb(190, 195, 200) : rgb(55, 65, 78));
-    text(sx + 12, sy + (SM_SEARCH_H - gui_font_line_height()) / 2,
-         "搜索应用...", light ? rgb(160, 166, 172) : rgb(100, 110, 122), 1);
+    if (st->sm_search_len > 0) {
+        text(sx + 12, sy + (SM_SEARCH_H - gui_font_line_height()) / 2,
+             st->sm_search, light ? rgb(30, 34, 40) : rgb(232, 238, 244), 1);
+        /* 光标 */
+        int cxp = sx + 12 + text_width(st->sm_search, 1) + 1;
+        rect(cxp, sy + 8, 1, SM_SEARCH_H - 16, light ? rgb(60, 66, 72) : rgb(200, 206, 212));
+    } else {
+        text(sx + 12, sy + (SM_SEARCH_H - gui_font_line_height()) / 2,
+             "搜索应用…（输入名称或拼音，Enter 启动）",
+             light ? rgb(160, 166, 172) : rgb(100, 110, 122), 1);
+    }
     /* magnifier icon */
     int mg = sy + SM_SEARCH_H / 2;
     int mr = 6;
@@ -4475,48 +5173,40 @@ static void draw_start_menu(gui_state_t *st) {
          lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
          "全部 >", light ? rgb(61, 174, 233) : rgb(61, 174, 233), 1);
 
-    /* ── pinned app icon grid ── */
-    static const char *pinned_names[] = {
-        "文件管理器", "磁盘", "资源", "应用", "记事本",
-        "计算器", "贪吃蛇", "浏览器", "代码", "终端",
-        "时钟", "设置", "文件(App)"
-    };
-    static const int pinned_icons[] = {
-        ICON_FILES, ICON_DISK, ICON_SYS, ICON_APPS, ICON_NOTES,
-        ICON_CALC, ICON_SNAKE, ICON_BROWSER, ICON_CODE, ICON_TERM,
-        ICON_CLOCK, ICON_SYS, ICON_FILES
-    };
+    /* ── 应用网格（按搜索过滤后顺序排布） ── */
     int cell_w = (SM_W - 2 * SM_PAD) / SM_GRID_COLS;
-    for (int i = 0; i < SM_PINNED_COUNT; i++) {
+    int vis = sm_visible_count(st);
+    for (int i = 0; i < vis; i++) {
+        sm_entry_t e;
+        if (!sm_visible_at(st, i, &e)) break;
         int col = i % SM_GRID_COLS;
         int row = i / SM_GRID_COLS;
         int cx = ox + SM_PAD + col * cell_w + cell_w / 2;
         int cy = oy + SM_GRID_TOP + row * SM_CELL_H;
-
-        /* icon */
-        int isz = 36;
+        int isz = ui_s(36);
         int ix = cx - isz / 2;
-        int iy = cy + 4;
-        blit_icon(ix, iy, isz, pinned_icons[i]);
-
-        /* label centered below icon */
-        const char *lbl = pinned_names[i];
-        int tw = text_width(lbl, 1);
+        int iy = cy + ui_s(4);
+        blit_icon(ix, iy, isz, e.icon);
+        int tw = text_width(e.name, 1);
         int lx = cx - tw / 2;
         if (lx < ox + SM_PAD) lx = ox + SM_PAD;
         text_clipped(lx, iy + isz + 4, ox + SM_W - SM_PAD,
-                     lbl, light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+                     e.name, light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+    }
+    if (vis == 0) {
+        text(ox + SM_PAD, oy + SM_GRID_TOP + 24, "无匹配应用",
+             light ? rgb(120, 126, 132) : rgb(150, 156, 162), 1);
     }
 
-    /* ── separator ── */
-    int sep_y = oy + SM_SEP_Y + 2;
+    /* ── separator（随额外行下移） ── */
+    int sep_y = oy + SM_SEP_Y + 2 + extra;
     rect(ox + SM_PAD, sep_y, SM_W - 2 * SM_PAD, 1,
          light ? rgb(210, 214, 218) : rgb(48, 56, 64));
 
-    /* ── bottom bar ── */
-    int bar_y = oy + SM_BAR_TOP;
+    /* ── bottom bar（随额外行下移） ── */
+    int bar_y = oy + SM_BAR_TOP + extra;
     /* left: user icon + name */
-    int uisz = 28;
+    int uisz = ui_s(28);
     int uix = ox + SM_PAD, uiy = bar_y + (SM_BAR_H - uisz) / 2;
     fill_round_rect(uix, uiy, uisz, uisz, uisz / 2,
                     light ? rgb(61, 120, 180) : rgb(50, 100, 160), RR_ALL);
@@ -4565,47 +5255,86 @@ static void draw_start_menu(gui_state_t *st) {
     }
 }
 
+/* 进入 GUI 的欢迎窗口 —— 与桌面其余部分统一的圆角现代风格（蓝/深主题）。 */
+// 与 draw_window_frame 完全一致的 Breeze 窗框配色/圆角/标题栏样式（中性标题
+// 栏 + 强调色边框 + 左上角圆角图标），让欢迎窗口看起来就是桌面里的一个普通
+// 窗口，而不是一张单独的强调色卡片。
 static void draw_splash_window(int w, int h, int ticks, int light) {
-    int sw = 440, sh = 200;
+    int sw = ui_s(440), sh = ui_s(208);
     int sx = (w - sw) / 2, sy = (h - sh) / 2;
     int title_h = WM_TITLE_H;
+    int R = 8;
+    uint32_t accent   = rgb(61, 174, 233);
+    uint32_t body     = light ? rgb(239, 240, 241) : rgb(42, 46, 50);
+    uint32_t title_bg = light ? rgb(214, 217, 221) : rgb(49, 54, 59);
+    uint32_t tcol     = light ? rgb(40, 44, 48)    : rgb(226, 232, 238);
+    uint32_t scol     = light ? rgb(110, 120, 130) : rgb(150, 160, 170);
+    int lh = gui_font_line_height();
 
     soft_shadow(sx, sy, sw, sh);
+    soft_shadow(sx + 2, sy + 3, sw - 4, sh - 4);
+    fill_round_rect(sx, sy, sw, sh, R, body, RR_ALL);
+    fill_round_rect(sx, sy, sw, title_h, R, title_bg, RR_TOP);
+    rect(sx + 1, sy + title_h, sw - 2, 1, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
+    rect(sx + R, sy, sw - 2 * R, 1, accent);
+    rect(sx + R, sy + sh - 1, sw - 2 * R, 1, accent);
+    rect(sx, sy + R, 1, sh - 2 * R, accent);
+    rect(sx + sw - 1, sy + R, 1, sh - 2 * R, accent);
 
-    vgradient(sx + 1, sy + 1, sw - 2, title_h, cyber_neon_pink(light), light ? rgb(160, 0, 70) : rgb(180, 0, 90));
-    rect(sx, sy, sw, 1, light ? rgb(255, 120, 200) : rgb(255, 100, 180));
-    rect(sx, sy + title_h, sw, 1, light ? rgb(180, 185, 192) : rgb(10, 8, 16));
-    rect(sx + 1, sy + title_h + 1, sw - 2, sh - title_h - 2, cyber_bg_top(light));
-    rect(sx, sy + sh - 1, sw, 1, light ? rgb(180, 185, 190) : rgb(8, 5, 12));
-    rect(sx, sy, 1, sh, cyber_neon_pink(light));
-    rect(sx + sw - 1, sy, 1, sh, cyber_neon_cyan(light));
-    border(sx, sy, sw, sh, cyber_neon_cyan(light));
-
-    text_clipped(sx + 14, sy + 10, sx + sw - 20, "HBOS  v0.1 beta3-pre3", rgb(255, 255, 255), 1);
-
-    int bx = sx + 16, by = sy + title_h + 18;
-    vgradient(bx, by, 48, 48, cyber_neon_pink(light), light ? rgb(160, 0, 70) : rgb(180, 0, 90));
-    border(bx, by, 48, 48, cyber_neon_cyan(light));
-    rect(bx + 6, by + 18, 36, 5, cyber_neon_yellow(light));
-    rect(bx + 6, by + 26, 22, 5, cyber_neon_cyan(light));
-    rect(bx + 6, by + 34, 30, 5, cyber_neon_pink(light));
-
-    text(sx + 80, sy + title_h + 22, "欢迎使用 HBOS！", cyber_neon_yellow(light), 1);
-    text(sx + 80, sy + title_h + 44, "64 位 x86_64 操作系统", cyber_neon_cyan(light), 1);
-    text(sx + 80, sy + title_h + 64, "BIOS / UEFI 双启动  协作式多任务", cyber_text(light), 1);
-
-    rect(sx + 16, sy + title_h + 94, sw - 32, 1, cyber_neon_purple(light));
-    text(sx + 20, sy + title_h + 106, "help  命令列表      gui  图形界面", cyber_neon_cyan(light), 1);
-    text(sx + 20, sy + title_h + 124, "ls / cat  文件      net / http  网络", cyber_neon_cyan(light), 1);
-
-    int bar_w = sw - 32;
-    int filled = ticks > 0 ? bar_w * ticks / 90 : 0;
-    rect(sx + 16, sy + sh - 22, bar_w, 8, light ? rgb(220, 225, 230) : rgb(10, 8, 16));
-    if (filled > 0) {
-        hgradient(sx + 16, sy + sh - 22, filled, 8, cyber_neon_cyan(light), light ? rgb(0, 120, 160) : rgb(0, 120, 200));
+    /* 标题栏：圆角图标 + 标题 + 右侧版本号（与 draw_window_frame 一致） */
+    int ico = 14, icy = sy + (title_h - ico) / 2;
+    fill_round_rect(sx + 12, icy, ico, ico, 3, accent, RR_ALL);
+    rect(sx + 12 + 4, icy + 5, ico - 8, ico - 9, rgb(255, 255, 255));
+    text(sx + 34, sy + (title_h - lh) / 2, "欢迎使用 HBOS", rgb(255, 255, 255), 1);
+    {
+        const char *v = HBOS_VERSION_TAG;
+        int vw = text_width(v, 1);
+        text(sx + sw - 16 - vw, sy + (title_h - lh) / 2, v,
+             light ? rgb(90, 96, 102) : rgb(190, 196, 202), 1);
     }
-    border(sx + 16, sy + sh - 22, bar_w, 8, cyber_neon_pink(light));
-    text(sx + 20, sy + sh - 12, "点击任意位置关闭", cyber_neon_pink(light), 1);
+
+    /* 圆角 logo 方块：HBOS "H" 标志 */
+    int bx = sx + 18, by = sy + title_h + 20;
+    fill_round_rect(bx, by, 48, 48, 8, accent, RR_ALL);
+    draw_hbos_logo(bx + 12, by + 12, 24, rgb(255, 255, 255));
+
+    text(sx + 82, sy + title_h + 22, "HBOS 图形桌面", tcol, 1);
+    text(sx + 82, sy + title_h + 44, "64 位 x86_64 · BIOS / UEFI 双启动", scol, 1);
+    text(sx + 82, sy + title_h + 64, "并发多窗口 · 协作式多任务", scol, 1);
+
+    /* 圆角进度条 */
+    int bar_x = sx + 18, bar_w = sw - 36, bar_y = sy + sh - 32, bar_h = 8;
+    fill_round_rect(bar_x, bar_y, bar_w, bar_h, 4,
+                    light ? rgb(222, 227, 232) : rgb(24, 30, 38), RR_ALL);
+    int filled = ticks > 0 ? bar_w * ticks / 90 : 0;
+    if (filled > 8) fill_round_rect(bar_x, bar_y, filled, bar_h, 4, accent, RR_ALL);
+
+    text(sx + 18, sy + sh - 16, "点击任意位置进入桌面", scol, 1);
+}
+
+/* Win11 风格 toast 通知：右下角浮窗，自右滑入，定时淡出（由 toast_ticks 驱动） */
+static void draw_toast(int w, int h, gui_state_t *st) {
+    if (st->toast_ticks <= 0 || !st->toast_msg[0]) return;
+    int light = st->theme_light;
+    int tw = text_width(st->toast_msg, 1);
+    int bw = tw + ui_s(36);
+    if (bw < ui_s(200)) bw = ui_s(200);
+    int bh = ui_s(56);
+    int bx = w - bw - ui_s(20);
+    int by = h - TASKBAR_H - bh - ui_s(16);
+
+    /* 进场：前 8 帧自右滑入 */
+    int appear = TOAST_TICKS - st->toast_ticks;
+    if (appear < 8) bx += (8 - appear) * 14;
+
+    soft_shadow(bx, by, bw, bh);
+    fill_round_rect(bx, by, bw, bh, 10,
+                    light ? 0xFFF4F6F8 : 0xFF222A33, RR_ALL);
+    /* 左侧强调色条 */
+    fill_round_rect(bx, by, 5, bh, 10, rgb(61, 174, 233), RR_TL | RR_BL);
+    text(bx + 16, by + 9,  "通知", rgb(61, 174, 233), 1);
+    text(bx + 16, by + 30, st->toast_msg,
+         light ? rgb(40, 44, 48) : rgb(225, 230, 235), 1);
 }
 
 static void cmd_gui(int argc, char **argv) {
@@ -4627,6 +5356,24 @@ static void cmd_gui(int argc, char **argv) {
 
     int w = (int)fb.width;
     int h = (int)fb.height;
+
+    /* ── DPI 自适应：按屏幕高度计算全局缩放（基准 1080p = 100%）──────
+     * 所有经 ui_s() 的布局/图标常量随之缩放；字号也按分辨率选基号。
+     * 低分辨率（如 VMware 受限）下整体缩小，高分屏整体放大。 */
+    g_ui_scale = h * 100 / 1080;
+    if (g_ui_scale < 70)  g_ui_scale = 70;    /* 下限：避免过小 */
+    if (g_ui_scale > 220) g_ui_scale = 220;   /* 上限：避免过大 */
+    {
+        int nb = gui_font_base_count();
+        if (nb > 1) {
+            int slot;
+            if (g_ui_scale < 90)       slot = 0;        /* 小屏：最小字 */
+            else if (g_ui_scale < 140) slot = nb / 2;   /* 常规：中等 */
+            else                       slot = nb - 1;   /* 高分屏：较大 */
+            gui_font_set_active(slot);
+        }
+    }
+
     int mx = w / 2;
     int my = h / 2;
     uint8_t last_buttons = 0;
@@ -4636,6 +5383,8 @@ static void cmd_gui(int argc, char **argv) {
     int drag_last_draw_x = 0;
     int drag_last_draw_y = 0;
     int drag_pending = 0;
+    int appwin_drag = -1;        /* 正在拖动的应用窗口 id（winsrv） */
+    int appwin_drag_dx = 0, appwin_drag_dy = 0;
     int resizing_window = -1;
     int resize_edge = WM_EDGE_NONE;
     int resize_orig_x = 0, resize_orig_y = 0, resize_orig_w = 0, resize_orig_h = 0;
@@ -4643,6 +5392,7 @@ static void cmd_gui(int argc, char **argv) {
     int cursor_edge = WM_EDGE_NONE;
     uint32_t frame_tick = 0;          // 自增帧计数，用于双击计时
     uint32_t last_title_click = 0;    // 上次点击标题栏的帧
+    uint8_t last_clock_sec = 0xFF;    // 任务栏时钟秒数，用于检测秒变化并触发重绘
     int last_title_idx = -1;          // 上次点击的窗口
     int snap_hint = WM_SNAP_NONE;     // 拖动吸附预览：WM_SNAP_*
     int drag_bounds_valid = 0;
@@ -4705,6 +5455,22 @@ static void cmd_gui(int argc, char **argv) {
     gui_dirty_mark_full();
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
     while (1) {
+        /* 回收已退出应用留下的窗口 */
+        if (winsrv_reap_dead() > 0) gui_dirty_mark_full();
+
+        /* 全屏画布应用（hax_gui_*）拥有屏幕时，合成器让位：不绘制、不读输入，
+         * 由该应用独占 g_gui_surface 并自行 present；其退出后收回屏幕。 */
+        if (g_screen_owner_task != 0) {
+            const task_t *ot = task_get_by_id(g_screen_owner_task);
+            if (!ot || ot->state == TASK_TERMINATED) {
+                g_screen_owner_task = 0;
+                gui_dirty_mark_full();
+            } else {
+                task_yield();
+                continue;
+            }
+        }
+
         wm_update_animations(&st.wm);
 
         int key = key_poll();
@@ -4724,6 +5490,41 @@ static void cmd_gui(int argc, char **argv) {
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
+        }
+        /* 开始菜单搜索：菜单打开时键盘输入用于过滤；Enter 启动首个匹配，Esc 关闭。 */
+        if (key && st.wm.start_menu_open) {
+            if (key == 27) {                         /* Esc 关闭 */
+                wm_close_start_menu(&st.wm);
+                st.sm_search[0] = 0; st.sm_search_len = 0;
+            } else if (key == '\n' || key == '\r') { /* Enter 启动首个匹配 */
+                sm_entry_t e;
+                if (sm_visible_at(&st, 0, &e)) {
+                    wm_close_start_menu(&st.wm);
+                    st.sm_search[0] = 0; st.sm_search_len = 0;
+                    sm_launch(&st, &e);
+                }
+            } else if (key == '\b' || key == GUI_KEY_BACKSPACE) {
+                if (st.sm_search_len > 0) st.sm_search[--st.sm_search_len] = 0;
+            } else if (key >= 32 && key < 127 &&
+                       st.sm_search_len < (int)sizeof(st.sm_search) - 1) {
+                st.sm_search[st.sm_search_len++] = (char)key;
+                st.sm_search[st.sm_search_len] = 0;
+            }
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
+        /* 键盘路由：存在应用窗口时，普通按键送给最顶层应用窗口（其拥有焦点）。
+         * F2/F3/F4 已在上面处理，不受影响。 */
+        if (key && winsrv_count() > 0 && !st.wm.start_menu_open) {
+            winsrv_window_t *fw = 0;
+            for (int i = WINSRV_MAX - 1; i >= 0; i--) { fw = winsrv_get(i); if (fw) break; }
+            if (fw) {
+                winsrv_push_event(fw, WINEV_KEY, key, 0, 0);
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
         }
         if (st.splash_ticks > 0 && key) {
             st.splash_ticks = 0;
@@ -4800,6 +5601,21 @@ static void cmd_gui(int argc, char **argv) {
             }
 
             if (st.splash_ticks > 0) goto skip_input;
+
+            /* 应用窗口标题栏拖动 */
+            if (appwin_drag >= 0) {
+                winsrv_window_t *win = left_down ? winsrv_get(appwin_drag) : 0;
+                if (win) {
+                    win->x = mx - appwin_drag_dx;
+                    win->y = my - appwin_drag_dy;
+                    if (win->y < APPWIN_TITLE_H) win->y = APPWIN_TITLE_H;
+                    if (win->x < 0) win->x = 0;
+                    if (win->x > w - 40) win->x = w - 40;
+                    redraw = 1;
+                } else {
+                    appwin_drag = -1;
+                }
+            }
 
             if (resizing_window >= 0 && left_down) {
                 wm_window_t *rw = wm_get_window(&st.wm, resizing_window);
@@ -4894,30 +5710,111 @@ static void cmd_gui(int argc, char **argv) {
             wm_hit_border(&st.wm, mx, my, &edge);
             cursor_edge = edge;
 
+            /* 右键：弹出上下文菜单（窗口上→窗口菜单，否则→桌面菜单） */
+            if ((st.buttons & 2) && !(last_buttons & 2)) {
+                if (st.wm.start_menu_open) wm_close_start_menu(&st.wm);
+                int wi = gui_window_at(&st, w, h, mx, my);
+                st.ctx_open   = (wi >= 0) ? 2 : 1;
+                st.ctx_target = wi;
+                int cn = ctx_item_count(st.ctx_open);
+                int cmh = cn * CTX_ITEM_H + 8;
+                st.ctx_x = mx; st.ctx_y = my;
+                if (st.ctx_x + CTX_W > w) st.ctx_x = w - CTX_W;
+                if (st.ctx_y + cmh > h - TASKBAR_H) st.ctx_y = h - TASKBAR_H - cmh;
+                if (st.ctx_x < 0) st.ctx_x = 0;
+                if (st.ctx_y < 0) st.ctx_y = 0;
+                redraw = 1;
+            }
+
             if ((st.buttons & 1) && !(last_buttons & 1)) {
                 st.clicks++;
-                if (st.wm.start_menu_open) {
+                /* 应用窗口命中优先（关闭按钮 / 标题栏拖动 / 内容点击） */
+                int appwin_hit = 0;
+                for (int i = WINSRV_MAX - 1; i >= 0 && !appwin_hit; i--) {
+                    winsrv_window_t *win = winsrv_get(i);
+                    if (!win) continue;
+                    int th = APPWIN_TITLE_H;
+                    int cbx = win->x + win->w - 22;
+                    if (mx >= cbx && mx < win->x + win->w &&
+                        my >= win->y - th && my < win->y) {            /* 关闭按钮 */
+                        win->want_close = 1;
+                        winsrv_push_event(win, WINEV_CLOSE, 0, 0, 0);
+                        appwin_hit = 1;
+                    } else if (mx >= win->x && mx < win->x + win->w &&
+                               my >= win->y - th && my < win->y) {     /* 标题栏→拖动 */
+                        appwin_drag = i;
+                        appwin_drag_dx = mx - win->x;
+                        appwin_drag_dy = my - win->y;
+                        appwin_hit = 1;
+                    } else if (mx >= win->x && mx < win->x + win->w &&
+                               my >= win->y && my < win->y + win->h) { /* 内容→鼠标事件 */
+                        winsrv_push_event(win, WINEV_MOUSE,
+                                          mx - win->x, my - win->y, st.buttons);
+                        appwin_hit = 1;
+                    }
+                }
+                if (appwin_hit) {
+                    redraw = 1;
+                } else if (st.ctx_open) {
+                    /* 上下文菜单打开时，左键命中即执行，未命中即关闭 */
+                    int ci = ctx_hit(&st, mx, my);
+                    if (ci >= 0) {
+                        if (st.ctx_open == 1) {           /* 桌面菜单 */
+                            if (ci == 0) gui_dirty_mark_full();
+                            else if (ci == 1) st.theme_light = !st.theme_light;
+                            else if (ci == 2) {
+                                wm_toggle_start_menu(&st.wm);
+                                if (st.wm.start_menu_open) {
+                                    int mh = gui_start_menu_h();
+                                    st.wm.menu_h = mh;
+                                    st.wm.menu_x = (w - SM_W) / 2;
+                                    if (st.wm.menu_x < 8) st.wm.menu_x = 8;
+                                    st.wm.menu_y = h - TASKBAR_H - mh - 8;
+                                    if (st.wm.menu_y < 8) st.wm.menu_y = 8;
+                                }
+                            }
+                        } else {                          /* 窗口菜单 */
+                            int t = st.ctx_target;
+                            if (ci == 0) { wm_minimize_window(&st.wm, t); gui_sync_focus(&st); }
+                            else if (ci == 1) {
+                                wm_window_t *mw = wm_get_window(&st.wm, t);
+                                if (mw && mw->state == WM_STATE_MAXIMIZED)
+                                    wm_restore_window(&st.wm, t);
+                                else
+                                    wm_maximize_window(&st.wm, t);
+                                gui_sync_focus(&st);
+                            } else if (ci == 2) {
+                                gui_close_window(&st, t);
+                            }
+                        }
+                    }
+                    st.ctx_open = 0;
+                    gui_dirty_mark_full();
+                    redraw = 1;
+                } else if (st.wm.start_menu_open) {
                     int item = wm_hit_start_menu(&st.wm, mx, my);
-                    if (item >= 0) {
+                    if (item == SM_SEARCH_ITEM) {
+                        /* 点搜索框：保持菜单打开，用键盘输入即可搜索 */
+                        redraw = 1;
+                    } else if (item == SM_SHELL_ITEM) {
                         wm_close_start_menu(&st.wm);
-                        if (item == 0) gui_open_panel_window(&st, PANEL_FILES);
-                        else if (item == 1) gui_open_panel_window(&st, PANEL_DISK);
-                        else if (item == 2) gui_open_panel_window(&st, PANEL_SYS);
-                        else if (item == 3) gui_open_panel_window(&st, PANEL_APPS);
-                        else if (item == 4) gui_open_window(&st, WM_WIN_APP, GUI_APP_NOTES, 0);
-                        else if (item == 5) gui_open_window(&st, WM_WIN_APP, GUI_APP_CALC, 0);
-                        else if (item == 6) gui_open_window(&st, WM_WIN_APP, GUI_APP_SNAKE, 0);
-                        else if (item == 7) gui_open_window(&st, WM_WIN_APP, GUI_APP_BROWSER, 0);
-                        else if (item == 8) gui_open_window(&st, WM_WIN_APP, GUI_APP_CODE, 0);
-                        else if (item == 9) gui_open_window(&st, WM_WIN_APP, GUI_APP_DIAG, 0);
-                        else if (item == 10) gui_open_window(&st, WM_WIN_APP, GUI_APP_CLOCK, 0);
-                        else if (item == 11) gui_open_window(&st, WM_WIN_APP, GUI_APP_SETTINGS, 0);
-                        else if (item == 12) gui_open_window(&st, WM_WIN_APP, GUI_APP_FILES, 0);
-                        else if (item == 13) break;
-                        else if (item == 14) { acpi_poweroff(); break; }
+                        st.sm_search[0] = 0; st.sm_search_len = 0;
+                        break;
+                    } else if (item == SM_POWER_ITEM) {
+                        acpi_poweroff();
+                        break;
+                    } else if (item >= SM_CELL_BASE) {
+                        /* 网格单元 → 过滤后的实际应用（内置或 .hax，统一启动） */
+                        sm_entry_t e;
+                        int ok = sm_visible_at(&st, item - SM_CELL_BASE, &e);
+                        wm_close_start_menu(&st.wm);
+                        st.sm_search[0] = 0; st.sm_search_len = 0;
+                        if (ok) sm_launch(&st, &e);
                         redraw = 1;
                     } else {
+                        /* 菜单内其他空白处：关闭 */
                         wm_close_start_menu(&st.wm);
+                        st.sm_search[0] = 0; st.sm_search_len = 0;
                         redraw = 1;
                     }
                 } else {
@@ -4958,11 +5855,15 @@ static void cmd_gui(int argc, char **argv) {
                         int tb = taskbar_hit(w, h, &st, mx, my);
                         if (tb == TBHIT_START) {
                             wm_toggle_start_menu(&st.wm);
+                            st.sm_search[0] = 0; st.sm_search_len = 0;  /* 每次打开清空搜索 */
                             if (st.wm.start_menu_open) {
-                                /* Win11 style: center horizontally above taskbar */
+                                /* Win11 style: center horizontally above taskbar.
+                                 * 面板高度按 .hax GUI 应用数动态增长。 */
+                                int mh = gui_start_menu_h();
+                                st.wm.menu_h = mh;
                                 st.wm.menu_x = (w - SM_W) / 2;
                                 if (st.wm.menu_x < 8) st.wm.menu_x = 8;
-                                st.wm.menu_y = h - TASKBAR_H - SM_H - 8;
+                                st.wm.menu_y = h - TASKBAR_H - mh - 8;
                                 if (st.wm.menu_y < 8) st.wm.menu_y = 8;
                             }
                             st.status = "开始菜单";
@@ -5136,6 +6037,11 @@ static void cmd_gui(int argc, char **argv) {
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
+        /* 有并发应用窗口时，每帧重绘以反映它们的实时刷新 */
+        if (winsrv_count() > 0) {
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
         if (st.app_mode == GUI_APP_DIAG && (frame_tick % 20 == 0)) {
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
@@ -5149,6 +6055,23 @@ static void cmd_gui(int argc, char **argv) {
             st.splash_ticks--;
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
+        if (st.toast_ticks > 0) {
+            st.toast_ticks--;
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
+        /* 任务栏时钟只在重绘时刷新；若没有输入/动画驱动重绘（长时间静置桌面），
+         * 时钟会卡住不走。这里独立检测秒数变化，保证时钟始终实时前进。
+         * 只标记任务栏这一小条为脏区域（而非 gui_dirty_mark_full 整屏重绘）——
+         * 整屏重绘开销大，每秒强制一次会造成周期性卡顿，表现为"鼠标又变卡"。 */
+        {
+            uint8_t cur_sec = cmos_second();
+            if (cur_sec != last_clock_sec) {
+                last_clock_sec = cur_sec;
+                gui_damage_region(0, h - TASKBAR_H, w, TASKBAR_H, w, h);
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            }
         }
         if (wm_has_active_animations(&st.wm)) {
             /* If any window is moving/resizing (maximize/restore), repaint the

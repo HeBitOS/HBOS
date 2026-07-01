@@ -44,4 +44,12 @@ const hax_app_entry_t *hax_app_find(const char *name);
  */
 int hax_app_run(const char *name, int argc, char **argv);
 
+/**
+ * @brief 非阻塞启动一个 .hax 应用：加载 ELF 并生成任务后立即返回，不等待结束。
+ * @return 新任务的 pid；-1 表示未找到或加载失败
+ *
+ * 供 GUI 合成器并发启动窗口应用——调用方（GUI 主循环）不被阻塞，可继续合成。
+ */
+int hax_app_spawn(const char *name, int argc, char **argv);
+
 #endif /* HBOS_USER_HAX_APP_H */

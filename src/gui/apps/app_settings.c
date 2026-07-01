@@ -2,6 +2,7 @@
 #include "gui_draw.h"
 #include "../../graphics/gui_font.h"
 #include "../../string.h"
+#include "../../version.h"
 
 /* ── small button helper ─────────────────────────────────── */
 #define SB_W  80
@@ -68,7 +69,7 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     uint32_t pos;
 
     /* memory - use simple placeholder if no API */
-    gui_text(x, y, "HBOS v0.1-beta3", gui_rgb(180, 200, 220), 1);
+    gui_text(x, y, "HBOS " HBOS_VERSION_TAG, gui_rgb(180, 200, 220), 1);
     y += 18;
     gui_text(x, y, "架构: x86_64 裸机内核", gui_rgb(140, 160, 180), 1);
     y += 18;

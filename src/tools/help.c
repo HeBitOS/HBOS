@@ -206,6 +206,13 @@ static void cmd_help(int argc, char **argv) {
         else print_cmd_help(argv[1]);
         return;
     }
+    if (console_has_sink()) {
+        // 运行在 GUI 终端里：命令是从合成器主循环同步阻塞调用的，这里若进入
+        // 下面自己的 kb_get_key() 按键循环会冻结整个桌面（无任何画面反馈，
+        // 看起来像系统崩溃）。退化为非交互的命令索引即可。
+        print_command_index();
+        return;
+    }
     console_puts("\n\x1b[33mHBOS Help\x1b[0m\n");
     PUTS_CN("\x1b[33mHBOS 帮助\x1b[0m\n");
     console_puts("Commands: list | help <command> | exit\n");

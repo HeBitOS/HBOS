@@ -119,18 +119,29 @@ static void cmd_run(int argc, char **argv) {
     }
     int ret = hbos_app_run(argv[1], argc - 1, argv + 1);
     /* 内建应用未命中时，尝试 ./app 自动发现的 .hax 应用 */
-    if (ret < 0 && hax_app_find(argv[1])) {
-        int hret = hax_app_run(argv[1], argc - 1, argv + 1);
-        if (hret < 0) {
-            console_puts("run: cannot load .hax app\n");
+    if (ret < 0) {
+        const hax_app_entry_t *he = hax_app_find(argv[1]);
+        if (he) {
+            /* GUI 类应用走非阻塞 spawn：否则会阻塞合成器导致窗口无法显示。
+             * TUI 类仍阻塞运行，以便捕获其文本输出。 */
+            if (he->kind & HAX_KIND_GUI) {
+                int pid = hax_app_spawn(argv[1], argc - 1, argv + 1);
+                if (pid < 0) console_puts("run: cannot load .hax app\n");
+                else console_puts("run: 已启动 GUI 应用\n");
+                return;
+            }
+            int hret = hax_app_run(argv[1], argc - 1, argv + 1);
+            if (hret < 0) {
+                console_puts("run: cannot load .hax app\n");
+                return;
+            }
+            if (hret != 0) {
+                console_puts("run: exit ");
+                print_uint((uint32_t)hret);
+                console_putchar('\n');
+            }
             return;
         }
-        if (hret != 0) {
-            console_puts("run: exit ");
-            print_uint((uint32_t)hret);
-            console_putchar('\n');
-        }
-        return;
     }
     if (ret < 0) {
         size_t size = 0;

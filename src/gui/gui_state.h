@@ -53,6 +53,13 @@ typedef struct gui_state {
     char calc_last_op;
     int calc_has_input;
     int calc_error;
+    /* 计算历史（环形缓冲，newest 在 head 前一位） */
+#define CALC_HIST_N 10
+    int  calc_hist_lhs[CALC_HIST_N];
+    int  calc_hist_rhs[CALC_HIST_N];
+    int  calc_hist_res[CALC_HIST_N];
+    char calc_hist_op[CALC_HIST_N];
+    int  calc_hist_count;   /* 累计条数（取 min(count, N) 显示） */
     int snake_x;
     int snake_y;
     int snake_tx;
@@ -81,6 +88,10 @@ typedef struct gui_state {
     char browser_url[BROWSER_URL_CAP];
     char browser_page[BROWSER_PAGE_CAP];
     uint32_t browser_page_len;
+    /* 带样式标记的渲染缓冲（每行首字节为 browser_blk_t 块类型），仅供屏幕渲染用；
+     * browser_page 保持纯文本供“保存网页”使用。 */
+    char browser_render[BROWSER_PAGE_CAP];
+    uint32_t browser_render_len;
     int browser_loaded;
     int browser_scroll;
     char code_path[GUI_PATH_MAX];
@@ -100,6 +111,15 @@ typedef struct gui_state {
     int snap_preview;
     uint8_t clock_last_sec;
     int switcher_ticks;
+    int  toast_ticks;       /* >0 时显示 toast 通知（每帧自减） */
+    char toast_msg[80];     /* toast 文本 */
+    /* 开始菜单搜索 */
+    char sm_search[24];     /* 搜索框文本（菜单打开时键盘输入） */
+    int  sm_search_len;
+    /* 右键上下文菜单 */
+    int  ctx_open;          /* 0=关闭 1=桌面菜单 2=窗口菜单 */
+    int  ctx_x, ctx_y;      /* 菜单左上角 */
+    int  ctx_target;        /* 窗口菜单时的目标窗口索引 */
     int theme_light;
     char console_input[120];
     uint32_t console_input_len;
