@@ -155,6 +155,16 @@ void wm_move_window(wm_state_t *wm, int idx, int x, int y) {
     if (idx < 0 || idx >= wm->window_count) return;
     wm_window_t *win = &wm->windows[idx];
     if (!win->used || win->state == WM_STATE_MAXIMIZED) return;
+    /* 边界钳制：保证标题栏始终可达，否则窗口拖出屏幕/塞进任务栏底下
+     * 就再也抓不回来了。横向两侧各留 80px 可见；纵向不许高于屏幕顶、
+     * 不许把标题栏藏进任务栏。 */
+    int est_w = win->w > 0 ? win->w : 640;   /* 未定尺寸窗口的保守估计 */
+    int keep = ui_s(80);
+    if (x < keep - est_w) x = keep - est_w;
+    if (x > wm->desk_w - keep) x = wm->desk_w - keep;
+    if (y < 0) y = 0;
+    int max_y = wm->desk_h - WM_TASKBAR_H - WM_TITLE_H;
+    if (y > max_y) y = max_y;
     win->x = x;
     win->y = y;
 }

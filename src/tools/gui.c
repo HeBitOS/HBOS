@@ -153,6 +153,7 @@ static int gui_select_path(gui_state_t *st, const char *path);
 static void draw_desktop(int w, int h, gui_state_t *st);
 static void draw_start_menu(gui_state_t *st);
 static void draw_context_menu(gui_state_t *st);
+static void draw_calendar_popup(int w, int h, gui_state_t *st);
 static void draw_window_switcher(int w, int h, gui_state_t *st);
 static void gui_sync_focus(gui_state_t *st);
 
@@ -3552,8 +3553,10 @@ static void browser_style_get(int type, browser_style_t *s) {
 
 // 按块类型渲染标记流（见 browser_render_from_html）：标题更大更亮、链接带
 // 下划线、列表带圆点、代码用等宽字体、<hr> 画分隔线——而非纯文本平铺。
-static void draw_rendered_page(int x, int y, int w, int h, const char *buf, uint32_t len, int scroll) {
-    if (!len) return;
+// 返回内容总行数（row-unit 计），供调用方钳制滚动量——之前滚动值可以无限
+// 增长滚过末尾，得按等次数反向按键才能滚回来。
+static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint32_t len, int scroll) {
+    if (!len) return 0;
     int rh = gui_font_line_height() + 3;
     int max_lines = h / rh;
     if (max_lines < 1) max_lines = 1;
@@ -3561,7 +3564,7 @@ static void draw_rendered_page(int x, int y, int w, int h, const char *buf, uint
     int drawn_rows = 0;
     int cy = y;
     uint32_t i = 0;
-    while (i < len && drawn_rows < max_lines) {
+    while (i < len) {
         int type = (unsigned char)buf[i++];
         browser_style_t bs;
         browser_style_get(type, &bs);
@@ -3594,13 +3597,13 @@ static void draw_rendered_page(int x, int y, int w, int h, const char *buf, uint
         char line[160];
         uint32_t p = start;
         int first_row = 1;
-        while (p < start + seg_len && drawn_rows < max_lines) {
+        while (p < start + seg_len) {
             uint32_t lp = 0;
             while (p < start + seg_len && lp < (uint32_t)max_cols && lp + 1 < sizeof(line))
                 line[lp++] = buf[p++];
             line[lp] = 0;
 
-            if (row_unit >= scroll) {
+            if (row_unit >= scroll && drawn_rows < max_lines) {
                 int rowh = rh * bs.scale;
                 if (bs.bullet && first_row)
                     text(x + bs.indent, cy, "•", bs.color, 1);
@@ -3620,11 +3623,12 @@ static void draw_rendered_page(int x, int y, int w, int h, const char *buf, uint
             row_unit += bs.scale;
             first_row = 0;
         }
-        if (bs.gap_after && drawn_rows < max_lines) {
-            if (row_unit >= scroll) { cy += rh; drawn_rows++; }
+        if (bs.gap_after) {
+            if (row_unit >= scroll && drawn_rows < max_lines) { cy += rh; drawn_rows++; }
             row_unit++;
         }
     }
+    return row_unit;
 }
 
 static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
@@ -3652,9 +3656,19 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     append_str(line, sizeof(line), &pos, "  ");
     append_str(line, sizeof(line), &pos, st->status ? st->status : "浏览器就绪");
     text_clipped(tx + 190, ty + 112, tx + view_w - 8, line, rgb(168, 190, 204), 1);
-    rect(tx, ty + 146, view_w, 196, rgb(4, 9, 14));
-    border(tx, ty + 146, view_w, 196, rgb(50, 74, 90));
-    draw_rendered_page(tx + 12, ty + 158, view_w - 24, 172, st->browser_render, st->browser_render_len, st->browser_scroll);
+    /* 内容区：先画，若发现滚动越过末尾则钳回并重画一遍（含背景）。 */
+    for (int pass = 0; pass < 2; pass++) {
+        rect(tx, ty + 146, view_w, 196, rgb(4, 9, 14));
+        border(tx, ty + 146, view_w, 196, rgb(50, 74, 90));
+        int total = draw_rendered_page(tx + 12, ty + 158, view_w - 24, 172,
+                                       st->browser_render, st->browser_render_len,
+                                       st->browser_scroll);
+        int rh = gui_font_line_height() + 3;
+        int max_scroll = total - 172 / rh;
+        if (max_scroll < 0) max_scroll = 0;
+        if (st->browser_scroll <= max_scroll) break;
+        st->browser_scroll = max_scroll;
+    }
 }
 
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state, int light) {
@@ -3784,7 +3798,10 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 #define TB_GAP ui_s(8)
 #define TBHIT_NONE  -1
 #define TBHIT_START -2
+#define TBHIT_CLOCK -3        /* 时钟/日期区域 → 日历弹窗 */
+#define TBHIT_SHOWDESK -4     /* 最右侧竖条 → 显示桌面 */
 #define TBHIT_WIN_BASE 100
+#define TB_SHOWDESK_W ui_s(10)
 
 static const struct { const char *label; int panel; } g_taskbar_pins[] = {
     {"文件", PANEL_FILES},
@@ -3863,7 +3880,7 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
         }
     }
 
-    /* Win11 风格：时间在上、日期在下，各自右对齐 */
+    /* Win11 风格：时间在上、日期在下，各自右对齐（给最右显示桌面竖条留位） */
     char tline[32], dline[40];
     time_line(tline, sizeof(tline), st->taskbar_show_seconds);
     date_line(dline, sizeof(dline));
@@ -3873,11 +3890,33 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int dw = text_width(dline, 1);
     int total_h = lh * 2;
     int top = h - TASKBAR_H + (TASKBAR_H - total_h) / 2;
-    text(w - 16 - tw, top,      tline, tcol, 1);
-    text(w - 16 - dw, top + lh, dline, tcol, 1);
+    int right = w - TB_SHOWDESK_W - ui_s(10);
+    text(right - tw, top,      tline, tcol, 1);
+    text(right - dw, top + lh, dline, tcol, 1);
+
+    /* 显示桌面竖条（Win11 任务栏最右角）：一条分隔线提示可点 */
+    rect(w - TB_SHOWDESK_W, h - TASKBAR_H + ui_s(8), 1, TASKBAR_H - ui_s(16),
+         light ? rgb(150, 156, 162) : rgb(90, 98, 106));
 }
 
 static int taskbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
+    if (my < h - TASKBAR_H) return TBHIT_NONE;
+
+    /* 最右侧显示桌面竖条：整个任务栏高度都算命中 */
+    if (mx >= w - TB_SHOWDESK_W) return TBHIT_SHOWDESK;
+
+    /* 时钟/日期区域 → 日历弹窗（按实际文本宽度计算命中区，
+     * 秒数开关与 draw_taskbar 保持一致，命中区和显示区才对得上） */
+    {
+        char tline[32], dline[40];
+        time_line(tline, sizeof(tline), st->taskbar_show_seconds);
+        date_line(dline, sizeof(dline));
+        int tw = text_width(tline, 1);
+        int dw = text_width(dline, 1);
+        int zone = (tw > dw ? tw : dw) + ui_s(20);
+        if (mx >= w - TB_SHOWDESK_W - ui_s(10) - zone) return TBHIT_CLOCK;
+    }
+
     int wins[WM_MAX_WINDOWS];
     int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
     int item_count = 1 + TB_PIN_COUNT + n;
@@ -3942,6 +3981,7 @@ static void draw_gui_screen(int w, int h, gui_state_t *st) {
     draw_desktop(w, h, st);
     draw_app_windows();
     draw_start_menu(st);
+    draw_calendar_popup(w, h, st);
     draw_window_switcher(w, h, st);
     if (st->splash_ticks > 0)
         draw_splash_window(w, h, st->splash_ticks, st->theme_light);
@@ -5188,6 +5228,153 @@ static int ctx_hit(gui_state_t *st, int mx, int my) {
     return i;
 }
 
+/* ── 日历弹窗（点击任务栏时钟弹出，Win11 风格） ─────────────── */
+
+static int cal_is_leap(int y) {
+    return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+}
+
+static int cal_days_in_month(int y, int m) {
+    static const int D[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m == 2 && cal_is_leap(y)) return 29;
+    return D[m - 1];
+}
+
+/* Sakamoto 算法：返回 0=周日 .. 6=周六 */
+static int cal_weekday(int y, int m, int d) {
+    static const int t[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (m < 3) y -= 1;
+    return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
+/* 面板几何：贴任务栏右上方。cell/pad 均随 DPI 缩放。 */
+static void cal_geometry(int w, int h, int *ox, int *oy, int *ow, int *oh,
+                         int *pad, int *cell, int *head_h, int *wk_h) {
+    *pad = ui_s(14);
+    *cell = ui_s(36);
+    *head_h = ui_s(40);
+    *wk_h = ui_s(24);
+    *ow = *pad * 2 + *cell * 7;
+    *oh = *pad * 2 + *head_h + *wk_h + *cell * 6;
+    *ox = w - *ow - ui_s(12);
+    if (*ox < 8) *ox = 8;
+    *oy = h - TASKBAR_H - *oh - ui_s(8);
+    if (*oy < 8) *oy = 8;
+}
+
+static void draw_calendar_popup(int w, int h, gui_state_t *st) {
+    if (!st->cal_open) return;
+    int light = st->theme_light;
+    int ox, oy, ow, oh, pad, cell, head_h, wk_h;
+    cal_geometry(w, h, &ox, &oy, &ow, &oh, &pad, &cell, &head_h, &wk_h);
+
+    uint32_t accent = rgb(61, 174, 233);
+    uint32_t fg     = light ? rgb(40, 44, 48)    : rgb(222, 228, 234);
+    uint32_t dim    = light ? rgb(130, 138, 146) : rgb(130, 140, 150);
+    fill_round_rect(ox, oy, ow, oh, 12, light ? 0xF6F5F6F8 : 0xF6202428, RR_ALL);
+    uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
+    rect(ox + 12, oy, ow - 24, 1, bd);
+    rect(ox + 12, oy + oh - 1, ow - 24, 1, bd);
+    rect(ox, oy + 12, 1, oh - 24, bd);
+    rect(ox + ow - 1, oy + 12, 1, oh - 24, bd);
+
+    int lh = gui_font_line_height();
+
+    /* 标题 "YYYY年M月" + 右侧 ‹ › 翻月按钮 */
+    char title[24];
+    {
+        uint32_t pos = 0;
+        title[0] = 0;
+        append_uint(title, sizeof(title), &pos, (uint32_t)st->cal_year);
+        append_str(title, sizeof(title), &pos, "年");
+        append_uint(title, sizeof(title), &pos, (uint32_t)st->cal_month);
+        append_str(title, sizeof(title), &pos, "月");
+    }
+    int hy = oy + pad;
+    text(ox + pad, hy + (head_h - lh) / 2, title, fg, 1);
+    int btn = ui_s(26);
+    int nav_y = hy + (head_h - btn) / 2;
+    int nx_next = ox + ow - pad - btn;
+    int nx_prev = nx_next - btn - ui_s(6);
+    fill_round_rect(nx_prev, nav_y, btn, btn, 6, light ? rgb(228, 231, 234) : rgb(46, 52, 58), RR_ALL);
+    fill_round_rect(nx_next, nav_y, btn, btn, 6, light ? rgb(228, 231, 234) : rgb(46, 52, 58), RR_ALL);
+    text(nx_prev + (btn - text_width("‹", 1)) / 2, nav_y + (btn - lh) / 2, "‹", fg, 1);
+    text(nx_next + (btn - text_width("›", 1)) / 2, nav_y + (btn - lh) / 2, "›", fg, 1);
+
+    /* 星期表头（周日起，与 CMOS wday 一致） */
+    static const char *const WK[7] = {"日", "一", "二", "三", "四", "五", "六"};
+    int gy = hy + head_h;
+    for (int i = 0; i < 7; i++) {
+        int cx = ox + pad + i * cell;
+        int tw2 = text_width(WK[i], 1);
+        text(cx + (cell - tw2) / 2, gy + (wk_h - lh) / 2, WK[i], dim, 1);
+    }
+
+    /* 当前真实日期（仅当浏览的正是本月时高亮今天） */
+    uint8_t status_b = cmos_read(0x0b);
+    uint8_t td = cmos_read(0x07), tm = cmos_read(0x08), ty2 = cmos_read(0x09);
+    if ((status_b & 0x04) == 0) { td = bcd_to_bin(td); tm = bcd_to_bin(tm); ty2 = bcd_to_bin(ty2); }
+    int today = (st->cal_year == 2000 + ty2 && st->cal_month == tm) ? td : -1;
+
+    /* 日期网格 */
+    int first_wd = cal_weekday(st->cal_year, st->cal_month, 1);
+    int ndays = cal_days_in_month(st->cal_year, st->cal_month);
+    int rows_y = gy + wk_h;
+    for (int d = 1; d <= ndays; d++) {
+        int idx = first_wd + d - 1;
+        int col = idx % 7, row = idx / 7;
+        int cx = ox + pad + col * cell;
+        int cy = rows_y + row * cell;
+        char db[4];
+        uint32_t pos = 0;
+        db[0] = 0;
+        append_uint(db, sizeof(db), &pos, (uint32_t)d);
+        int tw2 = text_width(db, 1);
+        if (d == today) {
+            int r = cell - ui_s(6);
+            fill_round_rect(cx + (cell - r) / 2, cy + (cell - r) / 2, r, r,
+                            r / 2, accent, RR_ALL);
+            text(cx + (cell - tw2) / 2, cy + (cell - lh) / 2, db,
+                 rgb(255, 255, 255), 1);
+        } else {
+            text(cx + (cell - tw2) / 2, cy + (cell - lh) / 2, db, fg, 1);
+        }
+    }
+}
+
+/* 日历命中：-1=面板外 0=面板内空白 1=上月 2=下月 */
+static int cal_hit(gui_state_t *st, int w, int h, int mx, int my) {
+    if (!st->cal_open) return -1;
+    int ox, oy, ow, oh, pad, cell, head_h, wk_h;
+    cal_geometry(w, h, &ox, &oy, &ow, &oh, &pad, &cell, &head_h, &wk_h);
+    if (mx < ox || mx >= ox + ow || my < oy || my >= oy + oh) return -1;
+    int btn = ui_s(26);
+    int nav_y = oy + pad + (head_h - btn) / 2;
+    int nx_next = ox + ow - pad - btn;
+    int nx_prev = nx_next - btn - ui_s(6);
+    if (my >= nav_y && my < nav_y + btn) {
+        if (mx >= nx_prev && mx < nx_prev + btn) return 1;
+        if (mx >= nx_next && mx < nx_next + btn) return 2;
+    }
+    return 0;
+}
+
+static void cal_shift_month(gui_state_t *st, int dir) {
+    st->cal_month += dir;
+    if (st->cal_month < 1)  { st->cal_month = 12; st->cal_year--; }
+    if (st->cal_month > 12) { st->cal_month = 1;  st->cal_year++; }
+}
+
+/* 打开日历时定位到当前年月 */
+static void cal_open_now(gui_state_t *st) {
+    uint8_t status_b = cmos_read(0x0b);
+    uint8_t m = cmos_read(0x08), y = cmos_read(0x09);
+    if ((status_b & 0x04) == 0) { m = bcd_to_bin(m); y = bcd_to_bin(y); }
+    st->cal_year = 2000 + y;
+    st->cal_month = (m >= 1 && m <= 12) ? m : 1;
+    st->cal_open = 1;
+}
+
 static void draw_start_menu(gui_state_t *st) {
     wm_state_t *wm = &st->wm;
     if (!wm->start_menu_open) return;
@@ -5600,6 +5787,12 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
+        if (key == 27 && st.cal_open) {
+            st.cal_open = 0;
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         if (key == 27 && st.rename_active) {
             gui_cancel_rename(&st);
             gui_dirty_mark_full();
@@ -5859,6 +6052,14 @@ static void cmd_gui(int argc, char **argv) {
                     st.ctx_open = 0;
                     gui_dirty_mark_full();
                     redraw = 1;
+                } else if (st.cal_open) {
+                    /* 日历打开：‹ › 翻月，面板内保持，面板外（含再点时钟）关闭 */
+                    int ch = cal_hit(&st, w, h, mx, my);
+                    if (ch == 1) cal_shift_month(&st, -1);
+                    else if (ch == 2) cal_shift_month(&st, 1);
+                    else if (ch < 0) st.cal_open = 0;
+                    gui_dirty_mark_full();
+                    redraw = 1;
                 } else if (st.wm.start_menu_open) {
                     int item = wm_hit_start_menu(&st.wm, mx, my);
                     if (item == SM_SEARCH_ITEM) {
@@ -5935,6 +6136,40 @@ static void cmd_gui(int argc, char **argv) {
                                 if (st.wm.menu_y < 8) st.wm.menu_y = 8;
                             }
                             st.status = "开始菜单";
+                        } else if (tb == TBHIT_CLOCK) {
+                            /* 点时钟：开/关日历弹窗 */
+                            if (st.cal_open) st.cal_open = 0;
+                            else cal_open_now(&st);
+                            st.status = "日历";
+                        } else if (tb == TBHIT_SHOWDESK) {
+                            /* 显示桌面：最小化全部可见窗口；再点恢复 */
+                            int any = 0;
+                            for (int i = 0; i < st.wm.window_count; i++) {
+                                wm_window_t *sw2 = wm_get_window(&st.wm, i);
+                                if (sw2 && sw2->used && sw2->state != WM_STATE_MINIMIZED) any = 1;
+                            }
+                            if (any) {
+                                st.showdesk_mask = 0;
+                                for (int i = 0; i < st.wm.window_count; i++) {
+                                    wm_window_t *sw2 = wm_get_window(&st.wm, i);
+                                    if (sw2 && sw2->used && sw2->state != WM_STATE_MINIMIZED) {
+                                        st.showdesk_mask |= 1u << i;
+                                        wm_minimize_window(&st.wm, i);
+                                    }
+                                }
+                                st.showdesk_active = 1;
+                                st.status = "已显示桌面";
+                            } else if (st.showdesk_active) {
+                                for (int i = 0; i < st.wm.window_count; i++) {
+                                    wm_window_t *sw2 = wm_get_window(&st.wm, i);
+                                    if ((st.showdesk_mask & (1u << i)) && sw2 &&
+                                        sw2->used && sw2->state == WM_STATE_MINIMIZED)
+                                        wm_restore_window(&st.wm, i);
+                                }
+                                st.showdesk_active = 0;
+                                st.status = "已恢复窗口";
+                            }
+                            gui_sync_focus(&st);
                         } else if (tb >= TBHIT_WIN_BASE) {
                             int slot = tb - TBHIT_WIN_BASE;
                             wm_window_t *tw = wm_get_window(&st.wm, slot);
