@@ -120,6 +120,12 @@ typedef struct gui_state {
     int  ctx_open;          /* 0=关闭 1=桌面菜单 2=窗口菜单 */
     int  ctx_x, ctx_y;      /* 菜单左上角 */
     int  ctx_target;        /* 窗口菜单时的目标窗口索引 */
+    /* 日历弹窗（点击任务栏时钟） */
+    int  cal_open;
+    int  cal_year, cal_month;   /* 正在浏览的年月（可用 ‹ › 翻月） */
+    /* 显示桌面（任务栏最右角）：记录被本功能最小化的窗口位掩码 */
+    uint32_t showdesk_mask;
+    int  showdesk_active;
     int theme_light;
     char console_input[120];
     uint32_t console_input_len;
