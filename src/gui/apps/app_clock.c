@@ -1,6 +1,7 @@
 #include "gui_app.h"
 #include "gui_draw.h"
 #include "../../string.h"
+#include "../rtc_tz.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -30,26 +31,17 @@ static const int SIN60[60] = {
 static int cos60(int k) { return SIN60[(k + 15) % 60]; }
 
 static void clock_read(uint8_t *h, uint8_t *m, uint8_t *s) {
-    uint8_t sb = cmos_read(0x0b);
-    *h = cmos_read(0x04); *m = cmos_read(0x02); *s = cmos_read(0x00);
-    if ((sb & 0x04) == 0) { *h = bcd_to_bin(*h); *m = bcd_to_bin(*m); *s = bcd_to_bin(*s); }
-    if ((sb & 0x02) == 0) {
-        uint8_t pm = *h & 0x80; *h &= 0x7f;
-        if (pm && *h < 12) *h += 12;
-        if (!pm && *h == 12) *h = 0;
-    }
+    uint8_t day, mon, wday;
+    uint32_t year;
+    rtc_tz_read_local(h, m, s, &day, &mon, &year, &wday);
 }
 
 static void date_line(char *buf, uint32_t cap) {
-    uint8_t sb = cmos_read(0x0b);
-    uint8_t day = cmos_read(0x07), mon = cmos_read(0x08);
-    uint8_t yr = cmos_read(0x09), cent = cmos_read(0x32);
-    if ((sb & 0x04) == 0) {
-        day = bcd_to_bin(day); mon = bcd_to_bin(mon);
-        yr = bcd_to_bin(yr); cent = bcd_to_bin(cent);
-    }
+    uint8_t h, m, s, day, mon, wday;
+    uint32_t year;
+    rtc_tz_read_local(&h, &m, &s, &day, &mon, &year, &wday);
     uint32_t pos = 0; buf[0] = 0;
-    gui_append_uint(buf, cap, &pos, (uint32_t)cent * 100u + yr);
+    gui_append_uint(buf, cap, &pos, year);
     gui_append_char(buf, cap, &pos, '-');
     if (mon < 10) gui_append_char(buf, cap, &pos, '0');
     gui_append_uint(buf, cap, &pos, mon);
@@ -59,10 +51,11 @@ static void date_line(char *buf, uint32_t cap) {
 }
 
 static const char *weekday_name(void) {
-    uint8_t sb = cmos_read(0x0b), wd = cmos_read(0x06);
-    if ((sb & 0x04) == 0) wd = bcd_to_bin(wd);
+    uint8_t h, m, s, day, mon, wday;
+    uint32_t year;
+    rtc_tz_read_local(&h, &m, &s, &day, &mon, &year, &wday);
     static const char *names[] = {"","星期日","星期一","星期二","星期三","星期四","星期五","星期六"};
-    return (wd >= 1 && wd <= 7) ? names[wd] : "";
+    return (wday >= 1 && wday <= 7) ? names[wday] : "";
 }
 
 static int clock_visible(gui_state_t *st) {

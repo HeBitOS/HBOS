@@ -90,6 +90,8 @@ void task_yield(void);
 #define KEY_F2      0x10B
 #define KEY_F3      0x10C
 #define KEY_F4      0x10D
+#define KEY_F5      0x10E
+#define KEY_F6      0x10F
 static int shift_pressed = 0, caps_lock = 0, num_lock = 1;
 
 static inline uint8_t inb(uint16_t port) {
@@ -359,13 +361,13 @@ int kb_poll_key(void) {
     if (sc == 0x3C) return KEY_F2;
     if (sc == 0x3D) return KEY_F3;
     if (sc == 0x3E) return KEY_F4;
+    if (sc == 0x3F) return KEY_F5;
+    if (sc == 0x40) return KEY_F6;
     if (sc < 128) {
         char c = scancode_map[sc];
         if (c == 0) return 0;
         if (ctrl_pressed && c >= 'a' && c <= 'z') {
-            char ctrl_c = (char)(c - 'a' + 1);
-            if (ctrl_c == 0x13 || ctrl_c == 0x11 || ctrl_c == 0x03) return ctrl_c;
-            return c;
+            return (char)(c - 'a' + 1);
         }
         if (c >= 'a' && c <= 'z') {
             if (shift_pressed ^ caps_lock) c = c - 'a' + 'A';

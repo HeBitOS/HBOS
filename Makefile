@@ -96,7 +96,7 @@ QEMU_IMG ?= qemu-img
 
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
-         -O2 -Wall -Wextra \
+         -O2 -Wall -Wextra -MMD -MP \
          -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_DIR)/gui -I$(SRC_DIR)/user
 
 ASFLAGS = -f elf64
@@ -361,7 +361,7 @@ $(ISO_BIOS): $(KERNEL_BIOS)
 	@printf 'set timeout=5\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1920x1080x32,1680x1050x32,1600x900x32,1440x900x32,1366x768x32,1280x800x32,1024x768x32,auto\n' > $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
-	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios 2>/dev/null
+	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios
 	@cp $@ "$(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 	@echo "✓ BIOS ISO: $@"
 	@echo "✓ Versioned BIOS ISO: $(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
@@ -500,8 +500,8 @@ $(LIMINE_EFI):
 
 $(UEFI_CD_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf
 	@rm -f $@
-	@dd if=/dev/zero of=$@ bs=512 count=32768 2>/dev/null
-	@mformat -i $@ -h 64 -t 32 -s 16 -N 12345678 ::
+	@dd if=/dev/zero of=$@ bs=512 count=98304 2>/dev/null
+	@mformat -i $@ -h 64 -t 96 -s 16 -N 12345678 ::
 	@mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
 	@mcopy -D o -m -i $@ $(LIMINE_EFI) ::/EFI/BOOT/BOOTX64.EFI
 	@mcopy -D o -m -i $@ limine.conf ::/limine.conf
@@ -678,3 +678,10 @@ $(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
 clean:
 	rm -rf $(BUILD_DIR)
 	@echo "✓ Cleaned"
+
+# Auto-generated header dependencies (-MMD -MP in CFLAGS): without this, editing
+# a shared header (e.g. gui_state.h) doesn't force recompilation of every .c
+# that includes it, so a stale .o keeps the OLD struct layout while everything
+# else uses the new one — silent memory corruption at runtime, not a build
+# error. `-include` so a missing .d (first build) is skipped instead of failing.
+-include $(C_OBJS:.o=.d)

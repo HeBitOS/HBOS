@@ -75,8 +75,7 @@ bool gui_font_init(void) {
     }
     g_nsizes = (int)nsz;
     g_blob = data;
-    /* Default to the middle base size (e.g. 18px of 16/18/20). */
-    g_active = gui_font_nbase() / 2;
+    g_active = 0;   /* default base size = BASE_SIZES[0] (16px) */
     return true;
 }
 

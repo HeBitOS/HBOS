@@ -29,6 +29,7 @@
 #include "../gui/gui_dirty.h"
 #include "../gui/gui_draw.h"
 #include "../gui/gui_app.h"
+#include "../gui/rtc_tz.h"
 #include "../shell/shell.h"
 #include "tool.h"
 #include "cc.h"
@@ -348,6 +349,27 @@ static uint32_t apply_layer_opacity(uint32_t color) {
     return ((uint32_t)a << 24) | (color & 0x00FFFFFF);
 }
 
+// 屏幕亮度：没有真实背光可调，用"呈现到硬件帧缓冲时按比例压暗每个像素的
+// RGB 通道"模拟。20..100，floor 在 20 避免完全变黑（那样用户没法再把它调回来）。
+static int g_brightness = 100;
+
+void gui_set_brightness(int pct) {
+    if (pct < 20) pct = 20;
+    if (pct > 100) pct = 100;
+    g_brightness = pct;
+}
+
+int gui_get_brightness(void) { return g_brightness; }
+
+static inline uint32_t apply_brightness_px(uint32_t px) {
+    if (g_brightness >= 100) return px;
+    uint32_t r = (px >> 16) & 0xFF, g = (px >> 8) & 0xFF, b = px & 0xFF;
+    r = r * (uint32_t)g_brightness / 100;
+    g = g * (uint32_t)g_brightness / 100;
+    b = b * (uint32_t)g_brightness / 100;
+    return (px & 0xFF000000) | (r << 16) | (g << 8) | b;
+}
+
 void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px) {
     g_gui_surface = surface;
     g_gui_surface_w = surface ? w : 0;
@@ -361,7 +383,7 @@ void gui_present_surface(const fb_info_t *fb) {
     for (int y = 0; y < g_gui_surface_h; y++) {
         uint32_t *dst = fb->addr + (uint32_t)y * fb_pitch;
         uint32_t *src = g_gui_surface + (uint32_t)y * g_gui_surface_pitch;
-        for (int x = 0; x < g_gui_surface_w; x++) dst[x] = src[x];
+        for (int x = 0; x < g_gui_surface_w; x++) dst[x] = apply_brightness_px(src[x]);
     }
 }
 
@@ -376,7 +398,7 @@ void gui_present_rect(const fb_info_t *fb, int x, int y, int w, int h) {
     for (int yy = 0; yy < h; yy++) {
         uint32_t *dst = fb->addr + (uint32_t)(y + yy) * fb_pitch + (uint32_t)x;
         uint32_t *src = g_gui_surface + (uint32_t)(y + yy) * g_gui_surface_pitch + (uint32_t)x;
-        for (int xx = 0; xx < w; xx++) dst[xx] = src[xx];
+        for (int xx = 0; xx < w; xx++) dst[xx] = apply_brightness_px(src[xx]);
     }
 }
 
@@ -1122,6 +1144,7 @@ static void gui_set_note_name(gui_state_t *st, const char *name) {
     }
     st->note_name[i] = 0;
     st->note_loaded = 0;
+    st->note_select_all = 0;
 }
 
 static const char *gui_note_name(gui_state_t *st) {
@@ -1146,21 +1169,10 @@ static uint8_t cmos_second(void) {
 }
 
 static void time_line(char *buf, uint32_t cap, int show_seconds) {
-    uint8_t status_b = cmos_read(0x0b);
-    uint8_t hour = cmos_read(0x04);
-    uint8_t min = cmos_read(0x02);
-    uint8_t sec = cmos_read(0x00);
-    if ((status_b & 0x04) == 0) {
-        hour = bcd_to_bin(hour);
-        min = bcd_to_bin(min);
-        sec = bcd_to_bin(sec);
-    }
-    if ((status_b & 0x02) == 0) {
-        uint8_t pm = hour & 0x80;
-        hour &= 0x7f;
-        if (pm && hour < 12) hour += 12;
-        if (!pm && hour == 12) hour = 0;
-    }
+    uint8_t hour, min, sec, day, month, wday;
+    uint32_t year;
+    rtc_tz_read_local(&hour, &min, &sec, &day, &month, &year, &wday);
+    (void)day; (void)month; (void)year; (void)wday;
     uint32_t pos = 0;
     buf[0] = 0;
     if (hour < 10) append_char(buf, cap, &pos, '0');
@@ -1177,21 +1189,14 @@ static void time_line(char *buf, uint32_t cap, int show_seconds) {
 
 /* 日期串 "YYYY/MM/DD 周X"（Win11 任务栏第二行） */
 static void date_line(char *buf, uint32_t cap) {
-    uint8_t status_b = cmos_read(0x0b);
-    uint8_t day   = cmos_read(0x07);
-    uint8_t month = cmos_read(0x08);
-    uint8_t year  = cmos_read(0x09);
-    uint8_t wday  = cmos_read(0x06);   /* 星期几 1=周日..7=周六 */
-    if ((status_b & 0x04) == 0) {
-        day   = bcd_to_bin(day);
-        month = bcd_to_bin(month);
-        year  = bcd_to_bin(year);
-        wday  = bcd_to_bin(wday);
-    }
+    uint8_t hour, min, sec, day, month, wday;
+    uint32_t year;
+    rtc_tz_read_local(&hour, &min, &sec, &day, &month, &year, &wday);
+    (void)hour; (void)min; (void)sec;
     static const char *const WD[8] = {"", "日", "一", "二", "三", "四", "五", "六"};
     uint32_t pos = 0;
     buf[0] = 0;
-    append_uint(buf, cap, &pos, 2000 + year);
+    append_uint(buf, cap, &pos, year);
     append_char(buf, cap, &pos, '/');
     if (month < 10) append_char(buf, cap, &pos, '0');
     append_uint(buf, cap, &pos, month);
@@ -2016,6 +2021,16 @@ static void note_save(gui_state_t *st) {
     st->status = "笔记已保存";
 }
 
+// Ctrl+A 全选后，Backspace/Delete/输入字符 都应先清空整篇笔记（相当于替换选区）
+static void note_clear_all(gui_state_t *st) {
+    st->note_len = 0;
+    st->note_cursor = 0;
+    st->note_buf[0] = 0;
+    st->note_select_all = 0;
+    st->note_dirty = 1;
+    st->status = "已清空（Ctrl+S 保存）";
+}
+
 // 在光标处插入一个字节，仅修改内存缓冲，标记 dirty（Ctrl+S 才落盘）
 static void note_insert(gui_state_t *st, char c) {
     if (st->note_len + 1 >= NOTE_EDIT_CAP) {
@@ -2173,7 +2188,7 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     }
     text(edit_x, ty + 92, line, st->note_dirty ? rgb(244, 194, 82) : rgb(150, 200, 160), 1);
     text_clipped(edit_x, ty + 50, edit_x + edit_w,
-                 "方向键移动  Ctrl+S 保存  支持中间插入/删除",
+                 "方向键移动  Ctrl+S 保存  Ctrl+A 全选",
                  rgb(120, 150, 168), 1);
     vgradient(edit_x, ty + 118, edit_w, 174, rgb(8, 14, 22), rgb(2, 6, 12));
     rect(edit_x, ty + 118, edit_w, 1, rgb(28, 56, 36));
@@ -2193,6 +2208,7 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
             cursor_drawn = 1;
         }
         if (st->note_buf[i] == '\n') {
+            if (st->note_select_all) rect(x, y, 6, 16, rgb(40, 92, 132));
             x = edit_x + 8;
             y += 18;
             utf8_init(&utf8);
@@ -2204,6 +2220,7 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
 
+        if (st->note_select_all) rect(x, y, gui_cp_advance(cp, 1), 16, rgb(40, 92, 132));
         int advance = draw_text_codepoint(x, y, cp, rgb(228, 238, 246), 1);
         x += advance;
         if (x > edit_x + edit_w - 16) {
@@ -2292,6 +2309,7 @@ static void code_set_path(gui_state_t *st, const char *path) {
     st->code_modified = 0;
     st->code_scroll = 0;
     st->code_cursor = 0;
+    st->code_select_all = 0;
     st->code_error_line = 0;
     st->code_view_rows = 0;
 }
@@ -2509,6 +2527,18 @@ static void code_move_page(gui_state_t *st, int dir) {
     if (target < 0) target = 0;
     if (target > max_line) target = max_line;
     st->code_cursor = code_offset_for_line_col(st, (uint32_t)target, col);
+    code_ensure_visible(st);
+}
+
+// Ctrl+A 全选后，Backspace/Delete/输入字符 都应先清空整份代码（相当于替换选区）
+static void code_clear_all(gui_state_t *st) {
+    st->code_len = 0;
+    st->code_cursor = 0;
+    g_code_buf[0] = 0;
+    st->code_select_all = 0;
+    st->code_modified = 1;
+    st->code_error_line = 0;
+    st->code_scroll = 0;
     code_ensure_visible(st);
 }
 
@@ -2916,7 +2946,9 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
         num[0] = 0;
         append_uint(num, sizeof(num), &pos, line_idx + 1);
         int y = l.editor_y + 10 + row * l.row_h;
-        if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
+        if (st->code_select_all) {
+            rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(40, 92, 132));
+        } else if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
             rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(70, 24, 30));
             rect(l.editor_x + l.line_no_w + 1, y - 3, 3, l.row_h, rgb(232, 86, 92));
         } else if (line_idx == cursor_line) {
@@ -3639,7 +3671,17 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     rect(tx, ty + 58, view_w, 32, rgb(6, 14, 22));
     border(tx, ty + 58, view_w, 32, rgb(78, 192, 236));
     text(tx + 10, ty + 68, st->browser_url, rgb(232, 242, 248), 1);
-    rect(tx + view_w - 12, ty + 68, 6, 14, rgb(78, 192, 236));
+    // 闪烁插入光标：跟随网址文本末尾（输入/退格都只作用于末尾），超出输入框
+    // 宽度时钳制在框内，避免长网址把光标画到边框外面。
+    {
+        int caret_x = tx + 10 + text_width(st->browser_url, 1);
+        if (caret_x > tx + view_w - 10) caret_x = tx + view_w - 10;
+        static uint32_t browser_caret_ticks = 0;
+        browser_caret_ticks++;
+        if ((browser_caret_ticks / 15) % 2) {
+            rect(caret_x + 1, ty + 66, 2, 18, rgb(78, 192, 236));
+        }
+    }
     draw_small_button(tx, ty + 104, 96, "Enter 加载", rgb(78, 192, 236));
     draw_small_button(tx + 108, ty + 104, 68, "保存", rgb(85, 180, 120));
     char line[128];
@@ -3785,6 +3827,32 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 #define TBHIT_NONE  -1
 #define TBHIT_START -2
 #define TBHIT_WIN_BASE 100
+#define TBHIT_BRIGHTNESS -3
+
+/* 亮度图标 + 滑杆弹窗的几何布局，绘制和点击测试共用，避免两处数字不一致。 */
+#define BR_ICON_SZ  ui_s(22)
+#define BR_ICON_GAP ui_s(10)
+#define BR_POPUP_W  ui_s(200)
+#define BR_POPUP_H  ui_s(78)
+#define BR_MIN 20
+#define BR_MAX 100
+
+static void brightness_icon_xy(int w, int h, int *bx, int *by) {
+    *bx = w - 16 - BR_ICON_SZ;
+    *by = h - TASKBAR_H + (TASKBAR_H - BR_ICON_SZ) / 2;
+}
+
+static void brightness_popup_xy(int w, int h, int *px, int *py) {
+    *px = w - 16 - BR_POPUP_W;
+    *py = h - TASKBAR_H - BR_POPUP_H - 8;
+}
+
+/* 滑杆轨道范围（弹窗内边距 18px），返回轨道左右端点 x 与竖直位置 y。 */
+static void brightness_track_xy(int px, int py, int *tx0, int *tx1, int *ty) {
+    *tx0 = px + ui_s(18);
+    *tx1 = px + BR_POPUP_W - ui_s(18);
+    *ty = py + ui_s(52);
+}
 
 static const struct { const char *label; int panel; } g_taskbar_pins[] = {
     {"文件", PANEL_FILES},
@@ -3830,6 +3898,81 @@ static void draw_hbos_logo(int x, int y, int size, uint32_t color) {
     rect(x + bar_w, mid_y, right_x - (x + bar_w), mid_h, color);
 }
 
+// 用户头像图标：外圈圆形底色 + 头部圆 + 肩部圆（被外圈裁切，只露出顶部弧线），
+// 比例取自用户提供的参考图。x,y,size 为外接正方形左上角与边长。
+static void draw_user_avatar(int x, int y, int size, uint32_t bg, uint32_t fg) {
+    int r = size / 2;
+    int cx = x + r, cy = y + r;
+    int head_r  = r * 44 / 100;
+    int head_cy = cy - r * 20 / 100;
+    int body_r  = r * 62 / 100;
+    int body_cy = cy + r * 58 / 100;
+    for (int dy = -r; dy <= r; dy++) {
+        for (int dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy > r * r) continue;  // outside outer circle: transparent
+            int px = cx + dx, py = cy + dy;
+            int hdy = py - head_cy;
+            int bdy = py - body_cy;
+            uint32_t c = bg;
+            if (dx * dx + hdy * hdy <= head_r * head_r) c = fg;
+            else if (dx * dx + bdy * bdy <= body_r * body_r) c = fg;
+            rect(px, py, 1, 1, c);
+        }
+    }
+}
+
+// 亮度图标：太阳造型（实心圆 + 8 条短射线）。x,y,size 为外接正方形左上角与边长。
+static void draw_brightness_icon(int x, int y, int size, uint32_t color) {
+    int r = size / 2;
+    int cx = x + r, cy = y + r;
+    int core_r = r * 45 / 100;
+    gui_fill_circle(cx, cy, core_r, color);
+    int ray_len = r * 30 / 100;
+    int ray_gap = r * 20 / 100;
+    static const int DX8[8] = { 0, 100, 100, 100, 0, -100, -100, -100 };
+    static const int DY8[8] = { -100, -100, 0, 100, 100, 100, 0, -100 };
+    for (int i = 0; i < 8; i++) {
+        int ux = DX8[i], uy = DY8[i];
+        /* 归一化对角方向，避免斜射线比正射线长 */
+        int norm = (ux != 0 && uy != 0) ? 71 : 100;
+        int x0 = cx + ux * (core_r + ray_gap) / 100 * norm / 100;
+        int y0 = cy + uy * (core_r + ray_gap) / 100 * norm / 100;
+        int x1 = cx + ux * (core_r + ray_gap + ray_len) / 100 * norm / 100;
+        int y1 = cy + uy * (core_r + ray_gap + ray_len) / 100 * norm / 100;
+        gui_draw_thick_line(x0, y0, x1, y1, 2, color);
+    }
+}
+
+/* 任务栏亮度弹窗：标题 + 百分比 + 可拖动滑杆。 */
+static void draw_brightness_popup(int w, int h, const gui_state_t *st) {
+    int light = st->theme_light;
+    int px, py;
+    brightness_popup_xy(w, h, &px, &py);
+    soft_shadow(px - 2, py - 2, BR_POPUP_W + 4, BR_POPUP_H + 4);
+    uint32_t bg = light ? 0xF6F5F6F8 : 0xF6202428;
+    fill_round_rect(px, py, BR_POPUP_W, BR_POPUP_H, 10, bg, RR_ALL);
+    uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
+    border(px, py, BR_POPUP_W, BR_POPUP_H, bd);
+
+    char line[24];
+    uint32_t pos = 0; line[0] = 0;
+    append_str(line, sizeof(line), &pos, "亮度  ");
+    append_uint(line, sizeof(line), &pos, (uint32_t)st->brightness);
+    append_char(line, sizeof(line), &pos, '%');
+    text(px + 18, py + 14, line, light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+
+    int tx0, tx1, ty;
+    brightness_track_xy(px, py, &tx0, &tx1, &ty);
+    uint32_t track_bg = light ? rgb(214, 218, 222) : rgb(52, 60, 68);
+    fill_round_rect(tx0, ty - 3, tx1 - tx0, 6, 3, track_bg, RR_ALL);
+    int fill_w = (tx1 - tx0) * (st->brightness - BR_MIN) / (BR_MAX - BR_MIN);
+    if (fill_w > 0)
+        fill_round_rect(tx0, ty - 3, fill_w, 6, 3, rgb(61, 174, 233), RR_ALL);
+    int thumb_x = tx0 + fill_w;
+    gui_fill_circle(thumb_x, ty, 8, rgb(255, 255, 255));
+    gui_fill_circle(thumb_x, ty, 6, rgb(61, 174, 233));
+}
+
 static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int light = st->theme_light;
     uint32_t accent = rgb(61, 174, 233);
@@ -3863,7 +4006,14 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
         }
     }
 
-    /* Win11 风格：时间在上、日期在下，各自右对齐 */
+    /* 亮度图标（时钟左边） */
+    int bix, biy;
+    brightness_icon_xy(w, h, &bix, &biy);
+    if (st->brightness_popup_open)
+        fill_round_rect(bix - 4, biy - 4, BR_ICON_SZ + 8, BR_ICON_SZ + 8, 8, 0x44FFFFFF, RR_ALL);
+    draw_brightness_icon(bix, biy, BR_ICON_SZ, light ? cyber_text(1) : rgb(235, 238, 242));
+
+    /* Win11 风格：时间在上、日期在下，各自右对齐，给亮度图标让出空间 */
     char tline[32], dline[40];
     time_line(tline, sizeof(tline), st->taskbar_show_seconds);
     date_line(dline, sizeof(dline));
@@ -3873,11 +4023,18 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int dw = text_width(dline, 1);
     int total_h = lh * 2;
     int top = h - TASKBAR_H + (TASKBAR_H - total_h) / 2;
-    text(w - 16 - tw, top,      tline, tcol, 1);
-    text(w - 16 - dw, top + lh, dline, tcol, 1);
+    int clock_right = bix - BR_ICON_GAP;
+    text(clock_right - tw, top,      tline, tcol, 1);
+    text(clock_right - dw, top + lh, dline, tcol, 1);
 }
 
 static int taskbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
+    int bix, biy;
+    brightness_icon_xy(w, h, &bix, &biy);
+    if (mx >= bix - 4 && mx < bix + BR_ICON_SZ + 4 &&
+        my >= biy - 4 && my < biy + BR_ICON_SZ + 4)
+        return TBHIT_BRIGHTNESS;
+
     int wins[WM_MAX_WINDOWS];
     int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
     int item_count = 1 + TB_PIN_COUNT + n;
@@ -3942,6 +4099,7 @@ static void draw_gui_screen(int w, int h, gui_state_t *st) {
     draw_desktop(w, h, st);
     draw_app_windows();
     draw_start_menu(st);
+    if (st->brightness_popup_open) draw_brightness_popup(w, h, st);
     draw_window_switcher(w, h, st);
     if (st->splash_ticks > 0)
         draw_splash_window(w, h, st->splash_ticks, st->theme_light);
@@ -4697,7 +4855,7 @@ static int snake_auto_tick(gui_state_t *st) {
 }
 
 static void handle_app_key(gui_state_t *st, int key) {
-    if (key == '\t' && st->app_mode != GUI_APP_CODE) {
+    if (key == KB_KEY_F6) {
         gui_focus_next_window(st, 1);
         if (st->wm.window_count > 1) st->switcher_ticks = 40;
         return;
@@ -4706,12 +4864,19 @@ static void handle_app_key(gui_state_t *st, int key) {
     if (gui_app_handle_key(st, key)) return;
     if (st->app_mode == GUI_APP_NOTES) {
         note_load(st);
+        if (key == 1) {  // Ctrl+A：全选
+            st->note_select_all = (st->note_len > 0);
+            st->status = st->note_select_all ? "已全选（Backspace/输入 可替换）" : "笔记为空";
+            return;
+        }
+        int had_sel = st->note_select_all;
+        st->note_select_all = 0;  // 除 Ctrl+A 外任何按键都取消选中
         if (key == 19) {  // Ctrl+S
             note_save(st);
-        } else if (key == GUI_KEY_BACKSPACE) {
-            note_backspace(st);
-        } else if (key == GUI_KEY_DELETE) {
-            note_delete_forward(st);
+        } else if (key == GUI_KEY_BACKSPACE || key == GUI_KEY_DELETE) {
+            if (had_sel) note_clear_all(st);
+            else if (key == GUI_KEY_BACKSPACE) note_backspace(st);
+            else note_delete_forward(st);
         } else if (key == GUI_KEY_LEFT) {
             note_cursor_left(st);
         } else if (key == GUI_KEY_RIGHT) {
@@ -4725,10 +4890,13 @@ static void handle_app_key(gui_state_t *st, int key) {
         } else if (key == GUI_KEY_END) {
             note_cursor_end(st);
         } else if (key == '\n') {
+            if (had_sel) note_clear_all(st);
             note_insert(st, '\n');
         } else if (key == '\t') {
+            if (had_sel) note_clear_all(st);
             for (int i = 0; i < 4; i++) note_insert(st, ' ');
         } else if (key >= 32 && key <= 126) {
+            if (had_sel) note_clear_all(st);
             note_insert(st, (char)key);
         }
     } else if (st->app_mode == GUI_APP_UWC) {
@@ -4761,6 +4929,13 @@ static void handle_app_key(gui_state_t *st, int key) {
         }
     } else if (st->app_mode == GUI_APP_CODE) {
         code_load(st);
+        if (key == 1) {  // Ctrl+A：全选
+            st->code_select_all = (st->code_len > 0);
+            st->status = st->code_select_all ? "已全选（Backspace/输入 可替换）" : "代码为空";
+            return;
+        }
+        int had_sel = st->code_select_all;
+        st->code_select_all = 0;  // 除 Ctrl+A 外任何按键都取消选中
         if (key == 19) {
             (void)code_save(st);
         } else if (key == 18) {
@@ -4785,18 +4960,21 @@ static void handle_app_key(gui_state_t *st, int key) {
             code_move_page(st, -1);
         } else if (key == GUI_KEY_PGDOWN) {
             code_move_page(st, 1);
-        } else if (key == GUI_KEY_BACKSPACE) {
-            code_backspace(st);
-        } else if (key == GUI_KEY_DELETE) {
-            code_delete_forward(st);
+        } else if (key == GUI_KEY_BACKSPACE || key == GUI_KEY_DELETE) {
+            if (had_sel) code_clear_all(st);
+            else if (key == GUI_KEY_BACKSPACE) code_backspace(st);
+            else code_delete_forward(st);
         } else if (key == 3) {
             code_set_output("Use Esc/window close to leave Code Workspace");
             st->status = "代码工作台保持打开";
         } else if (key == '\t') {
+            if (had_sel) code_clear_all(st);
             for (int i = 0; i < 4; i++) code_insert_char(st, ' ');
         } else if (key == '\n') {
+            if (had_sel) code_clear_all(st);
             code_insert_newline(st);
         } else if (key >= 32 && key <= 126) {
+            if (had_sel) code_clear_all(st);
             code_insert_char(st, (char)key);
         }
     } else if (st->app_mode == GUI_APP_DIAG) {
@@ -4876,7 +5054,7 @@ static void handle_app_key(gui_state_t *st, int key) {
 static void handle_key(gui_state_t *st, int key) {
     gui_sync_focus(st);
     if (gui_handle_rename_key(st, key)) return;
-    if (key == '\t' || key == ' ') {
+    if (key == KB_KEY_F6 || key == ' ') {
         gui_focus_next_window(st, 1);
         if (st->wm.window_count > 1) st->switcher_ticks = 40;
     } else if (key == GUI_KEY_RIGHT && st->wm.window_count > 0 && st->app_mode == GUI_APP_NONE) {
@@ -4958,7 +5136,7 @@ static void handle_key(gui_state_t *st, int key) {
     }
 }
 
-// Tab 窗口切换器浮层：列出全部窗口并高亮当前焦点
+// F6 窗口切换器浮层：列出全部窗口并高亮当前焦点
 static void draw_window_switcher(int w, int h, gui_state_t *st) {
     if (st->switcher_ticks <= 0) return;
     int n = st->wm.window_count;
@@ -4974,7 +5152,7 @@ static void draw_window_switcher(int w, int h, gui_state_t *st) {
     soft_shadow(ox, oy, ow, oh);
     draw_panel_shell(ox, oy, ow, oh, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
                      cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
-    text(ox + pad, oy + pad, "切换窗口  (Tab 循环)", cyber_text(st->theme_light), 1);
+    text(ox + pad, oy + pad, "切换窗口  (F6 循环)", cyber_text(st->theme_light), 1);
     rect(ox + pad, oy + pad + 22, ow - pad * 2, 1, cyber_neon_pink(st->theme_light));
 
     int ry = oy + pad + 30;
@@ -5275,11 +5453,9 @@ static void draw_start_menu(gui_state_t *st) {
     /* left: user icon + name */
     int uisz = ui_s(28);
     int uix = ox + SM_PAD, uiy = bar_y + (SM_BAR_H - uisz) / 2;
-    fill_round_rect(uix, uiy, uisz, uisz, uisz / 2,
-                    light ? rgb(61, 120, 180) : rgb(50, 100, 160), RR_ALL);
-    /* silhouette */
-    rect(uix + uisz/2 - 4, uiy + 4, 8, 8, rgb(255,255,255));
-    rect(uix + 4, uiy + uisz - 10, uisz - 8, 8, rgb(255,255,255));
+    draw_user_avatar(uix, uiy, uisz,
+                     light ? rgb(135, 206, 235) : rgb(90, 150, 180),
+                     rgb(140, 140, 140));
     text(uix + uisz + 8, bar_y + (SM_BAR_H - gui_font_line_height()) / 2,
          "用户", light ? rgb(40, 44, 48) : rgb(210, 218, 226), 1);
 
@@ -5433,10 +5609,9 @@ static void cmd_gui(int argc, char **argv) {
     {
         int nb = gui_font_base_count();
         if (nb > 1) {
-            int slot;
-            if (g_ui_scale < 90)       slot = 0;        /* 小屏：最小字 */
-            else if (g_ui_scale < 140) slot = nb / 2;   /* 常规：中等 */
-            else                       slot = nb - 1;   /* 高分屏：较大 */
+            /* 默认字号固定为最小档（16px）；只有明显高分屏才自动放大，
+             * 避免常规分辨率下被自动挑成大字号。 */
+            int slot = (g_ui_scale >= 140) ? nb - 1 : 0;
             gui_font_set_active(slot);
         }
     }
@@ -5444,6 +5619,7 @@ static void cmd_gui(int argc, char **argv) {
     int mx = w / 2;
     int my = h / 2;
     uint8_t last_buttons = 0;
+    int brightness_dragging = 0;
     int dragging_window = -1;
     int drag_off_x = 0;
     int drag_off_y = 0;
@@ -5481,6 +5657,8 @@ static void cmd_gui(int argc, char **argv) {
     st.last_clicked_file = -1;
     st.delete_confirm_index = -1;
     st.taskbar_show_seconds = 1;
+    st.brightness = 100;
+    gui_set_brightness(st.brightness);
     st.status = "就绪";
     wm_init(&st.wm, w, h);
     st.console_input[0] = 0;
@@ -5559,6 +5737,13 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
+        /* F5: force a full desktop repaint (manual refresh). */
+        if (key == KB_KEY_F5) {
+            st.status = "桌面已刷新";
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         /* 开始菜单搜索：菜单打开时键盘输入用于过滤；Enter 启动首个匹配，Esc 关闭。 */
         if (key && st.wm.start_menu_open) {
             if (key == 27) {                         /* Esc 关闭 */
@@ -5596,6 +5781,12 @@ static void cmd_gui(int argc, char **argv) {
         }
         if (st.splash_ticks > 0 && key) {
             st.splash_ticks = 0;
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
+        if (key == 27 && st.brightness_popup_open) {
+            st.brightness_popup_open = 0;
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
@@ -5669,6 +5860,23 @@ static void cmd_gui(int argc, char **argv) {
             }
 
             if (st.splash_ticks > 0) goto skip_input;
+
+            /* 亮度滑杆拖动：鼠标持续按住时跟随水平位置更新 */
+            if (brightness_dragging) {
+                if (left_down) {
+                    int bpx, bpy; brightness_popup_xy(w, h, &bpx, &bpy);
+                    int btx0, btx1, bty; brightness_track_xy(bpx, bpy, &btx0, &btx1, &bty);
+                    int cx = mx;
+                    if (cx < btx0) cx = btx0;
+                    if (cx > btx1) cx = btx1;
+                    int pct = BR_MIN + (cx - btx0) * (BR_MAX - BR_MIN) / (btx1 - btx0);
+                    st.brightness = pct;
+                    gui_set_brightness(pct);
+                    redraw = 1;
+                } else {
+                    brightness_dragging = 0;
+                }
+            }
 
             /* 应用窗口标题栏拖动 */
             if (appwin_drag >= 0) {
@@ -5823,6 +6031,25 @@ static void cmd_gui(int argc, char **argv) {
                 }
                 if (appwin_hit) {
                     redraw = 1;
+                } else if (st.brightness_popup_open) {
+                    /* 亮度弹窗打开时：命中滑杆轨道附近就开始拖动并跳到点击位置，
+                     * 点在弹窗外（含再次点亮度图标）一律关闭，跟开始菜单一致。 */
+                    int bpx, bpy; brightness_popup_xy(w, h, &bpx, &bpy);
+                    int btx0, btx1, bty; brightness_track_xy(bpx, bpy, &btx0, &btx1, &bty);
+                    if (mx >= bpx && mx < bpx + BR_POPUP_W && my >= bpy && my < bpy + BR_POPUP_H) {
+                        if (my >= bty - 12 && my < bty + 14) {
+                            int cx = mx;
+                            if (cx < btx0) cx = btx0;
+                            if (cx > btx1) cx = btx1;
+                            int pct = BR_MIN + (cx - btx0) * (BR_MAX - BR_MIN) / (btx1 - btx0);
+                            st.brightness = pct;
+                            gui_set_brightness(pct);
+                            brightness_dragging = 1;
+                        }
+                    } else {
+                        st.brightness_popup_open = 0;
+                    }
+                    redraw = 1;
                 } else if (st.ctx_open) {
                     /* 上下文菜单打开时，左键命中即执行，未命中即关闭 */
                     int ci = ctx_hit(&st, mx, my);
@@ -5935,6 +6162,9 @@ static void cmd_gui(int argc, char **argv) {
                                 if (st.wm.menu_y < 8) st.wm.menu_y = 8;
                             }
                             st.status = "开始菜单";
+                        } else if (tb == TBHIT_BRIGHTNESS) {
+                            st.brightness_popup_open = 1;
+                            st.status = "屏幕亮度";
                         } else if (tb >= TBHIT_WIN_BASE) {
                             int slot = tb - TBHIT_WIN_BASE;
                             wm_window_t *tw = wm_get_window(&st.wm, slot);
@@ -6008,6 +6238,7 @@ static void cmd_gui(int argc, char **argv) {
                                             uint32_t code_off = 0;
                                             if (hit_code_editor(w, h, &st, mx, my, &code_off)) {
                                                 st.code_cursor = code_off;
+                                                st.code_select_all = 0;
                                                 code_ensure_visible(&st);
                                                 st.status = "已移动代码光标";
                                             } else {

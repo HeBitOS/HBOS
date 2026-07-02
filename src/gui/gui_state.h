@@ -82,6 +82,7 @@ typedef struct gui_state {
     char note_buf[NOTE_EDIT_CAP];
     uint32_t note_len;
     uint32_t note_cursor;
+    int note_select_all;   /* Ctrl+A：整篇笔记处于选中状态 */
     int note_dirty;
     int note_loaded;
     char note_name[MAX_FILENAME];
@@ -97,6 +98,7 @@ typedef struct gui_state {
     char code_path[GUI_PATH_MAX];
     uint32_t code_len;
     uint32_t code_cursor;
+    int code_select_all;   /* Ctrl+A：整份代码处于选中状态 */
     int code_loaded;
     int code_modified;
     int code_scroll;
@@ -122,6 +124,8 @@ typedef struct gui_state {
     int  ctx_target;        /* 窗口菜单时的目标窗口索引 */
     int theme_light;
     int taskbar_show_seconds;  /* 任务栏时钟是否显示秒数，默认开启 */
+    int brightness;            /* 屏幕亮度 20..100，默认 100 */
+    int brightness_popup_open; /* 任务栏亮度滑杆弹窗是否打开 */
     char console_input[120];
     uint32_t console_input_len;
     char console_history[64][120];

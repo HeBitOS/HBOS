@@ -53,9 +53,9 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     section(x, y, "字体大小");
     y += 20;
     int nbase = gui_font_base_count();
-    static const char *sz_labels[] = {"小 (16px)", "中 (18px)", "大 (20px)"};
+    static const char *sz_labels[] = {"标准 (16px)", "大号 (24px)"};
     int active = gui_font_active();
-    for (int i = 0; i < nbase && i < 3; i++) {
+    for (int i = 0; i < nbase && i < 2; i++) {
         uint32_t bc = (i == active) ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64);
         draw_sb(x + i * (SB_W + 8), y, SB_W + 4, sz_labels[i], bc);
     }
@@ -103,11 +103,15 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     y += 16;
     gui_text(x, y,      "F4         深色 / 浅色主题",  gui_rgb(120, 140, 160), 1);
     y += 16;
-    gui_text(x, y,      "Tab / 空格  切换窗口",         gui_rgb(120, 140, 160), 1);
+    gui_text(x, y,      "F5         刷新桌面",         gui_rgb(120, 140, 160), 1);
+    y += 16;
+    gui_text(x, y,      "F6 / 空格   切换窗口",         gui_rgb(120, 140, 160), 1);
     y += 16;
     gui_text(x, y,      "Alt+↑      窗口最大化",       gui_rgb(120, 140, 160), 1);
     y += 16;
     gui_text(x, y,      "Alt+↓      窗口最小化",       gui_rgb(120, 140, 160), 1);
+    y += 16;
+    gui_text(x, y,      "Ctrl+A     全选（记事本/代码工作台）", gui_rgb(120, 140, 160), 1);
 }
 
 /* ── on_click ────────────────────────────────────────────── */
@@ -126,7 +130,7 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
     /* font size row */
     y += 20;
     int nbase = gui_font_base_count();
-    for (int i = 0; i < nbase && i < 3; i++) {
+    for (int i = 0; i < nbase && i < 2; i++) {
         int bx = x + i * (SB_W + 8);
         if (mx >= bx && mx < bx + SB_W + 4 && my >= y && my < y + SB_H) {
             gui_font_set_active(i);
