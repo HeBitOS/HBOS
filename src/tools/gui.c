@@ -1304,35 +1304,50 @@ static void draw_file_action_bar(int tx, int ty, int content_w) {
     }
 }
 
-// Cursor silhouette: a plain triangular arrow — straight vertical back on the
-// left, a diagonal front edge widening down to a shoulder, then tapering back
-// to a point. Returns the rightmost filled column for a glyph row (0 means
-// the row is a single outline pixel), or -1 past the bottom of the glyph.
-#define CURSOR_ARROW_ROWS 17
-static int cursor_arrow_width(int row) {
-    if (row < 0) return -1;
-    if (row <= 11) return (9 * row) / 11;
-    if (row <= 16) return (9 * (16 - row)) / 5;
-    return -1;
+// Cursor silhouette: arrow with a small concave "flag" notch near the tail
+// (tip -> shoulder -> notch -> tail tip -> back up to tip), matching the
+// reference glyph supplied by the user. One shape used everywhere — there is
+// no separate resize/drag variant.
+#define CURSOR_ARROW_W 16   /* bounding box columns 0..15 */
+#define CURSOR_ARROW_H 23   /* bounding box rows    0..22 */
+static const int CURSOR_VX[4] = { 0, 15, 7, 0 };
+static const int CURSOR_VY[4] = { 0, 18, 17, 22 };
+
+static int cursor_point_inside(int px, int py) {
+    int inside = 0;
+    for (int i = 0, j = 3; i < 4; j = i++) {
+        int xi = CURSOR_VX[i], yi = CURSOR_VY[i];
+        int xj = CURSOR_VX[j], yj = CURSOR_VY[j];
+        if ((yi > py) != (yj > py)) {
+            int xcross = xi + (xj - xi) * (py - yi) / (yj - yi);
+            if (px < xcross) inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// 0 = outside (transparent, leaves the desktop showing through),
+// 1 = interior fill, 2 = outline (borders the outside on any of 4 sides).
+static int cursor_pixel_kind(int px, int py) {
+    if (!cursor_point_inside(px, py)) return 0;
+    if (px <= 0 || py <= 0 || px >= CURSOR_ARROW_W - 1 || py >= CURSOR_ARROW_H - 1 ||
+        !cursor_point_inside(px - 1, py) || !cursor_point_inside(px + 1, py) ||
+        !cursor_point_inside(px, py - 1) || !cursor_point_inside(px, py + 1))
+        return 2;
+    return 1;
 }
 
 static void draw_cursor(int x, int y, int edge) {
-    uint32_t c = rgb(238, 246, 255);
+    (void)edge;
+    uint32_t c = rgb(148, 148, 148);
     uint32_t d = rgb(20, 27, 34);
 
-    if (edge == WM_EDGE_W || edge == WM_EDGE_E) {
-        for (int i = 0; i < 18; i++) rect(x + 8, y + i, 2, 2, c);
-        for (int i = 0; i < 12; i++) rect(x + 8, y + i, 2, 2, c);
-        rect(x + 2, y + 4, 12, 2, c);
-        rect(x + 2, y + 14, 12, 2, c);
-        return;
-    }
-
-    for (int row = 0; row < CURSOR_ARROW_ROWS; row++) {
-        int w = cursor_arrow_width(row);
-        rect(x, y + row, 1, 1, d);
-        if (w > 1) rect(x + 1, y + row, w - 1, 1, c);
-        if (w > 0) rect(x + w, y + row, 1, 1, d);
+    for (int row = 0; row < CURSOR_ARROW_H; row++) {
+        for (int col = 0; col < CURSOR_ARROW_W; col++) {
+            int k = cursor_pixel_kind(col, row);
+            if (k == 1) rect(x + col, y + row, 1, 1, c);
+            else if (k == 2) rect(x + col, y + row, 1, 1, d);
+        }
     }
 }
 
@@ -1420,18 +1435,19 @@ void gui_app_text(int x, int y, const char *s, uint32_t color, int scale) {
 static void present_screen_owner_cursor(const fb_info_t *fb, int x, int y) {
     uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
     int fbw = (int)fb->width, fbh = (int)fb->height;
-    uint32_t c = rgb(238, 246, 255);
+    uint32_t c = rgb(148, 148, 148);
     uint32_t d = rgb(20, 27, 34);
 #define OWNER_CURSOR_PX(px, py, col) do { \
         int _x = (px), _y = (py); \
         if (_x >= 0 && _y >= 0 && _x < fbw && _y < fbh) \
             fb->addr[(uint32_t)_y * fb_pitch + (uint32_t)_x] = (col); \
     } while (0)
-    for (int row = 0; row < CURSOR_ARROW_ROWS; row++) {
-        int w = cursor_arrow_width(row);
-        OWNER_CURSOR_PX(x, y + row, d);
-        for (int xx = 1; xx < w; xx++) OWNER_CURSOR_PX(x + xx, y + row, c);
-        if (w > 0) OWNER_CURSOR_PX(x + w, y + row, d);
+    for (int row = 0; row < CURSOR_ARROW_H; row++) {
+        for (int col = 0; col < CURSOR_ARROW_W; col++) {
+            int k = cursor_pixel_kind(col, row);
+            if (k == 1) OWNER_CURSOR_PX(x + col, y + row, c);
+            else if (k == 2) OWNER_CURSOR_PX(x + col, y + row, d);
+        }
     }
 #undef OWNER_CURSOR_PX
 }
@@ -5130,7 +5146,6 @@ static void draw_start_menu(gui_state_t *st) {
     if (extra < 0) extra = 0;
 
     /* ── panel background ── */
-    soft_shadow(ox - 4, oy - 4, SM_W + 8, mh + 8);
     uint32_t bg = light ? 0xF6F5F6F8 : 0xF6202428;
     fill_round_rect(ox, oy, SM_W, mh, 12, bg, RR_ALL);
     uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
