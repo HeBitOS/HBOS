@@ -1145,7 +1145,7 @@ static uint8_t cmos_second(void) {
     return sec;
 }
 
-static void time_line(char *buf, uint32_t cap) {
+static void time_line(char *buf, uint32_t cap, int show_seconds) {
     uint8_t status_b = cmos_read(0x0b);
     uint8_t hour = cmos_read(0x04);
     uint8_t min = cmos_read(0x02);
@@ -1168,9 +1168,11 @@ static void time_line(char *buf, uint32_t cap) {
     append_char(buf, cap, &pos, ':');
     if (min < 10) append_char(buf, cap, &pos, '0');
     append_uint(buf, cap, &pos, min);
-    append_char(buf, cap, &pos, ':');
-    if (sec < 10) append_char(buf, cap, &pos, '0');
-    append_uint(buf, cap, &pos, sec);
+    if (show_seconds) {
+        append_char(buf, cap, &pos, ':');
+        if (sec < 10) append_char(buf, cap, &pos, '0');
+        append_uint(buf, cap, &pos, sec);
+    }
 }
 
 /* 日期串 "YYYY/MM/DD 周X"（Win11 任务栏第二行） */
@@ -1304,35 +1306,99 @@ static void draw_file_action_bar(int tx, int ty, int content_w) {
     }
 }
 
-// Cursor silhouette: a plain triangular arrow — straight vertical back on the
-// left, a diagonal front edge widening down to a shoulder, then tapering back
-// to a point. Returns the rightmost filled column for a glyph row (0 means
-// the row is a single outline pixel), or -1 past the bottom of the glyph.
-#define CURSOR_ARROW_ROWS 17
-static int cursor_arrow_width(int row) {
-    if (row < 0) return -1;
-    if (row <= 11) return (9 * row) / 11;
-    if (row <= 16) return (9 * (16 - row)) / 5;
-    return -1;
+// Cursor glyphs are simple closed polygons rasterized with a generic
+// even-odd point-in-polygon test; the outline is whatever fill pixel has a
+// non-fill neighbor. This handles both the concave pointer notch and the
+// "dumbbell" resize double-arrows (two chevrons joined by a thin bar)
+// without a separate rasterizer per shape.
+static int polygon_point_inside(const int *vx, const int *vy, int n, int px, int py) {
+    int inside = 0;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        int xi = vx[i], yi = vy[i];
+        int xj = vx[j], yj = vy[j];
+        if ((yi > py) != (yj > py)) {
+            int xcross = xi + (xj - xi) * (py - yi) / (yj - yi);
+            if (px < xcross) inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// 0 = outside (transparent, leaves the desktop showing through),
+// 1 = interior fill, 2 = outline (borders the outside on any of 4 sides).
+static int polygon_pixel_kind(const int *vx, const int *vy, int n, int bw, int bh, int px, int py) {
+    if (!polygon_point_inside(vx, vy, n, px, py)) return 0;
+    if (px <= 0 || py <= 0 || px >= bw - 1 || py >= bh - 1 ||
+        !polygon_point_inside(vx, vy, n, px - 1, py) || !polygon_point_inside(vx, vy, n, px + 1, py) ||
+        !polygon_point_inside(vx, vy, n, px, py - 1) || !polygon_point_inside(vx, vy, n, px, py + 1))
+        return 2;
+    return 1;
+}
+
+// Pointer: tip -> shoulder -> notch (reflex) -> tail tip -> back to tip.
+#define CURSOR_ARROW_W 16   /* bounding box columns 0..15 */
+#define CURSOR_ARROW_H 23   /* bounding box rows    0..22 */
+static const int CURSOR_VX[4] = { 0, 15, 7, 0 };
+static const int CURSOR_VY[4] = { 0, 18, 17, 22 };
+
+// Resize double-arrows: two chevrons pointing away from center, joined by a
+// thin bar. Vertical/diagonal variants are the same "dumbbell" shape rotated
+// 90°/45°, with the vertex coordinates precomputed (no runtime float/trig).
+#define CURSOR_RESIZE_H_W 24
+#define CURSOR_RESIZE_H_H 13
+static const int CURSOR_RESIZE_H_VX[10] = { 0, 7, 7, 17, 17, 23, 17, 17, 7, 7 };
+static const int CURSOR_RESIZE_H_VY[10] = { 6, 0, 5, 5, 0, 6, 12, 7, 7, 12 };
+
+#define CURSOR_RESIZE_V_W 13
+#define CURSOR_RESIZE_V_H 24
+static const int CURSOR_RESIZE_V_VX[10] = { 6, 0, 5, 5, 0, 6, 12, 7, 7, 12 };
+static const int CURSOR_RESIZE_V_VY[10] = { 0, 7, 7, 17, 17, 23, 17, 17, 7, 7 };
+
+// NW<->SE diagonal (top-left / bottom-right).
+#define CURSOR_RESIZE_NWSE_W 19
+#define CURSOR_RESIZE_NWSE_H 19
+static const int CURSOR_RESIZE_NWSE_VX[10] = { 1, 10, 6, 13, 17, 17, 8, 12, 5, 1 };
+static const int CURSOR_RESIZE_NWSE_VY[10] = { 1, 1, 5, 12, 8, 17, 17, 13, 6, 10 };
+
+// NE<->SW diagonal (top-right / bottom-left).
+#define CURSOR_RESIZE_NESW_W 19
+#define CURSOR_RESIZE_NESW_H 19
+static const int CURSOR_RESIZE_NESW_VX[10] = { 1, 1, 5, 12, 8, 17, 17, 13, 6, 10 };
+static const int CURSOR_RESIZE_NESW_VY[10] = { 17, 8, 12, 5, 1, 1, 10, 6, 13, 17 };
+
+static void draw_polygon_cursor(int x, int y, const int *vx, const int *vy, int n, int bw, int bh) {
+    uint32_t c = rgb(148, 148, 148);
+    uint32_t d = rgb(20, 27, 34);
+    for (int row = 0; row < bh; row++) {
+        for (int col = 0; col < bw; col++) {
+            int k = polygon_pixel_kind(vx, vy, n, bw, bh, col, row);
+            if (k == 1) rect(x + col, y + row, 1, 1, c);
+            else if (k == 2) rect(x + col, y + row, 1, 1, d);
+        }
+    }
 }
 
 static void draw_cursor(int x, int y, int edge) {
-    uint32_t c = rgb(238, 246, 255);
-    uint32_t d = rgb(20, 27, 34);
-
-    if (edge == WM_EDGE_W || edge == WM_EDGE_E) {
-        for (int i = 0; i < 18; i++) rect(x + 8, y + i, 2, 2, c);
-        for (int i = 0; i < 12; i++) rect(x + 8, y + i, 2, 2, c);
-        rect(x + 2, y + 4, 12, 2, c);
-        rect(x + 2, y + 14, 12, 2, c);
+    switch (edge) {
+    case WM_EDGE_W: case WM_EDGE_E:
+        draw_polygon_cursor(x, y, CURSOR_RESIZE_H_VX, CURSOR_RESIZE_H_VY, 10,
+                             CURSOR_RESIZE_H_W, CURSOR_RESIZE_H_H);
         return;
-    }
-
-    for (int row = 0; row < CURSOR_ARROW_ROWS; row++) {
-        int w = cursor_arrow_width(row);
-        rect(x, y + row, 1, 1, d);
-        if (w > 1) rect(x + 1, y + row, w - 1, 1, c);
-        if (w > 0) rect(x + w, y + row, 1, 1, d);
+    case WM_EDGE_N: case WM_EDGE_S:
+        draw_polygon_cursor(x, y, CURSOR_RESIZE_V_VX, CURSOR_RESIZE_V_VY, 10,
+                             CURSOR_RESIZE_V_W, CURSOR_RESIZE_V_H);
+        return;
+    case WM_EDGE_NW: case WM_EDGE_SE:
+        draw_polygon_cursor(x, y, CURSOR_RESIZE_NWSE_VX, CURSOR_RESIZE_NWSE_VY, 10,
+                             CURSOR_RESIZE_NWSE_W, CURSOR_RESIZE_NWSE_H);
+        return;
+    case WM_EDGE_NE: case WM_EDGE_SW:
+        draw_polygon_cursor(x, y, CURSOR_RESIZE_NESW_VX, CURSOR_RESIZE_NESW_VY, 10,
+                             CURSOR_RESIZE_NESW_W, CURSOR_RESIZE_NESW_H);
+        return;
+    default:
+        draw_polygon_cursor(x, y, CURSOR_VX, CURSOR_VY, 4, CURSOR_ARROW_W, CURSOR_ARROW_H);
+        return;
     }
 }
 
@@ -1420,18 +1486,19 @@ void gui_app_text(int x, int y, const char *s, uint32_t color, int scale) {
 static void present_screen_owner_cursor(const fb_info_t *fb, int x, int y) {
     uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
     int fbw = (int)fb->width, fbh = (int)fb->height;
-    uint32_t c = rgb(238, 246, 255);
+    uint32_t c = rgb(148, 148, 148);
     uint32_t d = rgb(20, 27, 34);
 #define OWNER_CURSOR_PX(px, py, col) do { \
         int _x = (px), _y = (py); \
         if (_x >= 0 && _y >= 0 && _x < fbw && _y < fbh) \
             fb->addr[(uint32_t)_y * fb_pitch + (uint32_t)_x] = (col); \
     } while (0)
-    for (int row = 0; row < CURSOR_ARROW_ROWS; row++) {
-        int w = cursor_arrow_width(row);
-        OWNER_CURSOR_PX(x, y + row, d);
-        for (int xx = 1; xx < w; xx++) OWNER_CURSOR_PX(x + xx, y + row, c);
-        if (w > 0) OWNER_CURSOR_PX(x + w, y + row, d);
+    for (int row = 0; row < CURSOR_ARROW_H; row++) {
+        for (int col = 0; col < CURSOR_ARROW_W; col++) {
+            int k = polygon_pixel_kind(CURSOR_VX, CURSOR_VY, 4, CURSOR_ARROW_W, CURSOR_ARROW_H, col, row);
+            if (k == 1) OWNER_CURSOR_PX(x + col, y + row, c);
+            else if (k == 2) OWNER_CURSOR_PX(x + col, y + row, d);
+        }
     }
 #undef OWNER_CURSOR_PX
 }
@@ -3798,7 +3865,7 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
 
     /* Win11 风格：时间在上、日期在下，各自右对齐 */
     char tline[32], dline[40];
-    time_line(tline, sizeof(tline));
+    time_line(tline, sizeof(tline), st->taskbar_show_seconds);
     date_line(dline, sizeof(dline));
     uint32_t tcol = light ? cyber_text(1) : rgb(235, 238, 242);
     int lh = gui_font_line_height();
@@ -3896,14 +3963,15 @@ static void gui_damage_window(gui_state_t *st, int scr_w, int scr_h, int idx) {
 }
 
 static void gui_damage_cursor(int omx, int omy, int nmx, int nmy) {
-    // The cursor glyph spans x..x+14, y..y+22; the damage box must fully cover
-    // it (incl. the -2 top margin) or stray bottom pixels leave a dotted trail.
-    gui_dirty_add(omx - 2, omy - 2, 22, 27);
-    gui_dirty_add(nmx - 2, nmy - 2, 22, 27);
+    // Largest cursor glyph (horizontal resize) spans x..x+23, y..y+12; the
+    // damage box must fully cover the widest/tallest of all glyph variants
+    // (incl. the -2 top/left margin) or stray pixels leave a dotted trail.
+    gui_dirty_add(omx - 2, omy - 2, 28, 27);
+    gui_dirty_add(nmx - 2, nmy - 2, 28, 27);
 }
 
 static int cursor_overlaps_rect(int mx, int my, int rx, int ry, int rw, int rh) {
-    return mx + 22 > rx && mx - 2 < rx + rw && my + 25 > ry && my - 2 < ry + rh;
+    return mx + 28 > rx && mx - 2 < rx + rw && my + 25 > ry && my - 2 < ry + rh;
 }
 
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
@@ -5130,7 +5198,6 @@ static void draw_start_menu(gui_state_t *st) {
     if (extra < 0) extra = 0;
 
     /* ── panel background ── */
-    soft_shadow(ox - 4, oy - 4, SM_W + 8, mh + 8);
     uint32_t bg = light ? 0xF6F5F6F8 : 0xF6202428;
     fill_round_rect(ox, oy, SM_W, mh, 12, bg, RR_ALL);
     uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
@@ -5413,6 +5480,7 @@ static void cmd_gui(int argc, char **argv) {
     st.snake_ty = 5;
     st.last_clicked_file = -1;
     st.delete_confirm_index = -1;
+    st.taskbar_show_seconds = 1;
     st.status = "就绪";
     wm_init(&st.wm, w, h);
     st.console_input[0] = 0;
@@ -6064,11 +6132,16 @@ static void cmd_gui(int argc, char **argv) {
         /* 任务栏时钟只在重绘时刷新；若没有输入/动画驱动重绘（长时间静置桌面），
          * 时钟会卡住不走。这里独立检测秒数变化，保证时钟始终实时前进。
          * 只标记任务栏这一小条为脏区域（而非 gui_dirty_mark_full 整屏重绘）——
-         * 整屏重绘开销大，每秒强制一次会造成周期性卡顿，表现为"鼠标又变卡"。 */
+         * 整屏重绘开销大，每秒强制一次会造成周期性卡顿，表现为"鼠标又变卡"。
+         * 设置里关掉"显示秒数"后，显示的文本每分钟才变一次，没必要再每秒强制
+         * 重绘一次（那样纯粹是浪费）——改成只在跨分钟（秒数归零）时才重绘。 */
         {
             uint8_t cur_sec = cmos_second();
-            if (cur_sec != last_clock_sec) {
-                last_clock_sec = cur_sec;
+            int need_redraw = st.taskbar_show_seconds
+                ? (cur_sec != last_clock_sec)
+                : (cur_sec == 0 && last_clock_sec != 0);
+            last_clock_sec = cur_sec;
+            if (need_redraw) {
                 gui_damage_region(0, h - TASKBAR_H, w, TASKBAR_H, w, h);
                 draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             }

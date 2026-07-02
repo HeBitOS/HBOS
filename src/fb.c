@@ -11,6 +11,14 @@
 #define FLANTERM_FB_WIDTH_LIMIT  1920
 #define FLANTERM_FB_HEIGHT_LIMIT 1200
 
+// Bumped whenever a pixel-level scroll shifts the whole visible grid (see
+// flanterm_fb_scroll/revscroll below). graphics.c reads this to tell a
+// same-row character write (cheap: blit just that text row to the real
+// framebuffer) apart from a scroll (every row moved: needs a full blit) —
+// without it, console_putchar can't tell the two apart from cursor_y alone,
+// since cursor_y stays at the bottom row in both cases.
+uint64_t g_flanterm_scroll_gen = 0;
+
 static uint8_t bump_alloc_pool[FLANTERM_FB_BUMP_ALLOC_POOL_SIZE];
 static uint64_t bump_alloc_ptr = 0;
 static bool bump_allocated_instance = false;
@@ -479,6 +487,7 @@ push_to_queue(struct flanterm_context *_ctx, struct flanterm_fb_char *c, uint64_
 
 static void flanterm_fb_revscroll(struct flanterm_context *_ctx) {
     struct flanterm_fb_context *ctx = (void *)_ctx;
+    g_flanterm_scroll_gen++;
 
     // Erase cursor I-beam before pixel scroll to prevent ghost cursor.
     if (_ctx->cursor_enabled && ctx->cursor_x < _ctx->cols && ctx->cursor_y < _ctx->rows) {
@@ -541,6 +550,7 @@ static void flanterm_fb_revscroll(struct flanterm_context *_ctx) {
 
 static void flanterm_fb_scroll(struct flanterm_context *_ctx) {
     struct flanterm_fb_context *ctx = (void *)_ctx;
+    g_flanterm_scroll_gen++;
 
     // Erase cursor I-beam before pixel scroll to prevent ghost cursor.
     // Redraw the character under the cursor (same as draw_cursor's erase step).

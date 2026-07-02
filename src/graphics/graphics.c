@@ -65,6 +65,44 @@ void console_present(void) {
     }
 }
 
+// Blit just the pixel scanlines covering text rows [row0, row0+row_count)
+// instead of the whole screen. A single character write only ever touches
+// its own text row (plus one more if it wrapped/newlined to the next row);
+// scrolling the whole grid is a separate, detectable event (see
+// g_flanterm_scroll_gen) that still goes through the full console_present().
+// This turns the common "type one character" case from an O(screen) blit
+// into an O(one glyph row) blit — the full blit was the actual cause of
+// visibly laggy character echo in the shell.
+extern uint64_t g_flanterm_scroll_gen;
+
+static void console_present_rows(uint64_t row0, uint64_t row_count) {
+    if (!g_backbuf_active || !g_term) return;
+    struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
+    uint64_t y0 = fc->offset_y + row0 * fc->glyph_height;
+    uint64_t y1 = y0 + row_count * fc->glyph_height;
+    if (y0 >= fc->height) return;
+    if (y1 > fc->height) y1 = fc->height;
+    uint64_t w = fc->width;
+    uint64_t src_pitch_px = fc->pitch / 4;
+    uint64_t dst_pitch_px = g_real_fb_pitch / 4;
+    for (uint64_t y = y0; y < y1; y++) {
+        const volatile uint32_t *src = fc->framebuffer + y * src_pitch_px;
+        uint32_t *dst = g_real_fb + y * dst_pitch_px;
+        for (uint64_t x = 0; x < w; x++) dst[x] = src[x];
+    }
+}
+
+// Present after a single-character write: cheap per-row blit unless a
+// scroll happened between old_scroll_gen and now, in which case every row
+// may have moved and we fall back to the full-screen console_present().
+static void console_present_after_char(uint64_t old_cy, uint64_t new_cy, uint64_t old_scroll_gen) {
+    if (!g_backbuf_active || !g_term) return;
+    if (g_flanterm_scroll_gen != old_scroll_gen) { console_present(); return; }
+    uint64_t row0 = old_cy < new_cy ? old_cy : new_cy;
+    uint64_t rows = (old_cy < new_cy ? new_cy - old_cy : old_cy - new_cy) + 1;
+    console_present_rows(row0, rows);
+}
+
 // When set, console output is captured here instead of going to the terminal.
 static void (*g_console_sink)(char) = NULL;
 void console_set_sink(void (*fn)(char)) { g_console_sink = fn; }
@@ -546,6 +584,9 @@ void console_putchar(char c) {
         // Capture for scrollback (ASCII control/visible chars)
         sb_capture_char(c);
 
+        struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
+        uint64_t old_cy = fc->cursor_y, old_scroll_gen = g_flanterm_scroll_gen;
+
         // Complete codepoint
         if (codepoint < 0x80) {
             // ASCII — pass directly to flanterm (1 column)
@@ -557,7 +598,7 @@ void console_putchar(char c) {
             // overpaints the glyph bitmap if available in the font table.
             cjk_render_at_cursor(codepoint);
         }
-        console_present();
+        console_present_after_char(old_cy, fc->cursor_y, old_scroll_gen);
     } else {
         // VGA text mode fallback
         vga_putc_fallback(c);
@@ -567,9 +608,11 @@ void console_putchar(char c) {
 void console_putchar_raw(char c) {
     if (!g_initialized) return;
     if (g_term) {
+        struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
+        uint64_t old_cy = fc->cursor_y, old_scroll_gen = g_flanterm_scroll_gen;
         flanterm_putchar(g_term, (uint8_t)c);
         flanterm_flush(g_term);
-        console_present();
+        console_present_after_char(old_cy, fc->cursor_y, old_scroll_gen);
     } else {
         vga_putc_fallback(c);
     }

@@ -121,6 +121,7 @@ typedef struct gui_state {
     int  ctx_x, ctx_y;      /* 菜单左上角 */
     int  ctx_target;        /* 窗口菜单时的目标窗口索引 */
     int theme_light;
+    int taskbar_show_seconds;  /* 任务栏时钟是否显示秒数，默认开启 */
     char console_input[120];
     uint32_t console_input_len;
     char console_history[64][120];

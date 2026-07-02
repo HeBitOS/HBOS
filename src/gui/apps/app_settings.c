@@ -61,6 +61,15 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     }
     y += SB_H + 14;
 
+    /* ── 任务栏 ── */
+    section(x, y, "任务栏");
+    y += 20;
+    draw_sb(x, y, SB_W + 30, st->taskbar_show_seconds ? "● 显示秒数" : "  显示秒数",
+            st->taskbar_show_seconds ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
+    y += SB_H + 6;
+    gui_text(x, y, "关闭后任务栏时钟只显示时:分，不显示秒", gui_rgb(120, 140, 160), 1);
+    y += 16 + 8;
+
     /* ── 系统信息 ── */
     section(x, y, "系统信息");
     y += 20;
@@ -124,6 +133,15 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
             st->status = "字体大小已更新";
             return 1;
         }
+    }
+    y += SB_H + 14;
+
+    /* taskbar seconds toggle */
+    y += 20;
+    if (mx >= x && mx < x + SB_W + 30 && my >= y && my < y + SB_H) {
+        st->taskbar_show_seconds = !st->taskbar_show_seconds;
+        st->status = st->taskbar_show_seconds ? "任务栏时钟已显示秒数" : "任务栏时钟已隐藏秒数";
+        return 1;
     }
     return 0;
 }
