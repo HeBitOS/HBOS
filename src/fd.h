@@ -29,6 +29,12 @@ typedef struct {
     int type;
     uint16_t local_port;
     pipe_t *pipe;
+    /* Resolved path this fd was opened with. vfs_node_t itself has no
+     * parent/children links (see vfs.h) -- listing a directory's contents
+     * only works via the path-string-based fs_readdir()/vfs_readdir_at(),
+     * not a per-node op, so a directory fd needs this to answer getdents()
+     * (see HBOS_SYS_GETDENTS in syscall.c). */
+    char path[256];
 } fd_entry_t;
 
 #endif

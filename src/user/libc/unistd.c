@@ -75,3 +75,13 @@ int execvp(const char *file, char *const argv[]) {
     execve(buf, argv, 0);
     return execve(file, argv, 0);
 }
+
+int access(const char *path, int mode) {
+    long ret = __syscall3(HBOS_SYS_ACCESS, (long)path, mode, 0);
+    return (int)__syscall_errno(ret);
+}
+
+int isatty(int fd) {
+    long ret = __syscall1(HBOS_SYS_ISATTY, fd);
+    return ret > 0 ? 1 : 0;
+}

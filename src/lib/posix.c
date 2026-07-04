@@ -32,7 +32,7 @@ static fd_entry_t *fd_table(void) {
     return task ? task->fds : NULL;
 }
 
-static int fd_alloc(vfs_node_t *node, int flags) {
+static int fd_alloc(vfs_node_t *node, int flags, const char *path) {
     fd_entry_t *fds = fd_table();
     if (!fds) return set_errno(EBADF);
     for (int fd = 3; fd < POSIX_MAX_FDS; fd++) {
@@ -43,6 +43,12 @@ static int fd_alloc(vfs_node_t *node, int flags) {
         fds[fd].offset = (flags & O_APPEND) ? node->size : 0;
         fds[fd].type = FD_FILE;
         fds[fd].pipe = NULL;
+        if (path) {
+            strncpy(fds[fd].path, path, sizeof(fds[fd].path) - 1);
+            fds[fd].path[sizeof(fds[fd].path) - 1] = 0;
+        } else {
+            fds[fd].path[0] = 0;
+        }
         return fd;
     }
     return set_errno(EMFILE);
@@ -280,7 +286,7 @@ int open(const char *path, int flags, ...) {
         if (vfs_truncate(node) < 0) return set_errno(EIO);
     }
 
-    return fd_alloc(node, flags);
+    return fd_alloc(node, flags, full);
 }
 
 int fstat(int fd, struct stat *st) {

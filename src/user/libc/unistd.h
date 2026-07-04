@@ -37,4 +37,7 @@ int          rmdir(const char *path);
 int          execve(const char *path, char *const argv[], char *const envp[]);
 int          execvp(const char *file, char *const argv[]);
 
+int          access(const char *path, int mode);
+int          isatty(int fd);
+
 #endif

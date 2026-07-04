@@ -289,6 +289,52 @@ int fflush_all(void) {
     return fflush(NULL);
 }
 
+/* Hand-written (not upstream) — small enough that vendoring upstream's
+ * own concat_path_file.c (which needs xasprintf + last_char_is) wasn't
+ * worth the extra dependency chain. */
+static char *last_char_is(const char *s, int c) {
+    if (!s || !*s) return NULL;
+    char *p = (char *)s + strlen(s) - 1;
+    return (*p == (char)c) ? p : NULL;
+}
+
+char *concat_path_file(const char *path, const char *filename) {
+    if (!path) path = "";
+    int need_slash = (last_char_is(path, '/') == NULL);
+    while (*filename == '/') filename++;
+    size_t len = strlen(path) + need_slash + strlen(filename) + 1;
+    char *out = xmalloc(len);
+    strcpy(out, path);
+    if (need_slash) strcat(out, "/");
+    strcat(out, filename);
+    return out;
+}
+
+char *concat_subpath_file(const char *path, const char *f) {
+    if (f && DOT_OR_DOTDOT(f)) return NULL;
+    return concat_path_file(path, f);
+}
+
+char *bb_get_last_path_component_strip(char *path) {
+    char *slash = last_char_is(path, '/');
+    if (slash) {
+        while (*slash == '/' && slash != path) *slash-- = '\0';
+    }
+    slash = strrchr(path, '/');
+    if (!slash || (slash == path && !slash[1])) return path;
+    return slash + 1;
+}
+
+int bb_ask_y_confirmation(void) {
+    fflush_all();
+    int first = 0, c;
+    while ((c = fgetc(stdin)) != EOF && c != '\n') {
+        if (!first && c != ' ' && c != '\t') first = c | 0x20;
+    }
+    return first == 'y';
+}
+
 /* Vendored verbatim from upstream — see the declarations in libbb.h. */
 #include "process_escape_sequence.c"
 #include "xgetcwd.c"
+#include "remove_file.c"

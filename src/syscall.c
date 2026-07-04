@@ -868,20 +868,30 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             vfs_node_t *dir = cur->fds[fd].node;
             if (!dir || dir->type != VFS_NODE_DIR)
                 return (uint64_t)(-ENOTDIR);
-            extern uint32_t fs_get_count(void);
-            extern file_t *fs_get_file(uint32_t index);
-            uint32_t total = fs_get_count();
+            /* 之前这里完全没用到上面解析出来的 dir 节点，而是走
+             * fs_get_count()/fs_get_file() 遍历整个文件系统的扁平文件表——
+             * 相当于不管打开的是哪个目录，getdents 永远把全盘所有文件都
+             * 当作"这个目录的项"返回，d_name 里存的还是完整路径而不是
+             * 单个文件名。vfs_node_t 本身没有父子链接（见 vfs.h），真正能
+             * 列出"这一个目录下有什么"的只有 vfs.c 给 ls 用的那套按路径
+             * 字符串 + 顺序游标的 vfs_opendir/vfs_readdir/vfs_closedir——
+             * 所以这里改用同一套，配合新加的 fds[fd].path（fd_alloc 时
+             * open() 存下来的解析后路径，见 src/fd.h/src/lib/posix.c）。 */
+            const char *path = cur->fds[fd].path;
+            if (!path[0] || vfs_opendir(path) < 0)
+                return 0;
             unsigned int bytes_written = 0;
-            for (uint32_t i = 0; i < total; i++) {
-                file_t *file = fs_get_file(i);
-                if (!file || !file->used) continue;
+            for (uint32_t i = 0; ; i++) {
+                char name[VFS_MAX_NAME];
+                uint32_t type;
+                if (vfs_readdir(path, name, &type) < 0) break;
                 struct dirent dent;
                 dent.d_ino = (uint64_t)i;
                 dent.d_off = (int64_t)i;
-                dent.d_type = (file->type == 1) ? DT_DIR : DT_REG;
-                size_t name_len = strlen(file->name);
+                dent.d_type = (type == VFS_NODE_DIR) ? DT_DIR : DT_REG;
+                size_t name_len = strlen(name);
                 if (name_len > NAME_MAX) name_len = NAME_MAX;
-                memcpy(dent.d_name, file->name, name_len);
+                memcpy(dent.d_name, name, name_len);
                 dent.d_name[name_len] = '\0';
                 dent.d_reclen = sizeof(struct dirent) - NAME_MAX - 1 + name_len + 1;
                 unsigned int reclen = sizeof(dent);
@@ -889,6 +899,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 memcpy((uint8_t *)dirp + bytes_written, &dent, reclen);
                 bytes_written += reclen;
             }
+            vfs_closedir(path);
             return (uint64_t)bytes_written;
         }
 

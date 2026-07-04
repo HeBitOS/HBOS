@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "getopt.h"
 
 /* platform.h macros real applet .c files reference directly */
@@ -129,6 +130,18 @@ mode_t bb_parse_mode(const char *s, mode_t base);
 #define FILEUTILS_INTERACTIVE (1 << 4)
 #define FILEUTILS_VERBOSE  (1 << 13)
 int bb_make_directory(char *path, long mode, int flags);
+
+/* rm — recursive remove, path-component helpers, y/n confirmation prompt.
+ * Vendored verbatim from upstream where genuinely self-contained
+ * (get_last_path_component.c, concat_subpath_file.c + concat_path_file.c,
+ * ask_confirmation.c); remove_file() itself is also vendored verbatim
+ * (libbb/remove_file.c) since it only calls things already declared here. */
+#define DOT_OR_DOTDOT(s) ((s)[0] == '.' && (!(s)[1] || ((s)[1] == '.' && !(s)[2])))
+char *bb_get_last_path_component_strip(char *path);
+char *concat_path_file(const char *path, const char *filename);
+char *concat_subpath_file(const char *path, const char *f);
+int bb_ask_y_confirmation(void);
+int remove_file(const char *path, int flags);
 
 /* wc's unicode support — this port treats everything as single-byte/ASCII
  * (HBOS's own libc has no locale/unicode machinery), matching upstream's

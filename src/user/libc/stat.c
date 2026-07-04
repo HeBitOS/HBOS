@@ -16,3 +16,7 @@ int mkdir(const char *path, mode_t mode) {
     long ret = __syscall3(HBOS_SYS_MKDIR, (long)path, mode, 0);
     return (int)__syscall_errno(ret);
 }
+
+int lstat(const char *path, struct stat *buf) {
+    return stat(path, buf);
+}
