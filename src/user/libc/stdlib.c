@@ -1,6 +1,8 @@
 #include "stdlib.h"
 #include "string.h"
 #include "syscall.h"
+#include "unistd.h"
+#include "stdio.h"
 
 typedef struct block {
     size_t size;
@@ -152,7 +154,42 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
     return (unsigned long)strtol(s, endptr, base);
 }
 
+unsigned long long strtoull(const char *s, char **endptr, int base) {
+    return (unsigned long long)strtol(s, endptr, base);
+}
+
+/* Simplified: no "." / ".." collapsing or symlink resolution (HBOS has no
+ * symlinks in the relevant paths) — just makes the path absolute. Good
+ * enough for TinyCC's own use (locating its "-B" install dir relative to
+ * argv[0]), not a general-purpose canonicalizer. */
+char *realpath(const char *path, char *resolved_path) {
+    if (!path) return 0;
+    char buf[PATH_MAX];
+    if (path[0] == '/') {
+        strncpy(buf, path, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = 0;
+    } else {
+        if (!getcwd(buf, sizeof(buf))) return 0;
+        size_t len = strlen(buf);
+        if (len && buf[len - 1] != '/' && len + 1 < sizeof(buf)) buf[len++] = '/';
+        strncpy(buf + len, path, sizeof(buf) - len - 1);
+        buf[sizeof(buf) - 1] = 0;
+    }
+    char *out = resolved_path ? resolved_path : malloc(PATH_MAX);
+    if (!out) return 0;
+    strncpy(out, buf, PATH_MAX - 1);
+    out[PATH_MAX - 1] = 0;
+    return out;
+}
+
 void abort(void) { exit(1); }
+
+void __assert_fail(const char *assertion, const char *file,
+                    unsigned int line, const char *function) {
+    fprintf(stderr, "Assertion failed: %s, function %s, file %s, line %d.\n",
+            assertion, function, file, (int)line);
+    abort();
+}
 
 void exit(int status) {
     __syscall1(HBOS_SYS_EXIT, status);
@@ -165,3 +202,29 @@ void srand(unsigned int seed) { _rand_seed = seed; }
 
 int abs(int n) { return n < 0 ? -n : n; }
 long labs(long n) { return n < 0 ? -n : n; }
+
+/* Simple insertion sort — not fast, but correct, and callers of qsort() in
+ * practice (e.g. TinyCC) sort small lists where this is plenty. */
+void qsort(void *base, size_t nmemb, size_t size,
+           int (*compar)(const void *, const void *)) {
+    if (!base || nmemb < 2 || size == 0) return;
+    unsigned char *arr = (unsigned char *)base;
+    unsigned char tmp[256];
+    unsigned char *scratch = size <= sizeof(tmp) ? tmp : malloc(size);
+    if (!scratch) return;
+    for (size_t i = 1; i < nmemb; i++) {
+        memcpy(scratch, arr + i * size, size);
+        size_t j = i;
+        while (j > 0 && compar(arr + (j - 1) * size, scratch) > 0) {
+            memcpy(arr + j * size, arr + (j - 1) * size, size);
+            j--;
+        }
+        memcpy(arr + j * size, scratch, size);
+    }
+    if (scratch != tmp) free(scratch);
+}
+
+char *getenv(const char *name) {
+    (void)name;
+    return 0;
+}

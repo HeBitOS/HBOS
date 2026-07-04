@@ -248,6 +248,55 @@ static inline void write_cr3(uint64_t v) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(v) : "memory");
 }
 
+/**
+ * 打开 CPU 对 x87/SSE/SSE2 指令的支持。开机后默认这些指令会触发 #UD
+ * （Invalid Opcode）——这正是为什么内核和几乎所有用户态代码都用
+ * -mno-80387 -mno-mmx -mno-sse -mno-sse2 编译。TinyCC 自身的浮点常量折叠
+ * （third_party/tinycc/tcc.c 里的 strtod/ldexpl 等）确实需要真正的硬件浮点，
+ * 所以 tcc.hax 是当前唯一一个不带这些 -mno-* 标志编译的 .hax（见
+ * Makefile TCC_CFLAGS），这个函数就是让它的 SSE2 指令能真正跑起来。
+ * 未在任务切换时保存/恢复 XMM 寄存器（src/core/task_switch.asm 没有
+ * FXSAVE/XRSTOR）——目前唯一会用到 SSE 的程序只有 tcc，属于可接受的
+ * 窄范围风险，而不是这里要解决的问题。 */
+static inline void fpu_enable(void) {
+    uint64_t cr0, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1ULL << 2);   /* EM=0：关闭协处理器模拟陷阱，允许硬件执行 */
+    cr0 |= (1ULL << 1);    /* MP=1：配合 TS 位正确处理 WAIT/FWAIT */
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1ULL << 9);    /* OSFXSR：允许 FXSAVE/FXRSTOR 和 SSE/SSE2 指令 */
+    cr4 |= (1ULL << 10);   /* OSXMMEXCPT：未屏蔽的 SIMD 浮点异常走 #XM(19) 而非 #UD */
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+}
+
+#define MSR_PAT 0x277
+
+/**
+ * 重新编程 IA32_PAT MSR，把 PAT 槽位 1 从加电默认的 WT（Write-Through）
+ * 改成 WC（Write-Combining，编码值 0x01）。选槽位 1 是因为 WT 在这个内核
+ * 里从未被用到，改掉它不影响任何现有映射；其余 7 个槽位保持 CPU 复位
+ * 默认值不变（WB/WT/UC-/UC/WB/WT/UC-/UC）。
+ *
+ * 之所以需要 WC：真实硬件上，framebuffer 之类的大块顺序写入如果走
+ * UC（无缓冲，每次写都是一次总线事务）会慢得离谱；如果不设置任何缓存
+ * 属性、继续沿用 boot.asm 建立的恒等映射（纯 WB，见 vmm.c 头部注释），
+ * CPU 缓存里的写入不保证及时刷到显卡实际读取的显存，会出现画面延迟数
+ * 秒才更新的现象。WC 允许 CPU 合并连续写入、批量写出，兼顾速度和及时性，
+ * 是所有真实操作系统对 framebuffer/MMIO 顺序写区域的标准做法。
+ *
+ * 必须在任何代码使用 VMM_WC 标志位之前调用一次（比如 kmain 里紧跟
+ * fpu_enable() 之后）。QEMU 等虚拟化环境通常不会暴露这类缓存属性差异
+ * 造成的性能问题，所以这个函数的实际效果只能在真实硬件上验证。
+ */
+static inline void pat_init(void) {
+    uint64_t pat = rdmsr(MSR_PAT);
+    pat &= ~(0xFFULL << 8);      /* 清除槽位 1 (bits 8-15) */
+    pat |= (0x01ULL << 8);       /* 槽位 1 = WC (Write-Combining) */
+    wrmsr(MSR_PAT, pat);
+}
+
 /** 禁用中断 (cli 指令) */
 static inline void cli(void)  { __asm__ volatile("cli"); }
 
@@ -267,5 +316,8 @@ void tss_set_stack(uint64_t rsp0);
 void int_enable(void);
 void int_disable(void);
 bool int_get_state(void);
+
+/** PIT (IRQ0) 中断计数，pit_init() 设的频率下累加；除以该频率即得开机秒数。 */
+uint64_t pit_get_ticks(void);
 
 #endif /* HBOS_CPU_H */

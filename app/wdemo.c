@@ -4,7 +4,7 @@
  * 与全屏 paint 不同，本应用运行时桌面/时钟/其他窗口仍在刷新。 */
 #include <hax.h>
 
-HAX_APP("wdemo", "并发窗口示例：计数器", HAX_KIND_GUI);
+HAX_APP("wdemo", "并发窗口示例：计数器", HAX_KIND_GUI | HAX_KIND_GUI_WIN);
 
 #define BG    0x121820
 #define CARD  0x1E2A38

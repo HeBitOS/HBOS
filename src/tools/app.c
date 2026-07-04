@@ -122,9 +122,14 @@ static void cmd_run(int argc, char **argv) {
     if (ret < 0) {
         const hax_app_entry_t *he = hax_app_find(argv[1]);
         if (he) {
-            /* GUI 类应用走非阻塞 spawn：否则会阻塞合成器导致窗口无法显示。
-             * TUI 类仍阻塞运行，以便捕获其文本输出。 */
-            if (he->kind & HAX_KIND_GUI) {
+            /* 并发窗口应用（hax_win_open，如 wdemo）必须走非阻塞 spawn：
+             * 它靠合成器主循环持续跑帧才能把窗口内容合成到屏幕上，同步运行
+             * 会卡住调用者、窗口画面永远显示不出来。
+             * 其余应用（纯控制台或独占画布风格，即使声明了 HAX_KIND_GUI，
+             * 如 guess/paint）同步运行：异步启动会让它们在后台永久存活、
+             * 和调用者抢键盘轮询——guess 这类纯 stdio 应用曾因此在退出 GUI
+             * 后引发内核 panic。 */
+            if ((he->kind & HAX_KIND_GUI) && (he->kind & HAX_KIND_GUI_WIN)) {
                 int pid = hax_app_spawn(argv[1], argc - 1, argv + 1);
                 if (pid < 0) console_puts("run: cannot load .hax app\n");
                 else console_puts("run: 已启动 GUI 应用\n");

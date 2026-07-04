@@ -99,6 +99,7 @@ void kmain(void *mbi) {
     // IDT（中断描述符表）: 32 个 CPU 异常 + 16 个 IRQ + int 0x80 系统调用
     // PIC 重映射: IRQ0-15 → INT 32-47
     gdt_idt_init();
+    fpu_enable();   // 打开 SSE/SSE2（tcc.hax 自身需要真正的硬件浮点，见 cpu.h）
     pit_init(100);
     acpi_init(mbi);  // ACPI 解析（用于关机支持的 S5 睡眠状态 + MADT CPU 检测）
     smp_init();     // SMP 多核初始化（启动 AP）
@@ -118,6 +119,20 @@ void kmain(void *mbi) {
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     vmm_init(cr3);
 
+    // framebuffer 目前沿用 boot.asm 建立的纯 WB 恒等映射（graphics_init 在
+    // vmm_init 之前就跑了，见上面 Phase 1）。真实硬件上这会导致画面更新
+    // 依赖 CPU 缓存的不定期回写，出现数秒延迟；QEMU 等虚拟化环境通常不
+    // 暴露这个问题。这里把它改成 write-combining：先重新编程 PAT，再对
+    // framebuffer 覆盖的物理范围单独设置 WC（必要时拆分 boot.asm 的 2MB
+    // 大页，不影响同一 2MB 区域内其余无关内存的属性）。
+    pat_init();
+    fb_info_t fbi;
+    if (fb_get_info(&fbi) == 0 && fbi.addr) {
+        uint64_t fb_phys = (uint64_t)(uintptr_t)fbi.addr;
+        uint64_t fb_size = (uint64_t)fbi.pitch * fbi.height;
+        vmm_set_range_wc(fb_phys, fb_size);
+    }
+
     // ---- Phase 5: 内核堆 ----
     // 简单的 bump 分配器，128KB 静态池，用于 kmalloc/kfree
     heap_init();
@@ -130,6 +145,9 @@ void kmain(void *mbi) {
     task_init();
     net_init();
     selftest_run();
+
+    extern void tcc_runtime_seed_init(void);
+    tcc_runtime_seed_init();
 
     // ---- Phase 6: Shell ----
     // 注册所有内置命令（help, ls, cat, echo 等）

@@ -286,3 +286,70 @@ void *vmm_map_mmio(uint64_t phys_addr, size_t size) {
 uint64_t vmm_virt_to_phys(uint64_t virt_addr) {
     return vmm_get_phys(virt_addr);
 }
+
+/**
+ * 将覆盖 virt_2mb_aligned（必须 2MB 对齐）的 boot.asm 大页拆分成 512 个
+ * 4KB 页表条目，保持原有的物理地址映射和访问标志不变（只是粒度变细）。
+ * 拆分后调用者可以对其中某几个 4KB 条目单独设置不同的缓存属性，而不影响
+ * 同一 2MB 区域内其余、与目标范围无关的物理内存。
+ * @return 0 成功，-1 失败（不是大页，或分配新页表失败）
+ */
+static int vmm_split_large_page(uint64_t virt_2mb_aligned) {
+    if (!g_pml4) return -1;
+
+    pte_t *pml4e = &g_pml4[VMM_IDX(virt_2mb_aligned, VMM_PML4)];
+    if (!(*pml4e & VMM_P)) return -1;
+    pte_t *pdpt = (pte_t *)(uintptr_t)(*pml4e & ~0xFFFULL);
+
+    pte_t *pdpte = &pdpt[VMM_IDX(virt_2mb_aligned, VMM_PDPT)];
+    if (!(*pdpte & VMM_P)) return -1;
+    pte_t *pd = (pte_t *)(uintptr_t)(*pdpte & ~0xFFFULL);
+
+    pte_t *pde = &pd[VMM_IDX(virt_2mb_aligned, VMM_PD)];
+    if (!(*pde & VMM_P) || !(*pde & VMM_PS)) return -1; // 不存在，或已经不是大页
+
+    uint64_t large_phys_base = *pde & ~((1ULL << 21) - 1);
+    uint64_t flags = *pde & 0xFFFULL & ~(uint64_t)VMM_PS;
+
+    uint64_t new_pt_phys = pmm_alloc_page();
+    if (!new_pt_phys) return -1;
+    pte_t *new_pt = (pte_t *)(uintptr_t)new_pt_phys;
+    for (int i = 0; i < PT_ENTRIES; i++) {
+        new_pt[i] = (large_phys_base + (uint64_t)i * PAGE_SIZE) | flags;
+    }
+
+    *pde = new_pt_phys | (flags & (VMM_W | VMM_U)) | VMM_P;
+    vmm_flush_tlb();
+    return 0;
+}
+
+int vmm_set_range_wc(uint64_t phys_addr, uint64_t size) {
+    if (!g_pml4 || size == 0) return -1;
+
+    uint64_t start = phys_addr & ~(PAGE_SIZE - 1);
+    uint64_t end = (phys_addr + size + PAGE_SIZE - 1) & ~((uint64_t)PAGE_SIZE - 1);
+
+    // 先把范围内涉及到的每个 2MB 大页都拆分成 4KB 页
+    const uint64_t LARGE_PAGE_SIZE = 1ULL << 21;
+    for (uint64_t va = start & ~(LARGE_PAGE_SIZE - 1); va < end; va += LARGE_PAGE_SIZE) {
+        pte_t *pml4e = &g_pml4[VMM_IDX(va, VMM_PML4)];
+        if (!(*pml4e & VMM_P)) continue;
+        pte_t *pdpt = (pte_t *)(uintptr_t)(*pml4e & ~0xFFFULL);
+        pte_t *pdpte = &pdpt[VMM_IDX(va, VMM_PDPT)];
+        if (!(*pdpte & VMM_P)) continue;
+        pte_t *pd = (pte_t *)(uintptr_t)(*pdpte & ~0xFFFULL);
+        pte_t *pde = &pd[VMM_IDX(va, VMM_PD)];
+        if ((*pde & VMM_P) && (*pde & VMM_PS)) {
+            if (vmm_split_large_page(va) != 0) return -1;
+        }
+    }
+
+    // 现在范围内全部是 4KB 粒度了，逐页设置 WC，清除 CD
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        pte_t *pte = vmm_get_pte(va, false, 0);
+        if (!pte) return -1;
+        *pte = (*pte & ~(uint64_t)VMM_CD) | VMM_WC;
+    }
+    vmm_flush_tlb();
+    return 0;
+}

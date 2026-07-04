@@ -3,6 +3,14 @@
 #include "core/heap.h"
 #include "string.h"
 
+extern void console_puts(const char *s);
+extern void console_putchar(char c);
+static void hid_dbg_hex8(uint8_t v) {
+    static const char hex[] = "0123456789ABCDEF";
+    console_putchar(hex[(v >> 4) & 0xF]);
+    console_putchar(hex[v & 0xF]);
+}
+
 static hid_device_t hid_devices[HID_MAX_DEVICES];
 static int hid_count;
 static hid_kbd_report_t last_report;
@@ -119,20 +127,44 @@ static int hid_probe_config(int dev_idx) {
 
         if (dtype == 4 && len >= 9) {
             uint8_t if_class = buf[off + 5];
+            uint8_t if_subclass = buf[off + 6];
             uint8_t if_protocol = buf[off + 7];
             current_if = buf[off + 2];
             current_type = 0;
+            if (if_class == 0x03) {
+                console_puts("[HID] interface class=03 subclass=");
+                hid_dbg_hex8(if_subclass);
+                console_puts(" protocol=");
+                hid_dbg_hex8(if_protocol);
+                console_puts("\n");
+            }
             if (if_class == 0x03 && if_protocol == 1) current_type = HID_KEYBOARD;
             else if (if_class == 0x03 && if_protocol == 2) current_type = HID_MOUSE;
+            /* Real mice frequently leave bInterfaceProtocol at 0 ("none" —
+             * no boot-protocol support declared, since they use a custom
+             * report format for extra buttons/DPI switches etc.) even
+             * though they still honor a SET_PROTOCOL(boot) request and send
+             * boot-compatible reports as a practical legacy/BIOS-compat
+             * fallback — this is how real BIOS/UEFI USB mouse support gets
+             * away without ever parsing a HID Report Descriptor either.
+             * QEMU's emulated usb-mouse always cleanly declares protocol 2,
+             * which is why this gap never showed up before real hardware.
+             * Keyboards essentially always declare protocol 1 (near-
+             * universal BIOS legacy-keyboard requirement), so biasing an
+             * undeclared HID interface toward "mouse" is the safer guess. */
+            else if (if_class == 0x03 && if_protocol == 0) current_type = HID_MOUSE;
         } else if (dtype == 5 && len >= 7 && current_type) {
             uint8_t ep_addr = buf[off + 2];
             uint8_t attrs = buf[off + 3] & 0x03;
             if ((ep_addr & 0x80) && attrs == 0x03) {
                 uint16_t max_packet = rd16(buf + off + 4) & 0x07FF;
                 uint8_t interval = buf[off + 6];
-                added += hid_add_device(current_type, slot, current_if,
+                int ok = hid_add_device(current_type, slot, current_if,
                                         ep_addr, max_packet, interval);
+                added += ok;
                 hid_set_boot_protocol(slot, current_if);
+                console_puts(ok ? "[HID] registered as " : "[HID] add failed, wanted ");
+                console_puts(current_type == HID_MOUSE ? "mouse\n" : "keyboard\n");
                 current_type = 0;
             }
         }

@@ -5337,8 +5337,26 @@ static void sm_launch(gui_state_t *st, const sm_entry_t *e) {
         const hax_app_entry_t *he = gui_hax_at(e->mode);
         if (he) {
             char *av[1]; av[0] = (char *)he->name;
-            hax_app_spawn(he->name, 1, av);
-            gui_toast(st, "启动 ", he->name);
+            if (he->kind & HAX_KIND_GUI_WIN) {
+                /* 并发窗口应用（hax_win_open，如 wdemo）：必须非阻塞启动。
+                 * 它靠合成器主循环持续跑帧才能把窗口内容合成到屏幕上，同步
+                 * 等待会卡住本函数所在的合成器任务，窗口画面永远显示不出来。 */
+                hax_app_spawn(he->name, 1, av);
+                gui_toast(st, "已启动 ", he->name);
+            } else {
+                /* 其余应用（纯控制台或独占画布风格，即使声明了 HAX_KIND_GUI，
+                 * 如 guess/paint）：同步等待退出，而非 fire-and-forget 的
+                 * hax_app_spawn。纯控制台风格的 .hax 应用用 read(stdin) 直接
+                 * 轮询键盘，若与合成器自身的按键轮询并发运行，两者会争抢同一份
+                 * 全局键盘状态机（kb_poll_key 里的 shift/ctrl/ext_scancode
+                 * 静态状态）。之前用异步 spawn 时，用户按 Esc 只会退出 GUI 主
+                 * 循环本身（该按键从未被送到那个后台任务），应用则继续在后台
+                 * 无限期存活、持续和 TUI 抢键盘，造成状态错乱甚至崩溃。改为
+                 * 同步执行可保证本函数返回时应用已确实终止，不会残留后台任务。 */
+                hax_app_run(he->name, 1, av);
+                gui_dirty_mark_full();
+                gui_toast(st, "已退出 ", he->name);
+            }
         }
     }
 }

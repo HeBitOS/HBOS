@@ -30,6 +30,7 @@
 
 #include "task.h"
 #include "vmm.h"
+#include "cpu.h"
 #include "../smp.h"
 
 static void task_sig_deliver(task_t *task);
@@ -42,7 +43,7 @@ static void task_sig_deliver(task_t *task);
 // ============================================================
 
 /** 上下文切换: 保存当前 RSP，加载下一个 RSP */
-extern void task_switch(uint64_t *prev_rsp, uint64_t *next_rsp);
+extern void task_switch(uint64_t *prev_rsp, uint64_t *next_rsp, void *prev_fpu, void *next_fpu);
 
 /** 新任务入口蹦床: pop arg → pop entry → call entry(arg) → task_exit() */
 extern void task_entry_trampoline(void);
@@ -69,6 +70,24 @@ static uint32_t next_id = 0;                 /**< 下一个任务 ID */
 /** 预分配的栈空间: 16 个任务 × 8KB = 128KB */
 static char task_stacks[MAX_TASKS][TASK_STACK_SIZE]
     __attribute__((aligned(16)));
+
+/** 每任务 FXSAVE/FXRSTOR 区域: 16 个任务 × 512 字节，16 字节对齐（FXSAVE 硬性要求）。 */
+static uint8_t task_fpu_state[MAX_TASKS][512]
+    __attribute__((aligned(16)));
+
+/**
+ * 将一块 FXSAVE 区域初始化为 CPU 复位后的默认状态（FCW=0x037F,
+ * MXCSR=0x1F80，其余全零）。新任务从未运行过，没有"当前"FPU 状态可保存，
+ * 所以第一次 FXRSTOR 到它时需要一个合法的初始镜像——尤其 MXCSR 不能是 0
+ * （那样会解除所有 SIMD 异常屏蔽，导致本可静默产生 NaN/Inf 的运算改为
+ * 触发 #XM）。纯内存写入，不执行任何真实 FPU 指令，因此不会影响调用者
+ * （可能是任意其他任务）此刻的真实 FPU 寄存器状态。
+ */
+static void task_fpu_init(void *area) {
+    memset(area, 0, 512);
+    *(uint16_t *)((uint8_t *)area + 0)  = 0x037F; /* FCW */
+    *(uint32_t *)((uint8_t *)area + 24) = 0x1F80; /* MXCSR */
+}
 
 static uint64_t task_irq_save(void) {
     uint64_t rflags;
@@ -130,6 +149,8 @@ void task_init(void) {
     main_task->next = main_task;  // 循环链表（单元素）
     main_task->stack_base = (uint64_t)task_stacks[0];
     main_task->stack_size = TASK_STACK_SIZE;
+    main_task->fpu_state = task_fpu_state[0];
+    task_fpu_init(main_task->fpu_state);
     main_task->vm_areas = NULL;
     main_task->pml4_phys = vmm_get_pml4();
     main_task->user_heap_start = 0;
@@ -194,6 +215,8 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->child_id = 0;
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
+    tcb->fpu_state = task_fpu_state[idx];
+    task_fpu_init(tcb->fpu_state);
     tcb->vm_areas = NULL;
     tcb->pml4_phys = vmm_create_address_space();
     tcb->user_heap_start = 0;
@@ -276,6 +299,8 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     tcb->child_id = 0;
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
+    tcb->fpu_state = task_fpu_state[idx];
+    task_fpu_init(tcb->fpu_state);
     tcb->vm_areas = NULL;
     tcb->pml4_phys = pml4_phys ? pml4_phys : vmm_create_address_space();
     if (!tcb->pml4_phys) return -1;
@@ -352,10 +377,11 @@ void task_yield(void) {
     current_task = next;
 
     if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
+    tss_set_stack(next->stack_base + next->stack_size);
 
     task_sig_deliver(next);
 
-    task_switch(&prev->rsp, &next->rsp);
+    task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);
     smp_sched_unlock();
     task_irq_restore(irq_flags);
 }
@@ -381,7 +407,8 @@ void task_exit(void) {
         task_t *prev = current_task;
         current_task = next;
         if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
-        task_switch(&prev->rsp, &next->rsp);
+        tss_set_stack(next->stack_base + next->stack_size);
+        task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);
     }
     smp_sched_unlock();
 }
@@ -493,6 +520,8 @@ int task_fork(void) {
     child->child_id = 0;
     child->stack_base = (uint64_t)task_stacks[idx];
     child->stack_size = TASK_STACK_SIZE;
+    child->fpu_state = task_fpu_state[idx];
+    task_fpu_init(child->fpu_state);
     child->vm_areas = NULL;
 
     child->pml4_phys = current_task->pml4_phys ?
@@ -617,8 +646,9 @@ void task_schedule(void) {
     task_t *prev = current_task;
     current_task = next;
     if (next->pml4_phys) vmm_set_pml4(next->pml4_phys);
+    tss_set_stack(next->stack_base + next->stack_size);
     task_sig_deliver(next);
-    task_switch(&prev->rsp, &next->rsp);
+    task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);
     smp_sched_unlock();
     task_irq_restore(irq_flags);
 }

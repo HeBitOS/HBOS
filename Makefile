@@ -116,7 +116,7 @@ FONT_BIN = $(BUILD_DIR)/font_cjk.bin
 GUI_FONT_TTF = fonts/HarmonyOS_Sans_SC_Regular.ttf
 GUI_FONT_BIN = $(BUILD_DIR)/gui_font.bin
 # Desktop wallpaper. Swap GUI_WALL_IMG to change it; genwall.py decodes/resizes.
-GUI_WALL_IMG = photo/壁纸.jpg
+GUI_WALL_IMG = photo/wallpaper.jpg
 GUI_WALL_BIN = $(BUILD_DIR)/gui_wall.bin
 # Flat anti-aliased GUI icons. Designs live in tools/genicon.py.
 GUI_ICON_BIN = $(BUILD_DIR)/gui_icons.bin
@@ -181,11 +181,13 @@ C_SRCS = \
 	$(SRC_DIR)/tools/cc.c \
 	$(SRC_DIR)/tools/python.c \
 	$(SRC_DIR)/tools/cppe.c \
+	$(SRC_DIR)/tools/tcc_runtime_seed.c \
 	$(SRC_DIR)/gui/wm.c \
 	$(SRC_DIR)/gui/winsrv.c \
 	$(SRC_DIR)/gui/compositor.c \
 	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gui/gui_dirty.c \
+	$(SRC_DIR)/gui/rtc_tz.c \
 	$(SRC_DIR)/gui/gui_apps.c \
 	$(SRC_DIR)/gui/apps/app_calc.c \
 	$(SRC_DIR)/gui/apps/app_clock.c \
@@ -211,6 +213,7 @@ ASM_SRCS = \
 	$(SRC_DIR)/graphics/gui_glyph.asm \
 	$(SRC_DIR)/graphics/gui_wallimg.asm \
 	$(SRC_DIR)/graphics/gui_iconsimg.asm \
+	$(SRC_DIR)/user/tcc_runtime_blob.asm \
 	$(SRC_DIR)/smp_trampoline.asm
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
@@ -221,7 +224,7 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 HAX_APP_SRCS = $(wildcard app/*.c)
 HAX_APP_BINS = $(HAX_APP_SRCS:app/%.c=$(BUILD_DIR)/app/%.hax)
 HAX_PREBUILT = $(wildcard app/*.hax)
-HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT)
+HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax $(BUSYBOX_HAX)
 HAX_BLOB     = $(BUILD_DIR)/hax_blob.bin
 HAX_MANIFEST = $(BUILD_DIR)/hax_manifest.c
 HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
@@ -307,6 +310,10 @@ $(BUILD_DIR)/graphics/cjk_glyph.o: $(FONT_BIN)
 $(BUILD_DIR)/graphics/gui_glyph.o: $(GUI_FONT_BIN)
 $(BUILD_DIR)/graphics/gui_wallimg.o: $(GUI_WALL_BIN)
 $(BUILD_DIR)/graphics/gui_iconsimg.o: $(GUI_ICON_BIN)
+
+$(BUILD_DIR)/user/tcc_runtime_blob.o: $(SRC_DIR)/user/tcc_runtime_blob.asm $(BUILD_DIR)/tcc/hbos_runtime.o | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
 
 # C rules — one generic rule for all subdirectories
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
@@ -597,9 +604,15 @@ USER_LIBC_SRCS = \
 	$(USER_LIBC_DIR)/socket.c \
 	$(USER_LIBC_DIR)/dlfcn.c \
 	$(USER_LIBC_DIR)/dirent.c \
-	$(USER_LIBC_DIR)/unistd.c
+	$(USER_LIBC_DIR)/unistd.c \
+	$(USER_LIBC_DIR)/errno.c \
+	$(USER_LIBC_DIR)/fcntl.c \
+	$(USER_LIBC_DIR)/time.c \
+	$(USER_LIBC_DIR)/stat.c \
+	$(USER_LIBC_DIR)/wait.c \
+	$(USER_LIBC_DIR)/getopt.c
 
-USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o) $(BUILD_DIR)/user/libc/setjmp.o
 
 USER_PROG_SRCS = $(wildcard $(USER_PROG_DIR)/*.c)
 USER_PROG_BINS = $(USER_PROG_SRCS:$(USER_PROG_DIR)/%.c=$(USER_BUILD_DIR)/%.elf)
@@ -607,6 +620,10 @@ USER_PROG_BINS = $(USER_PROG_SRCS:$(USER_PROG_DIR)/%.c=$(USER_BUILD_DIR)/%.elf)
 $(BUILD_DIR)/user/libc/%.o: $(SRC_DIR)/user/libc/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(USER_CFLAGS) $< -o $@
+
+$(BUILD_DIR)/user/libc/setjmp.o: $(SRC_DIR)/user/libc/setjmp.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
 
 $(USER_BUILD_DIR)/%.elf: $(USER_PROG_DIR)/%.c $(USER_LIBC_OBJS) | $(BUILD_DIR)
 	@mkdir -p $(@D) $(BUILD_DIR)/user/progs
@@ -631,6 +648,72 @@ $(BUILD_DIR)/app/%.hax: app/%.c $(USER_LIBC_OBJS) | $(BUILD_DIR)
 	$(CC) -c $(HAX_CFLAGS) $< -o $(BUILD_DIR)/app/$*.o
 	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/app/$*.o -o $@
 	@echo "✓ hax app: $@"
+
+# ── TinyCC (vendored third_party/tinycc) — see that dir's README.md ────
+# Builds as a single translation unit (tcc.c #includes everything else,
+# TinyCC's own default "ONE_SOURCE" unity build) using HBOS's normal user
+# libc/crt0/user.ld, exactly like any other single-file .hax app — except
+# it needs real SSE2 (own float constant folding) instead of the
+# -mno-{80387,mmx,sse,sse2} every other .hax app builds with. See
+# third_party/tinycc/README.md for why, and the known FPU-context-switch
+# risk that trade-off carries.
+TCC_DIR = third_party/tinycc
+TCC_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+             -mno-red-zone -O2 -Wall -MMD -MP \
+             -I$(SRC_DIR)/user/libc -I$(SRC_DIR)/user -I$(TCC_DIR)
+
+# tcc.c #includes everything else in $(TCC_DIR) as one unity-build translation
+# unit (see third_party/tinycc/README.md) — -MMD/-MP (like the kernel's own
+# C_SRCS) tracks that whole chain so editing e.g. tccelf.c or libtcc.c
+# correctly forces a rebuild, not just editing tcc.c itself.
+-include $(BUILD_DIR)/app/tcc.d
+
+$(BUILD_DIR)/app/tcc.hax: $(TCC_DIR)/tcc.c $(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(TCC_CFLAGS) $< -o $(BUILD_DIR)/app/tcc.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/app/tcc.o -o $@
+	@echo "✓ hax app: $@ (tcc)"
+
+# TinyCC-compiled user programs link against this (crt0 + all of HBOS's own
+# libc, combined into one relocatable object) — see tcc.c's HBOS patch
+# ("auto-link our own crt0+libc runtime bundle") and
+# src/tools/tcc_runtime_seed.c (writes it into ramfs at boot).
+$(BUILD_DIR)/tcc/hbos_runtime.o: $(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(LD) -r $(USER_LIBC_OBJS) -o $@
+
+# ── Vendored BusyBox applets (third_party/busybox) — see that dir's
+# README.md. Each applet is its own standalone .hax (one main() shim
+# `#include`-ing the mostly-unmodified upstream applet .c file), not a
+# multi-call binary — see README.md "Why one .hax per applet". Unlike tcc.c,
+# these need no SSE2, so they build with the normal HAX_CFLAGS-equivalent
+# flags (-mno-80387/mmx/sse/sse2), just with third_party/busybox on the
+# include path instead of app/include.
+BUSYBOX_DIR = third_party/busybox
+BUSYBOX_CFLAGS = $(USER_CFLAGS) -MMD -MP -I$(BUSYBOX_DIR)
+BUSYBOX_APPLETS = true false echo pwd mkdir wc head cat
+
+-include $(BUSYBOX_APPLETS:%=$(BUILD_DIR)/app/%.d)
+-include $(BUILD_DIR)/busybox/libbb_shim.d
+
+# Small hand-written libbb.h helper implementations (libbb_shim.c) — linked
+# into every applet; unused symbols just go unreferenced (same reasoning as
+# linking the full USER_LIBC_OBJS into every plain .hax app regardless of
+# what each one actually calls).
+$(BUILD_DIR)/busybox/libbb_shim.o: $(BUSYBOX_DIR)/libbb_shim.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(BUSYBOX_CFLAGS) $< -o $@
+
+define BUSYBOX_APPLET_RULE
+$(BUILD_DIR)/app/$(1).hax: $(BUSYBOX_DIR)/entry_$(1).c $(USER_LIBC_OBJS) $(BUILD_DIR)/busybox/libbb_shim.o | $$(BUILD_DIR)
+	@mkdir -p $$(@D)
+	$$(CC) -c $$(BUSYBOX_CFLAGS) $$< -o $(BUILD_DIR)/app/$(1).o
+	$$(LD) $$(USER_LDFLAGS) $$(USER_LIBC_OBJS) $(BUILD_DIR)/busybox/libbb_shim.o $(BUILD_DIR)/app/$(1).o -o $$@
+	@echo "✓ hax app: $$@ (busybox $(1))"
+endef
+$(foreach applet,$(BUSYBOX_APPLETS),$(eval $(call BUSYBOX_APPLET_RULE,$(applet))))
+
+BUSYBOX_HAX = $(BUSYBOX_APPLETS:%=$(BUILD_DIR)/app/%.hax)
 
 # 生成清单与 blob（grouped target：一次调用产出两者，GNU Make >= 4.3）
 $(HAX_BLOB) $(HAX_MANIFEST) &: $(HAX_ALL_BINS) tools/genhax.py | $(BUILD_DIR)

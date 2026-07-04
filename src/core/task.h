@@ -38,6 +38,11 @@ typedef struct task {
     // Saved stack pointer (RSP) — when task yields
     uint64_t rsp;
 
+    // FXSAVE/FXRSTOR area (512 bytes, 16-byte aligned) — x87/MMX/SSE state,
+    // saved/restored on every task_switch(). Points into task_fpu_state[]
+    // (task.c), sized/initialized at task creation.
+    void *fpu_state;
+
     // Task's dedicated stack
     uint64_t stack_base;
     uint64_t stack_size;

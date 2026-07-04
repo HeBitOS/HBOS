@@ -303,6 +303,12 @@ void isr_handler(isr_regs_t *regs) {
 // ============================================================
 // irq_handler — called from assembly common stub
 // ============================================================
+static volatile uint64_t g_pit_ticks = 0;
+
+uint64_t pit_get_ticks(void) {
+    return g_pit_ticks;
+}
+
 void irq_handler(isr_regs_t *regs) {
     uint8_t irq = (uint8_t)(regs->int_no - IRQ_BASE);
 
@@ -313,6 +319,7 @@ void irq_handler(isr_regs_t *regs) {
 
     if (irq == 0) {
         pic_send_eoi(0);
+        g_pit_ticks++;
         extern void task_schedule(void);
         task_schedule();
         return;

@@ -1,12 +1,16 @@
 ; ============================================================
 ; HBOS Context Switch — assembly primitive
 ; ============================================================
-; void task_switch(uint64_t *prev_rsp, uint64_t *next_rsp);
+; void task_switch(uint64_t *prev_rsp, uint64_t *next_rsp,
+;                   void *prev_fpu, void *next_fpu);
 ;   rdi = address of current task's rsp field (save here)
 ;   rsi = address of next task's rsp field (restore from here)
+;   rdx = current task's 512-byte FXSAVE area (16-byte aligned)
+;   rcx = next task's 512-byte FXSAVE area (16-byte aligned)
 ;
 ; Saves all callee-saved registers (RBP, RBX, R12-R15) and RSP,
-; then loads the next task's RSP and restores its registers.
+; plus x87/MMX/SSE state (FXSAVE/FXRSTOR), then loads the next
+; task's RSP/FPU state and restores its registers.
 ; Returns to wherever the next task was when it yielded.
 ; ============================================================
 
@@ -20,6 +24,11 @@ section .text
 bits 64
 
 task_switch:
+    ; rdx/rcx (prev_fpu/next_fpu) don't survive the stack juggling below
+    ; unscathed in spirit, but they're never touched by push/pop/mov here,
+    ; so it's safe to use them directly before and after the RSP swap.
+    fxsave [rdx]         ; Save current task's x87/MMX/SSE state
+
     ; Save callee-saved registers + RFLAGS onto current task's stack
     pushfq              ; Save RFLAGS (IF state)
     push rbp
@@ -43,6 +52,8 @@ task_switch:
     pop rbx
     pop rbp
     popfq               ; Restore RFLAGS (restores IF)
+
+    fxrstor [rcx]        ; Restore next task's x87/MMX/SSE state
 
     ; Return to where next task yielded (return address on its stack)
     ret

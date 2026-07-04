@@ -8,6 +8,7 @@
 #include "string.h"
 #include "core/vmm.h"
 #include "core/heap.h"
+#include "gui/rtc_tz.h"
 
 /** @brief PCI 设备类型：网络控制器 */
 #define PCI_CLASS_NETWORK      0x02
@@ -1319,6 +1320,76 @@ int net_dns_resolve(const char *name, uint32_t *out_ip) {
         }
     }
     set_error("dns timeout");
+    return -1;
+}
+
+/** @brief NTP 服务端口号（RFC 5905） */
+#define NTP_PORT 123
+/** @brief NTP 时间戳纪元 (1900-01-01) 到 Unix 纪元 (1970-01-01) 的秒数差 */
+#define NTP_UNIX_EPOCH_DELTA 2208988800ULL
+
+/** @brief NTP 应答等待上下文 */
+typedef struct { uint16_t sport; uint64_t unix_sec; int found; } ntp_wait_t;
+
+/**
+ * @brief NTP 应答接收回调，从 Transmit Timestamp 字段提取服务器时间
+ * @return 1 收到匹配的应答，0 继续轮询
+ */
+static int ntp_cb(const uint8_t *pkt, uint16_t len, void *arg) {
+    ntp_wait_t *w = arg;
+    if (len < sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(udp_hdr_t) + 48) return 0;
+    const eth_hdr_t *eth = (const eth_hdr_t *)pkt;
+    if (ntohs(eth->type) != ETH_TYPE_IP) return 0;
+    const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(pkt + sizeof(eth_hdr_t));
+    if (ip->proto != IP_PROTO_UDP || ip->dst != primary.ip) return 0;
+    const udp_hdr_t *udp = (const udp_hdr_t *)((const uint8_t *)ip + ((ip->ver_ihl & 0x0F) * 4));
+    if (ntohs(udp->dst) != w->sport) return 0;
+    uint16_t ulen = ntohs(udp->len);
+    if (ulen < sizeof(udp_hdr_t) + 48) return 0;
+    const uint8_t *ntp = (const uint8_t *)udp + sizeof(udp_hdr_t);
+    int mode = ntp[0] & 0x07;
+    if (mode != 4 && mode != 5) return 0;   /* 4=server, 5=broadcast（宽松接受） */
+    uint32_t tx_sec = ntohl(*(const uint32_t *)(ntp + 40));
+    if (tx_sec < (uint32_t)NTP_UNIX_EPOCH_DELTA) return 0;   /* 应答里没给出合理时间戳 */
+    w->unix_sec = (uint64_t)tx_sec - NTP_UNIX_EPOCH_DELTA;
+    w->found = 1;
+    return 1;
+}
+
+/**
+ * @brief 通过 NTP 协议向服务器同步时间
+ * @param server 服务器域名或点分 IP（如 "pool.ntp.org" 或 "132.163.96.1"）
+ * @return 0 成功（已更新 g_rtc_ntp_correction_sec），-1 失败
+ */
+int net_ntp_sync(const char *server) {
+    if (!server || !*server) {
+        set_error("bad ntp server");
+        return -1;
+    }
+    uint32_t ntp_server;
+    if (net_dns_resolve(server, &ntp_server) < 0) return -1;
+    uint8_t mac[6];
+    uint32_t next_hop;
+    if (net_route_next_hop(ntp_server, &next_hop) < 0) return -1;
+    if (arp_resolve(next_hop, mac) < 0) return -1;
+
+    uint8_t req[48];
+    memset(req, 0, sizeof(req));
+    req[0] = (0 << 6) | (4 << 3) | 3;   /* LI=0, VN=4, Mode=3 (client) */
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (next_port < 49152) next_port = 49152;
+        uint16_t sport = next_port++;
+        ntp_wait_t w = {sport, 0, 0};
+        send_udp_raw(mac, primary.ip, ntp_server, sport, NTP_PORT, req, sizeof(req));
+        for (int i = 0; i < 8 && !w.found; i++) net_poll(ntp_cb, &w, 80000);
+        if (w.found) {
+            int64_t cmos_epoch = rtc_tz_cmos_epoch_now();
+            g_rtc_ntp_correction_sec = (long long)w.unix_sec - cmos_epoch;
+            return 0;
+        }
+    }
+    set_error("ntp timeout");
     return -1;
 }
 

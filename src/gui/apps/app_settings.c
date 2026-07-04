@@ -3,6 +3,8 @@
 #include "../../graphics/gui_font.h"
 #include "../../string.h"
 #include "../../version.h"
+#include "../../net.h"
+#include "../rtc_tz.h"
 
 /* ── small button helper ─────────────────────────────────── */
 #define SB_W  80
@@ -68,6 +70,26 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
             st->taskbar_show_seconds ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
     y += SB_H + 6;
     gui_text(x, y, "关闭后任务栏时钟只显示时:分，不显示秒", gui_rgb(120, 140, 160), 1);
+    y += 16 + 8;
+
+    /* ── 时区与网络时间 ── */
+    section(x, y, "时区与网络时间");
+    y += 20;
+    {
+        char tzline[24]; uint32_t tpos = 0; tzline[0] = 0;
+        gui_append_str(tzline, sizeof(tzline), &tpos, "当前时区: UTC");
+        if (g_rtc_tz_offset_hours >= 0) gui_append_str(tzline, sizeof(tzline), &tpos, "+");
+        gui_append_int(tzline, sizeof(tzline), &tpos, g_rtc_tz_offset_hours);
+        gui_text(x, y + 8, tzline, gui_rgb(200, 215, 230), 1);
+    }
+    y += 26;
+    draw_sb(x,      y, 40, "-", gui_rgb(38, 50, 64));
+    draw_sb(x + 48, y, 40, "+", gui_rgb(38, 50, 64));
+    draw_sb(x + 96, y, SB_W + 30, "NTP 同步", gui_rgb(61, 174, 233));
+    y += SB_H + 6;
+    gui_text(x, y, "QEMU 的 CMOS 时钟通常是 UTC；VMware 可能已写入本地时间，", gui_rgb(120, 140, 160), 1);
+    y += 16;
+    gui_text(x, y, "时钟不对时可在此调整时区，或点 NTP 同步网络时间校准。", gui_rgb(120, 140, 160), 1);
     y += 16 + 8;
 
     /* ── 系统信息 ── */
@@ -145,6 +167,26 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
     if (mx >= x && mx < x + SB_W + 30 && my >= y && my < y + SB_H) {
         st->taskbar_show_seconds = !st->taskbar_show_seconds;
         st->status = st->taskbar_show_seconds ? "任务栏时钟已显示秒数" : "任务栏时钟已隐藏秒数";
+        return 1;
+    }
+    y += SB_H + 30;
+
+    /* timezone / NTP row */
+    y += 20 + 26;
+    if (mx >= x && mx < x + 40 && my >= y && my < y + SB_H) {
+        if (g_rtc_tz_offset_hours > -12) g_rtc_tz_offset_hours--;
+        st->status = "时区已调整";
+        return 1;
+    }
+    if (mx >= x + 48 && mx < x + 88 && my >= y && my < y + SB_H) {
+        if (g_rtc_tz_offset_hours < 14) g_rtc_tz_offset_hours++;
+        st->status = "时区已调整";
+        return 1;
+    }
+    if (mx >= x + 96 && mx < x + 96 + SB_W + 30 && my >= y && my < y + SB_H) {
+        st->status = "正在同步 NTP...";
+        if (net_ntp_sync("pool.ntp.org") == 0) st->status = "NTP 同步成功";
+        else st->status = "NTP 同步失败（检查网络）";
         return 1;
     }
     return 0;

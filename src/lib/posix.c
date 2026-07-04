@@ -159,7 +159,12 @@ ssize_t read(int fd, void *buf, size_t count) {
         while (i < count) {
             int key = kb_get_key();
             if (key < 0 || key > 0xff) continue;
+            if (key == '\b') {
+                if (i > 0) { i--; console_putchar('\b'); console_putchar(' '); console_putchar('\b'); }
+                continue;
+            }
             out[i++] = (char)key;
+            console_putchar((char)key);
             if (key == '\n') break;
         }
         return (ssize_t)i;

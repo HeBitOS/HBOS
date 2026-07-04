@@ -38,7 +38,7 @@ def cover_resize(im, tw, th):
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else 'photo/壁纸.jpg'
+    src = sys.argv[1] if len(sys.argv) > 1 else 'photo/wallpaper.jpg'
     out = sys.argv[2] if len(sys.argv) > 2 else 'build/gui_wall.bin'
 
     print(f"[genwall] Loading {src}")

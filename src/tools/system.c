@@ -9,6 +9,7 @@
 #include "../input/mouse.h"
 #include "../shell/shell.h"
 #include "../net.h"
+#include "../smp.h"
 #include "../string.h"
 #include "../unistd.h"
 #include "../usb_hid.h"
@@ -44,14 +45,14 @@ static void cmd_credits(int argc, char **argv) {
     (void)argc; (void)argv;
     console_puts("\n\x1b[33mHBOS Credits\x1b[0m\n");
     PUTS_CN("\x1b[33m致谢\x1b[0m\n");
-    console_puts("  \x1b[36mlinpinf\x1b[0m           -- Main developer");
-    PUTS_CN(" / 主要开发者");
+    console_puts("  \x1b[36mlinpinf\x1b[0m           -- low-level OS development");
+    PUTS_CN(" / 系统底层开发");
     console_putchar('\n');
-    console_puts("  \x1b[36mPCJKL(aaamemz)\x1b[0m    -- Video demonstration");
-    PUTS_CN(" / 视频演示");
+    console_puts("  \x1b[36mPCJKL\x1b[0m            -- Application development & promote");
+    PUTS_CN(" / 应用程序开发与宣传");
     console_putchar('\n');
-    console_puts("  \x1b[36mNuclear weapons\x1b[0m   -- Team members");
-    PUTS_CN(" / 团队成员");
+    console_puts("  \x1b[36mNuclear weapons\x1b[0m   -- Debug & idea provision");
+    PUTS_CN(" / 调试与灵感提供");
     console_putchar('\n');
     console_puts("  \x1b[36mCommunity members\x1b[0m -- Testing & feedback");
     PUTS_CN(" / 测试与反馈");
@@ -96,15 +97,6 @@ static void cmd_version(int argc, char **argv) {
     console_puts("64-bit x86_64 Long Mode OS\n");
     console_puts("Boot: BIOS Multiboot2 / UEFI Limine\n");
     console_puts("Files: ramfs + HBFS disk backend\n");
-}
-
-static void cmd_neofetch(int argc, char **argv) {
-    (void)argc; (void)argv;
-    console_puts("   \x1b[36m/\\\\_/\\\\\x1b[0m      \x1b[1m\x1b[35mHBOS (HeBitOS) " HBOS_VERSION_NAME "\x1b[0m\n");
-    console_puts("  \x1b[36m( o.o )\x1b[0m     \x1b[32mKernel:\x1b[0m Coop-Multitasking\n");
-    console_puts("   \x1b[36m> ^ <\x1b[0m      \x1b[32mArch:\x1b[0m   x86_64\n");
-    console_puts("  \x1b[36m/     \\\\\x1b[0m     \x1b[32mUI:\x1b[0m     Cyberpunk TUI Console\n");
-    console_puts(" \x1b[36m|       |\x1b[0m    \x1b[32mStatus:\x1b[0m Online & Ready\n");
 }
 
 static void cmd_about(int argc, char **argv) {
@@ -170,6 +162,80 @@ static void print_hex16(uint16_t v) {
 
 static void print_ready(int ok) {
     console_puts(ok ? "\x1b[32mready\x1b[0m" : "\x1b[31mmissing\x1b[0m");
+}
+
+/* 两位数补零打印（用于 uptime 的 时:分:秒） */
+static void print_uint_pad2(uint32_t v) {
+    if (v < 10) console_putchar('0');
+    print_uint(v);
+}
+
+static inline void cpuid_raw(uint32_t leaf, uint32_t subleaf,
+                              uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
+    __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(subleaf));
+}
+
+/* 读取 CPU 品牌字符串（如 "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz"）；
+ * 老 CPU 不支持扩展 leaf 时（0x80000000 返回值 < 0x80000004）给占位符。 */
+static void cpu_brand_string(char *out, size_t cap) {
+    uint32_t a, b, c, d;
+    cpuid_raw(0x80000000, 0, &a, &b, &c, &d);
+    if (a < 0x80000004) {
+        strncpy(out, "Unknown x86_64 CPU", cap - 1);
+        out[cap - 1] = 0;
+        return;
+    }
+    uint32_t regs[12];
+    cpuid_raw(0x80000002, 0, &regs[0], &regs[1], &regs[2], &regs[3]);
+    cpuid_raw(0x80000003, 0, &regs[4], &regs[5], &regs[6], &regs[7]);
+    cpuid_raw(0x80000004, 0, &regs[8], &regs[9], &regs[10], &regs[11]);
+    char brand[49];
+    memcpy(brand, regs, 48);
+    brand[48] = 0;
+    const char *s = brand;
+    while (*s == ' ') s++;   /* 品牌字符串常有前导空格 */
+    strncpy(out, s, cap - 1);
+    out[cap - 1] = 0;
+}
+
+static void cmd_neofetch(int argc, char **argv) {
+    (void)argc; (void)argv;
+    char brand[64];
+    cpu_brand_string(brand, sizeof(brand));
+
+    uint64_t total = pmm_get_total_mem();
+    uint64_t free = pmm_get_free_mem();
+    uint64_t used_kb = (total > free ? total - free : 0) / 1024;
+    uint64_t total_kb = total / 1024;
+
+    extern uint64_t pit_get_ticks(void);
+    uint64_t up_sec = pit_get_ticks() / 100;   /* pit_init(100) — 100Hz */
+    uint32_t up_h = (uint32_t)(up_sec / 3600);
+    uint32_t up_m = (uint32_t)((up_sec / 60) % 60);
+    uint32_t up_s = (uint32_t)(up_sec % 60);
+
+    console_puts("   \x1b[36m/\\_/\\\x1b[0m      \x1b[1m\x1b[35mHBOS (HeBitOS) " HBOS_VERSION_NAME "\x1b[0m\n");
+    console_puts("  \x1b[36m( o.o )\x1b[0m     \x1b[32mKernel:\x1b[0m  Coop-Multitasking, PIT 100Hz\n");
+    console_puts("   \x1b[36m> ^ <\x1b[0m      \x1b[32mArch:\x1b[0m    x86_64\n");
+    console_puts("  \x1b[36m/     \\\x1b[0m     \x1b[32mCPU:\x1b[0m     ");
+    console_puts(brand);
+    console_puts(" ("); print_uint((uint32_t)smp_cpu_count()); console_puts(" core)\n");
+    console_puts(" \x1b[36m|       |\x1b[0m    \x1b[32mMemory:\x1b[0m  ");
+    print_uint64(used_kb); console_puts(" KiB / "); print_uint64(total_kb); console_puts(" KiB\n");
+    console_puts(" \x1b[36m\\       /\x1b[0m    \x1b[32mUptime:\x1b[0m  ");
+    print_uint((uint32_t)up_h); console_putchar(':');
+    print_uint_pad2(up_m); console_putchar(':');
+    print_uint_pad2(up_s); console_putchar('\n');
+    console_puts("              \x1b[32mTasks:\x1b[0m   ");
+    print_uint((uint32_t)task_get_count()); console_puts(" active\n\n");
+
+    console_puts("              ");
+    static const char *bg[8] = {"40","41","42","43","44","45","46","47"};
+    for (int i = 0; i < 8; i++) { console_puts("\x1b["); console_puts(bg[i]); console_puts("m  \x1b[0m"); }
+    console_puts("\n              ");
+    static const char *bgbright[8] = {"100","101","102","103","104","105","106","107"};
+    for (int i = 0; i < 8; i++) { console_puts("\x1b["); console_puts(bgbright[i]); console_puts("m  \x1b[0m"); }
+    console_putchar('\n');
 }
 
 static void cmd_status(int argc, char **argv) {

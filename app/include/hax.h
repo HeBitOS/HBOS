@@ -49,6 +49,10 @@ typedef uint32_t HCOLOR; /**< 0xRRGGBB 颜色 */
 #define HAX_KIND_TUI   1u   /**< 终端应用：在命令行 / GUI 终端窗口运行 */
 #define HAX_KIND_GUI   2u   /**< 图形应用：出现在桌面启动器，启动到窗口 */
 #define HAX_KIND_BOTH  3u   /**< 两种入口都注册 */
+/** 与 HAX_KIND_GUI 一起 OR：应用使用并发窗口 API（hax_win_open），需要合成器
+ *  主循环持续跑动才能显示，运行时会走非阻塞启动。纯控制台或独占画布
+ *  （hax_gui_*）风格的 GUI 应用不要加这个位——同步运行更安全。 */
+#define HAX_KIND_GUI_WIN 4u
 
 /** HAX 元数据魔数 'HAXM'（小端） */
 #define HAX_META_MAGIC 0x4D584148u

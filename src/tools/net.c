@@ -251,6 +251,20 @@ static void cmd_nslookup(int argc, char **argv) {
     cmd_dns(argc, argv);
 }
 
+static void cmd_ntp(int argc, char **argv) {
+    const char *server = argc >= 2 ? argv[1] : "pool.ntp.org";
+    console_puts("[ntp] syncing with ");
+    console_puts(server);
+    console_puts(" ...\n");
+    if (net_ntp_sync(server) < 0) {
+        console_puts("ntp: ");
+        console_puts(net_last_error());
+        console_putchar('\n');
+        return;
+    }
+    console_puts("ntp: synced ok\n");
+}
+
 static void cmd_nettest(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -737,6 +751,7 @@ void tool_net_init(void) {
         {"ping", CMD_GROUP_SYSTEM, "Send one ICMP echo request", "ping <ip|host>", cmd_ping},
         {"dns", CMD_GROUP_SYSTEM, "Resolve a host name", "dns <host>", cmd_dns},
         {"nslookup", CMD_GROUP_SYSTEM, "Resolve a host name", "nslookup <host>", cmd_nslookup},
+        {"ntp", CMD_GROUP_SYSTEM, "Sync clock via NTP", "ntp [server]", cmd_ntp},
         {"curl", CMD_GROUP_SYSTEM, "HTTP(S) GET/HEAD", "curl [-I] http[s]://host[:port]/path", cmd_curl},
         {"wget", CMD_GROUP_SYSTEM, "HTTP(S) GET and print/save body", "wget [-S] [-O file] http[s]://host[:port]/path [file]", cmd_wget},
         {"httpd", CMD_GROUP_SYSTEM, "Simple HTTP file server", "httpd [port]", cmd_httpd},

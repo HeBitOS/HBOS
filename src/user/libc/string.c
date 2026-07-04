@@ -79,6 +79,11 @@ char *strchr(const char *s, int c) {
         if (*s == (char)c) return (char *)s;
         s++;
     }
+    /* Standard strchr treats the string as strlen(s)+1 chars including the
+     * terminator, so strchr(s, 0) must return a pointer to that terminating
+     * NUL rather than NULL. TinyCC's tcc_basename() relies on exactly this
+     * (walks backward from strchr(name, 0) to find the last path separator). */
+    if ((char)c == 0) return (char *)s;
     return 0;
 }
 
@@ -88,7 +93,49 @@ char *strrchr(const char *s, int c) {
         if (*s == (char)c) last = s;
         s++;
     }
+    /* Same NUL-terminator case as strchr() above. */
+    if ((char)c == 0) return (char *)s;
     return (char *)last;
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    if (!*needle) return (char *)haystack;
+    for (; *haystack; haystack++) {
+        const char *h = haystack, *n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return (char *)haystack;
+    }
+    return 0;
+}
+
+char *strpbrk(const char *s, const char *accept) {
+    for (; *s; s++) {
+        for (const char *a = accept; *a; a++) {
+            if (*s == *a) return (char *)s;
+        }
+    }
+    return 0;
+}
+
+char *strerror(int errnum) {
+    switch (errnum) {
+        case 0:  return "Success";
+        case 1:  return "Operation not permitted";
+        case 2:  return "No such file or directory";
+        case 4:  return "Interrupted system call";
+        case 5:  return "Input/output error";
+        case 9:  return "Bad file descriptor";
+        case 11: return "Resource temporarily unavailable";
+        case 12: return "Cannot allocate memory";
+        case 13: return "Permission denied";
+        case 14: return "Bad address";
+        case 17: return "File exists";
+        case 20: return "Not a directory";
+        case 21: return "Is a directory";
+        case 22: return "Invalid argument";
+        case 28: return "No space left on device";
+        default: return "Unknown error";
+    }
 }
 
 char *strdup(const char *s) {

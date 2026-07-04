@@ -2,6 +2,8 @@
 #include "string.h"
 #include "stdlib.h"
 #include "syscall.h"
+#include "unistd.h"
+#include "errno.h"
 
 static FILE _stdin  = { .fd = 0, .buf_mode = 1, .buf_size = BUFSIZ };
 static FILE _stdout = { .fd = 1, .buf_mode = 1, .buf_size = BUFSIZ };
@@ -38,12 +40,31 @@ FILE *fopen(const char *path, const char *mode) {
         fd = (int)__syscall3(HBOS_SYS_OPEN, (long)path, O_WRONLY | O_CREAT, 0);
         if (fd >= 0) __syscall3(HBOS_SYS_LSEEK, fd, 0, SEEK_END);
     }
-    if (fd < 0) { _file_cnt--; return 0; }
+    if (fd < 0) { __syscall_errno(fd); _file_cnt--; return 0; }
     FILE *fp = &_file_pool[idx];
     memset(fp, 0, sizeof(*fp));
     fp->fd = fd; fp->buf_mode = 2; fp->buf_size = BUFSIZ;
     fp->buf = (uint8_t *)malloc(BUFSIZ);
     return fp;
+}
+
+/* Wraps an already-open fd (e.g. stdout's fd 1) in a FILE*, rather than
+ * open()ing a new one — used by TinyCC's `-MF -` ("write deps to stdout"). */
+FILE *fdopen(int fd, const char *mode) {
+    (void)mode;
+    if (fd < 0) return 0;
+    int idx = _alloc_fd();
+    if (idx < 0) return 0;
+    FILE *fp = &_file_pool[idx];
+    memset(fp, 0, sizeof(*fp));
+    fp->fd = fd; fp->buf_mode = 2; fp->buf_size = BUFSIZ;
+    fp->buf = (uint8_t *)malloc(BUFSIZ);
+    if (!fp->buf) { _file_cnt--; return 0; }
+    return fp;
+}
+
+int remove(const char *path) {
+    return unlink(path);
 }
 
 int fclose(FILE *fp) {
@@ -80,6 +101,21 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *fp) {
         if (avail > total) avail = total;
         memcpy(dst, fp->buf + fp->buf_pos, avail);
         fp->buf_pos += (long)avail; dst += avail; done += avail; total -= avail;
+    }
+
+    if (!fp->buf) {
+        /* 无缓冲流（stdin/stdout/stderr 的静态 FILE 实例从不分配 buf，只有
+         * fopen() 打开的文件才有）：直接走系统调用读取，镜像 fwrite() 里
+         * 已有的 !fp->buf 分支。少了这段时 total<=BUFSIZ 会一路落进下面
+         * `total > 0 && fp->buf` 分支，因 fp->buf 为空而被跳过，fread 永远
+         * 返回 0——fgetc(stdin) 于是总是立即报 EOF，从不真正读键盘。 */
+        if (total > 0) {
+            long n = __syscall3(HBOS_SYS_READ, fp->fd, (long)dst, (long)total);
+            if (n <= 0) fp->eof = (n == 0);
+            else done += (size_t)n;
+        }
+        fp->pos += (long)done;
+        return done / size;
     }
 
     if (total > BUFSIZ) {
@@ -139,7 +175,7 @@ int fseek(FILE *fp, long offset, int whence) {
     fflush(fp);
     long ret = __syscall3(HBOS_SYS_LSEEK, fp->fd, offset, whence);
     if (ret >= 0) { fp->pos = ret; fp->buf_pos = 0; fp->buf_len = 0; }
-    return ret < 0 ? -1 : 0;
+    return (int)__syscall_errno(ret);
 }
 
 long ftell(FILE *fp) {

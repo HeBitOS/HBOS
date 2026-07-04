@@ -28,14 +28,18 @@ extern FILE *stdout;
 extern FILE *stderr;
 
 FILE *fopen(const char *path, const char *mode);
+FILE *fdopen(int fd, const char *mode);
 int   fclose(FILE *fp);
+int   remove(const char *path);
 int   fflush(FILE *fp);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *fp);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *fp);
 int   fseek(FILE *fp, long offset, int whence);
 long  ftell(FILE *fp);
 int   fgetc(FILE *fp);
+#define getc(fp) fgetc(fp)
 int   fputc(int c, FILE *fp);
+#define putc(c, fp) fputc(c, fp)
 char *fgets(char *s, int size, FILE *fp);
 int   fputs(const char *s, FILE *fp);
 int   feof(FILE *fp);

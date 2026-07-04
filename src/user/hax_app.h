@@ -15,6 +15,12 @@
 #define HAX_KIND_TUI   1u
 #define HAX_KIND_GUI   2u
 #define HAX_KIND_BOTH  3u
+/** 与 HAX_KIND_GUI 一起 OR：应用打开并发窗口（hax_win_open），需要合成器主
+ *  循环持续跑帧才能把窗口内容合成到屏幕上，因此运行时必须走非阻塞 spawn。
+ *  纯控制台或独占画布（hax_gui_*）风格的 GUI 应用不要设这个位——那类应用
+ *  没有这个依赖，同步运行更安全：异步启动会让它们在后台永久存活，和调用者
+ *  抢键盘轮询（guess 等纯 stdio 应用曾因此在退出 GUI 后引发内核 panic）。 */
+#define HAX_KIND_GUI_WIN 4u
 
 /** 应用表项（由 genhax.py 生成的 hax_manifest.c 填充） */
 typedef struct {
