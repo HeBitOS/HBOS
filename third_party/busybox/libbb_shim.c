@@ -334,6 +334,109 @@ int bb_ask_y_confirmation(void) {
     return first == 'y';
 }
 
+int cp_mv_stat2(const char *fn, struct stat *fn_stat, int (*sf)(const char *, struct stat *)) {
+    if (sf(fn, fn_stat) < 0) {
+        if (errno != ENOENT) {
+            bb_perror_msg("can't stat '%s'", fn);
+            return -1;
+        }
+        return 0;
+    }
+    if (S_ISDIR(fn_stat->st_mode)) return 3;
+    return 1;
+}
+
+int cp_mv_stat(const char *fn, struct stat *fn_stat) {
+    return cp_mv_stat2(fn, fn_stat, stat);
+}
+
+static int copy_regular_file(const char *source, const char *dest, int flags) {
+    struct stat dest_stat;
+    if (lstat(dest, &dest_stat) == 0) {
+        if (flags & FILEUTILS_NO_OVERWRITE) return 0;
+        if (flags & FILEUTILS_INTERACTIVE) {
+            fprintf(stderr, "%s: overwrite '%s'? ", applet_name, dest);
+            if (!bb_ask_y_confirmation()) return 0;
+        }
+    }
+
+    int sfd = open(source, O_RDONLY);
+    if (sfd < 0) {
+        bb_perror_msg("can't open '%s'", source);
+        return -1;
+    }
+    int dfd = open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (dfd < 0) {
+        bb_perror_msg("can't create '%s'", dest);
+        close(sfd);
+        return -1;
+    }
+
+    char buf[8192];
+    int ok = 1;
+    for (;;) {
+        long n = read(sfd, buf, sizeof(buf));
+        if (n < 0) { bb_perror_msg("can't read '%s'", source); ok = 0; break; }
+        if (n == 0) break;
+        if (full_write(dfd, buf, (size_t)n) != n) {
+            bb_perror_msg("can't write '%s'", dest);
+            ok = 0;
+            break;
+        }
+    }
+    close(sfd);
+    close(dfd);
+    return ok ? 0 : -1;
+}
+
+int copy_file(const char *source, const char *dest, int flags) {
+    struct stat source_stat, dest_stat;
+
+    if (lstat(source, &source_stat) < 0) {
+        bb_perror_msg("can't stat '%s'", source);
+        return -1;
+    }
+
+    if (lstat(dest, &dest_stat) == 0) {
+        if (source_stat.st_dev == dest_stat.st_dev &&
+            source_stat.st_ino == dest_stat.st_ino) {
+            bb_error_msg("'%s' and '%s' are the same file", source, dest);
+            return -1;
+        }
+    }
+
+    if (S_ISDIR(source_stat.st_mode)) {
+        if (!(flags & FILEUTILS_RECUR)) {
+            bb_error_msg("omitting directory '%s'", source);
+            return -1;
+        }
+        if (mkdir(dest, 0777) < 0 && errno != EEXIST) {
+            bb_perror_msg("can't create directory '%s'", dest);
+            return -1;
+        }
+
+        DIR *dp = opendir(source);
+        if (!dp) {
+            bb_perror_msg("can't open '%s'", source);
+            return -1;
+        }
+        int retval = 0;
+        struct dirent *d;
+        while ((d = readdir(dp)) != NULL) {
+            if (DOT_OR_DOTDOT(d->d_name)) continue;
+            char *new_source = concat_path_file(source, d->d_name);
+            char *new_dest = concat_path_file(dest, d->d_name);
+            if (copy_file(new_source, new_dest, flags) < 0) retval = -1;
+            free(new_source);
+            free(new_dest);
+        }
+        closedir(dp);
+        return retval;
+    }
+
+    return copy_regular_file(source, dest, flags);
+}
+
 /* Vendored verbatim from upstream — see the declarations in libbb.h. */
 #include "process_escape_sequence.c"
 #include "xgetcwd.c"

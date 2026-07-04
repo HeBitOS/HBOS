@@ -124,12 +124,41 @@ unsigned long xatoul_sfx(const char *numstr, const struct suffix_mult *suffixes)
  * separate ~100-line parser (bb_parse_mode_symbolic in libbb/bb_parse_mode.c)
  * that no applet vendored so far needs. */
 mode_t bb_parse_mode(const char *s, mode_t base);
-/* mkdir -p recursive directory creation. */
+/* mkdir -p recursive directory creation, and (below) cp/mv's copy_file() —
+ * bit values match upstream's libbb.h enum exactly, in case some future
+ * applet's getopt32 bit position math ever assumes it. */
+#define FILEUTILS_PRESERVE_STATUS (1 << 0)
+#define FILEUTILS_DEREFERENCE     (1 << 1)
 #define FILEUTILS_RECUR    (1 << 2)
 #define FILEUTILS_FORCE    (1 << 3)
 #define FILEUTILS_INTERACTIVE (1 << 4)
+#define FILEUTILS_NO_OVERWRITE    (1 << 5)
+#define FILEUTILS_MAKE_HARDLINK   (1 << 6)
+#define FILEUTILS_MAKE_SOFTLINK   (1 << 7)
+#define FILEUTILS_DEREF_SOFTLINK  (1 << 8)
+#define FILEUTILS_DEREFERENCE_L0  (1 << 9)
 #define FILEUTILS_VERBOSE  (1 << 13)
+#define FILEUTILS_UPDATE          (1 << 14)
+#define FILEUTILS_NO_TARGET_DIR   (1 << 15)
+#define FILEUTILS_TARGET_DIR      (1 << 16)
+#define FILEUTILS_PRESERVE_SECURITY_CONTEXT (1 << 17)
+/* cp's option string; upstream appends IF_SELINUX("c") — SELinux is off
+ * here (see ENABLE_SELINUX above) so that's simply omitted. */
+#define FILEUTILS_CP_OPTSTR "pdRfinlsLHarPvuTt:"
 int bb_make_directory(char *path, long mode, int flags);
+
+/* cp/mv's copy engine. Hand-written (not upstream's libbb/copy_file.c,
+ * ~450 lines handling symlinks/hardlinks/SELinux/ino-dev-hashtable-based
+ * recursion-loop detection/attribute preservation — none of which apply
+ * to HBOS, which has no symlinks or hardlinks at all, and recursion loops
+ * can't happen without symlinks): stats source, recurses into
+ * directories (mkdir dest + copy each child), plain byte-copy for regular
+ * files, -i/-f/-n overwrite handling. Does NOT preserve mode/owner/
+ * timestamps (cp -p is a silent no-op here) or support -l/-s
+ * (hard/symlink) modes. */
+int copy_file(const char *source, const char *dest, int flags);
+int cp_mv_stat2(const char *fn, struct stat *fn_stat, int (*sf)(const char *, struct stat *));
+int cp_mv_stat(const char *fn, struct stat *fn_stat);
 
 /* rm — recursive remove, path-component helpers, y/n confirmation prompt.
  * Vendored verbatim from upstream where genuinely self-contained

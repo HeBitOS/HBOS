@@ -40,4 +40,12 @@ int          execvp(const char *file, char *const argv[]);
 int          access(const char *path, int mode);
 int          isatty(int fd);
 
+/* HBOS has no true in-place VFS rename (ramfs/ext2/fat32 have no "just
+ * relink this node under a new name" primitive) -- always reports EXDEV
+ * ("cross-device"), which every real mv implementation (including
+ * BusyBox's) already treats as "fall back to copy + delete", so this
+ * still gets a correct (if less efficient) mv for every case rather than
+ * needing real move-in-place support. */
+int          rename(const char *oldpath, const char *newpath);
+
 #endif

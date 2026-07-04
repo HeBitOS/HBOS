@@ -85,3 +85,10 @@ int isatty(int fd) {
     long ret = __syscall1(HBOS_SYS_ISATTY, fd);
     return ret > 0 ? 1 : 0;
 }
+
+int rename(const char *oldpath, const char *newpath) {
+    (void)oldpath;
+    (void)newpath;
+    errno = EXDEV;
+    return -1;
+}
