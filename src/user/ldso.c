@@ -2,6 +2,7 @@
 #include "core/heap.h"
 #include "core/vmm.h"
 #include "core/pmm.h"
+#include "core/task.h"
 #include "string.h"
 
 /* 已加载的共享库链表 */
@@ -313,5 +314,24 @@ void *ldso_resolve(const char *name) {
         }
         lib = lib->next;
     }
+
+    /* 最后一步：在发起调用的这个程序自己的 .symtab 里找（让共享库能反过来
+     * 调用它自己静态链接进来的 printf/malloc 等——见 task.h 里
+     * host_symtab 字段的注释和 src/elf.c 的 attach_host_symtab）。这里
+     * st_value 就是最终绝对地址，不用像上面共享库那样再加 lib->base：
+     * 宿主程序是静态可执行文件，其 .symtab 里记录的本来就是链接时定好的
+     * 真实地址，不是文件相对偏移量。 */
+    const task_t *t = task_current();
+    if (t && t->host_symtab && t->host_strtab && t->host_symtab_count > 0) {
+        elf64_sym_t *sym = symtab_lookup((elf64_sym_t *)t->host_symtab,
+                                          t->host_symtab_count,
+                                          (const char *)t->host_strtab, name);
+        if (sym && sym->st_value != 0 &&
+            (ELF64_ST_BIND(sym->st_info) == STB_GLOBAL ||
+             ELF64_ST_BIND(sym->st_info) == STB_WEAK)) {
+            return (void *)sym->st_value;
+        }
+    }
+
     return 0;
 }

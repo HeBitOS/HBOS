@@ -70,6 +70,19 @@ typedef struct task {
     sigset_t sig_pending;
     sigset_t sig_blocked;
     int sig_exit_code;
+
+    // This task's own executable's .symtab/.strtab (copied out of the ELF
+    // buffer at elf64_load_and_spawn() time, since that buffer gets freed
+    // right after loading — see src/elf.c). Lets a dlopen()'d shared
+    // library's unresolved external symbols (printf, malloc, ...) resolve
+    // back into this program's own statically-linked libc instead of only
+    // ever finding symbols in other loaded shared libraries — see
+    // src/user/ldso.c's host-symbol-table fallback. NULL/0 if the
+    // executable had no .symtab (TCC only emits one when asked — see
+    // third_party/tinycc/tcc.c's `s->do_debug` patch).
+    void     *host_symtab;
+    char     *host_strtab;
+    uint64_t  host_symtab_count;
 } task_t;
 
 // ============================================================
@@ -112,6 +125,11 @@ uint32_t task_get_id(void);
 // Get current task object
 task_t *task_current(void);
 const task_t *task_get_by_id(uint32_t id);
+
+// Attach a copy of this program's own .symtab/.strtab (see src/elf.c's
+// elf64_load_and_spawn) so a later dlopen()'d shared library can resolve
+// symbols back into it — see src/user/ldso.c.
+void task_set_host_symtab(uint32_t id, void *symtab, char *strtab, uint64_t count);
 
 // Get number of active (non-terminated) tasks
 int task_get_count(void);

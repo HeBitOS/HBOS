@@ -451,6 +451,22 @@ redo:
      * steps on `!static_link`), breaking real ET_DYN shared-library output
      * — which src/user/ldso.c's dlopen() support needs to actually load. */
     if (s->output_type == TCC_OUTPUT_EXE) s->static_link = 1;
+
+    /* HBOS: tried forcing do_debug=2 here (equivalent to an implicit -g)
+     * to keep a real .symtab/.strtab around for src/user/ldso.c's
+     * host-symbol-table fallback (a dlopen()'d shared library resolving
+     * calls back into this program's own libc, e.g. printf/malloc).
+     * Reverted: this triggers a real, separate TCC bug -- ANY program
+     * with a plain function pointer (not even involving dlopen at all,
+     * e.g. `int (*fn)(int,int) = add;`) crashes the moment do_debug is
+     * on, seemingly in TCC's own debug-info generation. Since that
+     * breaks a basic, extremely common C pattern for every program (not
+     * just ones using dlopen), leaving it off is the safer default.
+     * dlopen()/dlsym() between independently-loaded shared libraries
+     * still works fully (verified); a shared library calling back into
+     * its host program's own libc functions does not yet, and needs this
+     * TCC debug-info bug root-caused (or some other way to keep a
+     * .symtab) before it can. */
     if (ppfp)
         s->ppfp = ppfp;
 

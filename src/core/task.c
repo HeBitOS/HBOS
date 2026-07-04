@@ -161,6 +161,9 @@ void task_init(void) {
     memset(&main_task->sig_pending, 0, sizeof(main_task->sig_pending));
     memset(&main_task->sig_blocked, 0, sizeof(main_task->sig_blocked));
     main_task->sig_exit_code = 0;
+    main_task->host_symtab = 0;
+    main_task->host_strtab = 0;
+    main_task->host_symtab_count = 0;
 
     current_task = main_task;
     task_count = 1;
@@ -227,6 +230,9 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
     memset(&tcb->sig_blocked, 0, sizeof(tcb->sig_blocked));
     tcb->sig_exit_code = 0;
+    tcb->host_symtab = 0;
+    tcb->host_strtab = 0;
+    tcb->host_symtab_count = 0;
 
     // ---- 构建初始栈帧 ----
     // 从栈顶向下填充（栈向低地址增长）
@@ -312,6 +318,9 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
     memset(&tcb->sig_blocked, 0, sizeof(tcb->sig_blocked));
     tcb->sig_exit_code = 0;
+    tcb->host_symtab = 0;
+    tcb->host_strtab = 0;
+    tcb->host_symtab_count = 0;
 
     // Allocate ring3_launch_ctx_t on the task's kernel stack
     uint64_t *sp = (uint64_t *)(tcb->stack_base + tcb->stack_size);
@@ -422,6 +431,17 @@ const task_t *task_get_by_id(uint32_t id) {
         if (task_pool[i].id == id) return &task_pool[i];
     }
     return NULL;
+}
+
+void task_set_host_symtab(uint32_t id, void *symtab, char *strtab, uint64_t count) {
+    for (int i = 0; i < task_count; i++) {
+        if (task_pool[i].id == id) {
+            task_pool[i].host_symtab = symtab;
+            task_pool[i].host_strtab = strtab;
+            task_pool[i].host_symtab_count = count;
+            return;
+        }
+    }
 }
 
 int task_wait(uint32_t id, int *status) {
@@ -535,6 +555,13 @@ int task_fork(void) {
     memset(&child->sig_pending, 0, sizeof(child->sig_pending));
     memset(&child->sig_blocked, 0, sizeof(child->sig_blocked));
     child->sig_exit_code = 0;
+    /* fork()'d child restarts from the same entry point in a cloned copy
+     * of the parent's address space (see vmm_clone_address_space above) --
+     * same executable, so the parent's own .symtab/.strtab (if any) is
+     * still valid and at the same addresses for the child too. */
+    child->host_symtab = current_task->host_symtab;
+    child->host_strtab = current_task->host_strtab;
+    child->host_symtab_count = current_task->host_symtab_count;
 
     uint64_t *sp = (uint64_t *)(child->stack_base + child->stack_size);
     *--sp = (uint64_t)current_task->entry;

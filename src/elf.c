@@ -12,6 +12,7 @@
 #include "elf.h"
 #include "core/task.h"
 #include "core/vmm.h"
+#include "core/heap.h"
 #include "string.h"
 
 #define ELF_MAG0  0x7f
@@ -86,6 +87,60 @@ static int validate_elf64_headers(const uint8_t *data, size_t size,
 static void push_user_u64(uintptr_t *sp, uint64_t value) {
     *sp -= sizeof(uint64_t);
     *(volatile uint64_t *)(*sp) = value;
+}
+
+/**
+ * 找到并复制这个可执行文件自己的 .symtab/.strtab（如果有的话——TCC 默认
+ * 不生成，除非显式要求，见 third_party/tinycc/tcc.c 的 do_debug 补丁），
+ * 挂到刚创建的任务上。这样之后 dlopen() 一个共享库时，库里对 printf/
+ * malloc 等外部符号的引用才能解析回这个程序自己静态链接进来的 libc，
+ * 而不是只能在其他 dlopen() 过的共享库里找（见 src/user/ldso.c）。
+ *
+ * 只看节头，不影响加载/执行本身（只用到程序头）；找不到就什么也不做，
+ * 不是错误——没有 .symtab 只是意味着这个程序打开的共享库没法反过来调用
+ * 它自己的函数，而不是没法用参数一致的普通静态可执行文件本身。
+ */
+static void attach_host_symtab(const uint8_t *data, size_t size,
+                                const elf64_ehdr_t *ehdr, uint32_t task_id) {
+    if (ehdr->e_shoff == 0 || ehdr->e_shnum == 0) return;
+    if (ehdr->e_shoff > (uint64_t)size ||
+        (uint64_t)ehdr->e_shnum * ehdr->e_shentsize > (uint64_t)size - ehdr->e_shoff)
+        return;
+
+    const elf64_shdr_t *shdrs = (const elf64_shdr_t *)(data + ehdr->e_shoff);
+    const elf64_shdr_t *symtab_sh = 0;
+    const elf64_shdr_t *strtab_sh = 0;
+
+    for (int i = 0; i < (int)ehdr->e_shnum; i++) {
+        if (shdrs[i].sh_type == SHT_SYMTAB) {
+            symtab_sh = &shdrs[i];
+            if (shdrs[i].sh_link < ehdr->e_shnum)
+                strtab_sh = &shdrs[shdrs[i].sh_link];
+            break;
+        }
+    }
+    if (!symtab_sh || !strtab_sh) return;
+    if (symtab_sh->sh_offset > (uint64_t)size ||
+        symtab_sh->sh_size > (uint64_t)size - symtab_sh->sh_offset)
+        return;
+    if (strtab_sh->sh_offset > (uint64_t)size ||
+        strtab_sh->sh_size > (uint64_t)size - strtab_sh->sh_offset)
+        return;
+
+    void *symtab_copy = kmalloc(symtab_sh->sh_size);
+    if (!symtab_copy) return;
+    char *strtab_copy = (char *)kmalloc(strtab_sh->sh_size);
+    if (!strtab_copy) { kfree(symtab_copy); return; }
+
+    memcpy(symtab_copy, data + symtab_sh->sh_offset, symtab_sh->sh_size);
+    memcpy(strtab_copy, data + strtab_sh->sh_offset, strtab_sh->sh_size);
+
+    /* ELF64_Sym 固定 24 字节；sh_entsize 应该总是等于这个值，但防御性地
+     * 处理一下万一是 0 的情况。 */
+    uint64_t entsize = symtab_sh->sh_entsize ? symtab_sh->sh_entsize : 24;
+    uint64_t count = symtab_sh->sh_size / entsize;
+
+    task_set_host_symtab(task_id, symtab_copy, strtab_copy, count);
 }
 
 int elf64_load_and_spawn(const uint8_t *data, size_t size,
@@ -223,6 +278,8 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
         vmm_destroy_address_space(app_pml4);
         return elf_fail("task create failed");
     }
+
+    attach_host_symtab(data, size, ehdr, (uint32_t)new_id);
 
     return new_id;
 }

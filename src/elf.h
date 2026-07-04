@@ -92,6 +92,24 @@ typedef struct {
     uint64_t p_align;
 } __attribute__((packed)) elf64_phdr_t;
 
+/** ELF64 节头 (64 bytes) — 用于查找 .symtab/.strtab（见下面 host-symbol
+ *  相关字段），加载/执行本身只看程序头，不需要节头。 */
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint64_t sh_flags;
+    uint64_t sh_addr;
+    uint64_t sh_offset;
+    uint64_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint64_t sh_addralign;
+    uint64_t sh_entsize;
+} __attribute__((packed)) elf64_shdr_t;
+
+#define SHT_SYMTAB 2
+#define SHT_STRTAB 3
+
 /**
  * 加载 ELF64 可执行文件并派生为新任务
  *
