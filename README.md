@@ -1,6 +1,7 @@
    # HBOS - He Bit OS
 
-> 当前版本：0.1 beta3
+> 当前版本：v0.1 beta3
+> 
 > 64-bit 高分辨率图形命令行操作系统，支持多阶段 AI 协同开发
 
 ![截图](./photo/hbosv0.1.png "v0.1截图")
