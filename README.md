@@ -4,7 +4,9 @@
 > 
 > 64-bit 高分辨率图形命令行操作系统，支持多阶段 AI 协同开发
 
-![截图](./photo/hbosv0.1.png "v0.1截图")
+![截图](./photo/hbosv0.1.png "v0.1 beta1截图")
+
+![截图](./photo/v0.1beta3.png "v0.1b eta3截图")
 
 ## 项目目标
 
