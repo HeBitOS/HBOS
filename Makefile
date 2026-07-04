@@ -214,6 +214,7 @@ ASM_SRCS = \
 	$(SRC_DIR)/graphics/gui_wallimg.asm \
 	$(SRC_DIR)/graphics/gui_iconsimg.asm \
 	$(SRC_DIR)/user/tcc_runtime_blob.asm \
+	$(SRC_DIR)/user/tcc_headers_blob.asm \
 	$(SRC_DIR)/smp_trampoline.asm
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
@@ -312,6 +313,17 @@ $(BUILD_DIR)/graphics/gui_wallimg.o: $(GUI_WALL_BIN)
 $(BUILD_DIR)/graphics/gui_iconsimg.o: $(GUI_ICON_BIN)
 
 $(BUILD_DIR)/user/tcc_runtime_blob.o: $(SRC_DIR)/user/tcc_runtime_blob.asm $(BUILD_DIR)/tcc/hbos_runtime.o | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
+
+# TCC sysinclude header bundle (tools/genheaders.py, seeded into ramfs at
+# boot by src/tools/tcc_runtime_seed.c) — lets `#include <stdio.h>` etc.
+# resolve in TCC-compiled user programs; see src/user/tcc_headers_blob.asm.
+$(BUILD_DIR)/tcc/headers.bin: tools/genheaders.py $(wildcard $(SRC_DIR)/user/libc/*.h) $(wildcard $(SRC_DIR)/user/libc/sys/*.h) $(wildcard $(TCC_DIR)/include/*.h) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	python3 tools/genheaders.py $(SRC_DIR)/user/libc $(TCC_DIR)/include $@
+
+$(BUILD_DIR)/user/tcc_headers_blob.o: $(SRC_DIR)/user/tcc_headers_blob.asm $(BUILD_DIR)/tcc/headers.bin | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 

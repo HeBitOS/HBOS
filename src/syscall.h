@@ -168,6 +168,10 @@ typedef enum {
     HBOS_SYS_WIN_POLL,       /**< win_poll(int*ev4) -> 事件类型或 0 */
     HBOS_SYS_WIN_CLOSE,      /**< win_close() 关闭窗口 */
 
+    HBOS_SYS_DLOPEN,         /**< dlopen(path) -> 句柄或 0 */
+    HBOS_SYS_DLSYM,          /**< dlsym(handle,name) -> 符号地址或 0 */
+    HBOS_SYS_DLCLOSE,        /**< dlclose(handle) -> 0 成功 -1 失败 */
+
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;
 

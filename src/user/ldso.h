@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
+/* elf64_ehdr_t / elf64_phdr_t / EI_ / PT_LOAD / PT_DYNAMIC / ET_DYN /
+ * PF_R|W|X are already defined there -- reused here instead of a second,
+ * conflicting copy (this header used to duplicate all of them, which broke
+ * as soon as a single translation unit needed both headers, e.g. syscall.c
+ * wiring up dlopen()). */
+#include "../elf.h"
 
 /* ELF dynamic section entry types */
 #define DT_NULL            0
@@ -95,67 +101,38 @@ typedef struct {
 #define ELF64_ST_BIND(i)  ((i) >> 4)
 #define ELF64_ST_TYPE(i)  ((i) & 0xf)
 
-/* ELF header types */
-#define EI_MAG0        0
-#define EI_MAG1        1
-#define EI_MAG2        2
-#define EI_MAG3        3
-#define EI_CLASS       4
-#define EI_DATA        5
-#define EI_VERSION     6
-#define EI_OSABI       7
-#define EI_ABIVERSION  8
-#define EI_NIDENT      16
-#define ET_DYN         3
-
-typedef struct {
-    uint8_t  e_ident[EI_NIDENT];
-    uint16_t e_type;
-    uint16_t e_machine;
-    uint32_t e_version;
-    uint64_t e_entry;
-    uint64_t e_phoff;
-    uint64_t e_shoff;
-    uint32_t e_flags;
-    uint16_t e_ehsize;
-    uint16_t e_phentsize;
-    uint16_t e_phnum;
-    uint16_t e_shentsize;
-    uint16_t e_shnum;
-    uint16_t e_shstrndx;
-} __attribute__((packed)) elf64_ehdr_t;
-
-#define PT_LOAD    1
-#define PT_DYNAMIC 2
-
-typedef struct {
-    uint32_t p_type;
-    uint32_t p_flags;
-    uint64_t p_offset;
-    uint64_t p_vaddr;
-    uint64_t p_paddr;
-    uint64_t p_filesz;
-    uint64_t p_memsz;
-    uint64_t p_align;
-} __attribute__((packed)) elf64_phdr_t;
-
-#define PF_R 4
-#define PF_W 2
-#define PF_X 1
-
 /**
- * 加载 ELF 共享对象 (.so) 并返回基地址
+ * 加载 ELF 共享对象 (.so)
  * @param data   ELF 文件数据
  * @param size   文件大小
- * @return 成功返回基地址，失败返回 NULL
+ * @return 成功返回不透明句柄（供 ldso_dlsym/ldso_close 使用，dlopen()
+ *         的返回值），失败返回 NULL。调用方不应解引用这个指针。
  */
 void *ldso_load(const uint8_t *data, size_t size);
 
 /**
- * 在已加载的共享库中解析符号
+ * 在所有已加载的共享库中解析符号（用于库间相互引用的重定位）
  * @param name   符号名称
  * @return 符号地址，未找到返回 NULL
  */
 void *ldso_resolve(const char *name);
+
+/**
+ * 在指定句柄对应的共享库中查找符号（dlsym() 语义：只在这一个库里找，
+ * 不像 ldso_resolve 那样搜索全部已加载库）
+ * @param handle ldso_load() 返回的句柄
+ * @param name   符号名称
+ * @return 符号地址，未找到或句柄无效返回 NULL
+ */
+void *ldso_dlsym(void *handle, const char *name);
+
+/**
+ * 卸载共享库：释放它占用的物理页并从已加载链表中移除。
+ * 简化实现——不检查是否还有其他代码持有指向其符号的指针，调用方需自行
+ * 保证卸载时机安全（和 dlclose() 在真实 Linux 上的一般用法一致）。
+ * @param handle ldso_load() 返回的句柄
+ * @return 0 成功，-1 句柄无效
+ */
+int ldso_close(void *handle);
 
 #endif

@@ -29,6 +29,7 @@
 #include "fs.h"
 #include "core/heap.h"
 #include "elf.h"
+#include "user/ldso.h"
 #include "vfs.h"
 #include "version.h"
 #include "gui/gui_canvas.h"
@@ -1034,6 +1035,40 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             uint32_t tid = task_current() ? task_current()->id : 0;
             winsrv_close_for_task(tid);
             return 0;
+        }
+
+        case HBOS_SYS_DLOPEN: {
+            const char *path = (const char *)f->a0;
+            if (!path) return (uint64_t)(-EFAULT);
+            int fd = open(path, O_RDONLY);
+            if (fd < 0) return (uint64_t)(-(int64_t)(errno ? errno : ENOENT));
+
+            uint8_t *buf = (uint8_t *)kmalloc(SYSCALL_EXEC_MAX_SIZE);
+            if (!buf) { close(fd); return (uint64_t)(-ENOMEM); }
+
+            size_t size = 0;
+            ssize_t n = 0;
+            while ((n = read(fd, buf + size, SYSCALL_EXEC_MAX_SIZE - size)) > 0) {
+                size += (size_t)n;
+                if (size >= SYSCALL_EXEC_MAX_SIZE) break;
+            }
+            close(fd);
+
+            void *handle = ldso_load(buf, size);
+            kfree(buf);
+            return (uint64_t)(uintptr_t)handle;
+        }
+
+        case HBOS_SYS_DLSYM: {
+            void *handle = (void *)f->a0;
+            const char *name = (const char *)f->a1;
+            void *addr = ldso_dlsym(handle, name);
+            return (uint64_t)(uintptr_t)addr;
+        }
+
+        case HBOS_SYS_DLCLOSE: {
+            void *handle = (void *)f->a0;
+            return (uint64_t)(long)ldso_close(handle);
         }
 
         default:

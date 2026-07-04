@@ -364,20 +364,11 @@ int main(int argc, char **argv)
 redo:
     argc = argc0, argv = argv0;
     s = s1 = tcc_new();
-    /* HBOS: always force static linking, equivalent to an implicit -static
-     * on every invocation. Without this, TCC's default output still uses
-     * GOT-indirect addressing for every global variable reference, backed
-     * by .rela.got R_X86_64_GLOB_DAT relocations meant to be resolved by a
-     * real runtime dynamic linker — which HBOS's elf64_load_and_spawn does
-     * not implement (it only memcpy's PT_LOAD segments, no relocation
-     * processing at all). Left unset, any compiled program that so much as
-     * declares one initialized global variable (even `int gx = 5;`) null-
-     * derefs on first access to it, because the GOT slot the code loads
-     * through was never patched with the real address. With -static
-     * behavior forced, TCC's own static linker resolves and bakes the
-     * correct address into the GOT slot at compile time, so the same
-     * GOT-indirect code works with zero runtime relocation needed. */
-    s->static_link = 1;
+    /* HBOS: point #include <...> resolution at the header bundle seeded
+     * into ramfs at boot (tools/genheaders.py + src/tools/tcc_runtime_seed.c
+     * write HBOS's own user-mode libc headers to /system/include/ — there's
+     * no real /usr/include tree to fall back on). */
+    tcc_add_sysinclude_path(s, "/system/include");
     opt = tcc_parse_args(s, &argc, &argv);
 
     if (n == 0) {
@@ -435,6 +426,31 @@ redo:
     if (s->output_type == 0)
         s->output_type = TCC_OUTPUT_EXE;
     ret = tcc_set_output_type(s, s->output_type);
+
+    /* HBOS: force static linking for plain executable output only,
+     * equivalent to an implicit -static on every `tcc foo.c -o foo`
+     * invocation. Without this, TCC's default EXE output still uses
+     * GOT-indirect addressing for every global variable reference, backed
+     * by .rela.got R_X86_64_GLOB_DAT relocations meant to be resolved by a
+     * real runtime dynamic linker — which HBOS's elf64_load_and_spawn does
+     * not implement (it only memcpy's PT_LOAD segments, no relocation
+     * processing at all). Left unset, any compiled program that so much as
+     * declares one initialized global variable (even `int gx = 5;`) null-
+     * derefs on first access to it, because the GOT slot the code loads
+     * through was never patched with the real address. With -static
+     * behavior forced, TCC's own static linker resolves and bakes the
+     * correct address into the GOT slot at compile time, so the same
+     * GOT-indirect code works with zero runtime relocation needed.
+     *
+     * Deliberately checked only here (output_type isn't actually finalized
+     * until tcc_set_output_type() just above — checking right after
+     * tcc_parse_args() sees output_type still 0 for the common "no -shared/
+     * -c flag at all" case, so that placement never actually fired): forcing
+     * this unconditionally previously also suppressed .dynamic/.dynsym
+     * generation for `-shared` builds (tccelf.c gates several DT_*-related
+     * steps on `!static_link`), breaking real ET_DYN shared-library output
+     * — which src/user/ldso.c's dlopen() support needs to actually load. */
+    if (s->output_type == TCC_OUTPUT_EXE) s->static_link = 1;
     if (ppfp)
         s->ppfp = ppfp;
 

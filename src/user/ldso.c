@@ -16,6 +16,7 @@ typedef struct loaded_lib {
     elf64_rela_t      *jmprel;
     uint64_t           jmprel_size;
     void              *pltgot;
+    uint64_t           num_pages;
 } loaded_lib_t;
 
 static loaded_lib_t *g_loaded_libs;
@@ -125,26 +126,36 @@ void *ldso_load(const uint8_t *data, size_t size) {
     uint64_t total_size = (vaddr_max - vaddr_min + 0xFFF) & ~0xFFFULL;
     uint64_t num_pages = total_size / PAGE_SIZE;
 
-    /* 分配虚拟地址空间 */
-    uint64_t vaddr_base = vaddr_min;
-    uint64_t base = 0;
+    /* 分配虚拟地址空间 — 真实共享库的 PT_LOAD vaddr 几乎总是从 0 开始
+     * （由真正的动态链接器在加载时选一个实际地址、再整体加上偏移量），
+     * 不能直接照抄文件自带的 vaddr 当成真实加载地址去映射/写入——那样会
+     * 尝试在虚拟地址 0（NULL 页）附近映射，基本必然失败。这里用一个简单
+     * 的 bump 分配器每次选一段全新、足够大、明显不会跟内核/任务栈/堆/
+     * TCC 编译产物（0x1000000000）/MMIO（0x100000000）等现有约定冲突的
+     * 虚拟地址区间作为本次加载的真实基址，随后所有对 PT_LOAD/.dynamic
+     * 里原始 vaddr 的引用都要换算成"真实基址 + (原始 vaddr - 文件最小
+     * vaddr)"，而不能直接沿用原始 vaddr。 */
+    static uint64_t g_next_ldso_base = 0x0000300000000000ULL;
+    uint64_t real_base = g_next_ldso_base;
+    g_next_ldso_base += total_size + PAGE_SIZE; /* 留一页保护间隙 */
 
     for (uint64_t p = 0; p < num_pages; p++) {
-        uint64_t va = vaddr_base + p * PAGE_SIZE;
+        uint64_t va = real_base + p * PAGE_SIZE;
         uint64_t phys = pmm_alloc_page();
         if (!phys) goto fail;
         if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) {
             pmm_free_page(phys);
             goto fail;
         }
-        if (p == 0) base = va;
     }
+    uint64_t base = real_base;
+    uint64_t vaddr_base = real_base - vaddr_min; /* 换算用的加法偏移量 */
 
-    /* 第二步：复制段数据 */
+    /* 第二步：复制段数据（目的地址要换算，不能用文件自带的 p_vaddr） */
     for (int i = 0; i < (int)ehdr->e_phnum; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
         uint64_t src_off = phdrs[i].p_offset;
-        uint64_t dst_va  = phdrs[i].p_vaddr;
+        uint64_t dst_va  = vaddr_base + phdrs[i].p_vaddr;
         uint64_t filesz  = phdrs[i].p_filesz;
         uint64_t memsz   = phdrs[i].p_memsz;
 
@@ -156,7 +167,7 @@ void *ldso_load(const uint8_t *data, size_t size) {
         }
     }
 
-    /* 第三步：解析 .dynamic 段 */
+    /* 第三步：解析 .dynamic 段（同样要换算） */
     const char           *strtab     = 0;
     elf64_sym_t          *symtab     = 0;
     elf64_rela_t         *rela       = 0;
@@ -224,19 +235,64 @@ void *ldso_load(const uint8_t *data, size_t size) {
     /* 第六步：加入链表 */
     lib->next = g_loaded_libs;
     g_loaded_libs = lib;
+    lib->num_pages = num_pages;
 
-    return (void *)base;
+    return (void *)lib;
 
 fail:
-    /* 简化清理：释放已分配页面 */
+    /* 简化清理：释放已分配页面（用真实映射地址 real_base，不是换算用的
+     * vaddr_base 偏移量——这里失败时 vaddr_base 可能还没来得及赋值）。 */
     for (uint64_t p = 0; p < num_pages; p++) {
-        uint64_t va = vaddr_base + p * PAGE_SIZE;
+        uint64_t va = real_base + p * PAGE_SIZE;
         uint64_t phys = vmm_get_phys(va);
         if (phys) {
             pmm_free_page(phys);
             vmm_unmap_page(va);
         }
     }
+    return 0;
+}
+
+/* 验证句柄确实指向当前已加载库链表中的一项，防止调用方传入野指针 */
+static int handle_is_valid(void *handle) {
+    for (loaded_lib_t *l = g_loaded_libs; l; l = l->next) {
+        if ((void *)l == handle) return 1;
+    }
+    return 0;
+}
+
+void *ldso_dlsym(void *handle, const char *name) {
+    if (!handle || !name || !handle_is_valid(handle)) return 0;
+    loaded_lib_t *lib = (loaded_lib_t *)handle;
+    if (!lib->strtab || !lib->symtab || lib->symtab_entries == 0) return 0;
+
+    elf64_sym_t *sym = symtab_lookup(lib->symtab, lib->symtab_entries,
+                                      lib->strtab, name);
+    if (!sym || sym->st_value == 0) return 0;
+    if (ELF64_ST_BIND(sym->st_info) != STB_GLOBAL &&
+        ELF64_ST_BIND(sym->st_info) != STB_WEAK) return 0;
+    return (uint8_t *)lib->base + sym->st_value;
+}
+
+int ldso_close(void *handle) {
+    if (!handle || !handle_is_valid(handle)) return -1;
+    loaded_lib_t *lib = (loaded_lib_t *)handle;
+
+    for (uint64_t p = 0; p < lib->num_pages; p++) {
+        uint64_t va = lib->vaddr_base + p * PAGE_SIZE;
+        uint64_t phys = vmm_get_phys(va);
+        if (phys) {
+            pmm_free_page(phys);
+            vmm_unmap_page(va);
+        }
+    }
+
+    loaded_lib_t **pp = &g_loaded_libs;
+    while (*pp) {
+        if (*pp == lib) { *pp = lib->next; break; }
+        pp = &(*pp)->next;
+    }
+    kfree(lib);
     return 0;
 }
 
