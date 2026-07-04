@@ -460,6 +460,18 @@ char *dirname(char *path) {
     return path;
 }
 
+int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags) {
+    (void)dirfd; (void)times; (void)flags;
+    struct stat st;
+    if (stat(path, &st) < 0) return -1; /* errno already set by stat() */
+    return 0;
+}
+
+int futimens(int fd, const struct timespec times[2]) {
+    (void)fd; (void)times;
+    return 0;
+}
+
 /* Vendored verbatim from upstream — see the declarations in libbb.h. */
 #include "process_escape_sequence.c"
 #include "xgetcwd.c"

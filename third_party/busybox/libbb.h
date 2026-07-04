@@ -20,7 +20,10 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include "getopt.h"
+
+typedef int exitcode_t;
 
 /* platform.h macros real applet .c files reference directly */
 #define UNUSED_PARAM __attribute__((__unused__))
@@ -169,6 +172,24 @@ char *dirname(char *path);
 char **skip_dash_dash(char **argv);
 char *single_argv(char **argv);
 
+/* touch -- HBOS's VFS has no mutable file timestamp support at all (struct
+ * stat's st_atime/st_mtime are filled in at query time, not stored per-file
+ * and updatable), so utimensat()/futimens() here are honest no-ops that
+ * just report success -- this is *not* real timestamp support, only
+ * enough for touch's much more common real-world use ("make sure this
+ * file exists") to work without spurious errors on already-existing
+ * files. This port disables ENABLE_FEATURE_TOUCH_SUSV3 (-a/-m/-d/-t/-r),
+ * so touch.c's own code never actually tries to compute a real timestamp
+ * to pass in anyway. */
+struct timespec { long tv_sec; long tv_nsec; };
+#define AT_FDCWD (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define UTIME_NOW  ((1L << 30) - 1L)
+#define UTIME_OMIT ((1L << 30) - 2L)
+int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags);
+int futimens(int fd, const struct timespec times[2]);
+#define xclose(fd) close(fd)
+
 /* rm — recursive remove, path-component helpers, y/n confirmation prompt.
  * Vendored verbatim from upstream where genuinely self-contained
  * (get_last_path_component.c, concat_subpath_file.c + concat_path_file.c,
@@ -205,6 +226,13 @@ typedef signed char smallint;
 #define IF_FEATURE_CATN(...)
 #define IF_FEATURE_FANCY_HEAD(...)
 #define IF_UNICODE_SUPPORT(...)
+/* touch's -a/-m/-d/-t/-r (SUSv3 date/reference-file options) -- HBOS's VFS
+ * has no mutable timestamps to actually set (see utimensat() above), so
+ * there's nothing for these to do; touch always just acts like plain
+ * SUSv2 touch (create-if-missing, ignore any requested time). */
+#define IF_FEATURE_TOUCH_SUSV3(...)
+#define IF_NOT_FEATURE_TOUCH_SUSV3(...) __VA_ARGS__
+#define ENABLE_FEATURE_TOUCH_SUSV3 0
 #define ENABLE_SELINUX 0
 #define ENABLE_FEATURE_VERBOSE 1
 #define ENABLE_LONG_OPTS 0

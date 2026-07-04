@@ -703,7 +703,7 @@ $(BUILD_DIR)/tcc/hbos_runtime.o: $(USER_LIBC_OBJS) | $(BUILD_DIR)
 # include path instead of app/include.
 BUSYBOX_DIR = third_party/busybox
 BUSYBOX_CFLAGS = $(USER_CFLAGS) -MMD -MP -I$(BUSYBOX_DIR)
-BUSYBOX_APPLETS = true false echo pwd mkdir wc head cat rm cp mv dirname basename
+BUSYBOX_APPLETS = true false echo pwd mkdir wc head cat rm cp mv dirname basename touch
 
 -include $(BUSYBOX_APPLETS:%=$(BUILD_DIR)/app/%.d)
 -include $(BUILD_DIR)/busybox/libbb_shim.d
