@@ -160,6 +160,15 @@ int copy_file(const char *source, const char *dest, int flags);
 int cp_mv_stat2(const char *fn, struct stat *fn_stat, int (*sf)(const char *, struct stat *));
 int cp_mv_stat(const char *fn, struct stat *fn_stat);
 
+/* dirname/basename — hand-written dirname() (real POSIX <libgen.h>
+ * function, which HBOS's libc doesn't have yet; standard semantics: may
+ * modify its argument in place, "." if no '/', "/" for "/"). skip_dash_dash/
+ * single_argv vendored verbatim from upstream (libbb/single_argv.c,
+ * genuinely self-contained). */
+char *dirname(char *path);
+char **skip_dash_dash(char **argv);
+char *single_argv(char **argv);
+
 /* rm — recursive remove, path-component helpers, y/n confirmation prompt.
  * Vendored verbatim from upstream where genuinely self-contained
  * (get_last_path_component.c, concat_subpath_file.c + concat_path_file.c,

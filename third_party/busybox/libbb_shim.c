@@ -437,7 +437,31 @@ int copy_file(const char *source, const char *dest, int flags) {
     return copy_regular_file(source, dest, flags);
 }
 
+/* Hand-written -- standard POSIX <libgen.h> dirname(), which HBOS's libc
+ * doesn't have yet. May modify its argument in place (standard, documented
+ * dirname() behavior, same as glibc's). */
+char *dirname(char *path) {
+    static char dot[] = ".";
+    if (!path || !*path) return dot;
+
+    char *end = path + strlen(path) - 1;
+    while (end > path && *end == '/') { *end = '\0'; end--; }
+
+    char *slash = strrchr(path, '/');
+    if (!slash) return dot;
+
+    while (slash > path && *(slash - 1) == '/') slash--;
+
+    if (slash == path) {
+        *(path + 1) = '\0';
+        return path;
+    }
+    *slash = '\0';
+    return path;
+}
+
 /* Vendored verbatim from upstream — see the declarations in libbb.h. */
 #include "process_escape_sequence.c"
 #include "xgetcwd.c"
 #include "remove_file.c"
+#include "single_argv.c"
