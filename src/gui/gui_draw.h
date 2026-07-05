@@ -29,6 +29,10 @@ void gui_append_char(char *buf, uint32_t cap, uint32_t *pos, char c);
 void gui_append_str(char *buf, uint32_t cap, uint32_t *pos, const char *s);
 void gui_append_int(char *buf, uint32_t cap, uint32_t *pos, int v);
 void gui_append_uint(char *buf, uint32_t cap, uint32_t *pos, uint32_t v);
+void gui_append_ll(char *buf, uint32_t cap, uint32_t *pos, long long v);
+/* Scientific notation ("D.DDDDDDDDe+NN") for values too large for a plain
+ * long long -- see app_calc.c's calc_to_sci for how mant/exp are derived. */
+void gui_append_sci(char *buf, uint32_t cap, uint32_t *pos, long long mant, int exp);
 
 void gui_draw_line(int x0, int y0, int x1, int y1, uint32_t color);
 void gui_draw_thick_line(int x0, int y0, int x1, int y1, int thickness, uint32_t color);

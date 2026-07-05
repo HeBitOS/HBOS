@@ -1023,6 +1023,55 @@ static void append_int(char *buf, uint32_t cap, uint32_t *pos, int v) {
     append_uint(buf, cap, pos, (uint32_t)(v < 0 ? -v : v));
 }
 
+static void append_uint64(char *buf, uint32_t cap, uint32_t *pos, unsigned long long v) {
+    char tmp[24];
+    uint32_t n = 0;
+    do {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v && n < sizeof(tmp));
+    while (n) append_char(buf, cap, pos, tmp[--n]);
+}
+
+static void append_ll(char *buf, uint32_t cap, uint32_t *pos, long long v) {
+    /* -v on LLONG_MIN overflows signed long long -- negate in unsigned
+     * space instead, which wraps around to the correct magnitude. */
+    if (v < 0) {
+        append_char(buf, cap, pos, '-');
+        append_uint64(buf, cap, pos, 0ULL - (unsigned long long)v);
+    } else {
+        append_uint64(buf, cap, pos, (unsigned long long)v);
+    }
+}
+
+/* Scientific-notation formatting for calculator results that overflow
+ * long long (see app_calc.c's calc_to_sci) -- pure integer arithmetic
+ * only, no float/double, since the kernel is built with SSE/x87 disabled
+ * (see Makefile's CFLAGS: -mno-80387 -mno-mmx -mno-sse -mno-sse2). mant is
+ * a <=9-significant-digit integer (any sign); the true value is
+ * approximately mant * 10^exp. Renders as "D.DDDDDDDDe+NN". */
+static void append_sci(char *buf, uint32_t cap, uint32_t *pos, long long mant, int exp) {
+    if (mant < 0) append_char(buf, cap, pos, '-');
+    unsigned long long m = mant < 0 ? (0ULL - (unsigned long long)mant) : (unsigned long long)mant;
+    char digits[20];
+    int nd = 0;
+    if (m == 0) digits[nd++] = '0';
+    while (m) { digits[nd++] = (char)('0' + (m % 10)); m /= 10; }
+    int total_exp = exp + (nd - 1);
+    append_char(buf, cap, pos, digits[nd - 1]);
+    append_char(buf, cap, pos, '.');
+    if (nd > 1) {
+        for (int i = nd - 2; i >= 0; i--) append_char(buf, cap, pos, digits[i]);
+    } else {
+        append_char(buf, cap, pos, '0');
+    }
+    append_char(buf, cap, pos, 'e');
+    append_char(buf, cap, pos, total_exp < 0 ? '-' : '+');
+    int e = total_exp < 0 ? -total_exp : total_exp;
+    if (e < 10) append_char(buf, cap, pos, '0');
+    append_uint(buf, cap, pos, (uint32_t)e);
+}
+
 static const char *gui_file_path(gui_state_t *st) {
     if (!st->file_path[0]) {
         st->file_path[0] = '/';
@@ -6697,6 +6746,10 @@ void gui_append_char(char *buf, uint32_t cap, uint32_t *pos, char c) { append_ch
 void gui_append_str(char *buf, uint32_t cap, uint32_t *pos, const char *s) { append_str(buf, cap, pos, s); }
 void gui_append_int(char *buf, uint32_t cap, uint32_t *pos, int v) { append_int(buf, cap, pos, v); }
 void gui_append_uint(char *buf, uint32_t cap, uint32_t *pos, uint32_t v) { append_uint(buf, cap, pos, v); }
+void gui_append_ll(char *buf, uint32_t cap, uint32_t *pos, long long v) { append_ll(buf, cap, pos, v); }
+void gui_append_sci(char *buf, uint32_t cap, uint32_t *pos, long long mant, int exp) {
+    append_sci(buf, cap, pos, mant, exp);
+}
 
 void gui_draw_line(int x0, int y0, int x1, int y1, uint32_t color) {
     int dx = x1 - x0, dy = y1 - y0;

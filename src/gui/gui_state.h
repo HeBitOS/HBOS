@@ -43,22 +43,33 @@ typedef struct gui_state {
     int selected_file;
     int selected_app;
     int app_mode;
-    int calc_value;
-    int calc_acc;
-    int calc_input;
-    int calc_last_lhs;
-    int calc_last_rhs;
+    long long calc_value;
+    long long calc_acc;
+    long long calc_input;
+    long long calc_last_lhs;
+    long long calc_last_rhs;
     int calc_just_evaluated;
     char calc_op;
     char calc_last_op;
     int calc_has_input;
     int calc_error;
+    /* 结果溢出 long long 时改用科学计数法显示：calc_sci=1 时，真实值约等于
+     * calc_sci_mant（<=9 位有效数字，可正可负）* 10^calc_sci_exp；此时
+     * calc_value 本身被钳制到 LLONG_MAX/MIN，只用来让后续运算不至于用到
+     * 未定义的值，显示时以 calc_sci_mant/calc_sci_exp 为准（见 app_calc.c
+     * 的 calc_to_sci）。 */
+    int calc_sci;
+    long long calc_sci_mant;
+    int calc_sci_exp;
     /* 计算历史（环形缓冲，newest 在 head 前一位） */
 #define CALC_HIST_N 10
-    int  calc_hist_lhs[CALC_HIST_N];
-    int  calc_hist_rhs[CALC_HIST_N];
-    int  calc_hist_res[CALC_HIST_N];
+    long long calc_hist_lhs[CALC_HIST_N];
+    long long calc_hist_rhs[CALC_HIST_N];
+    long long calc_hist_res[CALC_HIST_N];
     char calc_hist_op[CALC_HIST_N];
+    int  calc_hist_sci[CALC_HIST_N];
+    long long calc_hist_sci_mant[CALC_HIST_N];
+    int  calc_hist_sci_exp[CALC_HIST_N];
     int  calc_hist_count;   /* 累计条数（取 min(count, N) 显示） */
     int snake_x;
     int snake_y;
