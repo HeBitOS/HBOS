@@ -40,11 +40,14 @@ static unsigned vgetopt32(char **argv, const char *opts, va_list ap) {
     return flags;
 }
 
+unsigned option_mask32;
+
 unsigned getopt32(char **argv, const char *opts, ...) {
     va_list ap;
     va_start(ap, opts);
     unsigned r = vgetopt32(argv, opts, ap);
     va_end(ap);
+    option_mask32 = r;
     return r;
 }
 
@@ -54,6 +57,7 @@ unsigned getopt32long(char **argv, const char *opts, const char *longopts, ...) 
     va_start(ap, longopts);
     unsigned r = vgetopt32(argv, opts, ap);
     va_end(ap);
+    option_mask32 = r;
     return r;
 }
 
@@ -460,6 +464,27 @@ char *dirname(char *path) {
     return path;
 }
 
+int fputs_stdout(const char *s) {
+    return fputs(s, stdout);
+}
+
+void bb_simple_perror_msg_and_die(const char *s) {
+    bb_perror_msg_and_die("%s", s);
+}
+
+void bb_perror_nomsg_and_die(void) {
+    bb_simple_perror_msg_and_die("");
+}
+
+uid_t geteuid(void) {
+    return 0; /* HBOS has no real multi-user model -- always "root" */
+}
+
+const char *xuid2uname(long uid) {
+    (void)uid;
+    return "root";
+}
+
 int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags) {
     (void)dirfd; (void)times; (void)flags;
     struct stat st;
@@ -477,3 +502,4 @@ int futimens(int fd, const struct timespec times[2]) {
 #include "xgetcwd.c"
 #include "remove_file.c"
 #include "single_argv.c"
+#include "executable.c"

@@ -30,6 +30,7 @@
 #include "core/heap.h"
 #include "elf.h"
 #include "user/ldso.h"
+#include "user/hax_app.h"
 #include "vfs.h"
 #include "version.h"
 #include "gui/gui_canvas.h"
@@ -1080,6 +1081,12 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_DLCLOSE: {
             void *handle = (void *)f->a0;
             return (uint64_t)(long)ldso_close(handle);
+        }
+
+        case HBOS_SYS_HAX_EXISTS: {
+            const char *name = (const char *)f->a0;
+            if (!name) return 0;
+            return hax_app_find(name) ? 1 : 0;
         }
 
         default:

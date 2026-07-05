@@ -53,6 +53,25 @@ char bb_process_escape_sequence(const char **ptr);
 char *xrealloc_getcwd_or_warn(char *cwd);
 int fflush_all(void);
 void *xrealloc(void *ptr, size_t size);
+int fputs_stdout(const char *s);
+void bb_perror_nomsg_and_die(void) __attribute__((noreturn));
+void bb_simple_perror_msg_and_die(const char *s) __attribute__((noreturn));
+
+/* which -- HBOS has no real $PATH (getenv() is always NULL, see stdlib.c),
+ * so this is always what's actually searched, matching execvp()'s own
+ * fallback convention (src/user/libc/unistd.c). Vendored verbatim from
+ * upstream (libbb/executable.c) since it's genuinely self-contained. */
+#define bb_default_root_path "/bin"
+#define BB_PATH_ROOT_PATH "PATH=/bin"
+int file_is_executable(const char *name);
+char *find_executable(const char *filename, char **PATHp);
+
+/* whoami/id -- HBOS has no real multi-user model (no /etc/passwd, no uid
+ * database) -- always report the single implicit "root" user, matching
+ * how a single-user embedded OS conventionally behaves. uid_t itself is
+ * already declared in src/user/libc/syscall.h (included transitively). */
+uid_t geteuid(void);
+const char *xuid2uname(long uid);
 
 /* Real BusyBox's autoconf.h always defines every ENABLE_* symbol (0 or 1);
  * this one specifically disables pwd.c's optional -L/-P flag handling
@@ -80,6 +99,10 @@ void *xrealloc(void *ptr, size_t size);
  * unsupported surface works if a future applet relies on it. */
 unsigned getopt32(char **argv, const char *opts, ...);
 unsigned getopt32long(char **argv, const char *opts, const char *longopts, ...);
+/* Real upstream getopt32()/getopt32long() also stash their return value in
+ * this global, since some applets check option flags from a function
+ * other than the one that called getopt32() (e.g. which.c). */
+extern unsigned option_mask32;
 /* Long-option-table encoding markers — needed only so vendored files'
  * long-option table string-literal-concatenation still compiles; the
  * table itself is never read (see getopt32long above). */
@@ -91,17 +114,17 @@ unsigned getopt32long(char **argv, const char *opts, const char *longopts, ...);
  * format (see libbb_shim.c), minus upstream's syslog/logmode machinery. */
 extern const char *applet_name;
 void bb_error_msg(const char *fmt, ...);
-void bb_error_msg_and_die(const char *fmt, ...);
+void bb_error_msg_and_die(const char *fmt, ...) __attribute__((noreturn));
 void bb_simple_error_msg(const char *s);
-void bb_simple_error_msg_and_die(const char *s);
+void bb_simple_error_msg_and_die(const char *s) __attribute__((noreturn));
 void bb_perror_msg(const char *fmt, ...);
-void bb_perror_msg_and_die(const char *fmt, ...);
+void bb_perror_msg_and_die(const char *fmt, ...) __attribute__((noreturn));
 /* Real bb_show_usage() prints the applet's usage text from a table
  * generated at build time from every vendored file's "//usage:" comments
  * (usage_messages.c, itself Kconfig-driven — see README.md). Not vendored;
  * this prints a generic message instead. */
-void bb_show_usage(void);
-void xfunc_die(void);
+void bb_show_usage(void) __attribute__((noreturn));
+void xfunc_die(void) __attribute__((noreturn));
 
 /* stdio/fd convenience wrappers vendored applets call repeatedly. */
 FILE *fopen_or_warn_stdin(const char *filename);

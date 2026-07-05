@@ -92,3 +92,8 @@ int rename(const char *oldpath, const char *newpath) {
     errno = EXDEV;
     return -1;
 }
+
+int hax_app_exists(const char *name) {
+    long ret = __syscall1(HBOS_SYS_HAX_EXISTS, (long)name);
+    return ret > 0 ? 1 : 0;
+}

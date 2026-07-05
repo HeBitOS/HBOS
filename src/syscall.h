@@ -172,6 +172,8 @@ typedef enum {
     HBOS_SYS_DLSYM,          /**< dlsym(handle,name) -> 符号地址或 0 */
     HBOS_SYS_DLCLOSE,        /**< dlclose(handle) -> 0 成功 -1 失败 */
 
+    HBOS_SYS_HAX_EXISTS,     /**< hax_app_find(name) 是否存在 -> 1/0 */
+
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;
 

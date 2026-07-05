@@ -48,4 +48,12 @@ int          isatty(int fd);
  * needing real move-in-place support. */
 int          rename(const char *oldpath, const char *newpath);
 
+/* HBOS-specific: HBOS's "programs" are .hax apps looked up by name in an
+ * embedded kernel registry (src/user/hax.c's hax_app_find()), not files in
+ * the ramfs. There is no /bin directory listing them, so PATH-searching
+ * tools (which, executable_exists()) must ask the kernel directly whether
+ * a name is a known app rather than stat()'ing a path. Returns 1 if found,
+ * 0 otherwise. */
+int          hax_app_exists(const char *name);
+
 #endif
