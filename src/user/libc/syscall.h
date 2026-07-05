@@ -14,7 +14,16 @@ typedef unsigned int useconds_t;
 typedef long clock_t;
 typedef unsigned long dev_t;
 typedef unsigned long ino_t;
-typedef unsigned long nlink_t;
+/* Must be 4 bytes to match the kernel's struct stat (src/sys/types.h) --
+ * this used to be "unsigned long" (8 bytes), which shifted every field
+ * after st_nlink (uid/gid/rdev/size/atime/mtime/ctime) by 4 bytes between
+ * what the kernel's stat()/fstat() write and what user-mode code reads,
+ * so e.g. st_size always read back as 0 (actually reading half of the
+ * kernel's always-zero st_atime instead). Found via `ls -l` reporting
+ * every file as size 0 despite `cat`/the shell's own stat command (a
+ * direct in-kernel call, unaffected by this cross-boundary layout bug)
+ * showing the correct size. */
+typedef unsigned int nlink_t;
 
 struct stat {
     dev_t st_dev;
