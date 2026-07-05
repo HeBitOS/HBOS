@@ -32,7 +32,7 @@ HBOS_VERSION_STR = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR) beta$(HBOS_VER_BETA) pre$
 .DEFAULT_GOAL := all
 
 # 交互式设置版本号 → version.mk（回车保留当前值）
-.PHONY: ver ask
+.PHONY: ver ask apps
 ver:
 	@echo '── 设置 HBOS 构建版本号（直接回车保留当前值）──'; \
 	 printf '  大版本 MAJOR [%s]: ' '$(HBOS_VER_MAJOR)'; read M; M=$${M:-$(HBOS_VER_MAJOR)}; \
@@ -43,8 +43,38 @@ ver:
 	        "$$M" "$$N" "$$B" "$$P" > version.mk; \
 	 echo "✓ 已写入 version.mk:  v$$M.$$N-beta$$B-pre$$P"
 
-# 先询问版本，再完整构建
-ask: ver
+# 交互式选择要打包进镜像的 app/*.c（回车默认保留当前状态）。
+# 选"不包含"时把源码移到 app/.disabled/（不是直接删除，可随时在下次
+# make ask 时选择恢复）——效果和手动把 .c 从 app/ 删掉一样（genhax.py /
+# HAX_APP_SRCS 都是 wildcard app/*.c，本来就不会看 app/.disabled/ 里的
+# 东西），只是留了个反悔的余地。
+apps:
+	@mkdir -p app/.disabled; \
+	 echo '── 选择要打包进镜像的 app（回车 = 保留当前状态）──'; \
+	 for f in app/*.c; do \
+	   [ -e "$$f" ] || continue; \
+	   name=$$(basename "$$f" .c); \
+	   printf '  包含 %-12s [Y/n]: ' "$$name"; read a; \
+	   if [ "$$a" = "n" ] || [ "$$a" = "N" ]; then \
+	     mv "$$f" "app/.disabled/$$name.c"; \
+	     echo "    → 已移到 app/.disabled/（下次 make ask 可以选择恢复）"; \
+	   fi; \
+	 done; \
+	 if ls app/.disabled/*.c >/dev/null 2>&1; then \
+	   echo '── 已禁用的 app（回车 = 继续保持禁用）──'; \
+	   for f in app/.disabled/*.c; do \
+	     [ -e "$$f" ] || continue; \
+	     name=$$(basename "$$f" .c); \
+	     printf '  恢复 %-12s [y/N]: ' "$$name"; read a; \
+	     if [ "$$a" = "y" ] || [ "$$a" = "Y" ]; then \
+	       mv "$$f" "app/$$name.c"; \
+	       echo "    → 已恢复到 app/"; \
+	     fi; \
+	   done; \
+	 fi
+
+# 先询问版本 + 要打包的 app，再完整构建
+ask: ver apps
 	@$(MAKE) --no-print-directory all
 
 # version.mk 缺失时不报错（占位规则）
