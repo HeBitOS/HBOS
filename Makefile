@@ -223,6 +223,7 @@ C_SRCS = \
 	$(SRC_DIR)/gui/apps/app_clock.c \
 	$(SRC_DIR)/gui/apps/app_settings.c \
 	$(SRC_DIR)/gui/apps/app_files.c \
+	$(SRC_DIR)/gui/apps/app_taskmgr.c \
 	$(SRC_DIR)/gpu.c \
 	$(APP_SRCS)
 

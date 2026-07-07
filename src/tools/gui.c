@@ -132,6 +132,7 @@ static const gui_app_meta_t gui_apps[] = {
     {"控制台终端", "运行命令与系统交互", GUI_APP_DIAG},
     {"时钟", "实时时钟与日期", GUI_APP_CLOCK},
     {"设置", "主题与字体", GUI_APP_SETTINGS},
+    {"任务管理器", "查看运行中的任务，结束任务", GUI_APP_TASKMGR},
 };
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
@@ -848,6 +849,7 @@ static int app_icon_id(int mode) {
         case GUI_APP_CLOCK:    return ICON_CLOCK;
         case GUI_APP_SETTINGS: return ICON_SYS;
         case GUI_APP_FILES:    return ICON_FILES;
+        case GUI_APP_TASKMGR:  return ICON_SYS;
         default:               return ICON_APPS;
     }
 }
@@ -5317,6 +5319,7 @@ static const sm_entry_t sm_builtin[] = {
     {"终端",       "term terminal shell",      SM_K_APP,   GUI_APP_DIAG,    ICON_TERM},
     {"时钟",       "clock time shizhong",      SM_K_APP,   GUI_APP_CLOCK,   ICON_CLOCK},
     {"设置",       "settings config shezhi",   SM_K_APP,   GUI_APP_SETTINGS,ICON_SYS},
+    {"任务管理器", "task taskmgr process renwu guanli", SM_K_APP, GUI_APP_TASKMGR, ICON_SYS},
 };
 #define SM_BUILTIN_N ((int)(sizeof(sm_builtin) / sizeof(sm_builtin[0])))
 
@@ -5939,6 +5942,7 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_CLOCK, "时钟");
     wm_set_app_title(GUI_APP_SETTINGS, "设置");
     wm_set_app_title(GUI_APP_FILES, "文件管理器");
+    wm_set_app_title(GUI_APP_TASKMGR, "任务管理器");
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";

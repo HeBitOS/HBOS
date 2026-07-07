@@ -17,6 +17,7 @@
 #define GUI_APP_CLOCK    7
 #define GUI_APP_SETTINGS 8
 #define GUI_APP_FILES    9
+#define GUI_APP_TASKMGR  10
 
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
@@ -124,6 +125,10 @@ typedef struct gui_state {
     int snap_preview;
     uint8_t clock_last_sec;
     int switcher_ticks;
+    /* 任务管理器：选中行 + 每秒刷新节流（复用 CMOS 秒计数思路，见
+     * app_clock.c 的 clock_last_sec，taskmgr 单独一份避免和时钟耦合） */
+    int taskmgr_selected;
+    uint8_t taskmgr_last_sec;
     int  toast_ticks;       /* >0 时显示 toast 通知（每帧自减） */
     char toast_msg[80];     /* toast 文本 */
     /* 开始菜单搜索 */
