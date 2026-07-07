@@ -1196,7 +1196,7 @@ static void gui_set_note_name(gui_state_t *st, const char *name) {
     }
     st->note_name[i] = 0;
     st->note_loaded = 0;
-    st->note_select_all = 0;
+    st->note_sel_active = 0;
 }
 
 static const char *gui_note_name(gui_state_t *st) {
@@ -1423,6 +1423,14 @@ static const int CURSOR_RESIZE_NWSE_VY[10] = { 1, 1, 5, 12, 8, 17, 17, 13, 6, 10
 static const int CURSOR_RESIZE_NESW_VX[10] = { 1, 1, 5, 12, 8, 17, 17, 13, 6, 10 };
 static const int CURSOR_RESIZE_NESW_VY[10] = { 17, 8, 12, 5, 1, 1, 10, 6, 13, 17 };
 
+// I-beam 文本光标：上下两条横杠 + 中间细竖杠（工字形），悬停在记事本/代码
+// 工作台的文本框内时使用。#define 而非 WM_EDGE_* 值，避免跟窗口缩放边缘冲突。
+#define CURSOR_HOVER_TEXT -50
+#define CURSOR_TEXT_W 14
+#define CURSOR_TEXT_H 22
+static const int CURSOR_TEXT_VX[12] = { 0, 14, 14,  9,  9, 14, 14, 0, 0, 5, 5, 0 };
+static const int CURSOR_TEXT_VY[12] = { 0,  0,  4,  4, 18, 18, 22, 22, 18, 18, 4, 4 };
+
 static void draw_polygon_cursor(int x, int y, const int *vx, const int *vy, int n, int bw, int bh) {
     uint32_t c = rgb(148, 148, 148);
     uint32_t d = rgb(20, 27, 34);
@@ -1453,6 +1461,10 @@ static void draw_cursor(int x, int y, int edge) {
         draw_polygon_cursor(x, y, CURSOR_RESIZE_NESW_VX, CURSOR_RESIZE_NESW_VY, 10,
                              CURSOR_RESIZE_NESW_W, CURSOR_RESIZE_NESW_H);
         return;
+    case CURSOR_HOVER_TEXT:
+        draw_polygon_cursor(x, y, CURSOR_TEXT_VX, CURSOR_TEXT_VY, 12,
+                             CURSOR_TEXT_W, CURSOR_TEXT_H);
+        return;
     default:
         draw_polygon_cursor(x, y, CURSOR_VX, CURSOR_VY, 4, CURSOR_ARROW_W, CURSOR_ARROW_H);
         return;
@@ -1470,6 +1482,10 @@ static int key_poll(void) {
     if (key == KB_KEY_PGUP) return GUI_KEY_PGUP;
     if (key == KB_KEY_PGDWN) return GUI_KEY_PGDOWN;
     if (key == KB_KEY_DELETE) return GUI_KEY_DELETE;
+    if (key == KB_KEY_SHIFT_UP) return GUI_KEY_SHIFT_UP;
+    if (key == KB_KEY_SHIFT_DOWN) return GUI_KEY_SHIFT_DOWN;
+    if (key == KB_KEY_SHIFT_LEFT) return GUI_KEY_SHIFT_LEFT;
+    if (key == KB_KEY_SHIFT_RIGHT) return GUI_KEY_SHIFT_RIGHT;
     if (key == '\b') return GUI_KEY_BACKSPACE;
     return key;
 }
@@ -1665,19 +1681,50 @@ static const char *task_state_name(task_state_t state) {
     }
 }
 
-static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
+/* 文件管理器面板布局 —— 绘制(draw_files_panel)和点击测试(hit_action)共用，
+ * 避免两处几何不一致。三个列表框的高度(box_h)与可见行数(list_rows)跟随窗口
+ * 高度：窗口内容区高 = win_h - 42(顶部偏移) - 32(底部状态带)，见
+ * draw_one_window。旧实现的 206px 定高 + FILE_LIST_ROWS(8) 定行数有两个
+ * 问题：8 行 x 30px = 240px 本来就画穿了 206px 的框底（最后两行叠在状态
+ * 文字上、甚至越过窗口底边），而窗口放大/最大化后显示区域又完全不变。 */
+typedef struct {
+    int content_w;
+    int side_w, main_w, detail_w;   /* main_x = tx+side_w+12, detail_x = main_x+main_w+12 */
+    int box_h;       /* 三个列表框的公共高度 */
+    int list_rows;   /* 文件列表可见行数 */
+    int status_y;    /* 底部“已选择/显示 x-y”行的 y（相对 ty） */
+} files_layout_t;
+
+static void files_panel_layout(int win_w, int win_h, files_layout_t *L) {
+    L->content_w = win_w - 60;
+    L->side_w = 118;
+    L->detail_w = 184;
+    L->main_w = L->content_w - L->side_w - L->detail_w - 24;
+    if (L->main_w < 260) {
+        L->detail_w = 152;
+        L->main_w = L->content_w - L->side_w - L->detail_w - 24;
+    }
+    if (L->main_w < 220) L->main_w = 220;
+
+    int avail_h = win_h - 74;            /* 从 ty 到底部状态带的净高 */
+    L->box_h = avail_h - 114 - 40;       /* 框顶在 ty+114，底部留状态条(28)+边距 */
+    if (L->box_h < 206) L->box_h = 206;  /* 不小于原有设计尺寸 */
+    /* 行从框顶 +32 开始（表头），底部留 8px 边距 */
+    L->list_rows = (L->box_h - 40) / FILE_ROW_H;
+    if (L->list_rows < 1) L->list_rows = 1;
+    L->status_y = 114 + L->box_h + 14;
+}
+
+static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_state_t *st) {
     char line[96];
     gui_state_t *mst = (gui_state_t *)st;
-    int content_w = win_w - 60;
-    int side_w = 118;
+    files_layout_t L;
+    files_panel_layout(win_w, win_h, &L);
+    int content_w = L.content_w;
+    int side_w = L.side_w;
     int main_x = tx + side_w + 12;
-    int detail_w = 184;
-    int main_w = content_w - side_w - detail_w - 24;
-    if (main_w < 260) {
-        detail_w = 152;
-        main_w = content_w - side_w - detail_w - 24;
-    }
-    if (main_w < 220) main_w = 220;
+    int detail_w = L.detail_w;
+    int main_w = L.main_w;
     int detail_x = main_x + main_w + 12;
 
     uint32_t count = gui_file_count(mst);
@@ -1693,8 +1740,8 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
 
     draw_file_action_bar(tx, ty, content_w);
 
-    vgradient(tx, ty + 114, side_w, 206, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, ty + 114, side_w, 206, rgb(50, 72, 92));
+    vgradient(tx, ty + 114, side_w, L.box_h, rgb(22, 30, 40), rgb(14, 20, 28));
+    border(tx, ty + 114, side_w, L.box_h, rgb(50, 72, 92));
     rect(tx, ty + 114, side_w, 1, rgb(58, 86, 110));
     text(tx + 14, ty + 128, "位置", rgb(194, 226, 242), 1);
     vgradient(tx + 10, ty + 154, side_w - 20, 28, rgb(38, 76, 104), rgb(22, 50, 70));
@@ -1704,8 +1751,8 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     text(tx + 22, ty + 232, "/dev  /proc", rgb(132, 150, 162), 1);
     text(tx + 14, ty + 286, "Enter进入  Back上级", rgb(122, 142, 156), 1);
 
-    vgradient(main_x, ty + 114, main_w, 206, rgb(28, 40, 52), rgb(18, 26, 36));
-    border(main_x, ty + 114, main_w, 206, rgb(58, 86, 110));
+    vgradient(main_x, ty + 114, main_w, L.box_h, rgb(28, 40, 52), rgb(18, 26, 36));
+    border(main_x, ty + 114, main_w, L.box_h, rgb(58, 86, 110));
     vgradient(main_x, ty + 114, main_w, 26, rgb(40, 60, 78), rgb(24, 36, 48));
     rect(main_x, ty + 139, main_w, 1, rgb(70, 100, 116));
     text(main_x + 14, ty + 122, "名称", rgb(218, 232, 240), 1);
@@ -1716,8 +1763,8 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     if (count == 0) {
         text(main_x + 18, list_y + 18, "目录为空", rgb(190, 208, 218), 1);
         text(main_x + 18, list_y + 42, "点击新建或按 N 创建", rgb(148, 168, 180), 1);
-        vgradient(detail_x, ty + 114, detail_w, 206, rgb(22, 30, 40), rgb(14, 20, 28));
-        border(detail_x, ty + 114, detail_w, 206, rgb(50, 72, 92));
+        vgradient(detail_x, ty + 114, detail_w, L.box_h, rgb(22, 30, 40), rgb(14, 20, 28));
+        border(detail_x, ty + 114, detail_w, L.box_h, rgb(50, 72, 92));
         text(detail_x + 12, ty + 130, "详细信息", rgb(194, 226, 242), 1);
         text(detail_x + 12, ty + 164, "未选择文件", rgb(148, 162, 174), 1);
         return;
@@ -1726,9 +1773,9 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     int selected = st->selected_file;
     if (selected < 0) selected = 0;
     if ((uint32_t)selected >= count) selected = (int)count - 1;
-    uint32_t start = selected >= FILE_LIST_ROWS ? (uint32_t)selected - (FILE_LIST_ROWS - 1) : 0;
+    uint32_t start = selected >= L.list_rows ? (uint32_t)(selected - (L.list_rows - 1)) : 0;
     uint32_t max = count - start;
-    if (max > FILE_LIST_ROWS) max = FILE_LIST_ROWS;
+    if (max > (uint32_t)L.list_rows) max = (uint32_t)L.list_rows;
     for (uint32_t i = 0; i < max; i++) {
         uint32_t file_idx = start + i;
         char name[VFS_MAX_NAME], full[GUI_PATH_MAX];
@@ -1761,8 +1808,8 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         vfs_node_t *node = 0;
         if (gui_file_entry(mst, (uint32_t)selected, name, &type, &node, full, sizeof(full)) < 0)
             return;
-        vgradient(detail_x, ty + 114, detail_w, 206, rgb(22, 30, 40), rgb(14, 20, 28));
-        border(detail_x, ty + 114, detail_w, 206, rgb(50, 72, 92));
+        vgradient(detail_x, ty + 114, detail_w, L.box_h, rgb(22, 30, 40), rgb(14, 20, 28));
+        border(detail_x, ty + 114, detail_w, L.box_h, rgb(50, 72, 92));
         vgradient(detail_x, ty + 114, detail_w, 30, rgb(34, 50, 66), rgb(20, 30, 42));
         rect(detail_x, ty + 143, detail_w, 1, rgb(8, 14, 22));
         text(detail_x + 12, ty + 124, "详细信息", rgb(218, 232, 240), 1);
@@ -1776,7 +1823,8 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         line2(line, sizeof(line), "类型: ", gui_node_type_label(type));
         text(detail_x + 12, ty + 216, line, rgb(210, 221, 230), 1);
         text(detail_x + 12, ty + 246, "预览", rgb(194, 226, 242), 1);
-        char preview[64];
+        /* 256 而非原来的 64：详情框高度现在跟随窗口，最大化后能放下更多预览 */
+        char preview[256];
         uint32_t n = 0;
         if (node && node->type == VFS_NODE_FILE) {
             int got = vfs_read(node, 0, preview, sizeof(preview) - 1);
@@ -1793,7 +1841,7 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         int py = ty + 270;
         utf8_state_t utf8;
         utf8_init(&utf8);
-        for (uint32_t i = 0; i < n && py < ty + 312; i++) {
+        for (uint32_t i = 0; i < n && py < ty + 114 + L.box_h - 8; i++) {
             if (preview[i] == '\n') {
                 px = detail_x + 12;
                 py += 18;
@@ -1811,10 +1859,11 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
             }
         }
 
-        vgradient(tx, ty + 330, content_w, 28, rgb(28, 40, 54), rgb(16, 24, 34));
-        rect(tx, ty + 330, content_w, 1, rgb(50, 72, 92));
-        rect(tx, ty + 357, content_w, 1, rgb(8, 14, 22));
-        border(tx, ty + 330, content_w, 28, rgb(46, 66, 86));
+        int sy = ty + L.status_y;
+        vgradient(tx, sy - 10, content_w, 28, rgb(28, 40, 54), rgb(16, 24, 34));
+        rect(tx, sy - 10, content_w, 1, rgb(50, 72, 92));
+        rect(tx, sy + 17, content_w, 1, rgb(8, 14, 22));
+        border(tx, sy - 10, content_w, 28, rgb(46, 66, 86));
         if (st->rename_active) {
             int input_x = tx + 72;
             int hint_w = 132;
@@ -1824,15 +1873,15 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
                 input_w = content_w - 84;
             }
             if (input_w < 80) input_w = 80;
-            text(tx + 12, ty + 340, "新名称", rgb(216, 232, 244), 1);
-            draw_inset_shell(input_x, ty + 335, input_w, 18, rgb(8, 14, 22));
-            text_clipped(input_x + 6, ty + 340, input_x + input_w - 8,
+            text(tx + 12, sy, "新名称", rgb(216, 232, 244), 1);
+            draw_inset_shell(input_x, sy - 5, input_w, 18, rgb(8, 14, 22));
+            text_clipped(input_x + 6, sy, input_x + input_w - 8,
                          st->rename_buf, rgb(236, 246, 252), 1);
             int cursor_x = input_x + 6 + (int)st->rename_len * 6;
             if (cursor_x > input_x + input_w - 8) cursor_x = input_x + input_w - 8;
-            rect(cursor_x, ty + 339, 2, 12, rgb(124, 220, 154));
+            rect(cursor_x, sy - 1, 2, 12, rgb(124, 220, 154));
             if (hint_w > 0)
-                text(input_x + input_w + 10, ty + 340, "Enter确认 Esc取消",
+                text(input_x + input_w + 10, sy, "Enter确认 Esc取消",
                      rgb(148, 168, 180), 1);
         } else {
             uint32_t pos = 0;
@@ -1848,10 +1897,10 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
                 append_uint(line, sizeof(line), &pos, node ? node->size : 0);
                 append_str(line, sizeof(line), &pos, "B  Enter打开/进入  P复制 R重命名");
             }
-            text_clipped(tx + 12, ty + 340, tx + content_w - 12, line, rgb(216, 232, 244), 1);
+            text_clipped(tx + 12, sy, tx + content_w - 12, line, rgb(216, 232, 244), 1);
         }
     }
-    if (count > FILE_LIST_ROWS) {
+    if (count > (uint32_t)L.list_rows) {
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, "显示 ");
@@ -1860,7 +1909,7 @@ static void draw_files_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         append_uint(line, sizeof(line), &pos, start + max);
         append_str(line, sizeof(line), &pos, " / ");
         append_uint(line, sizeof(line), &pos, count);
-        text(main_x + main_w - 96, ty + 340, line, rgb(148, 162, 174), 1);
+        text(main_x + main_w - 96, ty + L.status_y, line, rgb(148, 162, 174), 1);
     }
 }
 
@@ -2074,13 +2123,26 @@ static void note_save(gui_state_t *st) {
 }
 
 // Ctrl+A 全选后，Backspace/Delete/输入字符 都应先清空整篇笔记（相当于替换选区）
-static void note_clear_all(gui_state_t *st) {
-    st->note_len = 0;
-    st->note_cursor = 0;
-    st->note_buf[0] = 0;
-    st->note_select_all = 0;
+// 删除 [start,end) 字节范围（Shift+方向键选区 或 Ctrl+A 全选后，输入/退格替换选中内容）
+static void note_delete_range(gui_state_t *st, uint32_t start, uint32_t end) {
+    if (end > st->note_len) end = st->note_len;
+    st->note_sel_active = 0;
+    if (start >= end) { st->note_cursor = start; return; }
+    uint32_t removed = end - start;
+    for (uint32_t i = start; i + removed <= st->note_len; i++)
+        st->note_buf[i] = st->note_buf[i + removed];
+    st->note_len -= removed;
+    st->note_cursor = start;
+    st->note_buf[st->note_len] = 0;
     st->note_dirty = 1;
-    st->status = "已清空（Ctrl+S 保存）";
+    st->status = "编辑中（Ctrl+S 保存）";
+}
+
+// 选区范围 [*start,*end)；anchor==cursor 时无实际选中内容
+static void note_sel_range(const gui_state_t *st, uint32_t *start, uint32_t *end) {
+    uint32_t a = st->note_sel_anchor, b = st->note_cursor;
+    *start = a < b ? a : b;
+    *end   = a < b ? b : a;
 }
 
 // 在光标处插入一个字节，仅修改内存缓冲，标记 dirty（Ctrl+S 才落盘）
@@ -2251,6 +2313,8 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     int cursor_x = x;
     int cursor_y = y;
     int cursor_drawn = 0;
+    uint32_t sel_start = 0, sel_end = 0;
+    if (st->note_sel_active) note_sel_range(st, &sel_start, &sel_end);
     utf8_state_t utf8;
     utf8_init(&utf8);
     for (uint32_t i = 0; i < st->note_len && y < ty + 280; i++) {
@@ -2259,8 +2323,9 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
             cursor_y = y;
             cursor_drawn = 1;
         }
+        int in_sel = st->note_sel_active && i >= sel_start && i < sel_end;
         if (st->note_buf[i] == '\n') {
-            if (st->note_select_all) rect(x, y, 6, 16, rgb(40, 92, 132));
+            if (in_sel) rect(x, y, 6, 16, rgb(40, 92, 132));
             x = edit_x + 8;
             y += 18;
             utf8_init(&utf8);
@@ -2272,7 +2337,7 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
 
-        if (st->note_select_all) rect(x, y, gui_cp_advance(cp, 1), 16, rgb(40, 92, 132));
+        if (in_sel) rect(x, y, gui_cp_advance(cp, 1), 16, rgb(40, 92, 132));
         int advance = draw_text_codepoint(x, y, cp, rgb(228, 238, 246), 1);
         x += advance;
         if (x > edit_x + edit_w - 16) {
@@ -2361,7 +2426,7 @@ static void code_set_path(gui_state_t *st, const char *path) {
     st->code_modified = 0;
     st->code_scroll = 0;
     st->code_cursor = 0;
-    st->code_select_all = 0;
+    st->code_sel_active = 0;
     st->code_error_line = 0;
     st->code_view_rows = 0;
 }
@@ -2582,16 +2647,24 @@ static void code_move_page(gui_state_t *st, int dir) {
     code_ensure_visible(st);
 }
 
-// Ctrl+A 全选后，Backspace/Delete/输入字符 都应先清空整份代码（相当于替换选区）
-static void code_clear_all(gui_state_t *st) {
-    st->code_len = 0;
-    st->code_cursor = 0;
-    g_code_buf[0] = 0;
-    st->code_select_all = 0;
+// 删除 [start,end) 字节范围（Shift+方向键选区 或 Ctrl+A 全选后，输入/退格替换选中内容）
+static void code_delete_range(gui_state_t *st, uint32_t start, uint32_t end) {
+    if (end > st->code_len) end = st->code_len;
+    st->code_sel_active = 0;
+    if (start >= end) { st->code_cursor = start; code_ensure_visible(st); return; }
+    memmove(g_code_buf + start, g_code_buf + end, st->code_len - end + 1);
+    st->code_len -= (end - start);
+    st->code_cursor = start;
     st->code_modified = 1;
     st->code_error_line = 0;
-    st->code_scroll = 0;
     code_ensure_visible(st);
+}
+
+// 选区范围 [*start,*end)；anchor==cursor 时无实际选中内容
+static void code_sel_range(const gui_state_t *st, uint32_t *start, uint32_t *end) {
+    uint32_t a = st->code_sel_anchor, b = st->code_cursor;
+    *start = a < b ? a : b;
+    *end   = a < b ? b : a;
 }
 
 static void code_insert_char(gui_state_t *st, char c) {
@@ -2982,6 +3055,8 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     uint32_t cursor_line = 0, cursor_col = 0;
     code_line_col(st, st->code_cursor, &cursor_line, &cursor_col);
     uint32_t total_lines = code_line_count(st);
+    uint32_t sel_start = 0, sel_end = 0;
+    if (st->code_sel_active) code_sel_range(st, &sel_start, &sel_end);
     for (int row = 0; row < l.view_rows; row++) {
         uint32_t line_idx = (uint32_t)(st->code_scroll + row);
         if (line_idx >= total_lines) break;
@@ -2998,8 +3073,14 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
         num[0] = 0;
         append_uint(num, sizeof(num), &pos, line_idx + 1);
         int y = l.editor_y + 10 + row * l.row_h;
-        if (st->code_select_all) {
-            rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(40, 92, 132));
+        if (st->code_sel_active && sel_end > off && sel_start < off + len) {
+            uint32_t line_sel_start = sel_start > off ? sel_start - off : 0;
+            uint32_t line_sel_end = sel_end < off + len ? sel_end - off : len;
+            int hl_x = l.editor_x + l.line_no_w + 10 + (int)line_sel_start * code_cell_w();
+            int hl_w = (int)(line_sel_end - line_sel_start) * code_cell_w();
+            if (sel_end > off + len) hl_w += code_cell_w();  // 选区跨行，把换行处也画出来
+            if (hl_w < 1) hl_w = 1;
+            rect(hl_x, y - 3, hl_w, l.row_h, rgb(40, 92, 132));
         } else if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
             rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(70, 24, 30));
             rect(l.editor_x + l.line_no_w + 1, y - 3, 3, l.row_h, rgb(232, 86, 92));
@@ -3529,6 +3610,7 @@ static void browser_set_plain2(gui_state_t *st, const char *a, const char *b) {
 static void browser_init(gui_state_t *st) {
     if (st->browser_loaded) return;
     strcpy(st->browser_url, "https://example.com/");
+    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
     browser_set_plain(st, "输入网址后按 Enter 加载。当前 HTTPS 支持 TLS 1.3 + ChaCha20-Poly1305；部分网站会自动尝试 HTTP。");
     st->browser_scroll = 0;
     st->browser_loaded = 1;
@@ -3722,14 +3804,20 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     char ipbuf[16];
     net_ipv4_to_str(dev->ip, ipbuf);
     text(tx, ty, "浏览器", rgb(78, 192, 236), 1);
-    text(tx, ty + 30, "Enter加载  Ctrl+S保存  方向键滚动", rgb(148, 162, 174), 1);
+    text(tx, ty + 30, "Enter加载  Ctrl+S保存  ←→移动光标  ↑↓滚动", rgb(148, 162, 174), 1);
     rect(tx, ty + 58, view_w, 32, rgb(6, 14, 22));
     border(tx, ty + 58, view_w, 32, rgb(78, 192, 236));
     text(tx + 10, ty + 68, st->browser_url, rgb(232, 242, 248), 1);
-    // 闪烁插入光标：跟随网址文本末尾（输入/退格都只作用于末尾），超出输入框
-    // 宽度时钳制在框内，避免长网址把光标画到边框外面。
+    // 闪烁插入光标：跟随实际光标位置（左右键可移动），超出输入框宽度时钳制在
+    // 框内，避免长网址把光标画到边框外面。
     {
-        int caret_x = tx + 10 + text_width(st->browser_url, 1);
+        uint32_t cur = st->browser_url_cursor;
+        uint32_t n = (uint32_t)strlen(st->browser_url);
+        if (cur > n) cur = n;
+        char prefix[BROWSER_URL_CAP];
+        memcpy(prefix, st->browser_url, cur);
+        prefix[cur] = 0;
+        int caret_x = tx + 10 + text_width(prefix, 1);
         if (caret_x > tx + view_w - 10) caret_x = tx + view_w - 10;
         static uint32_t browser_caret_ticks = 0;
         browser_caret_ticks++;
@@ -3822,8 +3910,8 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
                  title, active ? rgb(255, 255, 255) : (light ? rgb(90, 96, 102) : rgb(190, 196, 202)), 1);
 }
 
-static void draw_panel_window(int tx, int ty, int win_w, int w, int h, gui_state_t *st, int panel) {
-    if (panel == PANEL_FILES) draw_files_panel(tx, ty, win_w, st);
+static void draw_panel_window(int tx, int ty, int win_w, int win_h, int w, int h, gui_state_t *st, int panel) {
+    if (panel == PANEL_FILES) draw_files_panel(tx, ty, win_w, win_h, st);
     else if (panel == PANEL_DISK) draw_disk_panel(tx, ty, win_w);
     else if (panel == PANEL_SYS) draw_resource_panel(tx, ty, win_w, w, h);
     else draw_apps_panel(tx, ty, win_w, st);
@@ -3863,7 +3951,7 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     if (win->kind == WM_WIN_PANEL) {
         st->active = win->mode;
         st->app_mode = GUI_APP_NONE;
-        draw_panel_window(tx, ty, win_w, w, h, st, win->mode);
+        draw_panel_window(tx, ty, win_w, win_h, w, h, st, win->mode);
     } else {
         st->active = PANEL_APPS;
         st->app_mode = win->mode;
@@ -4743,33 +4831,27 @@ static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
     gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
     int tx = win_x + 30;
     int ty = win_y + 42;
-    (void)win_h;
     int panel = win->mode;
     if (panel == PANEL_FILES) {
-        int content_w = win_w - 60;
+        files_layout_t L;
+        files_panel_layout(win_w, win_h, &L);
+        int content_w = L.content_w;
         for (int i = 0; i < FILE_ACTION_COUNT; i++) {
             int x, y, bw;
             if (!gui_file_action_rect(content_w, i, &x, &y, &bw)) continue;
             if (mx >= tx + x && mx < tx + x + bw && my >= ty + y && my < ty + y + ACTION_H)
                 return gui_file_actions[i].action;
         }
-        int side_w = 118;
-        int main_x = tx + side_w + 12;
-        int detail_w = 184;
-        int main_w = content_w - side_w - detail_w - 24;
-        if (main_w < 260) {
-            detail_w = 152;
-            main_w = content_w - side_w - detail_w - 24;
-        }
-        if (main_w < 220) main_w = 220;
+        int main_x = tx + L.side_w + 12;
+        int main_w = L.main_w;
         int list_y = ty + 146;
-        if (mx >= main_x && mx < main_x + main_w && my >= list_y - 8 && my < list_y - 8 + FILE_LIST_ROWS * FILE_ROW_H) {
+        if (mx >= main_x && mx < main_x + main_w && my >= list_y - 8 && my < list_y - 8 + L.list_rows * FILE_ROW_H) {
             int selected = st->selected_file;
             if (selected < 0) selected = 0;
-            uint32_t start = selected >= FILE_LIST_ROWS ? (uint32_t)selected - (FILE_LIST_ROWS - 1) : 0;
+            uint32_t start = selected >= L.list_rows ? (uint32_t)(selected - (L.list_rows - 1)) : 0;
             int idx = (my - (list_y - 8)) / FILE_ROW_H;
             uint32_t file_idx = start + (uint32_t)idx;
-            if (idx >= 0 && idx < FILE_LIST_ROWS && file_idx < gui_file_count((gui_state_t *)st))
+            if (idx >= 0 && idx < L.list_rows && file_idx < gui_file_count((gui_state_t *)st))
                 return FILE_ACTION_BASE + (int)file_idx;
         }
     } else if (panel == PANEL_DISK) {
@@ -4812,6 +4894,74 @@ static int hit_note_file(int w, int h, const gui_state_t *st, int mx, int my) {
     uint32_t file_idx = start + (uint32_t)idx;
     if (idx >= 0 && idx < NOTE_FILE_ROWS && file_idx < count) return (int)file_idx;
     return -1;
+}
+
+// 记事本正文区点击定位：笔记是变宽比例字体（非等宽网格），逐字符重演
+// draw_notes_app 的排版循环来反推 (mx,my) 落在哪个字节偏移上，保证跟渲染
+// 完全一致。命中正文框返回 1 并写 *off；否则返回 0（不动光标）。
+static int hit_note_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off) {
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
+    const wm_window_t *win = wm_get_window(&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_NOTES) return 0;
+
+    int win_x, win_y, win_w, win_h;
+    gui_window_metrics(st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
+    (void)win_h;
+    int tx = win_x + 30;
+    int ty = win_y + 42;
+    int list_w = 150;
+    int edit_x = tx + list_w + 18;
+    int edit_w = win_w - list_w - 86;
+    if (edit_w < 260) edit_w = 260;
+    if (mx < edit_x || mx >= edit_x + edit_w || my < ty + 118 || my >= ty + 291)
+        return 0;
+
+    int x = edit_x + 8;
+    int y = ty + 126;
+    utf8_state_t utf8;
+    utf8_init(&utf8);
+    uint32_t i;
+    for (i = 0; i < st->note_len && y < ty + 280; i++) {
+        int row_top = y, row_bot = y + 18;
+        if (st->note_buf[i] == '\n') {
+            if (my >= row_top && my < row_bot) { if (off) *off = i; return 1; }
+            x = edit_x + 8;
+            y += 18;
+            utf8_init(&utf8);
+            continue;
+        }
+        uint32_t cp = 0;
+        int ok = utf8_feed(&utf8, (uint8_t)st->note_buf[i], &cp);
+        if (ok < 0) continue;
+        if (ok == 0) cp = '?';
+        int advance = gui_cp_advance(cp, 1);
+        if (my >= row_top && my < row_bot && mx < x + advance) {
+            if (off) *off = (mx < x + advance / 2) ? i : i + 1;
+            return 1;
+        }
+        x += advance;
+        if (x > edit_x + edit_w - 16) {
+            x = edit_x + 8;
+            y += 18;
+        }
+    }
+    if (off) *off = i;  // 点在最后一行之后：光标放到末尾
+    return 1;
+}
+
+/* "Enter 加载" 按钮命中测试；矩形与 draw_browser_app 里画的那个必须保持一致。 */
+static int hit_browser_load_button(int w, int h, const gui_state_t *st, int mx, int my) {
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
+    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_BROWSER) return 0;
+
+    int win_x, win_y, win_w, win_h;
+    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
+    (void)win_w; (void)win_h;
+    int tx = win_x + 30;
+    int ty = win_y + 42;
+    int bx = tx, by = ty + 104, bw = 96;
+    return (mx >= bx && mx < bx + bw && my >= by && my < by + ACTION_H);
 }
 
 static int hit_code_command(int w, int h, const gui_state_t *st, int mx, int my) {
@@ -4959,16 +5109,37 @@ static void handle_app_key(gui_state_t *st, int key) {
     if (st->app_mode == GUI_APP_NOTES) {
         note_load(st);
         if (key == 1) {  // Ctrl+A：全选
-            st->note_select_all = (st->note_len > 0);
-            st->status = st->note_select_all ? "已全选（Backspace/输入 可替换）" : "笔记为空";
+            if (st->note_len > 0) {
+                st->note_sel_anchor = 0;
+                st->note_cursor = st->note_len;
+                st->note_sel_active = 1;
+                st->status = "已全选（Backspace/输入 可替换）";
+            } else {
+                st->note_sel_active = 0;
+                st->status = "笔记为空";
+            }
             return;
         }
-        int had_sel = st->note_select_all;
-        st->note_select_all = 0;  // 除 Ctrl+A 外任何按键都取消选中
+        int had_sel = st->note_sel_active;
+        uint32_t sel_start = 0, sel_end = 0;
+        if (had_sel) note_sel_range(st, &sel_start, &sel_end);
+
+        // Shift+方向键：开始/延伸选区，光标移动端跟随移动，锚点端不动
+        if (key == GUI_KEY_SHIFT_LEFT || key == GUI_KEY_SHIFT_RIGHT ||
+            key == GUI_KEY_SHIFT_UP   || key == GUI_KEY_SHIFT_DOWN) {
+            if (!had_sel) st->note_sel_anchor = st->note_cursor;
+            if (key == GUI_KEY_SHIFT_LEFT) note_cursor_left(st);
+            else if (key == GUI_KEY_SHIFT_RIGHT) note_cursor_right(st);
+            else if (key == GUI_KEY_SHIFT_UP) note_cursor_vertical(st, -1);
+            else note_cursor_vertical(st, 1);
+            st->note_sel_active = (st->note_sel_anchor != st->note_cursor);
+            return;
+        }
+        st->note_sel_active = 0;  // 除 Shift+方向键/Ctrl+A 外任何按键都取消选中
         if (key == 19) {  // Ctrl+S
             note_save(st);
         } else if (key == GUI_KEY_BACKSPACE || key == GUI_KEY_DELETE) {
-            if (had_sel) note_clear_all(st);
+            if (had_sel) note_delete_range(st, sel_start, sel_end);
             else if (key == GUI_KEY_BACKSPACE) note_backspace(st);
             else note_delete_forward(st);
         } else if (key == GUI_KEY_LEFT) {
@@ -4984,13 +5155,13 @@ static void handle_app_key(gui_state_t *st, int key) {
         } else if (key == GUI_KEY_END) {
             note_cursor_end(st);
         } else if (key == '\n') {
-            if (had_sel) note_clear_all(st);
+            if (had_sel) note_delete_range(st, sel_start, sel_end);
             note_insert(st, '\n');
         } else if (key == '\t') {
-            if (had_sel) note_clear_all(st);
+            if (had_sel) note_delete_range(st, sel_start, sel_end);
             for (int i = 0; i < 4; i++) note_insert(st, ' ');
         } else if (key >= 32 && key <= 126) {
-            if (had_sel) note_clear_all(st);
+            if (had_sel) note_delete_range(st, sel_start, sel_end);
             note_insert(st, (char)key);
         }
     } else if (st->app_mode == GUI_APP_UWC) {
@@ -5005,31 +5176,71 @@ static void handle_app_key(gui_state_t *st, int key) {
         else if (key == GUI_KEY_DOWN) snake_turn(st, 0, 1);
     } else if (st->app_mode == GUI_APP_BROWSER) {
         browser_init(st);
+        uint32_t n = (uint32_t)strlen(st->browser_url);
+        if (st->browser_url_cursor > n) st->browser_url_cursor = n;  /* 页面加载等外部改动后钳制 */
         if (key == '\n') browser_load(st);
         else if (key == 19) browser_save_page(st);
         else if (key == GUI_KEY_BACKSPACE) {
-            uint32_t n = (uint32_t)strlen(st->browser_url);
-            if (n) st->browser_url[n - 1] = 0;
+            if (st->browser_url_cursor > 0) {
+                memmove(st->browser_url + st->browser_url_cursor - 1,
+                        st->browser_url + st->browser_url_cursor,
+                        n - st->browser_url_cursor + 1);
+                st->browser_url_cursor--;
+            }
+        } else if (key == GUI_KEY_LEFT) {
+            if (st->browser_url_cursor > 0) st->browser_url_cursor--;
+        } else if (key == GUI_KEY_RIGHT) {
+            if (st->browser_url_cursor < n) st->browser_url_cursor++;
         } else if (key == GUI_KEY_UP) {
             if (st->browser_scroll > 0) st->browser_scroll--;
         } else if (key == GUI_KEY_DOWN) {
             st->browser_scroll++;
         } else if (key >= 32 && key <= 126) {
-            uint32_t n = (uint32_t)strlen(st->browser_url);
             if (n + 1 < BROWSER_URL_CAP) {
-                st->browser_url[n] = (char)key;
-                st->browser_url[n + 1] = 0;
+                memmove(st->browser_url + st->browser_url_cursor + 1,
+                        st->browser_url + st->browser_url_cursor,
+                        n - st->browser_url_cursor + 1);
+                st->browser_url[st->browser_url_cursor] = (char)key;
+                st->browser_url_cursor++;
             }
         }
     } else if (st->app_mode == GUI_APP_CODE) {
         code_load(st);
         if (key == 1) {  // Ctrl+A：全选
-            st->code_select_all = (st->code_len > 0);
-            st->status = st->code_select_all ? "已全选（Backspace/输入 可替换）" : "代码为空";
+            if (st->code_len > 0) {
+                st->code_sel_anchor = 0;
+                st->code_cursor = st->code_len;
+                st->code_sel_active = 1;
+                st->status = "已全选（Backspace/输入 可替换）";
+            } else {
+                st->code_sel_active = 0;
+                st->status = "代码为空";
+            }
             return;
         }
-        int had_sel = st->code_select_all;
-        st->code_select_all = 0;  // 除 Ctrl+A 外任何按键都取消选中
+        int had_sel = st->code_sel_active;
+        uint32_t sel_start = 0, sel_end = 0;
+        if (had_sel) code_sel_range(st, &sel_start, &sel_end);
+
+        // Shift+方向键：开始/延伸选区，光标移动端跟随移动，锚点端不动
+        if (key == GUI_KEY_SHIFT_LEFT || key == GUI_KEY_SHIFT_RIGHT ||
+            key == GUI_KEY_SHIFT_UP   || key == GUI_KEY_SHIFT_DOWN) {
+            if (!had_sel) st->code_sel_anchor = st->code_cursor;
+            if (key == GUI_KEY_SHIFT_LEFT) {
+                if (st->code_cursor > 0) st->code_cursor--;
+                code_ensure_visible(st);
+            } else if (key == GUI_KEY_SHIFT_RIGHT) {
+                if (st->code_cursor < st->code_len) st->code_cursor++;
+                code_ensure_visible(st);
+            } else if (key == GUI_KEY_SHIFT_UP) {
+                code_move_vertical(st, -1);
+            } else {
+                code_move_vertical(st, 1);
+            }
+            st->code_sel_active = (st->code_sel_anchor != st->code_cursor);
+            return;
+        }
+        st->code_sel_active = 0;  // 除 Shift+方向键/Ctrl+A 外任何按键都取消选中
         if (key == 19) {
             (void)code_save(st);
         } else if (key == 18) {
@@ -5055,20 +5266,20 @@ static void handle_app_key(gui_state_t *st, int key) {
         } else if (key == GUI_KEY_PGDOWN) {
             code_move_page(st, 1);
         } else if (key == GUI_KEY_BACKSPACE || key == GUI_KEY_DELETE) {
-            if (had_sel) code_clear_all(st);
+            if (had_sel) code_delete_range(st, sel_start, sel_end);
             else if (key == GUI_KEY_BACKSPACE) code_backspace(st);
             else code_delete_forward(st);
         } else if (key == 3) {
             code_set_output("Use Esc/window close to leave Code Workspace");
             st->status = "代码工作台保持打开";
         } else if (key == '\t') {
-            if (had_sel) code_clear_all(st);
+            if (had_sel) code_delete_range(st, sel_start, sel_end);
             for (int i = 0; i < 4; i++) code_insert_char(st, ' ');
         } else if (key == '\n') {
-            if (had_sel) code_clear_all(st);
+            if (had_sel) code_delete_range(st, sel_start, sel_end);
             code_insert_newline(st);
         } else if (key >= 32 && key <= 126) {
-            if (had_sel) code_clear_all(st);
+            if (had_sel) code_delete_range(st, sel_start, sel_end);
             code_insert_char(st, (char)key);
         }
     } else if (st->app_mode == GUI_APP_DIAG) {
@@ -5880,6 +6091,8 @@ static void cmd_gui(int argc, char **argv) {
     int my = h / 2;
     uint8_t last_buttons = 0;
     int brightness_dragging = 0;
+    int code_text_dragging = 0;
+    int note_text_dragging = 0;
     int dragging_window = -1;
     int drag_off_x = 0;
     int drag_off_y = 0;
@@ -5981,6 +6194,20 @@ static void cmd_gui(int argc, char **argv) {
         wm_update_animations(&st.wm);
 
         int key = key_poll();
+        /* F1: toggle the start menu (keyboard-only path to every app --
+         * previously mouse-only via the taskbar logo / right-click menu;
+         * once open, typing filters and Enter launches, see below). */
+        if (key == KB_KEY_F1) {
+            wm_toggle_start_menu(&st.wm);
+            if (st.wm.start_menu_open) {
+                st.wm.menu_h = gui_start_menu_h();
+                st.sm_search[0] = 0; st.sm_search_len = 0;
+                st.status = "开始菜单";
+            }
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         /* F2 / F3: shrink / grow the GUI font (global, works in any app). */
         if (key == KB_KEY_F2 || key == KB_KEY_F3) {
             int slot = gui_font_active() + (key == KB_KEY_F3 ? 1 : -1);
@@ -6145,6 +6372,35 @@ static void cmd_gui(int argc, char **argv) {
                 }
             }
 
+            /* 代码工作台鼠标框选：按住并拖动时光标跟随鼠标位置移动，锚点不动 */
+            if (code_text_dragging) {
+                if (left_down) {
+                    uint32_t off = 0;
+                    if (hit_code_editor(w, h, &st, mx, my, &off)) {
+                        st.code_cursor = off;
+                        st.code_sel_active = (st.code_sel_anchor != st.code_cursor);
+                        code_ensure_visible(&st);
+                        redraw = 1;
+                    }
+                } else {
+                    code_text_dragging = 0;
+                }
+            }
+
+            /* 记事本鼠标框选：同上 */
+            if (note_text_dragging) {
+                if (left_down) {
+                    uint32_t off = 0;
+                    if (hit_note_editor(w, h, &st, mx, my, &off)) {
+                        st.note_cursor = off;
+                        st.note_sel_active = (st.note_sel_anchor != st.note_cursor);
+                        redraw = 1;
+                    }
+                } else {
+                    note_text_dragging = 0;
+                }
+            }
+
             /* 应用窗口标题栏拖动 */
             if (appwin_drag >= 0) {
                 winsrv_window_t *win = left_down ? winsrv_get(appwin_drag) : 0;
@@ -6252,6 +6508,14 @@ static void cmd_gui(int argc, char **argv) {
             int edge = WM_EDGE_NONE;
             wm_hit_border(&st.wm, mx, my, &edge);
             cursor_edge = edge;
+            /* 悬停在记事本/代码工作台的文本框内时换成工字形文本光标（不影响
+             * 窗口缩放边缘光标，那个优先级更高，上面已经赋过值了）。 */
+            if (cursor_edge == WM_EDGE_NONE) {
+                uint32_t hover_off = 0;
+                if ((st.app_mode == GUI_APP_NOTES && hit_note_editor(w, h, &st, mx, my, &hover_off)) ||
+                    (st.app_mode == GUI_APP_CODE && hit_code_editor(w, h, &st, mx, my, &hover_off)))
+                    cursor_edge = CURSOR_HOVER_TEXT;
+            }
 
             /* 右键：弹出上下文菜单（窗口上→窗口菜单，否则→桌面菜单） */
             if ((st.buttons & 2) && !(last_buttons & 2)) {
@@ -6528,6 +6792,8 @@ static void cmd_gui(int argc, char **argv) {
                                     code_gui_run(&st, &fb);
                                 } else if (code_cmd) {
                                     handle_code_command(&st, code_cmd);
+                                } else if (hit_browser_load_button(w, h, &st, mx, my)) {
+                                    browser_load(&st);
                                 } else {
                                     int note_file = hit_note_file(w, h, &st, mx, my);
                                     if (note_file >= 0) {
@@ -6545,12 +6811,20 @@ static void cmd_gui(int argc, char **argv) {
                                                 st.status = "已选择代码文件";
                                             }
                                         } else {
-                                            uint32_t code_off = 0;
+                                            uint32_t code_off = 0, note_off = 0;
                                             if (hit_code_editor(w, h, &st, mx, my, &code_off)) {
                                                 st.code_cursor = code_off;
-                                                st.code_select_all = 0;
+                                                st.code_sel_anchor = code_off;
+                                                st.code_sel_active = 0;
+                                                code_text_dragging = 1;
                                                 code_ensure_visible(&st);
                                                 st.status = "已移动代码光标";
+                                            } else if (hit_note_editor(w, h, &st, mx, my, &note_off)) {
+                                                st.note_cursor = note_off;
+                                                st.note_sel_anchor = note_off;
+                                                st.note_sel_active = 0;
+                                                note_text_dragging = 1;
+                                                st.status = "已移动笔记光标";
                                             } else {
                                                 int aw_x, aw_y, aw_w, aw_h;
                                                 int aw = st.wm.active_window;

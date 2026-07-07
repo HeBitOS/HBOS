@@ -3,31 +3,75 @@
 #include "../../string.h"
 
 /* ── layout constants ───────────────────────────────────────── */
-#define CALC_BW   56   /* button width  */
-#define CALC_BH   38   /* button height */
 #define CALC_GAP   5   /* gap between buttons */
 #define CALC_COLS  4
 #define CALC_ROWS  5
-/* grid origin relative to window content (tx,ty) */
+/* grid origin x relative to window content (tx) */
 #define CALC_GX    8
-#define CALC_GY   98
 
 /* ── history panel layout (right of the keypad) ─────────────── */
-#define CALC_HIST_X    300   /* panel left, relative to tx */
 #define CALC_HIST_TOP   34   /* first row top, relative to ty */
 #define CALC_HIST_ROW   28   /* per-row height */
 #define CALC_HIST_MIN_W 150  /* min panel width to bother drawing */
+
+/* ── adaptive geometry ────────────────────────────────────────
+ * Windows are freely resizable (wm_resize_window clamps at 200x120, far
+ * smaller than this app's natural 640x400-ish layout), and the drawable
+ * content area inside a window is (win_w-60) x (win_h-74): tx/ty passed
+ * to draw() are already inset (win_x+30, win_y+42) and the frame draws a
+ * 31px status band across the bottom (see gui.c draw_one_window). The
+ * previous fixed layout ignored both, so the history panel ran ~18px
+ * past the right edge and its rows past the bottom band even at the
+ * DEFAULT window size, and everything spilled outside on smaller ones.
+ * All geometry is derived here once, shared by draw and click handlers
+ * so hit-testing always matches what's on screen. */
+typedef struct {
+    int avail_w, avail_h;   /* content box size, from (tx,ty) */
+    int disp_w, disp_h;     /* result display box */
+    int bw, bh;             /* keypad button size */
+    int gy;                 /* keypad top, relative to ty */
+    int hist_x, hist_w;     /* history panel; hist_w<=0 -> hidden */
+    int hist_rows;
+} calc_layout_t;
+
+static void calc_layout(int win_w, int win_h, calc_layout_t *L) {
+    L->avail_w = win_w - 60;
+    L->avail_h = win_h - 74;
+    if (L->avail_w < 80) L->avail_w = 80;
+    if (L->avail_h < 60) L->avail_h = 60;
+
+    L->disp_w = L->avail_w < 280 ? L->avail_w : 280;
+    L->disp_h = L->avail_h < 200 ? 56 : 90;
+    L->gy = L->disp_h + 8;
+
+    L->bw = (L->disp_w - CALC_GX - (CALC_COLS - 1) * CALC_GAP) / CALC_COLS;
+    if (L->bw > 56) L->bw = 56;
+    if (L->bw < 26) L->bw = 26;
+    int kb_h = L->avail_h - L->gy;
+    L->bh = (kb_h - (CALC_ROWS - 1) * CALC_GAP) / CALC_ROWS;
+    if (L->bh > 38) L->bh = 38;
+    if (L->bh < 18) L->bh = 18;
+
+    int kb_w = CALC_GX + CALC_COLS * L->bw + (CALC_COLS - 1) * CALC_GAP;
+    L->hist_x = (kb_w + 20 > 300) ? kb_w + 20 : 300;
+    L->hist_w = L->avail_w - L->hist_x;
+    if (L->hist_w < CALC_HIST_MIN_W) L->hist_w = 0;
+    L->hist_rows = (L->avail_h - CALC_HIST_TOP) / CALC_HIST_ROW;
+    if (L->hist_rows < 0) L->hist_rows = 0;
+}
 
 /* ── button table ──────────────────────────────────────────── */
 typedef struct { const char *label; char action; } CalcBtn;
 /* action: '0'-'9' digit; 'C'=clear; 'N'=negate; '%'=pct;
    '+''-''*''/'=op;  '='=equal;  'B'=backspace;  '.'=decimal (ignored) */
+/* 减号用 ASCII '-' 而非 U+2212、退格用 "<-" 而非 U+232B：GUI 字体
+ * (genfont.py 生成) 不含这两个码点，会渲染成 "?" —— QEMU 截图实测确认。 */
 static const CalcBtn BTNS[CALC_ROWS][CALC_COLS] = {
-    {{"C",'C'}, {"±",'N'}, {"%",'%'}, {"÷",'/'} },
-    {{"7",'7'}, {"8",'8'}, {"9",'9'}, {"×",'*'} },
-    {{"4",'4'}, {"5",'5'}, {"6",'6'}, {"−",'-'} },
-    {{"1",'1'}, {"2",'2'}, {"3",'3'}, {"+",'+'} },
-    {{"0",'0'}, {".",'.'}, {"⌫",'B'}, {"=",'='} },
+    {{"C",'C'}, {"±",'N'}, {"%",'%'},  {"÷",'/'} },
+    {{"7",'7'}, {"8",'8'}, {"9",'9'},  {"×",'*'} },
+    {{"4",'4'}, {"5",'5'}, {"6",'6'},  {"-",'-'} },
+    {{"1",'1'}, {"2",'2'}, {"3",'3'},  {"+",'+'} },
+    {{"0",'0'}, {".",'.'}, {"<-",'B'}, {"=",'='} },
 };
 
 /* ── overflow → scientific notation ───────────────────────────
@@ -288,10 +332,12 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     char line[96];
     uint32_t pos = 0;
 
+    calc_layout_t L;
+    calc_layout(win_w, win_h, &L);
+
     /* display box */
-    int dh = 90;
-    gui_soft_shadow(tx, ty, 280, dh);
-    gui_draw_panel_shell(tx, ty, 280, dh,
+    gui_soft_shadow(tx, ty, L.disp_w, L.disp_h);
+    gui_draw_panel_shell(tx, ty, L.disp_w, L.disp_h,
                          gui_rgb(8, 14, 22), gui_rgb(2, 6, 12),
                          gui_rgb(48, 132, 196), gui_rgb(61, 174, 233));
 
@@ -304,68 +350,70 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     } else {
         gui_append_ll(line, sizeof(line), &pos, st->calc_value);
     }
-    gui_text_clipped(tx + 16, ty + 42, tx + 268, line,
+    gui_text_clipped(tx + 16, ty + L.disp_h - 48, tx + L.disp_w - 12, line,
                      st->calc_error ? gui_rgb(232, 88, 96) : gui_rgb(235, 242, 250), 2);
 
-    /* expression line */
-    line[0] = 0; pos = 0;
-    if (st->calc_op) {
-        gui_append_ll(line, sizeof(line), &pos, st->calc_acc);
-        gui_append_char(line, sizeof(line), &pos, ' ');
-        gui_append_char(line, sizeof(line), &pos, st->calc_op);
-        gui_append_char(line, sizeof(line), &pos, ' ');
-        if (st->calc_has_input) gui_append_ll(line, sizeof(line), &pos, st->calc_input);
-        else gui_append_char(line, sizeof(line), &pos, '_');
-    } else if (st->calc_just_evaluated && st->calc_last_op) {
-        gui_append_ll(line, sizeof(line), &pos, st->calc_last_lhs);
-        gui_append_char(line, sizeof(line), &pos, ' ');
-        gui_append_char(line, sizeof(line), &pos, st->calc_last_op);
-        gui_append_char(line, sizeof(line), &pos, ' ');
-        gui_append_ll(line, sizeof(line), &pos, st->calc_last_rhs);
-        gui_append_str(line, sizeof(line), &pos, " =");
+    /* expression line (only when the display box is tall enough for two rows) */
+    if (L.disp_h >= 80) {
+        line[0] = 0; pos = 0;
+        if (st->calc_op) {
+            gui_append_ll(line, sizeof(line), &pos, st->calc_acc);
+            gui_append_char(line, sizeof(line), &pos, ' ');
+            gui_append_char(line, sizeof(line), &pos, st->calc_op);
+            gui_append_char(line, sizeof(line), &pos, ' ');
+            if (st->calc_has_input) gui_append_ll(line, sizeof(line), &pos, st->calc_input);
+            else gui_append_char(line, sizeof(line), &pos, '_');
+        } else if (st->calc_just_evaluated && st->calc_last_op) {
+            gui_append_ll(line, sizeof(line), &pos, st->calc_last_lhs);
+            gui_append_char(line, sizeof(line), &pos, ' ');
+            gui_append_char(line, sizeof(line), &pos, st->calc_last_op);
+            gui_append_char(line, sizeof(line), &pos, ' ');
+            gui_append_ll(line, sizeof(line), &pos, st->calc_last_rhs);
+            gui_append_str(line, sizeof(line), &pos, " =");
+        }
+        gui_text_clipped(tx + 16, ty + 14, tx + L.disp_w - 12, line, gui_rgb(132, 196, 232), 1);
     }
-    gui_text(tx + 16, ty + 14, line, gui_rgb(132, 196, 232), 1);
 
     /* button grid */
     for (int row = 0; row < CALC_ROWS; row++) {
         for (int col = 0; col < CALC_COLS; col++) {
-            int bx = tx + CALC_GX + col * (CALC_BW + CALC_GAP);
-            int by = ty + CALC_GY + row * (CALC_BH + CALC_GAP);
+            int bx = tx + CALC_GX + col * (L.bw + CALC_GAP);
+            int by = ty + L.gy + row * (L.bh + CALC_GAP);
+            if (by + L.bh > ty + L.avail_h) break;  /* window too short: clip row */
             char action = BTNS[row][col].action;
             uint32_t bc = btn_color(action, 0);
-            gui_vgradient(bx, by, CALC_BW, CALC_BH,
+            gui_vgradient(bx, by, L.bw, L.bh,
                           gui_rgb(((bc >> 16) & 0xff) + 10,
                                   ((bc >>  8) & 0xff) + 10,
                                   (bc & 0xff) + 10),
                           bc);
-            gui_border(bx, by, CALC_BW, CALC_BH,
+            gui_border(bx, by, L.bw, L.bh,
                        action == '=' ? gui_rgb(30, 100, 170)
                                      : gui_rgb(55, 75, 95));
             int tw = gui_text_width(BTNS[row][col].label, 1);
-            int lx = bx + (CALC_BW - tw) / 2;
-            int ly = by + (CALC_BH - 10) / 2;
+            int lx = bx + (L.bw - tw) / 2;
+            int ly = by + (L.bh - 10) / 2;
             gui_text(lx, ly, BTNS[row][col].label, gui_rgb(235, 242, 250), 1);
         }
     }
 
     /* history panel (right of the keypad, only if the window is wide enough) */
-    int panel_x = tx + CALC_HIST_X;
-    int panel_w = win_w - CALC_HIST_X - 12;
-    if (panel_w >= CALC_HIST_MIN_W) {
+    if (L.hist_w > 0) {
+        int panel_x = tx + L.hist_x;
         gui_text(panel_x, ty + 10, "历史记录", gui_rgb(132, 196, 232), 1);
         int vis = calc_hist_visible(st);
         if (vis == 0) {
             gui_text(panel_x, ty + CALC_HIST_TOP, "（暂无计算）", gui_rgb(110, 130, 150), 1);
         } else {
-            int max_rows = (win_h - CALC_HIST_TOP - 12) / CALC_HIST_ROW;
+            int max_rows = L.hist_rows;
             if (max_rows > vis) max_rows = vis;
             for (int r = 0; r < max_rows; r++) {
                 int ring = calc_hist_ring_idx(st, r);
                 int ry = ty + CALC_HIST_TOP + r * CALC_HIST_ROW;
-                gui_border(panel_x, ry, panel_w, CALC_HIST_ROW - 4, gui_rgb(40, 56, 72));
+                gui_border(panel_x, ry, L.hist_w, CALC_HIST_ROW - 4, gui_rgb(40, 56, 72));
                 char hb[96];
                 calc_hist_format(st, ring, hb, sizeof(hb));
-                gui_text_clipped(panel_x + 6, ry + 5, panel_x + panel_w - 6, hb,
+                gui_text_clipped(panel_x + 6, ry + 5, panel_x + L.hist_w - 6, hb,
                                  gui_rgb(210, 224, 238), 1);
             }
         }
@@ -394,13 +442,16 @@ static int app_calc_key(gui_state_t *st, int key) {
 
 /* ── click ─────────────────────────────────────────────────── */
 static int app_calc_click(gui_state_t *st, int mx, int my, int tx, int ty, int win_w, int win_h) {
+    calc_layout_t L;
+    calc_layout(win_w, win_h, &L);
     int gx = tx + CALC_GX;
-    int gy = ty + CALC_GY;
+    int gy = ty + L.gy;
     for (int row = 0; row < CALC_ROWS; row++) {
         for (int col = 0; col < CALC_COLS; col++) {
-            int bx = gx + col * (CALC_BW + CALC_GAP);
-            int by = gy + row * (CALC_BH + CALC_GAP);
-            if (mx >= bx && mx < bx + CALC_BW && my >= by && my < by + CALC_BH) {
+            int bx = gx + col * (L.bw + CALC_GAP);
+            int by = gy + row * (L.bh + CALC_GAP);
+            if (by + L.bh > ty + L.avail_h) break;  /* not drawn (clipped) -> not clickable */
+            if (mx >= bx && mx < bx + L.bw && my >= by && my < by + L.bh) {
                 calc_dispatch(st, BTNS[row][col].action);
                 return 1;
             }
@@ -408,15 +459,14 @@ static int app_calc_click(gui_state_t *st, int mx, int my, int tx, int ty, int w
     }
 
     /* click a history row to recall its result */
-    int panel_x = tx + CALC_HIST_X;
-    int panel_w = win_w - CALC_HIST_X - 12;
-    if (panel_w >= CALC_HIST_MIN_W) {
+    if (L.hist_w > 0) {
+        int panel_x = tx + L.hist_x;
         int vis = calc_hist_visible(st);
-        int max_rows = (win_h - CALC_HIST_TOP - 12) / CALC_HIST_ROW;
+        int max_rows = L.hist_rows;
         if (max_rows > vis) max_rows = vis;
         for (int r = 0; r < max_rows; r++) {
             int ry = ty + CALC_HIST_TOP + r * CALC_HIST_ROW;
-            if (mx >= panel_x && mx < panel_x + panel_w &&
+            if (mx >= panel_x && mx < panel_x + L.hist_w &&
                 my >= ry && my < ry + CALC_HIST_ROW - 4) {
                 int ring = calc_hist_ring_idx(st, r);
                 st->calc_value = st->calc_hist_res[ring];

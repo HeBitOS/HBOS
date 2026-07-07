@@ -28,7 +28,21 @@ static uint8_t tm_cmos_second(void) {
 #define TM_COL_NAME  56
 #define TM_COL_STATE 260
 #define TM_COL_PPID  360
-#define TM_FOOTER_H  40
+/* hint line (20) + memory bar (14) + info line (16) + spacing */
+#define TM_FOOTER_H  62
+
+/* Drawable content inside a window is (win_w-60) x (win_h-74): tx/ty are
+ * already inset (win_x+30, win_y+42) and the frame draws a 31px status
+ * band across the window bottom (gui.c draw_one_window) that app content
+ * must stay above. Shared by draw and click so hit-testing matches. */
+static int tm_avail_h(int win_h) {
+    int h = win_h - 74;
+    return h > 0 ? h : 0;
+}
+static int tm_avail_w(int win_w) {
+    int w = win_w - 60;
+    return w > 0 ? w : 0;
+}
 
 static const char *tm_state_name(int state) {
     switch (state) {
@@ -59,7 +73,7 @@ static int tm_window_visible(gui_state_t *st) {
 }
 
 static int tm_visible_rows(int win_h) {
-    int rows = (win_h - TM_LIST_TOP - TM_FOOTER_H) / TM_ROW_H;
+    int rows = (tm_avail_h(win_h) - TM_LIST_TOP - TM_FOOTER_H) / TM_ROW_H;
     return rows > 0 ? rows : 0;
 }
 
@@ -74,13 +88,20 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     char line[96];
     tm_clamp_selection(st);
     int count = task_get_count();
+    int aw = tm_avail_w(win_w);
+    int ah = tm_avail_h(win_h);
+    int show_state = aw >= TM_COL_STATE + 60;
+    int show_ppid  = aw >= TM_COL_PPID + 60;
+    int name_clip_x = tx + (show_state ? TM_COL_STATE - 8 : aw - 4);
 
     /* column headers */
-    gui_text(tx + TM_COL_PID,   ty + TM_HEADER_Y, "PID",   gui_rgb(132, 196, 232), 1);
-    gui_text(tx + TM_COL_NAME,  ty + TM_HEADER_Y, "名称",   gui_rgb(132, 196, 232), 1);
-    gui_text(tx + TM_COL_STATE, ty + TM_HEADER_Y, "状态",   gui_rgb(132, 196, 232), 1);
-    gui_text(tx + TM_COL_PPID,  ty + TM_HEADER_Y, "父PID", gui_rgb(132, 196, 232), 1);
-    gui_rect(tx, ty + TM_LIST_TOP - 6, win_w - 60, 1, gui_rgb(48, 64, 84));
+    gui_text(tx + TM_COL_PID,  ty + TM_HEADER_Y, "PID", gui_rgb(132, 196, 232), 1);
+    gui_text(tx + TM_COL_NAME, ty + TM_HEADER_Y, "名称", gui_rgb(132, 196, 232), 1);
+    if (show_state)
+        gui_text(tx + TM_COL_STATE, ty + TM_HEADER_Y, "状态", gui_rgb(132, 196, 232), 1);
+    if (show_ppid)
+        gui_text(tx + TM_COL_PPID, ty + TM_HEADER_Y, "父PID", gui_rgb(132, 196, 232), 1);
+    gui_rect(tx, ty + TM_LIST_TOP - 6, aw, 1, gui_rgb(48, 64, 84));
 
     int rows = tm_visible_rows(win_h);
     for (int i = 0; i < rows && i < count; i++) {
@@ -88,42 +109,51 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         if (!t) break;
         int ry = ty + TM_LIST_TOP + i * TM_ROW_H;
         if (i == st->taskmgr_selected) {
-            gui_rect(tx - 8, ry - 3, win_w - 44, TM_ROW_H - 2, gui_rgb(40, 70, 96));
+            gui_rect(tx - 8, ry - 3, aw + 16, TM_ROW_H - 2, gui_rgb(40, 70, 96));
         }
         uint32_t pos = 0; line[0] = 0;
         gui_append_uint(line, sizeof(line), &pos, t->id);
         gui_text(tx + TM_COL_PID, ry, line, gui_rgb(220, 230, 240), 1);
 
-        gui_text_clipped(tx + TM_COL_NAME, ry, tx + TM_COL_STATE - 8,
+        gui_text_clipped(tx + TM_COL_NAME, ry, name_clip_x,
                          t->name[0] ? t->name : "(未命名)", gui_rgb(220, 230, 240), 1);
 
-        gui_text(tx + TM_COL_STATE, ry, tm_state_name(t->state), tm_state_color(t->state), 1);
+        if (show_state)
+            gui_text(tx + TM_COL_STATE, ry, tm_state_name(t->state), tm_state_color(t->state), 1);
 
-        pos = 0; line[0] = 0;
-        gui_append_uint(line, sizeof(line), &pos, t->parent_id);
-        gui_text(tx + TM_COL_PPID, ry, line, gui_rgb(160, 180, 200), 1);
+        if (show_ppid) {
+            pos = 0; line[0] = 0;
+            gui_append_uint(line, sizeof(line), &pos, t->parent_id);
+            gui_text(tx + TM_COL_PPID, ry, line, gui_rgb(160, 180, 200), 1);
+        }
     }
     if (count == 0) {
         gui_text(tx + TM_COL_NAME, ty + TM_LIST_TOP, "（没有可显示的任务）", gui_rgb(110, 130, 150), 1);
     }
 
-    /* footer: memory usage bar + kill hint */
-    int fy = ty + win_h - TM_FOOTER_H - 34;
-    gui_rect(tx, fy, win_w - 60, 1, gui_rgb(48, 64, 84));
+    /* footer: kill hint, memory usage bar, info line -- anchored to the
+     * bottom of the CONTENT area (ty + ah), not ty + win_h, which is 42px
+     * below the window's actual bottom edge. */
+    int fy = ty + ah - TM_FOOTER_H;
+    if (fy < ty + TM_LIST_TOP) fy = ty + TM_LIST_TOP;  /* tiny window: overlap, don't spill */
+    gui_rect(tx, fy, aw, 1, gui_rgb(48, 64, 84));
+
+    gui_text_clipped(tx, fy + 6, tx + aw,
+                     "点击选中任务，按 Delete 结束任务（不能结束主任务 0）",
+                     gui_rgb(110, 140, 165), 1);
 
     uint64_t total = pmm_get_total_mem();
     uint64_t free = pmm_get_free_mem();
     uint64_t used = total > free ? total - free : 0;
-    int bar_w = win_w - 60;
     int bar_h = 14;
-    int by = fy + 10;
-    gui_rect(tx, by, bar_w, bar_h, gui_rgb(30, 42, 56));
+    int by = fy + 26;
+    gui_rect(tx, by, aw, bar_h, gui_rgb(30, 42, 56));
     if (total > 0) {
-        int fill = (int)((uint64_t)bar_w * used / total);
-        if (fill > bar_w) fill = bar_w;
+        int fill = (int)((uint64_t)aw * used / total);
+        if (fill > aw) fill = aw;
         gui_rect(tx, by, fill, bar_h, gui_rgb(61, 174, 233));
     }
-    gui_border(tx, by, bar_w, bar_h, gui_rgb(70, 90, 110));
+    gui_border(tx, by, aw, bar_h, gui_rgb(70, 90, 110));
 
     uint32_t pos = 0; line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "物理内存: ");
@@ -132,10 +162,7 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     gui_append_uint(line, sizeof(line), &pos, (uint32_t)(total / (1024 * 1024)));
     gui_append_str(line, sizeof(line), &pos, " MB    任务数: ");
     gui_append_int(line, sizeof(line), &pos, count);
-    gui_text(tx, by + bar_h + 8, line, gui_rgb(160, 190, 215), 1);
-
-    gui_text(tx, by - 20, "点击选中任务，按 Delete 结束任务（不能结束主任务 0）",
-             gui_rgb(110, 140, 165), 1);
+    gui_text_clipped(tx, by + bar_h + 6, tx + aw, line, gui_rgb(160, 190, 215), 1);
 }
 
 static void tm_kill_selected(gui_state_t *st) {
@@ -164,12 +191,13 @@ static int app_taskmgr_key(gui_state_t *st, int key) {
 }
 
 static int app_taskmgr_click(gui_state_t *st, int mx, int my, int tx, int ty, int win_w, int win_h) {
-    (void)win_w;
+    int aw = tm_avail_w(win_w);
     int rows = tm_visible_rows(win_h);
     int count = task_get_count();
     for (int i = 0; i < rows && i < count; i++) {
         int ry = ty + TM_LIST_TOP + i * TM_ROW_H;
-        if (my >= ry - 3 && my < ry + TM_ROW_H - 2 && mx >= tx - 8) {
+        if (my >= ry - 3 && my < ry + TM_ROW_H - 2 &&
+            mx >= tx - 8 && mx < tx + aw + 8) {
             st->taskmgr_selected = i;
             return 1;
         }

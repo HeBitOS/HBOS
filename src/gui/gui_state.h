@@ -37,6 +37,10 @@ enum {
     GUI_KEY_END,
     GUI_KEY_PGUP,
     GUI_KEY_PGDOWN,
+    GUI_KEY_SHIFT_UP,
+    GUI_KEY_SHIFT_DOWN,
+    GUI_KEY_SHIFT_LEFT,
+    GUI_KEY_SHIFT_RIGHT,
 };
 
 typedef struct gui_state {
@@ -94,11 +98,13 @@ typedef struct gui_state {
     char note_buf[NOTE_EDIT_CAP];
     uint32_t note_len;
     uint32_t note_cursor;
-    int note_select_all;   /* Ctrl+A：整篇笔记处于选中状态 */
+    int note_sel_active;    /* 是否存在选区（Shift+方向键 或 Ctrl+A 产生） */
+    uint32_t note_sel_anchor; /* 选区固定端；note_cursor 是移动端 */
     int note_dirty;
     int note_loaded;
     char note_name[MAX_FILENAME];
     char browser_url[BROWSER_URL_CAP];
+    uint32_t browser_url_cursor;  /* 左右键在网址栏内移动的插入点 */
     char browser_page[BROWSER_PAGE_CAP];
     uint32_t browser_page_len;
     /* 带样式标记的渲染缓冲（每行首字节为 browser_blk_t 块类型），仅供屏幕渲染用；
@@ -110,7 +116,8 @@ typedef struct gui_state {
     char code_path[GUI_PATH_MAX];
     uint32_t code_len;
     uint32_t code_cursor;
-    int code_select_all;   /* Ctrl+A：整份代码处于选中状态 */
+    int code_sel_active;    /* 是否存在选区（Shift+方向键 或 Ctrl+A 产生） */
+    uint32_t code_sel_anchor; /* 选区固定端；code_cursor 是移动端 */
     int code_loaded;
     int code_modified;
     int code_scroll;
