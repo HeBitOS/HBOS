@@ -766,9 +766,17 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 return (uint64_t)(-EBADF);
             net_tcp_conn_t *conn = (net_tcp_conn_t *)cur->fds[sockfd].node;
             if (!conn) return (uint64_t)(-ENOTCONN);
+            /* net_tcp_send() returns a status code (0=success, <0=failure),
+             * not a byte count -- POSIX send() must return the number of
+             * bytes sent on success. It's all-or-nothing per call (any
+             * len over TCP_MSS is rejected outright, no partial sends),
+             * so on success the byte count is simply len. Returning the
+             * raw status code here made every successful send() look like
+             * "0 bytes sent" to callers, which breaks the common
+             * `while (total<len) total += send(...)` retry pattern. */
             int ret = net_tcp_send(conn, (const uint8_t *)buf, (uint32_t)len);
             if (ret < 0) return (uint64_t)(-ECONNRESET);
-            return (uint64_t)ret;
+            return (uint64_t)len;
         }
 
         case HBOS_SYS_RECV: {

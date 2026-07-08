@@ -240,8 +240,9 @@ static int _vsnprintf_core(char *buf, size_t n, const char *fmt, va_list ap) {
         int width = 0, pad = ' ';
         if (*fmt == '0') { pad = '0'; fmt++; }
         while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
-        if (*fmt == 'l') fmt++;
-        if (*fmt == 'l') fmt++;
+        int lcount = 0;
+        if (*fmt == 'l') { fmt++; lcount++; }
+        if (*fmt == 'l') { fmt++; lcount++; }
 
         switch (*fmt) {
         case 's': {
@@ -251,12 +252,35 @@ static int _vsnprintf_core(char *buf, size_t n, const char *fmt, va_list ap) {
             break;
         }
         case 'c': buf[pos++] = (char)va_arg(ap, int); break;
-        case 'd': case 'i':
-            _print_num(buf, n, (unsigned long long)va_arg(ap, long long), 10, 1, width, pad, &pos); break;
-        case 'u':
-            _print_num(buf, n, va_arg(ap, unsigned long long), 10, 0, width, pad, &pos); break;
-        case 'x':
-            _print_num(buf, n, va_arg(ap, unsigned long long), 16, 0, width, pad, &pos); break;
+        /* Plain %d/%u/%x (no l/ll) must read va_arg as plain int/unsigned
+         * int, not long long: the C standard only promotes types smaller
+         * than int in variadic calls, int itself is passed as-is. Always
+         * reading a 64-bit slot here silently assumed every caller's ABI
+         * sign/zero-extends a 32-bit int into the full 64-bit argument
+         * register -- true for this port's own GCC-built kernel code, but
+         * NOT for TCC (the primary user-facing compiler): a TCC-compiled
+         * program's printf("%d", -7) came back as 4294967289 because the
+         * upper 32 bits of the register TCC left in place were never
+         * sign-extended, and reading them as part of a 64-bit value
+         * turned a small negative number into a huge positive one. */
+        case 'd': case 'i': {
+            long long v = lcount >= 2 ? va_arg(ap, long long)
+                         : lcount == 1 ? (long long)va_arg(ap, long)
+                                       : (long long)va_arg(ap, int);
+            _print_num(buf, n, (unsigned long long)v, 10, 1, width, pad, &pos); break;
+        }
+        case 'u': {
+            unsigned long long v = lcount >= 2 ? va_arg(ap, unsigned long long)
+                                  : lcount == 1 ? (unsigned long long)va_arg(ap, unsigned long)
+                                                : (unsigned long long)va_arg(ap, unsigned int);
+            _print_num(buf, n, v, 10, 0, width, pad, &pos); break;
+        }
+        case 'x': {
+            unsigned long long v = lcount >= 2 ? va_arg(ap, unsigned long long)
+                                  : lcount == 1 ? (unsigned long long)va_arg(ap, unsigned long)
+                                                : (unsigned long long)va_arg(ap, unsigned int);
+            _print_num(buf, n, v, 16, 0, width, pad, &pos); break;
+        }
         case 'p':
             buf[pos++] = '0'; buf[pos++] = 'x';
             _print_num(buf, n, (uintptr_t)va_arg(ap, void *), 16, 0, 0, '0', &pos); break;
