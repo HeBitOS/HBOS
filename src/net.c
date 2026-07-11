@@ -8,6 +8,7 @@
 #include "string.h"
 #include "core/vmm.h"
 #include "core/heap.h"
+#include "core/task.h"
 #include "gui/rtc_tz.h"
 
 /** @brief PCI 设备类型：网络控制器 */
@@ -1523,7 +1524,7 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
     w.sport = conn->sport;
     for (int attempt = 0; attempt < 3 && !w.synack && !w.rst; attempt++) {
         send_tcp(conn->mac, ip, conn->sport, port, conn->seq, 0, 0x02, 0, 0);
-        for (int i = 0; i < 8 && !w.synack && !w.rst; i++) net_poll(tcp_cb, &w, 80000);
+        for (int i = 0; i < 8 && !w.synack && !w.rst; i++) { net_poll(tcp_cb, &w, 80000); task_yield(); }
     }
     if (!w.synack || w.rst) {
         set_error(w.rst ? "tcp reset" : "tcp connect timeout");
@@ -1564,6 +1565,7 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
             return -1;
         for (int i = 0; i < 8 && !w.rst; i++) {
             net_poll(tcp_cb, &w, 80000);
+            task_yield();
             if (w.acked) {
                 conn->seq += len;
                 return 0;
@@ -1623,6 +1625,7 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
     w.cap = sizeof(tmp);
     for (uint32_t i = 0; i < poll_rounds && !w.done && !w.rst; i++) {
         net_poll(tcp_cb, &w, 80000);
+        task_yield();
         if (w.need_ack) {
             conn->ack = w.ack;
             send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
@@ -1793,13 +1796,67 @@ void net_ipv4_to_str(uint32_t ip, char out[16]) {
     out[n] = 0;
 }
 
+/* beta5 M5: 之前这里是一整套全局单变量（listen_port/listen_peer/...），
+ * net_tcp_accept() 一进来就 `if (!listen_syn_acked) return -1;` ——但
+ * listen_syn_acked 只有 accept_cb() 自己能置位，而 accept_cb() 只在这同
+ * 一个"已经 syn_acked"的门槛后面才会被 net_poll() 调用。也就是说全新
+ * listen() 之后第一次 accept() 永远在真正开始收包之前就直接失败退出，
+ * httpd 的 `while(1){ accept(); continue; }` 循环会原地空转，从来碰不到
+ * 网络——不是"同一时间只能一个连接"，是压根一个都建立不起来（QEMU
+ * hostfwd + curl 实测复现：请求发出去后 httpd 侧从没打印过一行日志）。
+ *
+ * 现在改成一张小的"待处理连接"表：每收到一个 SYN 都在表里认领一个空
+ * 位（不再要求"必须已经有一个在等"），accept() 对表里还没发过 SYN-ACK
+ * 的项发 SYN-ACK，对已经完成三次握手的项直接摘下来交给调用方——这样
+ * 一次 accept() 循环期间收到的第二个客户端 SYN 不会被无声丢弃，而是排
+ * 在表里等下一次 accept() 调用来处理，不用等前一个连接完全处理完。 */
+#define TCP_PENDING_MAX 4
+
+/* 网卡驱动的 poll 循环（比如 e1000_poll）每处理完一个包，不管回调是不是
+ * 真的"用上"了它，都会立刻把对应的 RX 描述符标记为空闲、可以被下一个
+ * 包覆盖（"d->status = 0;" 无条件执行）——这个驱动层面没有另外留一份
+ * 收包缓冲。所以三次握手最后一个 ACK 如果和客户端的请求数据挤在同一个
+ * 包里（很常见：TCP 允许 ACK 捎带数据），或者数据包紧跟着单独的 ACK
+ * 包到达、恰好也被这次 accept_cb 的同一轮 poll 看到，那这段数据在
+ * accept_cb 手里就已经从网卡环形缓冲区里被取走了——如果 accept_cb 不
+ * 顺手接住它，之后 net_tcp_recv() 用 tcp_cb 再去 poll 就永远看不到这个
+ * 包了（已经被覆盖），实测复现：curl 发 GET 请求，httpd 侧 net_tcp_recv
+ * 读到的永远是空的。rx_stage 就是用来在 accept_cb 里接住这份"卡在握手
+ * 阶段"的数据，net_tcp_accept() 摘取连接时把它转交给 conn->rx_buf，
+ * net_tcp_recv() 本来就会优先看 conn->rx_len 是否已经有数据。 */
+#define TCP_PENDING_STAGE_CAP 2048
+
+typedef struct {
+    int      in_use;
+    uint16_t port;         /* 监听端口，用于区分同一张表服务不同端口的场景 */
+    uint32_t peer;
+    uint16_t peer_port;
+    uint8_t  peer_mac[6];
+    uint32_t peer_seq;     /* 对端下一个期望序列号（= 收到的 SYN.seq + 1） */
+    uint32_t isn;          /* 我们这边选的初始序列号，accept() 发 SYN-ACK 时才分配 */
+    int      syn_acked;    /* 已经发过 SYN-ACK，等对端最后一个 ACK */
+    int      established;  /* 三次握手完成，等 accept() 取走 */
+    uint8_t  rx_stage[TCP_PENDING_STAGE_CAP];
+    uint32_t rx_stage_len;
+} tcp_pending_t;
+
 static uint16_t listen_port;
-static uint32_t listen_peer;
-static uint8_t  listen_mac[6];
-static uint16_t listen_sport;
-static uint32_t listen_seq;
-static int      listen_syn_acked;
-static int      listen_established;
+static tcp_pending_t g_pending[TCP_PENDING_MAX];
+
+static int tcp_pending_find(uint32_t peer, uint16_t peer_port) {
+    for (int i = 0; i < TCP_PENDING_MAX; i++) {
+        if (g_pending[i].in_use && g_pending[i].peer == peer && g_pending[i].peer_port == peer_port)
+            return i;
+    }
+    return -1;
+}
+
+static int tcp_pending_alloc(void) {
+    for (int i = 0; i < TCP_PENDING_MAX; i++) {
+        if (!g_pending[i].in_use) return i;
+    }
+    return -1;
+}
 
 static int accept_cb(const uint8_t *pkt, uint16_t len, void *arg) {
     (void)arg;
@@ -1813,24 +1870,62 @@ static int accept_cb(const uint8_t *pkt, uint16_t len, void *arg) {
     if (ntohs(tcp->dst) != listen_port) return 0;
     uint8_t flags = tcp->flags;
     uint32_t seq = ntohl(tcp->seq);
+    uint32_t peer = ip->src;
+    uint16_t peer_port = ntohs(tcp->src);
 
-    if ((flags & 0x02) && !(flags & 0x10) && !listen_syn_acked) {
-        listen_peer  = ip->src;
-        listen_sport = ntohs(tcp->src);
-        listen_seq   = seq + 1;
-        memcpy(listen_mac, eth->src, 6);
-        listen_syn_acked = 1;
-        return 1;
+    if ((flags & 0x02) && !(flags & 0x10)) {
+        /* 新的 SYN：同一个 peer/port 重传的 SYN 复用已有槽位（不重置状态，
+         * 避免正在等最后 ACK 的连接被 SYN 重传打回原形），否则找个空槽位；
+         * 表满了就丢——客户端会自己重传 SYN。 */
+        int slot = tcp_pending_find(peer, peer_port);
+        if (slot < 0) slot = tcp_pending_alloc();
+        if (slot < 0) return 0;
+        if (!g_pending[slot].in_use) {
+            tcp_pending_t *p = &g_pending[slot];
+            memset(p, 0, sizeof(*p));
+            p->in_use = 1;
+            p->port = listen_port;
+            p->peer = peer;
+            p->peer_port = peer_port;
+            p->peer_seq = seq + 1;
+            memcpy(p->peer_mac, eth->src, 6);
+        }
+        return 0; /* 不提前结束这次 poll：同一批还可能有别的客户端的 SYN */
     }
 
-    if ((flags & 0x10) && listen_syn_acked) {
-        listen_established = 1;
-        return 1;
+    if (flags & 0x10) {
+        int slot = tcp_pending_find(peer, peer_port);
+        if (slot < 0) return 0;
+        tcp_pending_t *p = &g_pending[slot];
+        if (p->syn_acked && !p->established) p->established = 1;
+
+        /* 这个 ACK 可能捎带了数据（三次握手最后一个 ACK 和请求数据挤在
+         * 一个包里，或者独立的数据包紧跟着到达、被这轮 poll 一起看到）
+         * ——见 tcp_pending_t 定义处的注释，不接住的话这段数据会随着
+         * RX 描述符被驱动回收而永久丢失。 */
+        if (p->established) {
+            uint32_t ip_len = ntohs(ip->len);
+            uint32_t thl = (tcp->off_flags_hi >> 4) * 4;
+            const uint8_t *data = (const uint8_t *)tcp + thl;
+            uint32_t dlen = ip_len > ihl + thl ? ip_len - ihl - thl : 0;
+            if (dlen && seq == p->peer_seq) {
+                uint32_t copy = dlen;
+                if (p->rx_stage_len + copy > TCP_PENDING_STAGE_CAP)
+                    copy = TCP_PENDING_STAGE_CAP - p->rx_stage_len;
+                if (copy) {
+                    memcpy(p->rx_stage + p->rx_stage_len, data, copy);
+                    p->rx_stage_len += copy;
+                }
+                p->peer_seq += dlen;
+            }
+        }
+        return 0;
     }
 
     if (flags & 0x04) {
-        listen_syn_acked = 0;
-        return 1;
+        int slot = tcp_pending_find(peer, peer_port);
+        if (slot >= 0) g_pending[slot].in_use = 0;
+        return 0;
     }
 
     return 0;
@@ -1839,9 +1934,8 @@ static int accept_cb(const uint8_t *pkt, uint16_t len, void *arg) {
 int net_tcp_listen(uint16_t port) {
     if (port == 0) return -1;
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
-    listen_port        = port;
-    listen_syn_acked   = 0;
-    listen_established = 0;
+    listen_port = port;
+    memset(g_pending, 0, sizeof(g_pending));
     return 0;
 }
 
@@ -1853,38 +1947,66 @@ int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn,
     }
     memset(conn, 0, sizeof(*conn));
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
-    if (listen_port != port || !listen_syn_acked) return -1;
+    if (listen_port != port) return -1;
 
-    listen_established = 0;
-
-    send_tcp(listen_mac, listen_peer, port, listen_sport,
-             next_port, listen_seq, 0x12, 0, 0);
-
-    uint32_t deadline_ms = 0;
-    {
-        uint32_t elapsed = 0;
-        for (int i = 0; i < (int)(timeout_ms / 10) + 10 && !listen_established; i++) {
-            net_poll(accept_cb, NULL, 10000);
-            elapsed += 10;
-            if (elapsed >= timeout_ms) break;
+    uint32_t elapsed = 0;
+    int slot = -1;
+    while (elapsed <= timeout_ms) {
+        /* 把还没发 SYN-ACK 的排队项都发出去（可能不止一个：上一轮 poll
+         * 一次抓到了多个客户端的 SYN）。回包的源端口必须还是我们监听的
+         * 那个固定端口 port（标准 TCP 服务端行为——客户端认的是"服务端
+         * 在 port 上"，换成别的端口对客户端来说就是另一台服务器了）；
+         * 区分并发连接靠对端 IP/端口这一侧变化，不是靠改自己的端口。
+         * next_port 这里纯粹当一次性初始序列号使的，和它平时当"下一个
+         * 要用的本地临时端口"是两回事，蹭个全局递增计数器省事而已。 */
+        for (int i = 0; i < TCP_PENDING_MAX; i++) {
+            tcp_pending_t *p = &g_pending[i];
+            if (p->in_use && p->port == port && !p->syn_acked) {
+                if (next_port < 49152) next_port = 49152;
+                p->isn = next_port++;
+                send_tcp(p->peer_mac, p->peer, port, p->peer_port,
+                         p->isn, p->peer_seq, 0x12, 0, 0);
+                p->syn_acked = 1;
+            }
         }
-    }
-    (void)deadline_ms;
 
-    if (!listen_established) {
-        listen_syn_acked = 0;
+        for (int i = 0; i < TCP_PENDING_MAX; i++) {
+            if (g_pending[i].in_use && g_pending[i].port == port && g_pending[i].established) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) break;
+
+        net_poll(accept_cb, NULL, 10000);
+        task_yield();
+        elapsed += 10;
+    }
+
+    if (slot < 0) {
         set_error("tcp accept timeout");
         return -1;
     }
 
-    conn->peer  = listen_peer;
-    conn->sport = next_port;
-    conn->dport = listen_sport;
-    conn->seq   = next_port + 1;
-    conn->ack   = listen_seq;
-    memcpy(conn->mac, listen_mac, 6);
+    tcp_pending_t *p = &g_pending[slot];
+    conn->peer  = p->peer;
+    conn->sport = port;
+    conn->dport = p->peer_port;
+    conn->seq   = p->isn + 1;
+    conn->ack   = p->peer_seq;
+    memcpy(conn->mac, p->peer_mac, 6);
     conn->open  = true;
 
-    listen_syn_acked = 0;
+    /* 握手阶段就已经被 accept_cb 捎带收下的数据（见 tcp_pending_t 定义处
+     * 的注释）搬进 conn->rx_buf——net_tcp_recv() 一进来就会先看这里有没
+     * 有现成数据，不用重新等网络。 */
+    if (p->rx_stage_len) {
+        uint32_t copy = p->rx_stage_len;
+        if (copy > NET_TCP_RXBUF_SIZE) copy = NET_TCP_RXBUF_SIZE;
+        memcpy(conn->rx_buf, p->rx_stage, copy);
+        conn->rx_len = copy;
+    }
+
+    p->in_use = 0;
     return 0;
 }

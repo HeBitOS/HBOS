@@ -5,6 +5,7 @@
 #include "../tls.h"
 #include "../unistd.h"
 #include "../vfs.h"
+#include "../core/task.h"
 #include "tool.h"
 
 static void print_hex_digit(uint8_t v) {
@@ -627,6 +628,119 @@ static void cmd_wget(int argc, char **argv) {
     }
 }
 
+/* 处理已经 accept() 拿到的一个连接：读请求行、按方法/文件分发响应。
+ * 单独拆出来（而不是内嵌在 httpd_task_entry 的 while 里）纯粹是可读性
+ * 考虑，行为和以前完全一样。 */
+static void httpd_serve_one(net_tcp_conn_t *conn) {
+    /* 原来这里 poll_rounds=4，实测太短——accept() 一确认三次握手完成就
+     * 立刻返回，客户端的 GET 请求行有时还没真正到（各自是独立的包，不
+     * 保证攒在一起），4 轮很容易在数据到达前就放弃，读到空请求，看起来
+     * 像是"服务端不认识这个方法"（405），其实是根本没读到方法。 */
+    uint8_t req[512];
+    uint32_t rlen = 0;
+    net_tcp_recv(conn, req, sizeof(req) - 1, &rlen, 50);
+    req[rlen] = '\0';
+
+    /* Parse method and path */
+    char method[8] = {0};
+    char path[128] = {0};
+    const char *p = (const char *)req;
+    int mi = 0;
+    while (*p && *p != ' ' && mi < 7) method[mi++] = *p++;
+    while (*p == ' ') p++;
+    int pi = 0;
+    while (*p && *p != ' ' && *p != '\r' && pi < 127) path[pi++] = *p++;
+    path[pi] = '\0';
+
+    /* Strip leading / */
+    const char *filepath = path;
+    if (filepath[0] == '/') filepath++;
+
+    console_puts("httpd: ");
+    console_puts(method);
+    console_putchar(' ');
+    console_puts(filepath);
+    console_putchar('\n');
+
+    /* Build response */
+    if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
+        const char *resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
+        net_tcp_send(conn, (const uint8_t *)resp, (uint32_t)strlen(resp));
+        net_tcp_close(conn);
+        return;
+    }
+
+    /* Try to read file */
+    vfs_node_t *node = vfs_lookup(filepath);
+    if (!node) {
+        const char *resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        net_tcp_send(conn, (const uint8_t *)resp, (uint32_t)strlen(resp));
+        net_tcp_close(conn);
+        return;
+    }
+
+    /* Determine content type */
+    const char *ctype = "text/plain";
+    int flen = (int)strlen(filepath);
+    if (flen > 5 && strcmp(filepath + flen - 5, ".html") == 0) ctype = "text/html";
+    else if (flen > 4 && strcmp(filepath + flen - 4, ".htm") == 0) ctype = "text/html";
+    else if (flen > 3 && strcmp(filepath + flen - 3, ".js") == 0) ctype = "application/javascript";
+    else if (flen > 4 && strcmp(filepath + flen - 4, ".css") == 0) ctype = "text/css";
+    else if (flen > 4 && strcmp(filepath + flen - 4, ".png") == 0) ctype = "image/png";
+    else if (flen > 4 && strcmp(filepath + flen - 4, ".jpg") == 0) ctype = "image/jpeg";
+
+    uint32_t fsize = node->size;
+
+    /* Build header */
+    char hdr[256];
+    uint32_t hp = 0;
+    const char *prefix = "HTTP/1.1 200 OK\r\nContent-Type: ";
+    while (*prefix && hp < 255) hdr[hp++] = *prefix++;
+    while (*ctype && hp < 255) hdr[hp++] = *ctype++;
+    const char *mid = "\r\nContent-Length: ";
+    while (*mid && hp < 255) hdr[hp++] = *mid++;
+    /* Append size as decimal */
+    char siz[16]; int si = 0; uint32_t sv = fsize;
+    do { siz[si++] = '0' + sv % 10; sv /= 10; } while (sv);
+    while (si-- > 0 && hp < 255) hdr[hp++] = siz[si];
+    const char *end = "\r\nConnection: close\r\n\r\n";
+    while (*end && hp < 255) hdr[hp++] = *end++;
+    hdr[hp] = '\0';
+
+    net_tcp_send(conn, (const uint8_t *)hdr, hp);
+
+    /* Send file body */
+    if (strcmp(method, "GET") == 0 && fsize > 0) {
+        uint8_t buf[512];
+        uint32_t off = 0;
+        while (off < fsize) {
+            uint32_t chunk = fsize - off;
+            if (chunk > 512) chunk = 512;
+            ssize_t n = vfs_read(node, off, buf, chunk);
+            if (n <= 0) break;
+            net_tcp_send(conn, buf, (uint32_t)n);
+            off += (uint32_t)n;
+        }
+    }
+
+    net_tcp_close(conn);
+}
+
+/* 后台守护任务本体——httpd 命令只负责 listen() 一次然后 task_create()
+ * 这个当后台任务，命令本身立刻返回，shell 不再被占住。net_tcp_accept()
+ * 内部的轮询循环已经在 net.c 里插了 task_yield()，所以这个 while(1) 长
+ * 期跑着也不会把其它任务饿死。用 kill <pid>（任务管理器/ps 已有）结束；
+ * task_kill() 对 SIGTERM/SIGKILL 是直接把任务状态标成 TERMINATED，不需
+ * 要这个任务自己配合检查什么标志位。 */
+static void httpd_task_entry(void *arg) {
+    uint16_t port = (uint16_t)(uintptr_t)arg;
+    while (1) {
+        net_tcp_conn_t conn;
+        if (net_tcp_accept(port, &conn, 5000) < 0) continue;
+        httpd_serve_one(&conn);
+    }
+}
+
 static void cmd_httpd(int argc, char **argv) {
     uint16_t port = 80;
     if (argc >= 2) {
@@ -635,9 +749,6 @@ static void cmd_httpd(int argc, char **argv) {
         while (*s >= '0' && *s <= '9') { port = port * 10 + (uint16_t)(*s - '0'); s++; }
     }
     if (port == 0) port = 80;
-    console_puts("httpd: listening on port ");
-    print_uint(port);
-    console_puts("...\n");
 
     if (net_tcp_listen(port) < 0) {
         console_puts("httpd: listen failed: ");
@@ -646,100 +757,18 @@ static void cmd_httpd(int argc, char **argv) {
         return;
     }
 
-    while (1) {
-        net_tcp_conn_t conn;
-        if (net_tcp_accept(port, &conn, 5000) < 0) continue;
-
-        /* Read request */
-        uint8_t req[512];
-        uint32_t rlen = 0;
-        net_tcp_recv(&conn, req, sizeof(req) - 1, &rlen, 4);
-        req[rlen] = '\0';
-
-        /* Parse method and path */
-        char method[8] = {0};
-        char path[128] = {0};
-        const char *p = (const char *)req;
-        int mi = 0;
-        while (*p && *p != ' ' && mi < 7) method[mi++] = *p++;
-        while (*p == ' ') p++;
-        int pi = 0;
-        while (*p && *p != ' ' && *p != '\r' && pi < 127) path[pi++] = *p++;
-        path[pi] = '\0';
-
-        /* Strip leading / */
-        const char *filepath = path;
-        if (filepath[0] == '/') filepath++;
-
-        console_puts("httpd: ");
-        console_puts(method);
-        console_putchar(' ');
-        console_puts(filepath);
-        console_putchar('\n');
-
-        /* Build response */
-        if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
-            const char *resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
-            net_tcp_send(&conn, (const uint8_t *)resp, (uint32_t)strlen(resp));
-            net_tcp_close(&conn);
-            continue;
-        }
-
-        /* Try to read file */
-        vfs_node_t *node = vfs_lookup(filepath);
-        if (!node) {
-            const char *resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-            net_tcp_send(&conn, (const uint8_t *)resp, (uint32_t)strlen(resp));
-            net_tcp_close(&conn);
-            continue;
-        }
-
-        /* Determine content type */
-        const char *ctype = "text/plain";
-        int flen = (int)strlen(filepath);
-        if (flen > 5 && strcmp(filepath + flen - 5, ".html") == 0) ctype = "text/html";
-        else if (flen > 4 && strcmp(filepath + flen - 4, ".htm") == 0) ctype = "text/html";
-        else if (flen > 3 && strcmp(filepath + flen - 3, ".js") == 0) ctype = "application/javascript";
-        else if (flen > 4 && strcmp(filepath + flen - 4, ".css") == 0) ctype = "text/css";
-        else if (flen > 4 && strcmp(filepath + flen - 4, ".png") == 0) ctype = "image/png";
-        else if (flen > 4 && strcmp(filepath + flen - 4, ".jpg") == 0) ctype = "image/jpeg";
-
-        uint32_t fsize = node->size;
-
-        /* Build header */
-        char hdr[256];
-        uint32_t hp = 0;
-        const char *prefix = "HTTP/1.1 200 OK\r\nContent-Type: ";
-        while (*prefix && hp < 255) hdr[hp++] = *prefix++;
-        while (*ctype && hp < 255) hdr[hp++] = *ctype++;
-        const char *mid = "\r\nContent-Length: ";
-        while (*mid && hp < 255) hdr[hp++] = *mid++;
-        /* Append size as decimal */
-        char siz[16]; int si = 0; uint32_t sv = fsize;
-        do { siz[si++] = '0' + sv % 10; sv /= 10; } while (sv);
-        while (si-- > 0 && hp < 255) hdr[hp++] = siz[si];
-        const char *end = "\r\nConnection: close\r\n\r\n";
-        while (*end && hp < 255) hdr[hp++] = *end++;
-        hdr[hp] = '\0';
-
-        net_tcp_send(&conn, (const uint8_t *)hdr, hp);
-
-        /* Send file body */
-        if (strcmp(method, "GET") == 0 && fsize > 0) {
-            uint8_t buf[512];
-            uint32_t off = 0;
-            while (off < fsize) {
-                uint32_t chunk = fsize - off;
-                if (chunk > 512) chunk = 512;
-                ssize_t n = vfs_read(node, off, buf, chunk);
-                if (n <= 0) break;
-                net_tcp_send(&conn, buf, (uint32_t)n);
-                off += (uint32_t)n;
-            }
-        }
-
-        net_tcp_close(&conn);
+    int id = task_create("httpd", httpd_task_entry, (void *)(uintptr_t)port);
+    if (id < 0) {
+        console_puts("httpd: 后台任务创建失败（任务数已达上限）\n");
+        return;
     }
+    console_puts("httpd: 后台运行中，端口 ");
+    print_uint(port);
+    console_puts("，PID ");
+    print_uint((uint32_t)id);
+    console_puts("（kill ");
+    print_uint((uint32_t)id);
+    console_puts(" 结束）\n");
 }
 
 void tool_net_init(void) {
@@ -754,7 +783,7 @@ void tool_net_init(void) {
         {"ntp", CMD_GROUP_SYSTEM, "Sync clock via NTP", "ntp [server]", cmd_ntp},
         {"curl", CMD_GROUP_SYSTEM, "HTTP(S) GET/HEAD", "curl [-I] http[s]://host[:port]/path", cmd_curl},
         {"wget", CMD_GROUP_SYSTEM, "HTTP(S) GET and print/save body", "wget [-S] [-O file] http[s]://host[:port]/path [file]", cmd_wget},
-        {"httpd", CMD_GROUP_SYSTEM, "Simple HTTP file server", "httpd [port]", cmd_httpd},
+        {"httpd", CMD_GROUP_SYSTEM, "HTTP file server (background daemon)", "httpd [port]  (kill <pid> to stop)", cmd_httpd},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);
