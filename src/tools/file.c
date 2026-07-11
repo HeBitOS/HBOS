@@ -391,11 +391,11 @@ static void cmd_mkfs(int argc, char **argv) {
         console_puts("Usage: mkfs\n");
         return;
     }
-    if (fs_format_disk() < 0) {
+    if (fs_format_disk_fat32() < 0) {
         console_puts("mkfs: no writable ATA disk\n");
         return;
     }
-    console_puts("mkfs: formatted and mounted hbfs/ata\n");
+    console_puts("mkfs: formatted and mounted fat32/ata\n");
 }
 
 static void cmd_writefile(int argc, char **argv) {
@@ -688,7 +688,7 @@ void tool_file_init(void) {
         {"df",         CMD_GROUP_FILE, "Show disk usage",       "df",                         cmd_df},
         {"fsck",       CMD_GROUP_FILE, "Check filesystem",       "fsck",                      cmd_fsck},
         {"mount",      CMD_GROUP_FILE, "Mount HBFS ATA disk",    "mount",                     cmd_mount},
-        {"mkfs",       CMD_GROUP_FILE, "Format HBFS ATA disk",   "mkfs",                      cmd_mkfs},
+        {"mkfs",       CMD_GROUP_FILE, "Format FAT32 ATA disk",  "mkfs",                      cmd_mkfs},
         {"edit",       CMD_GROUP_FILE, "Edit a file (TUI editor)","edit <file>",               cmd_edit},
         {"find",       CMD_GROUP_FILE, "Find files by name",     "find [pattern]",            cmd_find},
         {"wc",         CMD_GROUP_FILE, "Count lines/words/bytes", "wc <file>",                cmd_wc},

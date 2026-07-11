@@ -126,7 +126,7 @@ static void print_next_step(void) {
     } else if (fs_is_disk()) {
         console_puts("\x1b[32mpersistent storage ready\x1b[0m; try writefile a hello\n");
     } else {
-        console_puts("\x1b[36mrun install auto\x1b[0m to prepare persistent HBFS\n");
+        console_puts("\x1b[36mrun install auto\x1b[0m to prepare persistent FAT32 storage\n");
     }
 }
 
@@ -180,17 +180,25 @@ static void cmd_diskmgr(int argc, char **argv) {
     console_putchar('\n');
 }
 
+/* beta5: new installs default to FAT32 (real Linux/Windows hosts can mount
+ * the resulting disk image directly, unlike the old custom HBFS format).
+ * "install hbfs*" variants are kept for anyone who still wants the legacy
+ * format; existing HBFS disks keep mounting/reading exactly as before
+ * (src/fs.c's HBFS code isn't touched), this only changes what a *new*
+ * install targets by default. */
 static void cmd_install(int argc, char **argv) {
     if (argc == 1) {
         console_puts("\n\x1b[33mHBOS Installer\x1b[0m\n");
         console_puts("No disk changes were made.\n");
         console_puts("Recommended path:\n");
         console_puts("  1. diskmgr        inspect disk and partition status\n");
-        console_puts("  2. install auto   prepare persistent HBFS storage\n");
+        console_puts("  2. install auto   prepare persistent FAT32 storage\n");
         console_puts("  3. diskmgr        confirm storage is ready\n\n");
         console_puts("Advanced:\n");
-        console_puts("  install format                 erase the current HBFS filesystem\n");
-        console_puts("  install part <start> <sectors> create HBFS at an exact LBA range\n\n");
+        console_puts("  install format                       erase the current FAT32 filesystem\n");
+        console_puts("  install part <start> <sectors>        create FAT32 at an exact LBA range\n");
+        console_puts("  install hbfs-auto                     prepare storage using the legacy HBFS format\n");
+        console_puts("  install hbfs-part <start> <sectors>   create legacy HBFS at an exact LBA range\n\n");
         cmd_diskmgr(0, 0);
         return;
     }
@@ -201,8 +209,8 @@ static void cmd_install(int argc, char **argv) {
     }
 
     if (argc > 1 && streq(argv[1], "format")) {
-        console_puts("\x1b[33minstall:\x1b[0m formatting current HBFS partition\n");
-        if (fs_format_disk() < 0) console_puts("\x1b[31minstall: format failed\x1b[0m\n");
+        console_puts("\x1b[33minstall:\x1b[0m formatting current FAT32 partition\n");
+        if (fs_format_disk_fat32() < 0) console_puts("\x1b[31minstall: format failed\x1b[0m\n");
         else console_puts("\x1b[32minstall: formatted\x1b[0m\n");
         return;
     }
@@ -211,6 +219,25 @@ static void cmd_install(int argc, char **argv) {
         uint32_t start = 0, sectors = 0;
         if (argc < 4 || parse_u32(argv[2], &start) < 0 || parse_u32(argv[3], &sectors) < 0) {
             console_puts("usage: install part <start_lba> <sectors>\n");
+            return;
+        }
+        console_puts("\x1b[33minstall:\x1b[0m creating FAT32 partition at LBA ");
+        print_uint(start);
+        console_puts(" size ");
+        print_uint(sectors);
+        console_puts(" sectors\n");
+        if (fs_install_disk_fat32_at(start, sectors) < 0) {
+            console_puts("\x1b[31minstall: failed, range overlaps or disk is too small\x1b[0m\n");
+            return;
+        }
+        console_puts("\x1b[32minstall: FAT32 partition ready\x1b[0m\n");
+        return;
+    }
+
+    if (argc > 1 && streq(argv[1], "hbfs-part")) {
+        uint32_t start = 0, sectors = 0;
+        if (argc < 4 || parse_u32(argv[2], &start) < 0 || parse_u32(argv[3], &sectors) < 0) {
+            console_puts("usage: install hbfs-part <start_lba> <sectors>\n");
             return;
         }
         console_puts("\x1b[33minstall:\x1b[0m creating HBFS partition at LBA ");
@@ -226,17 +253,30 @@ static void cmd_install(int argc, char **argv) {
         return;
     }
 
-    if (!streq(argv[1], "auto")) {
-        console_puts("usage: install [auto|status|format|part <start_lba> <sectors>]\n");
+    if (argc > 1 && streq(argv[1], "hbfs-auto")) {
+        console_puts("\x1b[33minstall:\x1b[0m creating/formatting HBFS partition\n");
+        if (fs_install_disk() < 0) {
+            console_puts("\x1b[31minstall: failed, no writable space for HBFS\x1b[0m\n");
+            return;
+        }
+        console_puts("\x1b[32minstall: HBFS partition ready\x1b[0m\n");
+        cmd_diskmgr(0, 0);
         return;
     }
 
-    console_puts("\x1b[33minstall:\x1b[0m creating/formatting HBFS partition\n");
-    if (fs_install_disk() < 0) {
-        console_puts("\x1b[31minstall: failed, no writable space for HBFS\x1b[0m\n");
+    if (!streq(argv[1], "auto")) {
+        console_puts("usage: install [auto|status|format|part <start_lba> <sectors>|hbfs-auto|hbfs-part <start_lba> <sectors>]\n");
         return;
     }
-    console_puts("\x1b[32minstall: HBFS partition ready\x1b[0m\n");
+
+    console_puts("\x1b[33minstall:\x1b[0m creating/formatting FAT32 partition\n");
+    if (fs_install_disk_fat32() < 0) {
+        console_puts("\x1b[31minstall: failed: \x1b[0m");
+        console_puts(fs_last_error());
+        console_putchar('\n');
+        return;
+    }
+    console_puts("\x1b[32minstall: FAT32 partition ready\x1b[0m\n");
     cmd_diskmgr(0, 0);
 }
 
@@ -244,8 +284,8 @@ void tool_disk_init(void) {
     static const command_t cmds[] = {
         {"diskmgr", CMD_GROUP_FILE, "Show disk usage map", "diskmgr", cmd_diskmgr},
         {"disk", CMD_GROUP_FILE, "Show disk usage map", "disk", cmd_diskmgr},
-        {"install", CMD_GROUP_SYSTEM, "Show installer or prepare HBFS", "install [auto|status|format|part <start_lba> <sectors>]", cmd_install},
-        {"setup", CMD_GROUP_SYSTEM, "Show installer or prepare HBFS", "setup [auto|status|format|part <start_lba> <sectors>]", cmd_install},
+        {"install", CMD_GROUP_SYSTEM, "Show installer or prepare FAT32 storage", "install [auto|status|format|part <start_lba> <sectors>|hbfs-auto|hbfs-part <start_lba> <sectors>]", cmd_install},
+        {"setup", CMD_GROUP_SYSTEM, "Show installer or prepare FAT32 storage", "setup [auto|status|format|part <start_lba> <sectors>|hbfs-auto|hbfs-part <start_lba> <sectors>]", cmd_install},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

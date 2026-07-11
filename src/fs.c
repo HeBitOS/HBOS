@@ -70,6 +70,7 @@ static int ext2_try_mount(void);
 
 static fat32_fs_t fat32_fs; /**< FAT32 文件系统实例 */
 static int fat32_try_mount(void);
+static uint32_t fat32_resolve_parent(const char *norm, char *basename_out);
 static int ext2_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);
 static int ext2_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count);
 static int ext2_vfs_truncate(vfs_node_t *node);
@@ -440,7 +441,17 @@ static int fat32_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, u
     if (!f || !f->used || (!buf && count)) return -1;
     uint32_t sz = f->size;
     int ret = fat32_write_file(&fat32_fs, f->disk_slot, &sz, offset, (const uint8_t *)buf, count);
-    if (ret > 0) { f->size = sz; f->node.size = sz; }
+    if (ret > 0) {
+        f->size = sz; f->node.size = sz;
+        /* fat32_write_file() 只更新调用方这份内存变量，从不回写目录项，
+         * 不手动同步的话文件大小在重启重新扫描根目录时会读回创建时的
+         * 0——之前 writefile+cat 在同一次开机里能用、重启后文件"变空"，
+         * 根因就在这。回写失败先不当成整次写入失败（数据已经落盘，只是
+         * 大小元数据没跟上，比直接报错整个 write() 更接近真实语义）。 */
+        char basename[MAX_FILENAME];
+        uint32_t parent = fat32_resolve_parent(f->name, basename);
+        if (parent) fat32_set_file_size(&fat32_fs, parent, f->disk_slot, sz);
+    }
     return ret;
 }
 
@@ -452,6 +463,11 @@ static int fat32_vfs_truncate(vfs_node_t *node) {
     uint32_t sz = 0;
     fat32_write_file(&fat32_fs, f->disk_slot, &sz, 0, NULL, 0);
     f->size = 0; f->node.size = 0;
+    {
+        char basename[MAX_FILENAME];
+        uint32_t parent = fat32_resolve_parent(f->name, basename);
+        if (parent) fat32_set_file_size(&fat32_fs, parent, f->disk_slot, 0);
+    }
     return 0;
 }
 
@@ -459,7 +475,14 @@ static int fat32_vfs_truncate(vfs_node_t *node) {
 static int fat32_vfs_unlink(vfs_node_t *node) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used) return -1;
-    int ret = fat32_delete_file(&fat32_fs, fat32_fs.bpb.root_cluster, f->name);
+    /* 同 fs_delete_file() 的 FAT32 分支踩过的坑：这是 unlink() 实际会走的
+     * 那条路径（node->ops->unlink 回调），之前只顾着改 fs_delete_file()
+     * 自己内联的 FAT32 分支，漏了这条平行、真正生效的路径——f->name 带
+     * 子目录时（"testdir/foo.txt"）直接传给根目录查找必然找不到，导致
+     * stat 能看见文件但 unlink/rm 报"not found"。 */
+    char basename[MAX_FILENAME];
+    uint32_t parent = fat32_resolve_parent(f->name, basename);
+    int ret = parent ? fat32_delete_file(&fat32_fs, parent, basename) : -1;
     if (ret == 0) {
         f->used = 0;
         f->name[0] = '\0';
@@ -990,6 +1013,164 @@ int fs_install_disk_at(uint32_t start, uint32_t sectors) {
     return hbfs_format_range(start, sectors);
 }
 
+/* ── FAT32 成为新装默认格式：安装/格式化路径 ──────────────────────
+ * 镜像上面 HBFS 的 fs_install_disk[_at]/fs_format_disk 三个入口，
+ * 复用同一批分区表读写辅助函数（write_mbr_entry/ranges_overlap/
+ * align_up/get_le32/fs_read_partitions），只是分区类型码换成 FAT32
+ * 的 0x0C，格式化本体交给 fat32.c 的 fat32_format()。HBFS 的挂载/读取
+ * 代码本身不删除——已装 HBFS 的旧盘仍可正常挂载，这里只是把"新装"
+ * 的默认目标换成 FAT32，方便真实 Linux/Windows 主机直接挂载识别。 */
+
+/** FAT32 安装所需的最小扇区数（对应 fat32_format 自身的下限） */
+static uint32_t fat32_needed_sectors(void) {
+    return 66600;
+}
+
+/** 检查 FAT32 分区范围是否有效 */
+static int fat32_range_valid(uint32_t start, uint32_t sectors) {
+    uint32_t total = block_sector_count();
+    if (start < 2048) return 0;
+    if (sectors < fat32_needed_sectors()) return 0;
+    if (start >= total) return 0;
+    if (sectors > total - start) return 0;
+    return 1;
+}
+
+/** 在 MBR 分区表中查找已存在的 FAT32 分区（类型 0x0B 或 0x0C） */
+static int fat32_find_mbr_partition(uint32_t *start, uint32_t *sectors) {
+    uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    if (block_read_sector(0, mbr) < 0) return -1;
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA) return -1;
+
+    for (uint32_t i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        if (e[4] != 0x0B && e[4] != 0x0C) continue;
+        uint32_t lba = get_le32(e + 8);
+        uint32_t cnt = get_le32(e + 12);
+        if (lba == 0 || cnt < fat32_needed_sectors()) continue;
+        *start = lba;
+        *sectors = cnt;
+        return 0;
+    }
+    return -1;
+}
+
+/** 将 FAT32 分区信息写入 MBR 分区表 */
+static int fat32_write_mbr_partition(uint32_t start, uint32_t sectors) {
+    uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    if (block_read_sector(0, mbr) < 0 || mbr[510] != 0x55 || mbr[511] != 0xAA) {
+        memset(mbr, 0, sizeof(mbr));
+    }
+
+    int slot = -1;
+    int empty = -1;
+    for (uint32_t i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        uint8_t type = e[4];
+        uint32_t lba = get_le32(e + 8);
+        uint32_t cnt = get_le32(e + 12);
+        if (type == 0x0B || type == 0x0C) {
+            slot = (int)i;
+            break;
+        }
+        if ((type == 0 || cnt == 0) && empty < 0) {
+            empty = (int)i;
+            continue;
+        }
+        if (cnt != 0 && ranges_overlap(start, sectors, lba, cnt))
+            return -1;
+    }
+    if (slot < 0) slot = empty;
+    if (slot < 0) return -1;
+
+    write_mbr_entry(mbr + 446 + (uint32_t)slot * 16, 0, 0x0C, start, sectors);
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+    return block_write_sector(0, mbr);
+}
+
+/** 自动选择 FAT32 安装范围（同 hbfs_choose_install_range 的找空闲区逻辑） */
+static int fat32_choose_install_range(uint32_t *start, uint32_t *sectors) {
+    uint32_t total = block_sector_count();
+    uint32_t min = fat32_needed_sectors();
+    if (total == 0) return fs_fail("未检测到可写硬盘");
+    if (total <= HBFS_DEFAULT_START_LBA + min) return fs_fail("硬盘空间不足");
+
+    if (fat32_find_mbr_partition(start, sectors) == 0) return 0;
+
+    fs_partition_info_t parts[4];
+    uint32_t candidate = HBFS_DEFAULT_START_LBA;
+    if (fs_read_partitions(parts) == 0) {
+        for (uint32_t pass = 0; pass < 4; pass++) {
+            uint32_t best_start = 0xFFFFFFFFU;
+            uint32_t best_end = 0;
+            for (uint32_t i = 0; i < 4; i++) {
+                if (!parts[i].present) continue;
+                uint32_t end = parts[i].start_lba + parts[i].sectors;
+                if (parts[i].start_lba >= candidate && parts[i].start_lba < best_start) {
+                    best_start = parts[i].start_lba;
+                    best_end = end;
+                }
+            }
+            if (best_start == 0xFFFFFFFFU) break;
+            if (candidate + min <= best_start) break;
+            candidate = align_up(best_end, 2048);
+        }
+    }
+
+    if (candidate + min > total) return fs_fail("没有可用分区空间");
+    *start = candidate;
+    *sectors = total - candidate;
+    return 0;
+}
+
+/** 挂载磁盘上刚格式化好的 FAT32 分区并切换后端 */
+static int fat32_mount_and_switch(uint32_t start) {
+    if (fat32_mount(start, &fat32_fs) < 0) return fs_fail("FAT32 挂载失败");
+    fs_backend = FS_BACKEND_FAT32;
+    fat32_rebuild_files();
+    fs.total_sectors = block_sector_count();
+    return 1;
+}
+
+/** 在指定范围格式化并挂载 FAT32 */
+static int fat32_format_range(uint32_t start, uint32_t sectors) {
+    if (!fat32_range_valid(start, sectors)) return fs_fail("FAT32 分区范围无效");
+    if (fat32_format(start, sectors, NULL) < 0) return fs_fail("写入 FAT32 文件系统失败");
+    return fat32_mount_and_switch(start);
+}
+
+/** 格式化磁盘为 FAT32（使用默认或已有的分区范围） */
+int fs_format_disk_fat32(void) {
+    fs_error = "ok";
+    if (block_init() < 0) return fs_fail("未检测到可写硬盘");
+    uint32_t start = HBFS_DEFAULT_START_LBA;
+    uint32_t sectors = block_sector_count() > start ? block_sector_count() - start : 0;
+    (void)fat32_find_mbr_partition(&start, &sectors);
+    return fat32_format_range(start, sectors);
+}
+
+/** 在磁盘上安装 FAT32 文件系统（自动选择分区范围） */
+int fs_install_disk_fat32(void) {
+    fs_error = "ok";
+    if (block_init() < 0) return fs_fail("未检测到可写硬盘");
+    uint32_t start = 0;
+    uint32_t sectors = 0;
+    if (fat32_find_mbr_partition(&start, &sectors) == 0)
+        return fat32_format_range(start, sectors);
+    if (fat32_choose_install_range(&start, &sectors) < 0) return -1;
+    return fs_install_disk_fat32_at(start, sectors);
+}
+
+/** 在指定 LBA 范围安装 FAT32 文件系统（含写入 MBR 分区表） */
+int fs_install_disk_fat32_at(uint32_t start, uint32_t sectors) {
+    fs_error = "ok";
+    if (block_init() < 0) return fs_fail("未检测到可写硬盘");
+    if (!fat32_range_valid(start, sectors)) return fs_fail("FAT32 分区范围无效");
+    if (fat32_write_mbr_partition(start, sectors) < 0) return fs_fail("写入分区表失败");
+    return fat32_format_range(start, sectors);
+}
+
 /** 挂载磁盘上的 HBFS 文件系统 */
 int fs_mount_disk(void) {
     if (block_init() < 0) return -1;
@@ -1095,6 +1276,52 @@ file_t *fs_find_file(const char *name) {
     return NULL;
 }
 
+/**
+ * 把一个规范化路径（不含前导 '/'，可能含中间 '/' 表示子目录）解析成
+ * FAT32 上真实的父目录簇号 + 叶子短文件名，逐级用 fat32_lookup() 下钻。
+ * 镜像 ext2_resolve_parent() 的角色。失败返回 0（0/1 簇号在 FAT 里永远
+ * 是保留值，不会是合法数据簇，可安全当"无效"哨兵）。
+ *
+ * 找到这个真实 bug 的来龙去脉：fs_create_file() 的 FAT32 分支原来直接把
+ * 整段 norm（可能带 '/'）当文件名传给 fat32_create_file()，且父目录永远
+ * 写死成根簇——对 "hello.txt" 这样的根级文件恰好凑巧能用，但一旦路径带
+ * 子目录（比如自检流程的 mkdir+chdir+相对路径操作），会在根目录里创建
+ * 一个名字带斜杠、被截断得乱七八糟的短文件名项，最终在重启后的自检里
+ * 引发内核 panic——用 HBFS 走同一段自检代码不会崩，因为 HBFS 的整个
+ * 通用兜底路径本来就是纯内存 ramfs 语义，从不真的碰磁盘簇。 */
+static uint32_t fat32_resolve_parent(const char *norm, char *basename_out) {
+    uint32_t cluster = fat32_fs.bpb.root_cluster;
+    const char *p = norm;
+    char comp[MAX_FILENAME];
+    while (1) {
+        const char *slash = strchr(p, '/');
+        if (!slash) {
+            uint32_t len = (uint32_t)strlen(p);
+            if (len == 0 || len >= MAX_FILENAME) return 0;
+            memcpy(basename_out, p, len + 1);
+            return cluster;
+        }
+        uint32_t clen = (uint32_t)(slash - p);
+        if (clen == 0 || clen >= MAX_FILENAME) return 0;
+        memcpy(comp, p, clen);
+        comp[clen] = '\0';
+        uint32_t next_cluster;
+        uint8_t attr;
+        if (fat32_lookup(&fat32_fs, cluster, comp, &next_cluster, NULL, &attr) < 0) {
+            /* 中间目录不存在就顺手建一个（mkdir -p 语义）——ramfs/HBFS 的
+             * "目录"本来就只是扁平存储上的假路径前缀，从不要求父目录真的
+             * 先存在；FAT32 走真实簇结构，为了不比另外两个后端更难用，
+             * 这里补上同等宽松的行为，而不是让 mkdir("/a/b") 在全新的
+             * FAT32 盘上莫名其妙失败。 */
+            if (fat32_mkdir(&fat32_fs, cluster, comp) < 0) return 0;
+            if (fat32_lookup(&fat32_fs, cluster, comp, &next_cluster, NULL, &attr) < 0) return 0;
+        }
+        if (!(attr & FAT32_ATTR_DIRECTORY)) return 0;
+        cluster = next_cluster;
+        p = slash + 1;
+    }
+}
+
 /** 创建文件（若同名文件已存在则返回已有文件） */
 file_t *fs_create_file(const char *name) {
     char norm[MAX_FILENAME];
@@ -1131,8 +1358,11 @@ file_t *fs_create_file(const char *name) {
     }
 
     if (fs_backend == FS_BACKEND_FAT32) {
+        char basename[MAX_FILENAME];
+        uint32_t parent = fat32_resolve_parent(norm, basename);
+        if (!parent) return NULL;
         uint32_t cluster;
-        if (fat32_create_file(&fat32_fs, fat32_fs.bpb.root_cluster, norm, &cluster) < 0) return NULL;
+        if (fat32_create_file(&fat32_fs, parent, basename, &cluster) < 0) return NULL;
         for (uint32_t i = 0; i < MAX_FILES; i++) {
             file_t *f = &fs.files[i];
             if (f->used) continue;
@@ -1201,7 +1431,9 @@ int fs_delete_file(const char *name) {
         return ret;
     }
     if (fs_backend == FS_BACKEND_FAT32) {
-        int ret = fat32_delete_file(&fat32_fs, fat32_fs.bpb.root_cluster, name);
+        char basename[MAX_FILENAME];
+        uint32_t parent = fat32_resolve_parent(f->name, basename);
+        int ret = parent ? fat32_delete_file(&fat32_fs, parent, basename) : -1;
         if (ret == 0) {
             f->used = 0;
             f->name[0] = '\0';
@@ -1425,6 +1657,35 @@ int fs_mkdir(const char *name) {
         return -1;
     }
 
+    if (fs_backend == FS_BACKEND_FAT32) {
+        char basename[MAX_FILENAME];
+        uint32_t parent = fat32_resolve_parent(norm, basename);
+        if (!parent) return -1;
+        if (fat32_mkdir(&fat32_fs, parent, basename) < 0) return -1;
+        uint32_t new_cluster;
+        if (fat32_lookup(&fat32_fs, parent, basename, &new_cluster, NULL, NULL) < 0) return -1;
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            file_t *f = &fs.files[i];
+            if (f->used) continue;
+            strcpy(f->name, norm);
+            f->size = 0;
+            f->capacity = 0;
+            f->data = NULL;
+            f->node.type = VFS_NODE_DIR;
+            f->node.size = 0;
+            f->node.capacity = 0;
+            f->node.private_data = f;
+            f->node.ops = &fat32_ops;
+            strcpy(f->node.name, norm);
+            f->disk_slot = new_cluster;
+            f->used = 1;
+            f->type = 1;
+            fs.file_count++;
+            return 0;
+        }
+        return -1;
+    }
+
     for (uint32_t i = 0; i < MAX_FILES; i++) {
         file_t *f = &fs.files[i];
         if (f->used) continue;
@@ -1463,6 +1724,21 @@ int fs_rmdir(const char *name) {
         if (strncmp(fs.files[i].name, f->name, dlen) == 0 &&
             fs.files[i].name[dlen] == '/')
             return -1;
+    }
+
+    if (fs_backend == FS_BACKEND_FAT32) {
+        /* fs_delete_file()/fat32_delete_file() 明确拒绝目录属性（那是给
+         * 删普通文件用的保护），rmdir 必须走专门的 fat32_rmdir()，否则
+         * 对 FAT32 盘 rmdir 永远失败。 */
+        char basename[MAX_FILENAME];
+        uint32_t parent = fat32_resolve_parent(f->name, basename);
+        if (!parent || fat32_rmdir(&fat32_fs, parent, basename) < 0) return -1;
+        f->used = 0;
+        f->name[0] = '\0';
+        f->node.name[0] = '\0';
+        f->node.size = 0;
+        if (fs.file_count > 0) fs.file_count--;
+        return 0;
     }
 
     return fs_delete_file(name);

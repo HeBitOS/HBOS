@@ -58,6 +58,9 @@ int fs_check(fs_check_result_t *out); /**< 检查文件系统一致性 */
 int fs_format_disk(void);        /**< 格式化磁盘（使用默认范围） */
 int fs_install_disk(void);       /**< 在磁盘上安装 HBFS 文件系统 */
 int fs_install_disk_at(uint32_t start_lba, uint32_t sectors); /**< 在指定 LBA 范围安装 HBFS */
+int fs_format_disk_fat32(void);   /**< 格式化磁盘为 FAT32（使用默认/已有范围） */
+int fs_install_disk_fat32(void);  /**< 在磁盘上安装 FAT32 文件系统（自动选择分区范围），成为新装默认格式 */
+int fs_install_disk_fat32_at(uint32_t start_lba, uint32_t sectors); /**< 在指定 LBA 范围安装 FAT32 */
 const char *fs_last_error(void); /**< 获取最近一次错误描述 */
 int fs_read_partitions(fs_partition_info_t out[4]); /**< 读取分区表信息（最多 4 个分区） */
 int fs_mount_disk(void);         /**< 挂载磁盘上的 HBFS 文件系统 */

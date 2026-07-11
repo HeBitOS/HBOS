@@ -86,4 +86,21 @@ int fat32_create_file(fat32_fs_t *fs, uint32_t dir_cluster, const char *name,
                       uint32_t *out_cluster);
 int fat32_delete_file(fat32_fs_t *fs, uint32_t dir_cluster, const char *name);
 
+/** 在 dir_cluster 目录下创建子目录 name（写 "." ".." 项），成功返回 0 */
+int fat32_mkdir(fat32_fs_t *fs, uint32_t dir_cluster, const char *name);
+
+/** 删除 dir_cluster 目录下的空子目录 name；目录非空或不是目录都失败 */
+int fat32_rmdir(fat32_fs_t *fs, uint32_t dir_cluster, const char *name);
+
+/** 把 dir_cluster 目录下、簇号为 file_cluster 的目录项的 file_size 字段
+ *  改写为 new_size 并落盘——fat32_write_file() 只更新调用方传入的内存
+ *  变量，从不回写目录项本身，不调用这个的话，文件大小在重启后会读回
+ *  创建时的 0。 */
+int fat32_set_file_size(fat32_fs_t *fs, uint32_t dir_cluster, uint32_t file_cluster, uint32_t new_size);
+
+/** 在 partition_lba 起、total_sectors 扇区的分区上写入一个全新的 FAT32
+ *  文件系统（BPB/FSInfo/备份引导扇区/两份 FAT 表/空根目录簇），成功返回 0。
+ *  volume_label 最多 11 字节，NULL 则使用默认卷标。 */
+int fat32_format(uint32_t partition_lba, uint32_t total_sectors, const char *volume_label);
+
 #endif

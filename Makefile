@@ -224,6 +224,7 @@ C_SRCS = \
 	$(SRC_DIR)/gui/apps/app_settings.c \
 	$(SRC_DIR)/gui/apps/app_files.c \
 	$(SRC_DIR)/gui/apps/app_taskmgr.c \
+	$(SRC_DIR)/gui/apps/app_shortcuts.c \
 	$(SRC_DIR)/gpu.c \
 	$(APP_SRCS)
 
@@ -800,6 +801,25 @@ hbfs-list: $(INSTALL_IMG_BIOS)
 hbfs-disk: $(DISK_IMG)
 $(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
 	python3 tools/mkhbfs.py $@ --size-mib 16
+
+# ── FAT32 file injection (beta5: new installs default to FAT32) ─────
+# Unlike HBFS, FAT32 is a real, standard format -- no custom Python writer
+# needed, `mtools`/`dosfstools` (already in README's apt dependency list)
+# read/write it directly. OFFSET is the partition's byte offset on the
+# image (LBA * 512); 1048576 = LBA 2048 = HBOS_DEFAULT_START_LBA in
+# src/fs.c, i.e. the default auto-install range.
+#   make fat32-copy DISK=build/hbos_disk.img FILE=hello.c [OFFSET=1048576]
+fat32-copy:
+	@test -n "$(FILE)" || { echo "Usage: make fat32-copy DISK=<image> FILE=<file> [OFFSET=1048576]"; exit 1; }
+	mcopy -i "$(DISK)@@$(or $(OFFSET),1048576)" "$(FILE)" ::
+
+# Copy a file into the installed disk image:  make fat32-install FILE=hello.c
+fat32-install: $(INSTALL_IMG_BIOS)
+	mcopy -i "$(INSTALL_IMG_BIOS)@@$(or $(OFFSET),1048576)" "$(FILE)" ::
+
+# List files in installed disk image:  make fat32-list
+fat32-list: $(INSTALL_IMG_BIOS)
+	mdir -i "$(INSTALL_IMG_BIOS)@@$(or $(OFFSET),1048576)"
 
 clean:
 	rm -rf $(BUILD_DIR)
