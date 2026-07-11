@@ -84,6 +84,19 @@ uint8_t pci_read8(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
  */
 int pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if, pci_device_t *out);
 
+/** 每发现一个 PCI 设备时的回调类型，见 pci_enumerate_all() */
+typedef void (*pci_enumerate_cb_t)(const pci_device_t *dev, void *ctx);
+
+/**
+ * @brief 递归枚举所有可达 PCI 设备（含 PCI-to-PCI 桥后面的次级总线）
+ *
+ * 从总线 0 开始，遇到桥就跟进其 Secondary Bus，逐个设备调用 cb。
+ *
+ * @param cb  每发现一个设备调用一次
+ * @param ctx 透传给回调的上下文指针
+ */
+void pci_enumerate_all(pci_enumerate_cb_t cb, void *ctx);
+
 /**
  * @brief 读取 PCI 设备的 BAR（Base Address Register）值
  *

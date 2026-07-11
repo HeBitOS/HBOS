@@ -252,12 +252,27 @@ void acpi_init(void *mbi) {
     g_pm1b_cnt = 0;
     g_slp_typa = 0;
     g_slp_typb = 0;
+    memset(&g_madt, 0, sizeof(g_madt));
 
     uint8_t *tag = (uint8_t *)mb2_find_tag(mbi, MB2_TAG_ACPI_NEW);
     if (!tag) tag = (uint8_t *)mb2_find_tag(mbi, MB2_TAG_ACPI_OLD);
     if (!tag) return;
 
     rsdp_t *rsdp = (rsdp_t *)(tag + 8);
+
+    /* MADT（CPU/IOAPIC 拓扑）单独查找、和下面的 FADT/DSDT/_S5 关机信息解析
+     * 完全独立——这两者除了都挂在同一个 RSDT/XSDT 根下，没有任何依赖关系。
+     * 以前 MADT 是在 _S5 解析成功之后才顺带查的，只要 DSDT 里的 AML 稍微
+     * 不对付（parse_s5 失败）或者压根没有 PM1a 寄存器，就会在走到 MADT
+     * 之前直接 return，导致哪怕 MADT 本身完全没问题，SMP 也永远发现不了
+     * 一个以上的核心——QEMU -smp 4 实测复现：neofetch 一直只报 1 core。 */
+    sdt_header_t *madt = NULL;
+    if (rsdp->revision >= 2 && rsdp->xsdt_address && rsdp->xsdt_address <= 0xffffffffULL)
+        madt = find_table_xsdt((sdt_header_t *)(uintptr_t)rsdp->xsdt_address, "APIC");
+    if (!madt && rsdp->rsdt_address)
+        madt = find_table_rsdt((sdt_header_t *)(uintptr_t)rsdp->rsdt_address, "APIC");
+    if (madt) acpi_parse_madt(madt);
+
     sdt_header_t *fadt = NULL;
     if (rsdp->revision >= 2 && rsdp->xsdt_address && rsdp->xsdt_address <= 0xffffffffULL)
         fadt = find_table_xsdt((sdt_header_t *)(uintptr_t)rsdp->xsdt_address, "FACP");
@@ -274,13 +289,6 @@ void acpi_init(void *mbi) {
     g_pm1b_cnt = (uint16_t)facp->pm1b_cnt_blk;
     if (!g_pm1a_cnt) return;
     g_ready = 1;
-
-    sdt_header_t *madt = NULL;
-    if (rsdp->revision >= 2 && rsdp->xsdt_address && rsdp->xsdt_address <= 0xffffffffULL)
-        madt = find_table_xsdt((sdt_header_t *)(uintptr_t)rsdp->xsdt_address, "APIC");
-    if (!madt && rsdp->rsdt_address)
-        madt = find_table_rsdt((sdt_header_t *)(uintptr_t)rsdp->rsdt_address, "APIC");
-    if (madt) acpi_parse_madt(madt);
 }
 
 static void acpi_parse_madt(sdt_header_t *madt_hdr) {

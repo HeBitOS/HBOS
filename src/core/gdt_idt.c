@@ -67,7 +67,7 @@ typedef struct {
 } __attribute__((packed)) seg_desc_t;
 
 static seg_desc_t gdt_entries[GDT_ENTRIES];
-static tss_t      g_tss;
+static tss_t      g_tss[GDT_MAX_CPUS];
 
 static void tss_desc_fill(seg_desc_t *low, seg_desc_t *high, uintptr_t base, uint32_t limit) {
     low->limit_low  = (uint16_t)(limit & 0xFFFF);
@@ -83,7 +83,7 @@ static void tss_desc_fill(seg_desc_t *low, seg_desc_t *high, uintptr_t base, uin
 }
 
 extern void gdt_flush(uint64_t gdt_ptr_addr);
-extern void tss_flush(void);
+extern void tss_flush(uint16_t sel);
 
 void gdt_init(void) {
     // NULL descriptor
@@ -121,21 +121,24 @@ void gdt_init(void) {
     gdt_entries[GDT_UDATA].granularity = GDT_GRAN_4K;
     gdt_entries[GDT_UDATA].base_high   = 0;
 
-    // TSS descriptor
-    tss_desc_fill(&gdt_entries[GDT_TSS_LOW], &gdt_entries[GDT_TSS_HIGH],
-                  (uintptr_t)&g_tss, sizeof(tss_t) - 1);
-    g_tss.rsp0 = 0; // will be set by tss_set_stack
+    // TSS descriptors — one per possible CPU core, see GDT_TSS_LOW(cpu)'s
+    // comment in cpu.h for why this isn't a single shared TSS.
+    for (int i = 0; i < GDT_MAX_CPUS; i++) {
+        tss_desc_fill(&gdt_entries[GDT_TSS_LOW(i)], &gdt_entries[GDT_TSS_HIGH(i)],
+                      (uintptr_t)&g_tss[i], sizeof(tss_t) - 1);
+        g_tss[i].rsp0 = 0; // will be set by tss_set_stack (BSP) / gdt_idt_load_ap (APs)
+    }
 
-    // Flush GDT and load TSS
+    // Flush GDT and load the BSP's own TSS (slot 0)
     gdt_ptr_t gdt_ptr;
     gdt_ptr.limit = sizeof(gdt_entries) - 1;
     gdt_ptr.base  = (uint64_t)gdt_entries;
     gdt_flush((uint64_t)&gdt_ptr);
-    tss_flush();
+    tss_flush(SEL_TSS(0));
 }
 
 void tss_set_stack(uint64_t rsp0) {
-    g_tss.rsp0 = rsp0;
+    g_tss[0].rsp0 = rsp0;
 }
 
 // ============================================================
@@ -404,6 +407,29 @@ void gdt_idt_init(void) {
     idt_ptr.limit = sizeof(idt_entries) - 1;
     idt_ptr.base  = (uint64_t)idt_entries;
     __asm__ volatile("lidt (%0)" : : "r"(&idt_ptr) : "memory");
+}
+
+/* AP 核心跳板（smp_trampoline.asm）目前只搭了一份没有 TSS 描述符的临时
+ * GDT 用来进长模式，也从没加载过 IDT——ap_entry() 以前直接上线就
+ * sti;hlt 空转，凑巧没暴露问题，但只要这个核心真收到一次中断/异常就会
+ * 直接三重故障。这里补上：加载 gdt_idt_init() 已经建好的共享 GDT/IDT
+ * （表本身是只读共用的，不重建），并把这个核心自己的 TSS 描述符指向
+ * 独立的 rsp0。 */
+void gdt_idt_load_ap(int cpu_idx, uint64_t rsp0) {
+    gdt_ptr_t gdt_ptr;
+    gdt_ptr.limit = sizeof(gdt_entries) - 1;
+    gdt_ptr.base  = (uint64_t)gdt_entries;
+    gdt_flush((uint64_t)&gdt_ptr);
+
+    if (cpu_idx >= 0 && cpu_idx < GDT_MAX_CPUS) {
+        g_tss[cpu_idx].rsp0 = rsp0;
+        tss_flush(SEL_TSS(cpu_idx));
+    }
+
+    idt_ptr_t idt_ptr2;
+    idt_ptr2.limit = sizeof(idt_entries) - 1;
+    idt_ptr2.base  = (uint64_t)idt_entries;
+    __asm__ volatile("lidt (%0)" : : "r"(&idt_ptr2) : "memory");
 }
 
 // ============================================================

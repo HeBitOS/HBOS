@@ -108,16 +108,24 @@ typedef struct {
 #define GDT_KDATA    2   /**< 内核数据段 (ring0) */
 #define GDT_UCODE    3   /**< 用户代码段 (ring3, 64-bit) */
 #define GDT_UDATA    4   /**< 用户数据段 (ring3) */
-#define GDT_TSS_LOW  5   /**< TSS 描述符低 64 位 */
-#define GDT_TSS_HIGH 6   /**< TSS 描述符高 64 位 */
-#define GDT_ENTRIES  7   /**< GDT 条目总数 */
+
+/* TSS 描述符：每个可能的 CPU 核心一对（低/高 64 位），而不是全核心共用
+ * 一份。共用一份时所有核心的 ring3→ring0 切换都会落到同一个 rsp0——
+ * 只要真有第二个核心在跑东西（而不是像之前那样上线后就直接 sti;hlt
+ * 空转），两个核心同时进 ring0 就会踩同一块栈。GDT_MAX_CPUS 必须和
+ * smp.h 的 MAX_CPUS 保持一致（cpu.h 不便反过来 include smp.h，用
+ * smp.c 里的 _Static_assert 兜底检查，而不是搞成互相 include）。 */
+#define GDT_MAX_CPUS 8
+#define GDT_TSS_LOW(cpu)  (5 + (cpu) * 2)   /**< 第 cpu 个核心的 TSS 描述符低 64 位 */
+#define GDT_TSS_HIGH(cpu) (6 + (cpu) * 2)   /**< 第 cpu 个核心的 TSS 描述符高 64 位 */
+#define GDT_ENTRIES  (5 + GDT_MAX_CPUS * 2) /**< GDT 条目总数 */
 
 /** 段选择子 = 索引 × 8 | RPL */
 #define SEL_KCODE  (GDT_KCODE * 8)        /**< 内核代码选择子 (RPL=0) */
 #define SEL_KDATA  (GDT_KDATA * 8)        /**< 内核数据选择子 (RPL=0) */
 #define SEL_UCODE  (GDT_UCODE * 8) | 3    /**< 用户代码选择子 (RPL=3) */
 #define SEL_UDATA  (GDT_UDATA * 8) | 3    /**< 用户数据选择子 (RPL=3) */
-#define SEL_TSS    (GDT_TSS_LOW * 8)      /**< TSS 选择子 */
+#define SEL_TSS(cpu) (GDT_TSS_LOW(cpu) * 8) /**< 第 cpu 个核心的 TSS 选择子 */
 
 // ============================================================
 // GDT 访问字节位定义
@@ -313,6 +321,11 @@ static inline void hlt(void)  { __asm__ volatile("hlt"); }
 void gdt_init(void);
 void gdt_idt_init(void);
 void tss_set_stack(uint64_t rsp0);
+/** AP 核心专用：加载 BSP 已经建好的共享 GDT/IDT，并把 cpu_idx 对应的
+ * TSS 描述符指向它自己独享的 rsp0 栈——见 GDT_TSS_LOW(cpu) 上面的说明。
+ * 不重建 GDT/IDT 表本身（那些是 gdt_idt_init() 一次性建好、全核心共用
+ * 只读的），只做"加载到这个核心"这一步。 */
+void gdt_idt_load_ap(int cpu_idx, uint64_t rsp0);
 void int_enable(void);
 void int_disable(void);
 bool int_get_state(void);

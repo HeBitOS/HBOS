@@ -29,13 +29,20 @@
 #define LAPIC_TIMER_MASK   (1 << 16)
 #define LAPIC_TIMER_PERIODIC (1 << 17)
 
-#define LAPIC_DELIVERY_INIT     5
-#define LAPIC_DELIVERY_STARTUP  6
-#define LAPIC_DELIVERY_FIXED    0
+/* ICR (Interrupt Command Register) 低 32 位字段位置——SDM Vol3 10.6.1：
+ * Delivery Mode 在 bit 8-10、Level 在 bit 14、Trigger Mode 在 bit 15。
+ * 这几个宏之前是没移位的原始小整数（0/1/5/6），直接 OR 进 ICR_LO 会落
+ * 到 bit 0-2（Vector 字段）而不是 Delivery Mode 字段，实际发出去的根本
+ * 不是 INIT/Startup IPI，AP 永远收不到正确的 INIT-SIPI-SIPI 序列，
+ * 也就永远起不来——QEMU -smp 4 下用调试输出实测复现（3 个 AP 全部
+ * start_ap 超时失败，ap_entry 从未被执行过）。 */
+#define LAPIC_DELIVERY_INIT     (5 << 8)
+#define LAPIC_DELIVERY_STARTUP  (6 << 8)
+#define LAPIC_DELIVERY_FIXED    (0 << 8)
 
-#define LAPIC_LEVEL_DEASSERT 0
-#define LAPIC_LEVEL_ASSERT   1
-#define LAPIC_EDGE           0
+#define LAPIC_LEVEL_DEASSERT (0 << 14)
+#define LAPIC_LEVEL_ASSERT   (1 << 14)
+#define LAPIC_EDGE           (0 << 15)
 
 #define LAPIC_ICR_PENDING    (1 << 12)
 

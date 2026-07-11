@@ -84,19 +84,35 @@ static void ap_idle(void) {
     }
 }
 
+/* 每个核心专属的 ring0 栈——AP 之前从没有过自己的栈，TSS 也是全核心
+ * 共用一份（见 gdt_idt.c 里 GDT_TSS_LOW(cpu) 的注释），这里配一份独立
+ * 的，配合 gdt_idt_load_ap() 把它们真正接到各自的 TSS 描述符上。 */
+#define AP_STACK_SIZE 16384
+static uint8_t ap_kernel_stack[MAX_CPUS][AP_STACK_SIZE] __attribute__((aligned(16)));
+
+_Static_assert(MAX_CPUS == GDT_MAX_CPUS,
+               "smp.h MAX_CPUS must match cpu.h GDT_MAX_CPUS (TSS descriptor count)");
+
 static void ap_entry(void) {
     lapic_write(LAPIC_SPURIOUS, lapic_read(LAPIC_SPURIOUS) | LAPIC_ENABLE | 0xFF);
     lapic_write(LAPIC_TPR, 0);
 
     uint32_t my_id = lapic_get_id();
-    (void)my_id;
-
-    cpu_count++;
+    int my_idx = -1;
     for (int i = 0; i < MAX_CPUS; i++) {
-        if (cpu_data[i].apic_id == my_id) {
-            cpu_data[i].online = 1;
-            break;
-        }
+        if (cpu_data[i].apic_id == my_id) { my_idx = i; break; }
+    }
+
+    if (my_idx >= 0) {
+        /* 跳板（smp_trampoline.asm）搭的是一份没有 TSS、也没配 IDT 的临时
+         * GDT，只够把这个核心带进长模式——真出中断/异常在这上面直接三重
+         * 故障。补上共享的正式 GDT/IDT，并把这个核心自己的 TSS 指向独立
+         * 的栈，不再和 BSP 共用同一个 rsp0。（这段目前还到不了——见
+         * smp_init() 里的说明，跳板本身在切换过程中就会三重故障。） */
+        uint64_t stack_top = (uint64_t)(uintptr_t)&ap_kernel_stack[my_idx][AP_STACK_SIZE];
+        cpu_data[my_idx].stack = stack_top;
+        gdt_idt_load_ap(my_idx, stack_top);
+        cpu_data[my_idx].online = 1;
     }
 
     ap_idle();
@@ -163,18 +179,15 @@ void smp_init(void) {
         return;
     }
 
-    uint32_t bsp_id = lapic_get_id();
-
-    for (int i = 0; i < madt->cpu_count && cpu_count < MAX_CPUS; i++) {
-        if (madt->cpus[i].apic_id == bsp_id) continue;
-        if (!(madt->cpus[i].flags & 1)) continue;
-
-        cpu_data[cpu_count].apic_id = madt->cpus[i].apic_id;
-        cpu_data[cpu_count].enabled = 1;
-        cpu_data[cpu_count].online = 0;
-
-        if (start_ap(madt->cpus[i].apic_id, cpu_count) == 0) {
-            cpu_count++;
-        }
-    }
+    /* 已知问题，暂不在这里拉起 AP（后续单独跟进）：修好 MADT 解析
+     * （见 acpi.c acpi_init() 的注释）和 smp.h 里 LAPIC_DELIVERY_ 系列宏
+     * 缺移位的 bug 之后，INIT-SIPI-SIPI 已经能正确送达 AP 了，但
+     * smp_trampoline.asm 在实模式→保护模式→长模式切换过程中会触发三重
+     * 故障，导致整机复位——QEMU -smp 4 实测：BSP 发出第一个 AP 的
+     * STARTUP IPI 后，串口直接从 "XBLPOK" 重新打印，ap_entry() 里任何
+     * 调试输出都没出现过，说明问题出在跳板汇编本身、连 C 代码都没跑到，
+     * 和这次的 TSS/GDT/IDT 改动无关。这里先只用 MADT 确认核心数量、
+     * 不去实际执行 start_ap()：真实多核硬件必然有 >1 个核心，真跳进
+     * 这个 bug 会导致开机死循环重启，比"不启用多核、单核正常跑"糟得多。 */
+    (void)start_ap;
 }

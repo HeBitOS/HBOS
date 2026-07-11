@@ -508,34 +508,31 @@ static void dbg_print_hex16(uint16_t v) {
     console_putchar(hex[v & 0xF]);
 }
 
+static void xhci_dump_pci_device(const pci_device_t *dev, void *ctx) {
+    (void)ctx;
+    console_puts("[PCI] ");
+    dbg_print_uint(dev->bus);
+    console_putchar(':');
+    dbg_print_uint(dev->slot);
+    console_puts(" - Vendor=");
+    dbg_print_hex16(dev->vendor_id);
+    console_puts(" Device=");
+    dbg_print_hex16(dev->device_id);
+    console_puts(" Class=");
+    dbg_print_hex16(dev->class_code);
+    console_puts(" SubClass=");
+    dbg_print_hex16(dev->subclass);
+    console_puts(" ProgIF=");
+    dbg_print_hex16(dev->prog_if);
+    console_puts("\n");
+}
+
 static int xhci_init_internal(void) {
 
     console_puts("[XHCI] Scanning PCI bus for USB controllers...\n");
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            uint16_t vendor = pci_read16((uint8_t)bus, slot, 0, 0x00);
-            if (vendor == 0xFFFF) continue;
-            uint16_t device = pci_read16((uint8_t)bus, slot, 0, 0x02);
-            uint8_t class_code = pci_read8((uint8_t)bus, slot, 0, 0x0B);
-            uint8_t subclass = pci_read8((uint8_t)bus, slot, 0, 0x0A);
-            uint8_t prog_if = pci_read8((uint8_t)bus, slot, 0, 0x09);
-            console_puts("[PCI] ");
-            dbg_print_uint(bus);
-            console_putchar(':');
-            dbg_print_uint(slot);
-            console_puts(" - Vendor=");
-            dbg_print_hex16(vendor);
-            console_puts(" Device=");
-            dbg_print_hex16(device);
-            console_puts(" Class=");
-            dbg_print_hex16(class_code);
-            console_puts(" SubClass=");
-            dbg_print_hex16(subclass);
-            console_puts(" ProgIF=");
-            dbg_print_hex16(prog_if);
-            console_puts("\n");
-        }
-    }
+    /* 递归、桥感知的枚举（跟进 PCI-to-PCI 桥的 Secondary Bus），而不是
+     * 各自维护一份平坦的 bus 0-255 扫描——见 pci.c pci_enumerate_all()。 */
+    pci_enumerate_all(xhci_dump_pci_device, NULL);
 
     pci_device_t dev;
     if (pci_find_class(XHCI_PCI_CLASS, XHCI_PCI_SUBCLASS, XHCI_PCI_PROGIF, &dev) < 0) {

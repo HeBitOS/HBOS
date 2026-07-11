@@ -5,7 +5,6 @@
 ; Segment selector constants (must match cpu.h)
 SEL_KCODE equ 0x08
 SEL_KDATA equ 0x10
-SEL_TSS   equ 0x28
 
 section .text
 bits 64
@@ -31,11 +30,14 @@ gdt_flush:
     ret
 
 ; ============================================================
-; TSS flush — void tss_flush(void);
+; TSS flush — void tss_flush(uint16_t sel);
+; Takes the selector as a parameter now (di) instead of a hardcoded
+; constant: there's one TSS descriptor per CPU core (see GDT_TSS_LOW(cpu)
+; in cpu.h), not a single shared one, so the caller picks which.
 ; ============================================================
 global tss_flush
 tss_flush:
-    mov ax, SEL_TSS
+    mov ax, di
     ltr ax
     ret
 

@@ -139,11 +139,69 @@ static int pci_read_device(uint8_t bus, uint8_t slot, uint8_t func, pci_device_t
     return 0;
 }
 
+#define PCI_HEADER_TYPE_OFFSET   0x0E
+#define PCI_HEADER_TYPE_MASK     0x7F
+#define PCI_HEADER_MULTIFUNC     0x80
+#define PCI_HEADER_TYPE_BRIDGE   0x01
+#define PCI_BRIDGE_SECONDARY_BUS_OFFSET 0x19
+#define PCI_MAX_BRIDGE_DEPTH     8 /**< 防止桥配置错误/成环导致无限递归 */
+
+/**
+ * @brief 递归扫描一条总线（含桥后面的次级总线）查找匹配设备
+ *
+ * bus/slot/func 三重循环本身已经覆盖 0-255 全部总线号，但这只在固件已经
+ * 给每个桥分配好总线号、且总线号是"扁平"排布时才碰巧管用——正确做法是
+ * 跟着桥走：碰到 PCI-to-PCI 桥（Header Type bit0-6 == 0x01）就读它的
+ * Secondary Bus 寄存器，递归扫描那条总线，而不是假设 0-255 顺序扫一遍
+ * 就能扫到桥后面的设备。
+ *
+ * @param bus        起始总线号
+ * @param class_code 大类代码
+ * @param subclass   子类代码
+ * @param prog_if    编程接口代码（0xFF 表示忽略）
+ * @param out        输出参数，用于存放找到的设备信息
+ * @param depth      当前递归深度
+ * @return 成功返回 0，未找到返回 -1
+ */
+static int pci_scan_bus(uint16_t bus, uint8_t class_code, uint8_t subclass,
+                         uint8_t prog_if, pci_device_t *out, int depth) {
+    if (depth > PCI_MAX_BRIDGE_DEPTH) return -1;
+
+    for (uint8_t slot = 0; slot < 32; slot++) {
+        if (pci_read16((uint8_t)bus, slot, 0, 0x00) == 0xFFFF) continue;
+        uint8_t header0 = pci_read8((uint8_t)bus, slot, 0, PCI_HEADER_TYPE_OFFSET);
+        uint8_t funcs = (header0 & PCI_HEADER_MULTIFUNC) ? 8 : 1;
+
+        for (uint8_t func = 0; func < funcs; func++) {
+            pci_device_t dev;
+            if (pci_read_device((uint8_t)bus, slot, func, &dev) < 0) continue;
+
+            if (dev.class_code == class_code &&
+                dev.subclass == subclass &&
+                (prog_if == 0xFF || dev.prog_if == prog_if)) {
+                if (out) *out = dev;
+                return 0;
+            }
+
+            uint8_t header = pci_read8((uint8_t)bus, slot, func, PCI_HEADER_TYPE_OFFSET);
+            if ((header & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
+                uint8_t secondary = pci_read8((uint8_t)bus, slot, func, PCI_BRIDGE_SECONDARY_BUS_OFFSET);
+                if (secondary != 0 && secondary != bus) {
+                    if (pci_scan_bus(secondary, class_code, subclass, prog_if, out, depth + 1) == 0)
+                        return 0;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
 /**
  * @brief 按分类代码查找 PCI 设备
  *
- * 遍历所有总线、插槽和功能号，查找与指定大类、子类和编程接口匹配的设备。
- * 当 prog_if 为 0xFF 时忽略编程接口匹配。
+ * 从总线 0（根总线）开始递归扫描，遇到 PCI-to-PCI 桥就跟进它的次级总线，
+ * 查找与指定大类、子类和编程接口匹配的设备。当 prog_if 为 0xFF 时忽略
+ * 编程接口匹配。
  *
  * @param class_code 大类代码
  * @param subclass   子类代码
@@ -152,24 +210,45 @@ static int pci_read_device(uint8_t bus, uint8_t slot, uint8_t func, pci_device_t
  * @return 成功返回 0，未找到返回 -1
  */
 int pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if, pci_device_t *out) {
-    pci_device_t dev;
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            uint8_t funcs = 1;
-            if (pci_read16((uint8_t)bus, slot, 0, 0x00) == 0xFFFF) continue;
-            if (pci_read8((uint8_t)bus, slot, 0, 0x0E) & 0x80) funcs = 8;
-            for (uint8_t func = 0; func < funcs; func++) {
-                if (pci_read_device((uint8_t)bus, slot, func, &dev) < 0) continue;
-                if (dev.class_code == class_code &&
-                    dev.subclass == subclass &&
-                    (prog_if == 0xFF || dev.prog_if == prog_if)) {
-                    if (out) *out = dev;
-                    return 0;
+    return pci_scan_bus(0, class_code, subclass, prog_if, out, 0);
+}
+
+static void pci_enumerate_bus(uint16_t bus, pci_enumerate_cb_t cb, void *ctx, int depth) {
+    if (depth > PCI_MAX_BRIDGE_DEPTH) return;
+
+    for (uint8_t slot = 0; slot < 32; slot++) {
+        if (pci_read16((uint8_t)bus, slot, 0, 0x00) == 0xFFFF) continue;
+        uint8_t header0 = pci_read8((uint8_t)bus, slot, 0, PCI_HEADER_TYPE_OFFSET);
+        uint8_t funcs = (header0 & PCI_HEADER_MULTIFUNC) ? 8 : 1;
+
+        for (uint8_t func = 0; func < funcs; func++) {
+            pci_device_t dev;
+            if (pci_read_device((uint8_t)bus, slot, func, &dev) < 0) continue;
+            cb(&dev, ctx);
+
+            uint8_t header = pci_read8((uint8_t)bus, slot, func, PCI_HEADER_TYPE_OFFSET);
+            if ((header & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
+                uint8_t secondary = pci_read8((uint8_t)bus, slot, func, PCI_BRIDGE_SECONDARY_BUS_OFFSET);
+                if (secondary != 0 && secondary != bus) {
+                    pci_enumerate_bus(secondary, cb, ctx, depth + 1);
                 }
             }
         }
     }
-    return -1;
+}
+
+/**
+ * @brief 递归枚举所有可达 PCI 设备（含桥后面的次级总线），逐个回调
+ *
+ * 供诊断/列表类用途使用（如 xhci.c 启动时打印的设备清单），和
+ * pci_find_class() 共享同一套桥感知递归逻辑，不再各自维护一份平坦的
+ * bus 0-255 扫描。
+ *
+ * @param cb  每发现一个设备调用一次
+ * @param ctx 透传给回调的上下文指针
+ */
+void pci_enumerate_all(pci_enumerate_cb_t cb, void *ctx) {
+    pci_enumerate_bus(0, cb, ctx, 0);
 }
 
 /**
