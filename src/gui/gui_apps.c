@@ -5,6 +5,9 @@ extern const gui_app_module_t gui_app_clock;
 extern const gui_app_module_t gui_app_settings;
 extern const gui_app_module_t gui_app_files;
 extern const gui_app_module_t gui_app_taskmgr;
+extern const gui_app_module_t gui_app_shortcuts;
+extern const gui_app_module_t gui_app_imgview;
+extern const gui_app_module_t gui_app_hexview;
 
 static const gui_app_module_t *const g_modules[] = {
     &gui_app_calc,
@@ -12,6 +15,9 @@ static const gui_app_module_t *const g_modules[] = {
     &gui_app_settings,
     &gui_app_files,
     &gui_app_taskmgr,
+    &gui_app_shortcuts,
+    &gui_app_imgview,
+    &gui_app_hexview,
 };
 
 const gui_app_module_t *gui_app_by_mode(int mode) {

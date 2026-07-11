@@ -29,6 +29,11 @@
 #include "../gui/gui_dirty.h"
 #include "../gui/gui_draw.h"
 #include "../gui/gui_app.h"
+
+/* app_imgview.c / app_hexview.c 各自路径 setter，供 gui_open_selected_file()
+ * 打开对应查看器前写入要打开的文件路径 */
+void app_imgview_set_path(gui_state_t *st, const char *path);
+void app_hexview_set_path(gui_state_t *st, const char *path);
 #include "../gui/rtc_tz.h"
 #include "../shell/shell.h"
 #include "tool.h"
@@ -133,6 +138,7 @@ static const gui_app_meta_t gui_apps[] = {
     {"时钟", "实时时钟与日期", GUI_APP_CLOCK},
     {"设置", "主题与字体", GUI_APP_SETTINGS},
     {"任务管理器", "查看运行中的任务，结束任务", GUI_APP_TASKMGR},
+    {"快捷键", "查看全局和各应用的键盘快捷键", GUI_APP_SHORTCUTS},
 };
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
@@ -850,6 +856,7 @@ static int app_icon_id(int mode) {
         case GUI_APP_SETTINGS: return ICON_SYS;
         case GUI_APP_FILES:    return ICON_FILES;
         case GUI_APP_TASKMGR:  return ICON_SYS;
+        case GUI_APP_SHORTCUTS: return ICON_SHORTCUTS;
         default:               return ICON_APPS;
     }
 }
@@ -1787,10 +1794,13 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         if ((int)file_idx == selected) {
             rect(main_x + 6, y - 7, main_w - 12, 24, rgb(61, 174, 233));
         }
-        uint32_t icon = type == VFS_NODE_DIR ? rgb(244, 194, 82) :
-                        type == VFS_NODE_CHARDEV ? rgb(102, 214, 255) : rgb(124, 220, 154);
-        rect(main_x + 16, y - 2, 18, 14, icon);
-        rect(main_x + 20, y - 7, 18, 7, rgb_lift(icon, -16));
+        if (type == VFS_NODE_DIR) {
+            blit_icon(main_x + 14, y - 8, 20, ICON_FOLDER_ROW);
+        } else {
+            uint32_t icon = type == VFS_NODE_CHARDEV ? rgb(102, 214, 255) : rgb(124, 220, 154);
+            rect(main_x + 16, y - 2, 18, 14, icon);
+            rect(main_x + 20, y - 7, 18, 7, rgb_lift(icon, -16));
+        }
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, name);
@@ -1813,10 +1823,13 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         vgradient(detail_x, ty + 114, detail_w, 30, rgb(34, 50, 66), rgb(20, 30, 42));
         rect(detail_x, ty + 143, detail_w, 1, rgb(8, 14, 22));
         text(detail_x + 12, ty + 124, "详细信息", rgb(218, 232, 240), 1);
-        uint32_t icon = type == VFS_NODE_DIR ? rgb(244, 194, 82) :
-                        type == VFS_NODE_CHARDEV ? rgb(102, 214, 255) : rgb(124, 220, 154);
-        rect(detail_x + 12, ty + 156, 30, 24, icon);
-        rect(detail_x + 17, ty + 150, 28, 8, rgb_lift(icon, -16));
+        if (type == VFS_NODE_DIR) {
+            blit_icon(detail_x + 10, ty + 148, 32, ICON_FOLDER_ROW);
+        } else {
+            uint32_t icon = type == VFS_NODE_CHARDEV ? rgb(102, 214, 255) : rgb(124, 220, 154);
+            rect(detail_x + 12, ty + 156, 30, 24, icon);
+            rect(detail_x + 17, ty + 150, 28, 8, rgb_lift(icon, -16));
+        }
         text_clipped(detail_x + 52, ty + 160, detail_x + detail_w - 12, name, rgb(238, 246, 255), 1);
         line_u32(line, sizeof(line), "大小: ", node ? node->size : 0, "B");
         text(detail_x + 12, ty + 194, line, rgb(210, 221, 230), 1);
@@ -2001,6 +2014,7 @@ static uint32_t app_accent(int mode) {
         case GUI_APP_CLOCK:    return rgb(231, 76, 60);
         case GUI_APP_SETTINGS: return rgb(149, 165, 166);
         case GUI_APP_FILES:    return rgb(52, 152, 219);
+        case GUI_APP_SHORTCUTS: return rgb(39, 174, 96);
         default:               return rgb(61, 174, 233);
     }
 }
@@ -2349,8 +2363,10 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
         cursor_x = x;
         cursor_y = y;
     }
-    // 在光标实际位置绘制竖线光标
-    if (cursor_y < ty + 280) {
+    // 在光标实际位置绘制闪烁竖线光标（每 15 帧切一次显隐，跟控制台/网址栏一致）
+    static uint32_t note_caret_ticks = 0;
+    note_caret_ticks++;
+    if (cursor_y < ty + 280 && (note_caret_ticks / 15) % 2) {
         rect(cursor_x, cursor_y, 2, 14, rgb(124, 220, 154));
     }
 }
@@ -2372,12 +2388,21 @@ static void draw_uwc_app(int tx, int ty, gui_state_t *st) {
     text(tx, ty + 86, line, rgb(210, 221, 230), 1);
 }
 
+static char gui_ascii_lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
+
+/* 大小写不敏感——FAT32 短文件名（8.3 格式）落盘/读回都是全大写
+ * （TEST.BMP），只按小写 ".bmp" 精确匹配的话，FAT32 盘上的文件后缀检测
+ * 会全部失效，退回到内容嗅探甚至记事本，而不是真正按后缀分发。 */
 static int gui_has_suffix(const char *path, const char *suffix) {
     if (!path || !suffix) return 0;
     uint32_t plen = (uint32_t)strlen(path);
     uint32_t slen = (uint32_t)strlen(suffix);
     if (slen == 0 || plen < slen) return 0;
-    return strcmp(path + plen - slen, suffix) == 0;
+    const char *p = path + plen - slen;
+    for (uint32_t i = 0; i < slen; i++) {
+        if (gui_ascii_lower(p[i]) != gui_ascii_lower(suffix[i])) return 0;
+    }
+    return 1;
 }
 
 static int gui_has_code_suffix(const char *path) {
@@ -2385,6 +2410,24 @@ static int gui_has_code_suffix(const char *path) {
            gui_has_suffix(path, ".cc") || gui_has_suffix(path, ".cpp") ||
            gui_has_suffix(path, ".hpp") || gui_has_suffix(path, ".asm") ||
            gui_has_suffix(path, ".S");
+}
+
+/* 内容嗅探兜底：没有 .bmp/代码后缀时，读文件开头一小段看像不像文本——
+ * 含 NUL 字节，或控制字符占比过高，就当成二进制交给十六进制查看器，
+ * 而不是像以前一样一律扔进记事本显示成乱码。纯文本文件（含没有后缀名
+ * 的 README 之类）行为不变，仍然走记事本。 */
+static int gui_looks_binary(vfs_node_t *node) {
+    if (!node) return 0;
+    uint8_t buf[64];
+    int got = vfs_read(node, 0, buf, sizeof(buf));
+    if (got <= 0) return 0;
+    int suspicious = 0;
+    for (int i = 0; i < got; i++) {
+        uint8_t c = buf[i];
+        if (c == 0) return 1;
+        if (c < 0x09 || (c > 0x0D && c < 0x20)) suspicious++;
+    }
+    return suspicious * 4 > got;
 }
 
 static void code_set_output(const char *msg) {
@@ -3091,7 +3134,10 @@ static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
         code_draw_highlighted_line(l.editor_x + l.line_no_w + 10, y,
                                    l.editor_x + l.editor_w - 10, line, n);
     }
-    if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + l.view_rows) {
+    static uint32_t code_caret_ticks = 0;
+    code_caret_ticks++;
+    if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + l.view_rows &&
+        (code_caret_ticks / 15) % 2) {
         int cx = l.editor_x + l.line_no_w + 10 + (int)cursor_col * code_cell_w();
         int cy = l.editor_y + 10 + ((int)cursor_line - st->code_scroll) * l.row_h;
         if (cx > l.editor_x + l.editor_w - 12) cx = l.editor_x + l.editor_w - 12;
@@ -4756,6 +4802,18 @@ static void gui_open_selected_file(gui_state_t *st) {
             st->status = "已用代码工作台打开";
         return;
     }
+    if (gui_has_suffix(full, ".bmp")) {
+        app_imgview_set_path(st, full);
+        if (gui_open_window(st, WM_WIN_APP, GUI_APP_IMGVIEW, 0) >= 0)
+            st->status = "已用图片查看器打开";
+        return;
+    }
+    if (gui_looks_binary(node)) {
+        app_hexview_set_path(st, full);
+        if (gui_open_window(st, WM_WIN_APP, GUI_APP_HEXVIEW, 0) >= 0)
+            st->status = "已用十六进制查看器打开";
+        return;
+    }
     gui_set_note_name(st, full);
     if (gui_open_window(st, WM_WIN_APP, GUI_APP_NOTES, 0) >= 0)
         st->status = "已用记事本打开";
@@ -5531,6 +5589,7 @@ static const sm_entry_t sm_builtin[] = {
     {"时钟",       "clock time shizhong",      SM_K_APP,   GUI_APP_CLOCK,   ICON_CLOCK},
     {"设置",       "settings config shezhi",   SM_K_APP,   GUI_APP_SETTINGS,ICON_SYS},
     {"任务管理器", "task taskmgr process renwu guanli", SM_K_APP, GUI_APP_TASKMGR, ICON_SYS},
+    {"快捷键",     "shortcuts keys kuaijiejian",        SM_K_APP, GUI_APP_SHORTCUTS, ICON_SHORTCUTS},
 };
 #define SM_BUILTIN_N ((int)(sizeof(sm_builtin) / sizeof(sm_builtin[0])))
 
@@ -6156,6 +6215,9 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_SETTINGS, "设置");
     wm_set_app_title(GUI_APP_FILES, "文件管理器");
     wm_set_app_title(GUI_APP_TASKMGR, "任务管理器");
+    wm_set_app_title(GUI_APP_SHORTCUTS, "快捷键");
+    wm_set_app_title(GUI_APP_IMGVIEW, "图片查看器");
+    wm_set_app_title(GUI_APP_HEXVIEW, "十六进制查看器");
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";
@@ -6925,7 +6987,11 @@ static void cmd_gui(int argc, char **argv) {
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
-        if (st.app_mode == GUI_APP_DIAG && (frame_tick % 20 == 0)) {
+        /* 控制台/记事本/代码工作台都有闪烁光标，静置无输入时也要靠这个定时
+         * 重绘才能继续闪烁——否则会卡在某一帧的显隐状态，跟之前任务栏时钟
+         * 卡住不走是同一类问题（见 gui_dirty 那段注释）。 */
+        if ((st.app_mode == GUI_APP_DIAG || st.app_mode == GUI_APP_NOTES ||
+             st.app_mode == GUI_APP_CODE) && (frame_tick % 20 == 0)) {
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
@@ -7009,6 +7075,28 @@ void tool_gui_init(void) {
 uint32_t gui_rgb(uint8_t r, uint8_t g, uint8_t b) { return rgb(r, g, b); }
 void gui_rect(int x, int y, int w, int h, uint32_t color) { rect(x, y, w, h, color); }
 void gui_rect_alpha(int x, int y, int w, int h, uint32_t color) { rect_alpha(x, y, w, h, color); }
+void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
+                      int clip_x, int clip_y, int clip_w, int clip_h) {
+    if (!g_gui_surface || !rgbdata || img_w <= 0 || img_h <= 0 || clip_w <= 0 || clip_h <= 0) return;
+    int x0 = x, y0 = y, x1 = x + img_w, y1 = y + img_h;
+    if (x0 < clip_x) x0 = clip_x;
+    if (y0 < clip_y) y0 = clip_y;
+    if (x1 > clip_x + clip_w) x1 = clip_x + clip_w;
+    if (y1 > clip_y + clip_h) y1 = clip_y + clip_h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > g_gui_surface_w) x1 = g_gui_surface_w;
+    if (y1 > g_gui_surface_h) y1 = g_gui_surface_h;
+    for (int py = y0; py < y1; py++) {
+        int src_y = py - y;
+        uint32_t *drow = g_gui_surface + (uint32_t)py * g_gui_surface_pitch;
+        const uint8_t *srow = rgbdata + (uint32_t)src_y * img_w * 3;
+        for (int px = x0; px < x1; px++) {
+            const uint8_t *p = srow + (px - x) * 3;
+            drow[px] = 0xFF000000u | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+        }
+    }
+}
 void gui_border(int x, int y, int w, int h, uint32_t color) { border(x, y, w, h, color); }
 void gui_vgradient(int x, int y, int w, int h, uint32_t top, uint32_t bottom) { vgradient(x, y, w, h, top, bottom); }
 void gui_soft_shadow(int x, int y, int w, int h) { soft_shadow(x, y, w, h); }

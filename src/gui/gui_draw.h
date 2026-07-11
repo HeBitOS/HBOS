@@ -16,6 +16,12 @@ void gui_present_rect(const fb_info_t *fb, int x, int y, int w, int h);
 
 void gui_rect(int x, int y, int w, int h, uint32_t color);
 void gui_rect_alpha(int x, int y, int w, int h, uint32_t color);
+/* 一次性把一块 RGB888（每像素 3 字节，行主序，从上到下）位图拷进当前
+ * surface，裁剪到 (clip_x,clip_y,clip_w,clip_h) 和屏幕范围——比逐像素
+ * gui_rect(px,py,1,1,color) 快得多，供图片查看器这类需要整块贴图的场景
+ * 使用。 */
+void gui_blit_rgb888(int x, int y, const uint8_t *rgb, int img_w, int img_h,
+                      int clip_x, int clip_y, int clip_w, int clip_h);
 void gui_border(int x, int y, int w, int h, uint32_t color);
 void gui_vgradient(int x, int y, int w, int h, uint32_t top, uint32_t bottom);
 void gui_soft_shadow(int x, int y, int w, int h);

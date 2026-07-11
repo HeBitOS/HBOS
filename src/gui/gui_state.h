@@ -18,6 +18,9 @@
 #define GUI_APP_SETTINGS 8
 #define GUI_APP_FILES    9
 #define GUI_APP_TASKMGR  10
+#define GUI_APP_SHORTCUTS 11
+#define GUI_APP_IMGVIEW 12
+#define GUI_APP_HEXVIEW 13
 
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
@@ -25,6 +28,9 @@
 #define CODE_EDIT_CAP 4096
 #define SNAKE_MAX (16 * 10)
 #define GUI_PATH_MAX 256
+#define IMGVIEW_MAX_W 512
+#define IMGVIEW_MAX_H 384
+#define HEXVIEW_MAX_BYTES 16384
 
 enum {
     GUI_KEY_UP = 1001,
@@ -166,6 +172,20 @@ typedef struct gui_state {
     char fm_path[GUI_PATH_MAX];
     int  fm_selected;
     int  fm_scroll;
+    /* 图片查看器（BMP）：解码后的像素数据是静态全局数组（见 app_imgview.c），
+     * 这里只放路径/状态这些小元数据，避免把几百 KB 的像素缓冲塞进
+     * gui_state_t */
+    char imgview_path[GUI_PATH_MAX];
+    int  imgview_loaded;
+    int  imgview_error;      /* 解码失败（非 BMP/非 24 位/太大等） */
+    int  imgview_w, imgview_h;
+    int  imgview_scroll_x, imgview_scroll_y;
+    /* 十六进制查看器：原始字节同样是静态全局数组（见 app_hexview.c） */
+    char hexview_path[GUI_PATH_MAX];
+    int  hexview_loaded;
+    uint32_t hexview_len;      /* 实际读取的字节数（可能因超过上限被截断） */
+    uint32_t hexview_file_size;/* 文件真实大小，用于判断是否被截断 */
+    int  hexview_scroll;       /* 起始行号（每行 16 字节） */
 } gui_state_t;
 
 #endif

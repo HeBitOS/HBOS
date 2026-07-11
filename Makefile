@@ -179,6 +179,7 @@ C_SRCS = \
 	$(SRC_DIR)/smp.c \
 	$(SRC_DIR)/ext2.c \
 	$(SRC_DIR)/fat32.c \
+	$(SRC_DIR)/bmp.c \
 	$(SRC_DIR)/tty.c \
 	$(SRC_DIR)/graphics/graphics.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
@@ -225,6 +226,8 @@ C_SRCS = \
 	$(SRC_DIR)/gui/apps/app_files.c \
 	$(SRC_DIR)/gui/apps/app_taskmgr.c \
 	$(SRC_DIR)/gui/apps/app_shortcuts.c \
+	$(SRC_DIR)/gui/apps/app_imgview.c \
+	$(SRC_DIR)/gui/apps/app_hexview.c \
 	$(SRC_DIR)/gpu.c \
 	$(APP_SRCS)
 
