@@ -180,6 +180,8 @@ C_SRCS = \
 	$(SRC_DIR)/ext2.c \
 	$(SRC_DIR)/fat32.c \
 	$(SRC_DIR)/bmp.c \
+	$(SRC_DIR)/wav.c \
+	$(SRC_DIR)/ac97.c \
 	$(SRC_DIR)/tty.c \
 	$(SRC_DIR)/graphics/graphics.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
@@ -213,6 +215,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/python.c \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/tools/tcc_runtime_seed.c \
+	$(SRC_DIR)/tools/audio.c \
 	$(SRC_DIR)/gui/wm.c \
 	$(SRC_DIR)/gui/winsrv.c \
 	$(SRC_DIR)/gui/compositor.c \

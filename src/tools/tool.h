@@ -31,6 +31,7 @@ void tool_net_init(void);
 void tool_cc_init(void);
 void tool_python_init(void);
 void tool_cppe_init(void);
+void tool_audio_init(void);
 
 // 聚合初始化 — 注册所有内建工具
 static inline void tool_init_all(void) {
@@ -47,6 +48,7 @@ static inline void tool_init_all(void) {
     tool_cc_init();
     tool_python_init();
     tool_cppe_init();
+    tool_audio_init();
 }
 
 #endif /* HBOS_TOOL_H */
