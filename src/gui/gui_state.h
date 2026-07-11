@@ -24,7 +24,15 @@
 
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
-#define BROWSER_PAGE_CAP 2048
+/* 128KB——真实网页正文常见 50-200KB；固定静态数组而不是按 Content-Length
+ * 堆分配，因为这个内核的 kfree() 是空操作（core/heap.c），每次换页都
+ * 新分配一块会永久漏内存，和 M2 图片/十六进制查看器缓冲区同一个考虑。 */
+#define BROWSER_PAGE_CAP (128 * 1024)
+/* 网络抓取缓冲要比 BROWSER_PAGE_CAP 大一截，留出响应头 + 未提取正文的
+ * 富余（不是所有抓到的字节都会进 browser_page/browser_render）。 */
+#define BROWSER_FETCH_CAP (192 * 1024)
+#define BROWSER_HIST_MAX 20
+#define BROWSER_LINK_MAX 64
 #define CODE_EDIT_CAP 4096
 #define SNAKE_MAX (16 * 10)
 #define GUI_PATH_MAX 256
@@ -119,6 +127,16 @@ typedef struct gui_state {
     uint32_t browser_render_len;
     int browser_loaded;
     int browser_scroll;
+    /* 每次渲染页面时 browser_render_from_html() 填好的链接 href 表，
+     * draw_rendered_page() 按流里出现的链接块顺序对应到这里的下标
+     * （见 gui.c 里 BRK_LINK 的编码方式）。 */
+    char browser_link_href[BROWSER_LINK_MAX][96];
+    int browser_link_count;
+    /* 后退/前进历史：定长环状最近 20 条，不缓存每条的完整渲染内容
+     * （避免 * 20 的内存倍数），后退/前进时用存的 URL 重新抓取。 */
+    char browser_hist[BROWSER_HIST_MAX][BROWSER_URL_CAP];
+    int browser_hist_count;
+    int browser_hist_pos;
     char code_path[GUI_PATH_MAX];
     uint32_t code_len;
     uint32_t code_cursor;

@@ -64,10 +64,10 @@ int ui_s(int v) { return v * g_ui_scale / 100; }
 #define GUI_MOUSE_POLL_BUDGET 64   /* drain the queue fully so motion doesn't
                                       back up into bursty "忽快忽慢" jumps */
 #define TASKBAR_H ui_s(50)
-#define NOTE_EDIT_CAP 512
-#define BROWSER_URL_CAP 160
-#define BROWSER_PAGE_CAP 2048
-#define CODE_EDIT_CAP 4096
+/* NOTE_EDIT_CAP/BROWSER_URL_CAP/BROWSER_PAGE_CAP/CODE_EDIT_CAP 都在
+ * gui_state.h（上面已 include）——这里以前有一份重复定义，用的是旧的
+ * 更小的值，会把 gui_state.h 的实际值静默盖掉（宏后定义生效），不要
+ * 再在这里重复定义。 */
 #define CODE_OUTPUT_CAP 256
 #define CODE_VIEW_ROWS 10
 #define SNAKE_W 16
@@ -3499,8 +3499,21 @@ enum {
     BRK_HR     = '7',
     BRK_STRONG = '8',
     BRK_QUOTE  = '9',
+    BRK_IMG    = 'i',
 };
 #define BR_STACK_MAX 8
+
+/* 块前缀扩展编码——正常情况下渲染流仍是 [type][text]\n，零开销；只有
+ * 块带链接和/或 CSS 覆盖时，type 后面才跟一个 0x01 (SOH) 标记 + 5 字节
+ * 元数据（flags + RGB + link_index+1），draw_rendered_page() 据此在基础
+ * 样式（browser_style_get）上打补丁。选这个方案是因为链接/CSS 覆盖只
+ * 影响少数块，不值得把整条流都改成变长记录格式。 */
+#define BR_META_MARK 0x01
+#define BR_META_LEN  6 /* mark + flags + r + g + b + link_idx_plus1 */
+#define BR_FLAG_COLOR     0x01
+#define BR_FLAG_BOLD_ON   0x02
+#define BR_FLAG_UNDER_ON  0x04
+#define BR_FLAG_SCALE2    0x08
 
 static int tag_ci_eq(const char *name, int len, const char *lit) {
     int i = 0;
@@ -3521,21 +3534,287 @@ static int browser_style_for_tag(const char *name, int len) {
     if (tag_ci_eq(name, len, "strong") || tag_ci_eq(name, len, "b")) return BRK_STRONG;
     if (tag_ci_eq(name, len, "pre") || tag_ci_eq(name, len, "code")) return BRK_CODE;
     if (tag_ci_eq(name, len, "blockquote")) return BRK_QUOTE;
+    if (tag_ci_eq(name, len, "img")) return BRK_IMG;
+    /* p/div/span 本身没有专属块类型（都渲染成普通段落 BRK_P），但必须在
+     * 这里被"认出来"才会走 do_push 那条分支去解析它们的 class/style 属性
+     * ——真实页面里 class/内联 style 多半就打在这几个标签上，不认出来的
+     * 话 CSS 覆盖会被无声跳过（只有 h1-h6/a/strong 等自带类型的标签才有
+     * 机会应用 CSS，明显不够用）。 */
+    if (tag_ci_eq(name, len, "p") || tag_ci_eq(name, len, "div") || tag_ci_eq(name, len, "span")) return BRK_P;
     return -1;
 }
 
-static void browser_render_from_html(const char *html, char *out, uint32_t cap, uint32_t *out_len) {
+/* ── 属性值提取：在一个标签的原始文本（"a href=\"x\" class='y'"）里找
+ * name="value" 或 name='value'，大小写不敏感匹配属性名。供 href/class/
+ * style/alt 属性解析共用。 */
+static int br_attr_value(const char *tag, uint32_t tag_len, const char *name,
+                          char *out, uint32_t out_cap) {
+    uint32_t nlen = (uint32_t)strlen(name);
+    for (uint32_t i = 0; i + nlen < tag_len; i++) {
+        if (!tag_ci_eq(tag + i, (int)nlen, name)) continue;
+        uint32_t p = i + nlen;
+        while (p < tag_len && (tag[p] == ' ' || tag[p] == '\t')) p++;
+        if (p >= tag_len || tag[p] != '=') continue;
+        p++;
+        while (p < tag_len && (tag[p] == ' ' || tag[p] == '\t')) p++;
+        if (p >= tag_len) return 0;
+        char quote = (tag[p] == '"' || tag[p] == '\'') ? tag[p] : 0;
+        if (quote) p++;
+        uint32_t start = p;
+        while (p < tag_len && (quote ? tag[p] != quote : (tag[p] != ' ' && tag[p] != '>'))) p++;
+        uint32_t vlen = p - start;
+        if (vlen >= out_cap) vlen = out_cap - 1;
+        memcpy(out, tag + start, vlen);
+        out[vlen] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* ── CSS：内联 style="prop:value;..." 属性 + <style> 块里简单的
+ * tagname{...} / .classname{...} 选择器，映射到 browser_style_t 能表示
+ * 的那几个属性（color/font-weight/text-decoration/font-size）。不做级联
+ * /优先级解析——同一个块如果内联和样式表都命中，内联覆盖样式表最后一条
+ * 匹配规则，就这两层，不是完整 CSS 引擎。 */
+typedef struct {
+    uint32_t color; int has_color;
+    int bold;        int has_bold;
+    int underline;   int has_underline;
+    int scale2;       int has_scale;
+} css_decl_t;
+
+#define CSS_RULE_MAX 32
+typedef struct {
+    char selector[32]; /* "tagname" 或 ".classname" */
+    css_decl_t decl;
+} css_rule_t;
+static css_rule_t g_css_rules[CSS_RULE_MAX];
+static int g_css_rule_count;
+
+static int css_hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int css_parse_color(const char *v, uint32_t *out) {
+    while (*v == ' ') v++;
+    if (*v == '#') {
+        v++;
+        int len = 0; while (v[len] && css_hex_digit(v[len]) >= 0) len++;
+        if (len == 6) {
+            uint32_t val = 0;
+            for (int i = 0; i < 6; i++) val = (val << 4) | (uint32_t)css_hex_digit(v[i]);
+            *out = val;
+            return 1;
+        }
+        if (len == 3) {
+            int r = css_hex_digit(v[0]), g = css_hex_digit(v[1]), b = css_hex_digit(v[2]);
+            *out = (uint32_t)((r << 4 | r) << 16 | (g << 4 | g) << 8 | (b << 4 | b));
+            return 1;
+        }
+        return 0;
+    }
+    static const struct { const char *name; uint32_t val; } named[] = {
+        {"black", 0x000000}, {"white", 0xFFFFFF}, {"red", 0xFF3B30}, {"green", 0x34C759},
+        {"blue", 0x0A84FF}, {"yellow", 0xFFD60A}, {"orange", 0xFF9500}, {"purple", 0xAF52DE},
+        {"gray", 0x8E8E93}, {"grey", 0x8E8E93}, {"silver", 0xC0C0C0}, {"cyan", 0x32ADE6},
+        {"pink", 0xFF2D55},
+    };
+    for (uint32_t i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
+        uint32_t nlen = (uint32_t)strlen(named[i].name);
+        int match = 1;
+        for (uint32_t j = 0; j < nlen; j++) {
+            char a = v[j]; if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+            if (a != named[i].name[j]) { match = 0; break; }
+        }
+        if (match && (v[nlen] == 0 || v[nlen] == ' ' || v[nlen] == ';')) {
+            *out = named[i].val;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 解析一条 "prop:value" 声明，命中的属性写进 *d（没命中的属性名直接
+ * 忽略——保证解析器不会被不认识的 CSS 属性卡住） */
+static void css_apply_decl(css_decl_t *d, const char *prop, uint32_t plen, const char *val) {
+    if (tag_ci_eq(prop, (int)plen, "color")) {
+        uint32_t c;
+        if (css_parse_color(val, &c)) { d->color = c; d->has_color = 1; }
+    } else if (tag_ci_eq(prop, (int)plen, "font-weight")) {
+        int is_bold = (strstr(val, "bold") != 0);
+        for (const char *p = val; !is_bold && *p >= '0' && *p <= '9'; ) {
+            int n = 0; while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+            is_bold = n >= 600;
+            break;
+        }
+        d->bold = is_bold; d->has_bold = 1;
+    } else if (tag_ci_eq(prop, (int)plen, "text-decoration")) {
+        d->underline = (strstr(val, "underline") != 0);
+        d->has_underline = 1;
+    } else if (tag_ci_eq(prop, (int)plen, "font-size")) {
+        int n = 0; const char *p = val;
+        while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+        d->scale2 = (n >= 20) || strstr(val, "large") != 0;
+        d->has_scale = 1;
+    }
+}
+
+/* 解析形如 "color:red; font-weight:bold" 的声明串（内联 style 属性值，
+ * 或 <style> 规则花括号里的内容），逐条分号切开交给 css_apply_decl。 */
+static void css_parse_decls(css_decl_t *d, const char *text, uint32_t len) {
+    memset(d, 0, sizeof(*d));
+    uint32_t i = 0;
+    while (i < len) {
+        while (i < len && (text[i] == ' ' || text[i] == ';')) i++;
+        uint32_t start = i;
+        while (i < len && text[i] != ';') i++;
+        uint32_t seg_len = i - start;
+        if (seg_len == 0) continue;
+        const char *colon = memchr(text + start, ':', seg_len);
+        if (!colon) continue;
+        uint32_t plen = (uint32_t)(colon - (text + start));
+        while (plen > 0 && text[start + plen - 1] == ' ') plen--;
+        char val[64];
+        uint32_t vstart = (uint32_t)(colon - text) + 1;
+        uint32_t vlen = (start + seg_len) - vstart;
+        while (vlen > 0 && text[vstart] == ' ') { vstart++; vlen--; }
+        while (vlen > 0 && text[vstart + vlen - 1] == ' ') vlen--;
+        if (vlen >= sizeof(val)) vlen = sizeof(val) - 1;
+        memcpy(val, text + vstart, vlen);
+        val[vlen] = 0;
+        css_apply_decl(d, text + start, plen, val);
+    }
+}
+
+/* 解析整个 <style>...</style> 块的内容："selector { decls } selector2 { decls2 } ..." */
+static void css_parse_stylesheet(const char *css, uint32_t len) {
+    uint32_t i = 0;
+    while (i < len && g_css_rule_count < CSS_RULE_MAX) {
+        while (i < len && (css[i] == ' ' || css[i] == '\n' || css[i] == '\t' || css[i] == '\r')) i++;
+        uint32_t sel_start = i;
+        while (i < len && css[i] != '{') i++;
+        if (i >= len) break;
+        uint32_t sel_end = i;
+        while (sel_end > sel_start && (css[sel_end - 1] == ' ' || css[sel_end - 1] == '\n' ||
+                                        css[sel_end - 1] == '\t' || css[sel_end - 1] == '\r')) sel_end--;
+        uint32_t sel_len = sel_end - sel_start;
+        i++; /* 跳过 '{' */
+        uint32_t body_start = i;
+        while (i < len && css[i] != '}') i++;
+        uint32_t body_len = i - body_start;
+        if (i < len) i++; /* 跳过 '}' */
+        if (sel_len == 0 || sel_len >= sizeof(g_css_rules[0].selector)) continue;
+        /* 只处理单一简单选择器（不支持逗号并列/组合选择器），多个用逗号
+         * 分隔的选择器分别当独立规则处理一遍相同声明。 */
+        uint32_t part_start = sel_start;
+        for (uint32_t k = sel_start; k <= sel_end && g_css_rule_count < CSS_RULE_MAX; k++) {
+            if (k == sel_end || css[k] == ',') {
+                uint32_t ps = part_start, pe = k;
+                while (ps < pe && css[ps] == ' ') ps++;
+                while (pe > ps && css[pe - 1] == ' ') pe--;
+                uint32_t plen = pe - ps;
+                if (plen > 0 && plen < sizeof(g_css_rules[0].selector)) {
+                    css_rule_t *r = &g_css_rules[g_css_rule_count++];
+                    memcpy(r->selector, css + ps, plen);
+                    r->selector[plen] = 0;
+                    css_parse_decls(&r->decl, css + body_start, body_len);
+                }
+                part_start = k + 1;
+            }
+        }
+    }
+}
+
+/* 给定标签名 + class 属性值，把匹配到的样式表规则和内联 style 合并成
+ * 一份声明（内联优先级最高，最后应用）。 */
+static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
+                                 const char *class_val, const char *inline_style,
+                                 css_decl_t *out) {
+    memset(out, 0, sizeof(*out));
+    for (int i = 0; i < g_css_rule_count; i++) {
+        css_rule_t *r = &g_css_rules[i];
+        int match = 0;
+        if (r->selector[0] == '.') {
+            if (class_val && class_val[0]) {
+                /* class 属性可能是空格分隔的多个 class，逐个比较 */
+                const char *p = class_val;
+                uint32_t sel_len = (uint32_t)strlen(r->selector + 1);
+                while (*p) {
+                    while (*p == ' ') p++;
+                    uint32_t cl = 0; while (p[cl] && p[cl] != ' ') cl++;
+                    if (cl == sel_len && tag_ci_eq(p, (int)cl, r->selector + 1)) { match = 1; break; }
+                    p += cl;
+                }
+            }
+        } else {
+            match = tag_ci_eq(tag_name, tag_name_len, r->selector);
+        }
+        if (!match) continue;
+        if (r->decl.has_color) { out->color = r->decl.color; out->has_color = 1; }
+        if (r->decl.has_bold) { out->bold = r->decl.bold; out->has_bold = 1; }
+        if (r->decl.has_underline) { out->underline = r->decl.underline; out->has_underline = 1; }
+        if (r->decl.has_scale) { out->scale2 = r->decl.scale2; out->has_scale = 1; }
+    }
+    if (inline_style && inline_style[0]) {
+        css_decl_t inl;
+        css_parse_decls(&inl, inline_style, (uint32_t)strlen(inline_style));
+        if (inl.has_color) { out->color = inl.color; out->has_color = 1; }
+        if (inl.has_bold) { out->bold = inl.bold; out->has_bold = 1; }
+        if (inl.has_underline) { out->underline = inl.underline; out->has_underline = 1; }
+        if (inl.has_scale) { out->scale2 = inl.scale2; out->has_scale = 1; }
+    }
+}
+
+/* 把当前活跃的 link 下标 + CSS 覆盖编码成 BR_META_MARK 扩展前缀（没有
+ * 覆盖也没有链接时不写这几个字节，保持零开销）。 */
+static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, const css_decl_t *ov) {
+    int has_meta = (link_idx >= 0) || (ov && (ov->has_color || ov->has_bold || ov->has_underline || ov->has_scale));
+    if (!has_meta) return;
+    if (*pos + BR_META_LEN >= cap) return;
+    uint8_t flags = 0;
+    uint8_t r = 0, g = 0, b = 0;
+    if (ov) {
+        if (ov->has_color) { flags |= BR_FLAG_COLOR; r = (uint8_t)(ov->color >> 16); g = (uint8_t)(ov->color >> 8); b = (uint8_t)ov->color; }
+        if (ov->has_bold && ov->bold) flags |= BR_FLAG_BOLD_ON;
+        if (ov->has_underline && ov->underline) flags |= BR_FLAG_UNDER_ON;
+        if (ov->has_scale && ov->scale2) flags |= BR_FLAG_SCALE2;
+    }
+    uint8_t link_byte = (link_idx >= 0 && link_idx < 254) ? (uint8_t)(link_idx + 1) : 0;
+    out[(*pos)++] = (char)BR_META_MARK;
+    out[(*pos)++] = (char)flags;
+    out[(*pos)++] = (char)r;
+    out[(*pos)++] = (char)g;
+    out[(*pos)++] = (char)b;
+    out[(*pos)++] = (char)link_byte;
+}
+
+static void browser_render_from_html(gui_state_t *st, const char *html, char *out, uint32_t cap, uint32_t *out_len) {
     uint32_t pos = 0;
     int space = 1;
     int need_prefix = 1;
     int style_stack[BR_STACK_MAX];
+    int link_idx_stack[BR_STACK_MAX];
+    css_decl_t override_stack[BR_STACK_MAX];
     int stack_n = 0;
     int cur_style = BRK_P;
+    int cur_link_idx = -1;
+    css_decl_t cur_override;
+    memset(&cur_override, 0, sizeof(cur_override));
     int skip_mode = 0;
     const char *skip_close = "";
+    int in_style_block = 0;
+    static char style_buf[4096];
+    uint32_t style_buf_len = 0;
+
+    g_css_rule_count = 0;
+    st->browser_link_count = 0;
 
 #define BREMIT(c) do { if (pos + 1 < cap) out[pos++] = (char)(c); } while (0)
 #define BRFLUSH() do { if (!space) { BREMIT('\n'); space = 1; need_prefix = 1; } } while (0)
+#define BRMETA() br_emit_meta(out, cap, &pos, cur_link_idx, &cur_override)
 
     for (uint32_t i = 0; html[i] && pos + 2 < cap; i++) {
         char c = html[i];
@@ -3545,30 +3824,49 @@ static void browser_render_from_html(const char *html, char *out, uint32_t cap, 
                 uint32_t j = i + 2;
                 char nm[16]; int nl = 0;
                 while (html[j] && html[j] != '>' && nl < 15) nm[nl++] = html[j++];
-                if (tag_ci_eq(nm, nl, skip_close)) { skip_mode = 0; i = j; }
+                if (tag_ci_eq(nm, nl, skip_close)) {
+                    skip_mode = 0;
+                    i = j;
+                    if (in_style_block) {
+                        css_parse_stylesheet(style_buf, style_buf_len);
+                        in_style_block = 0;
+                    }
+                    continue;
+                }
             }
+            if (in_style_block && style_buf_len + 1 < sizeof(style_buf)) style_buf[style_buf_len++] = c;
             continue;
         }
 
         if (c == '<') {
             int closing = (html[i + 1] == '/');
-            uint32_t j = i + 1 + (closing ? 1 : 0);
+            uint32_t tag_start = i + 1 + (closing ? 1 : 0);
+            uint32_t j = tag_start;
             char nm[16]; int nl = 0;
             while (html[j] && html[j] != '>' && html[j] != ' ' && html[j] != '\t' &&
                    html[j] != '\n' && html[j] != '/' && nl < 15)
                 nm[nl++] = html[j++];
+            uint32_t attr_start = j;
             while (html[j] && html[j] != '>') j++;
+            uint32_t attr_len = (j > attr_start) ? j - attr_start : 0;
 
-            if (!closing && (tag_ci_eq(nm, nl, "script") || tag_ci_eq(nm, nl, "style"))) {
+            if (!closing && tag_ci_eq(nm, nl, "script")) {
                 BRFLUSH();
-                skip_mode = 1;
-                skip_close = tag_ci_eq(nm, nl, "script") ? "script" : "style";
+                skip_mode = 1; in_style_block = 0;
+                skip_close = "script";
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "style")) {
+                BRFLUSH();
+                skip_mode = 1; in_style_block = 1; style_buf_len = 0;
+                skip_close = "style";
                 i = j;
                 continue;
             }
             if (!closing && tag_ci_eq(nm, nl, "br")) {
                 BRFLUSH();
-                BREMIT(BRK_P); BREMIT('\n');
+                BREMIT(BRK_P); BRMETA(); BREMIT('\n');
                 need_prefix = 1; space = 1;
                 i = j;
                 continue;
@@ -3580,27 +3878,81 @@ static void browser_render_from_html(const char *html, char *out, uint32_t cap, 
                 i = j;
                 continue;
             }
-            int st = browser_style_for_tag(nm, nl);
+            if (!closing && tag_ci_eq(nm, nl, "img")) {
+                BRFLUSH();
+                char alt[64];
+                if (!br_attr_value(html + attr_start, attr_len, "alt", alt, sizeof(alt)) || !alt[0])
+                    strcpy(alt, "图片");
+                BREMIT(BRK_IMG);
+                char label[80];
+                uint32_t lp = 0;
+                label[lp++] = '[';
+                for (uint32_t k = 0; alt[k] && lp < sizeof(label) - 2; k++) label[lp++] = alt[k];
+                label[lp++] = ']';
+                label[lp] = 0;
+                for (uint32_t k = 0; label[k] && pos + 1 < cap; k++) BREMIT(label[k]);
+                BREMIT('\n');
+                need_prefix = 1; space = 1;
+                i = j;
+                continue;
+            }
+            int st_type = browser_style_for_tag(nm, nl);
             int old_style = cur_style;
             int new_style = cur_style;
             int do_push = 0, do_pop = 0;
+            int new_link_idx = cur_link_idx;
+            css_decl_t new_override = cur_override;
             if (!closing) {
-                if (st >= 0) { new_style = st; do_push = 1; }
-            } else if (st >= 0 && stack_n > 0 && style_stack[stack_n - 1] == st) {
+                if (st_type >= 0) {
+                    new_style = st_type;
+                    do_push = 1;
+                    char class_val[64]; class_val[0] = 0;
+                    char style_val[128]; style_val[0] = 0;
+                    br_attr_value(html + attr_start, attr_len, "class", class_val, sizeof(class_val));
+                    br_attr_value(html + attr_start, attr_len, "style", style_val, sizeof(style_val));
+                    css_decl_t resolved;
+                    css_resolve_for_tag(nm, nl, class_val, style_val, &resolved);
+                    new_override = resolved;
+                    if (st_type == BRK_LINK) {
+                        char href[96];
+                        if (br_attr_value(html + attr_start, attr_len, "href", href, sizeof(href)) &&
+                            st->browser_link_count < BROWSER_LINK_MAX) {
+                            new_link_idx = st->browser_link_count;
+                            uint32_t hl = (uint32_t)strlen(href);
+                            if (hl >= sizeof(st->browser_link_href[0])) hl = sizeof(st->browser_link_href[0]) - 1;
+                            memcpy(st->browser_link_href[st->browser_link_count], href, hl);
+                            st->browser_link_href[st->browser_link_count][hl] = 0;
+                            st->browser_link_count++;
+                        }
+                    }
+                }
+            } else if (st_type >= 0 && stack_n > 0 && style_stack[stack_n - 1] == st_type) {
                 do_pop = 1;
                 new_style = (stack_n > 1) ? style_stack[stack_n - 2] : BRK_P;
+                new_link_idx = (stack_n > 1) ? link_idx_stack[stack_n - 2] : -1;
+                new_override = (stack_n > 1) ? override_stack[stack_n - 2] : (css_decl_t){0};
             }
-            if (new_style != old_style) {
-                /* 样式切换：即使前面文字以空格结尾也强制换行，否则新样式的
-                 * 前缀字节不会被写出（比如 "Hello <strong>world"）。 */
+            int override_changed = memcmp(&new_override, &cur_override, sizeof(css_decl_t)) != 0;
+            if (new_style != old_style || new_link_idx != cur_link_idx || override_changed) {
+                /* 样式/链接/CSS 覆盖任一变化：即使前面文字以空格结尾也强制换行，
+                 * 否则新样式的前缀字节不会被写出（比如 "Hello <strong>world"，
+                 * 或者连续两个 class 不同的 <p> 因为块类型都是 BRK_P 而被
+                 * BRFLUSH() 那条分支悄悄吞掉，第二个的 CSS 覆盖就丢了）。 */
                 if (!need_prefix) BREMIT('\n');
                 space = 1; need_prefix = 1;
             } else {
                 BRFLUSH();
             }
-            if (do_push && stack_n < BR_STACK_MAX) style_stack[stack_n++] = st;
+            if (do_push && stack_n < BR_STACK_MAX) {
+                style_stack[stack_n] = st_type;
+                link_idx_stack[stack_n] = new_link_idx;
+                override_stack[stack_n] = new_override;
+                stack_n++;
+            }
             if (do_pop) stack_n--;
             cur_style = new_style;
+            cur_link_idx = new_link_idx;
+            cur_override = new_override;
             i = j;
             continue;
         }
@@ -3621,13 +3973,14 @@ static void browser_render_from_html(const char *html, char *out, uint32_t cap, 
         } else {
             space = 0;
         }
-        if (need_prefix) { BREMIT(cur_style); need_prefix = 0; }
+        if (need_prefix) { BREMIT(cur_style); BRMETA(); need_prefix = 0; }
         BREMIT(ch);
     }
     BRFLUSH();
     out[pos < cap ? pos : cap - 1] = 0;
     if (out_len) *out_len = pos;
 #undef BREMIT
+#undef BRMETA
 #undef BRFLUSH
 }
 
@@ -3662,7 +4015,25 @@ static void browser_init(gui_state_t *st) {
     st->browser_loaded = 1;
 }
 
-static void browser_load(gui_state_t *st) {
+/* 后退/前进历史：定长环状最近 BROWSER_HIST_MAX 条 URL + 当前位置下标。
+ * 新导航（非后退/前进触发）会截断当前位置之后的“前进”条目，和标准浏览器
+ * 语义一致；满了就整体前移丢最老的一条。 */
+static void browser_hist_push(gui_state_t *st, const char *url) {
+    if (st->browser_hist_pos < st->browser_hist_count - 1) {
+        st->browser_hist_count = st->browser_hist_pos + 1;
+    }
+    if (st->browser_hist_count >= BROWSER_HIST_MAX) {
+        memmove(st->browser_hist[0], st->browser_hist[1],
+                (uint32_t)(BROWSER_HIST_MAX - 1) * BROWSER_URL_CAP);
+        st->browser_hist_count = BROWSER_HIST_MAX - 1;
+    }
+    strncpy(st->browser_hist[st->browser_hist_count], url, BROWSER_URL_CAP - 1);
+    st->browser_hist[st->browser_hist_count][BROWSER_URL_CAP - 1] = 0;
+    st->browser_hist_count++;
+    st->browser_hist_pos = st->browser_hist_count - 1;
+}
+
+static void browser_load_internal(gui_state_t *st, int push_history) {
     browser_init(st);
     char host[96];
     const char *path = "/";
@@ -3686,7 +4057,7 @@ static void browser_load(gui_state_t *st) {
         st->status = "浏览器 DNS 失败";
         return;
     }
-    static char response[8192];
+    static char response[BROWSER_FETCH_CAP];
     uint32_t len = 0;
     int ok = https ? tls_https_get(host, ip, port, path, response, sizeof(response), &len)
                    : net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
@@ -3703,10 +4074,81 @@ static void browser_load(gui_state_t *st) {
     }
     const char *body = http_body_ptr(response);
     browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
-    browser_render_from_html(body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
+    browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
     st->browser_scroll = 0;
     if (!https || strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
         st->status = "浏览器加载完成";
+    if (push_history) browser_hist_push(st, st->browser_url);
+}
+
+static void browser_load(gui_state_t *st) {
+    browser_load_internal(st, 1);
+}
+
+/* 解析 <a href> 目标：绝对 URL（含 scheme）原样用；"/xxx" 相对当前页面
+ * 的 host 补全；其余相对路径相对当前路径的目录部分拼接（不处理 "../"
+ * 折叠——真实页面里出现的比例不高，这里只做到“大部分链接能点开”）。
+ * "#"/"javascript:"/"mailto:" 之类不导航。 */
+static int browser_resolve_href(const gui_state_t *st, const char *href, char *out, uint32_t out_cap) {
+    if (!href || !href[0]) return -1;
+    if (href[0] == '#') return -1;
+    if (strncmp(href, "javascript:", 11) == 0) return -1;
+    if (strncmp(href, "mailto:", 7) == 0) return -1;
+    if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) {
+        strncpy(out, href, out_cap - 1);
+        out[out_cap - 1] = 0;
+        return 0;
+    }
+    const char *cur = st->browser_url;
+    const char *scheme_end = strstr(cur, "://");
+    if (!scheme_end) return -1;
+    const char *host_start = scheme_end + 3;
+    const char *host_end = host_start;
+    while (*host_end && *host_end != '/') host_end++;
+    uint32_t prefix_len = (uint32_t)(host_end - cur); /* "scheme://host[:port]" */
+    if (prefix_len >= out_cap) return -1;
+    memcpy(out, cur, prefix_len);
+    uint32_t pos = prefix_len;
+    if (href[0] == '/') {
+        for (uint32_t k = 0; href[k] && pos + 1 < out_cap; k++) out[pos++] = href[k];
+    } else {
+        /* 相对路径：取当前路径最后一个 '/' 之前的部分作为目录前缀 */
+        const char *last_slash = host_end;
+        for (const char *p = host_end; *p; p++) if (*p == '/') last_slash = p;
+        uint32_t dir_len = (uint32_t)(last_slash - host_end) + 1;
+        if (dir_len == 0) { out[pos++] = '/'; }
+        else {
+            for (uint32_t k = 0; k < dir_len && pos + 1 < out_cap; k++) out[pos++] = host_end[k];
+        }
+        for (uint32_t k = 0; href[k] && pos + 1 < out_cap; k++) out[pos++] = href[k];
+    }
+    out[pos < out_cap ? pos : out_cap - 1] = 0;
+    return 0;
+}
+
+static void browser_navigate(gui_state_t *st, const char *url) {
+    strncpy(st->browser_url, url, BROWSER_URL_CAP - 1);
+    st->browser_url[BROWSER_URL_CAP - 1] = 0;
+    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
+    browser_load(st);
+}
+
+static void browser_go_back(gui_state_t *st) {
+    if (st->browser_hist_pos <= 0) { st->status = "没有更早的页面"; return; }
+    st->browser_hist_pos--;
+    strncpy(st->browser_url, st->browser_hist[st->browser_hist_pos], BROWSER_URL_CAP - 1);
+    st->browser_url[BROWSER_URL_CAP - 1] = 0;
+    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
+    browser_load_internal(st, 0);
+}
+
+static void browser_go_forward(gui_state_t *st) {
+    if (st->browser_hist_pos + 1 >= st->browser_hist_count) { st->status = "没有更新的页面"; return; }
+    st->browser_hist_pos++;
+    strncpy(st->browser_url, st->browser_hist[st->browser_hist_pos], BROWSER_URL_CAP - 1);
+    st->browser_url[BROWSER_URL_CAP - 1] = 0;
+    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
+    browser_load_internal(st, 0);
 }
 
 static void browser_save_page(gui_state_t *st) {
@@ -3758,15 +4200,100 @@ static void browser_style_get(int type, browser_style_t *s) {
         case BRK_HR: s->is_hr = 1; break;
         case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
         case BRK_QUOTE: s->color = rgb(150, 160, 170); s->indent = 12; break;
+        case BRK_IMG: s->color = rgb(150, 140, 170); s->indent = 4; break;
         default: break;
     }
 }
 
+/* 链接点击命中区域——每次 draw_rendered_page 重新填充（滚动/窗口大小
+ * 变化后旧的矩形就作废了），draw_browser_app 一帧内可能画两遍（滚动钳
+ * 位重绘），以最后一次为准，供 hit_browser_link 做命中测试。 */
+#define BROWSER_LINK_RECT_MAX 96
+typedef struct { int x, y, w, h; int link_idx; } browser_link_rect_t;
+static browser_link_rect_t g_browser_link_rects[BROWSER_LINK_RECT_MAX];
+static int g_browser_link_rect_count;
+
+static void browser_add_link_rect(int x, int y, int w, int h, int link_idx) {
+    if (link_idx < 0 || g_browser_link_rect_count >= BROWSER_LINK_RECT_MAX) return;
+    browser_link_rect_t *r = &g_browser_link_rects[g_browser_link_rect_count++];
+    r->x = x; r->y = y; r->w = w; r->h = h; r->link_idx = link_idx;
+}
+
+/* 画一个块（一段 [start, start+seg_len) 文本，已经解出最终样式 bs 和可选
+ * 链接下标）：处理 HR/空行/正常换行折行三种情况，链接块的每一折行都记一条
+ * 命中矩形。返回更新后的 row_unit；cy 和 drawn_rows 通过指针原地更新。 */
+static int browser_draw_segment(int x, int w, int *cy, int row_unit, int scroll, int max_lines,
+                                 int *drawn_rows, const char *buf, uint32_t start, uint32_t seg_len,
+                                 const browser_style_t *bsp, int link_idx) {
+    browser_style_t bs = *bsp;
+    int rh = gui_font_line_height() + 3;
+
+    if (bs.is_hr) {
+        if (row_unit >= scroll && *drawn_rows < max_lines) {
+            rect(x, *cy + rh / 2, w, 2, rgb(70, 90, 105));
+            *cy += rh; (*drawn_rows)++;
+        }
+        return row_unit + 1;
+    }
+    if (seg_len == 0) {
+        if (row_unit >= scroll && *drawn_rows < max_lines) { *cy += rh; (*drawn_rows)++; }
+        return row_unit + 1;
+    }
+
+    int text_x = x + bs.indent + (bs.bullet ? 14 : 0);
+    int avail_w = w - bs.indent - (bs.bullet ? 14 : 0);
+    int px_per_char = (bs.mono ? MONO_GLYPH_W : 8) * bs.scale;
+    int max_cols = avail_w / (px_per_char > 0 ? px_per_char : 8);
+    if (max_cols < 6) max_cols = 6;
+    if (max_cols > 150) max_cols = 150;
+
+    char line[160];
+    uint32_t p = start;
+    int first_row = 1;
+    while (p < start + seg_len) {
+        uint32_t lp = 0;
+        while (p < start + seg_len && lp < (uint32_t)max_cols && lp + 1 < sizeof(line))
+            line[lp++] = buf[p++];
+        line[lp] = 0;
+
+        if (row_unit >= scroll && *drawn_rows < max_lines) {
+            int rowh = rh * bs.scale;
+            if (bs.bullet && first_row)
+                text(x + bs.indent, *cy, "•", bs.color, 1);
+            if (bs.mono) {
+                text_mono(text_x, *cy, text_x + avail_w, line, bs.color);
+            } else {
+                if (bs.bold) text(text_x + 1, *cy, line, bs.color, bs.scale);
+                text(text_x, *cy, line, bs.color, bs.scale);
+                if (bs.underline) {
+                    int tw = text_width(line, bs.scale);
+                    rect(text_x, *cy + rowh - 3, tw, 1, bs.color);
+                }
+            }
+            if (link_idx >= 0) {
+                int tw = text_width(line, bs.scale);
+                browser_add_link_rect(text_x, *cy, tw, rowh, link_idx);
+            }
+            *cy += rowh;
+            (*drawn_rows)++;
+        }
+        row_unit += bs.scale;
+        first_row = 0;
+    }
+    if (bs.gap_after) {
+        if (row_unit >= scroll && *drawn_rows < max_lines) { *cy += rh; (*drawn_rows)++; }
+        row_unit++;
+    }
+    return row_unit;
+}
+
 // 按块类型渲染标记流（见 browser_render_from_html）：标题更大更亮、链接带
 // 下划线、列表带圆点、代码用等宽字体、<hr> 画分隔线——而非纯文本平铺。
+// 还要解码 BR_META_MARK 扩展前缀（链接下标 + CSS 覆盖，见 br_emit_meta）。
 // 返回内容总行数（row-unit 计），供调用方钳制滚动量——之前滚动值可以无限
 // 增长滚过末尾，得按等次数反向按键才能滚回来。
 static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint32_t len, int scroll) {
+    g_browser_link_rect_count = 0;
     if (!len) return 0;
     int rh = gui_font_line_height() + 3;
     int max_lines = h / rh;
@@ -3777,67 +4304,35 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
     uint32_t i = 0;
     while (i < len) {
         int type = (unsigned char)buf[i++];
+        int link_idx = -1;
+        if (i < len && (unsigned char)buf[i] == BR_META_MARK && i + BR_META_LEN <= len) {
+            uint8_t flags = (uint8_t)buf[i + 1];
+            uint8_t r = (uint8_t)buf[i + 2], g = (uint8_t)buf[i + 3], b = (uint8_t)buf[i + 4];
+            uint8_t link_byte = (uint8_t)buf[i + 5];
+            i += BR_META_LEN;
+            browser_style_t bs_meta;
+            browser_style_get(type, &bs_meta);
+            if (flags & BR_FLAG_COLOR) bs_meta.color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+            if (flags & BR_FLAG_BOLD_ON) bs_meta.bold = 1;
+            if (flags & BR_FLAG_UNDER_ON) bs_meta.underline = 1;
+            if (flags & BR_FLAG_SCALE2) bs_meta.scale = 2;
+            if (link_byte) link_idx = link_byte - 1;
+            uint32_t start = i;
+            while (i < len && buf[i] != '\n') i++;
+            uint32_t seg_len = i - start;
+            if (i < len) i++;
+            row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines, &drawn_rows,
+                                            buf, start, seg_len, &bs_meta, link_idx);
+            continue;
+        }
         browser_style_t bs;
         browser_style_get(type, &bs);
         uint32_t start = i;
         while (i < len && buf[i] != '\n') i++;
         uint32_t seg_len = i - start;
         if (i < len) i++;
-
-        if (bs.is_hr) {
-            if (row_unit >= scroll && drawn_rows < max_lines) {
-                rect(x, cy + rh / 2, w, 2, rgb(70, 90, 105));
-                cy += rh; drawn_rows++;
-            }
-            row_unit++;
-            continue;
-        }
-        if (seg_len == 0) {
-            if (row_unit >= scroll && drawn_rows < max_lines) { cy += rh; drawn_rows++; }
-            row_unit++;
-            continue;
-        }
-
-        int text_x = x + bs.indent + (bs.bullet ? 14 : 0);
-        int avail_w = w - bs.indent - (bs.bullet ? 14 : 0);
-        int px_per_char = (bs.mono ? MONO_GLYPH_W : 8) * bs.scale;
-        int max_cols = avail_w / (px_per_char > 0 ? px_per_char : 8);
-        if (max_cols < 6) max_cols = 6;
-        if (max_cols > 150) max_cols = 150;
-
-        char line[160];
-        uint32_t p = start;
-        int first_row = 1;
-        while (p < start + seg_len) {
-            uint32_t lp = 0;
-            while (p < start + seg_len && lp < (uint32_t)max_cols && lp + 1 < sizeof(line))
-                line[lp++] = buf[p++];
-            line[lp] = 0;
-
-            if (row_unit >= scroll && drawn_rows < max_lines) {
-                int rowh = rh * bs.scale;
-                if (bs.bullet && first_row)
-                    text(x + bs.indent, cy, "•", bs.color, 1);
-                if (bs.mono) {
-                    text_mono(text_x, cy, text_x + avail_w, line, bs.color);
-                } else {
-                    if (bs.bold) text(text_x + 1, cy, line, bs.color, bs.scale);
-                    text(text_x, cy, line, bs.color, bs.scale);
-                    if (bs.underline) {
-                        int tw = text_width(line, bs.scale);
-                        rect(text_x, cy + rowh - 3, tw, 1, bs.color);
-                    }
-                }
-                cy += rowh;
-                drawn_rows++;
-            }
-            row_unit += bs.scale;
-            first_row = 0;
-        }
-        if (bs.gap_after) {
-            if (row_unit >= scroll && drawn_rows < max_lines) { cy += rh; drawn_rows++; }
-            row_unit++;
-        }
+        row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines, &drawn_rows,
+                                        buf, start, seg_len, &bs, -1);
     }
     return row_unit;
 }
@@ -3850,7 +4345,7 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     char ipbuf[16];
     net_ipv4_to_str(dev->ip, ipbuf);
     text(tx, ty, "浏览器", rgb(78, 192, 236), 1);
-    text(tx, ty + 30, "Enter加载  Ctrl+S保存  ←→移动光标  ↑↓滚动", rgb(148, 162, 174), 1);
+    text(tx, ty + 30, "Enter加载  点击链接跳转  ↑↓滚动  Ctrl+S保存", rgb(148, 162, 174), 1);
     rect(tx, ty + 58, view_w, 32, rgb(6, 14, 22));
     border(tx, ty + 58, view_w, 32, rgb(78, 192, 236));
     text(tx + 10, ty + 68, st->browser_url, rgb(232, 242, 248), 1);
@@ -3873,6 +4368,12 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     }
     draw_small_button(tx, ty + 104, 96, "Enter 加载", rgb(78, 192, 236));
     draw_small_button(tx + 108, ty + 104, 68, "保存", rgb(85, 180, 120));
+    int can_back = st->browser_hist_pos > 0;
+    int can_fwd  = st->browser_hist_pos + 1 < st->browser_hist_count;
+    draw_small_button(tx + 178, ty + 104, 44, "后退",
+                      can_back ? rgb(120, 150, 180) : rgb(60, 68, 78));
+    draw_small_button(tx + 224, ty + 104, 44, "前进",
+                      can_fwd ? rgb(120, 150, 180) : rgb(60, 68, 78));
     char line[128];
     uint32_t pos = 0;
     line[0] = 0;
@@ -3882,7 +4383,7 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     append_str(line, sizeof(line), &pos, ipbuf);
     append_str(line, sizeof(line), &pos, "  ");
     append_str(line, sizeof(line), &pos, st->status ? st->status : "浏览器就绪");
-    text_clipped(tx + 190, ty + 112, tx + view_w - 8, line, rgb(168, 190, 204), 1);
+    text_clipped(tx, ty + 136, tx + view_w - 8, line, rgb(168, 190, 204), 1);
     /* 内容区：先画，若发现滚动越过末尾则钳回并重画一遍（含背景）。 */
     for (int pass = 0; pass < 2; pass++) {
         rect(tx, ty + 146, view_w, 196, rgb(4, 9, 14));
@@ -5020,6 +5521,37 @@ static int hit_browser_load_button(int w, int h, const gui_state_t *st, int mx, 
     int ty = win_y + 42;
     int bx = tx, by = ty + 104, bw = 96;
     return (mx >= bx && mx < bx + bw && my >= by && my < by + ACTION_H);
+}
+
+/* 0=没点中，1=后退，2=前进；矩形要和 draw_browser_app 里画的保持一致。 */
+static int hit_browser_nav_button(int w, int h, const gui_state_t *st, int mx, int my) {
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
+    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_BROWSER) return 0;
+
+    int win_x, win_y, win_w, win_h;
+    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
+    (void)win_w; (void)win_h;
+    int tx = win_x + 30;
+    int ty = win_y + 42;
+    int by = ty + 104;
+    if (mx >= tx + 178 && mx < tx + 178 + 44 && my >= by && my < by + ACTION_H) return 1;
+    if (mx >= tx + 224 && mx < tx + 224 + 44 && my >= by && my < by + ACTION_H) return 2;
+    return 0;
+}
+
+/* 点中某个渲染过的链接就返回它的下标，否则 -1；命中矩形是
+ * draw_rendered_page() 上一次绘制时填进 g_browser_link_rects 的。 */
+static int hit_browser_link(int w, int h, const gui_state_t *st, int mx, int my) {
+    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return -1;
+    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
+    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_BROWSER) return -1;
+    (void)w; (void)h;
+    for (int i = 0; i < g_browser_link_rect_count; i++) {
+        browser_link_rect_t *r = &g_browser_link_rects[i];
+        if (mx >= r->x && mx < r->x + r->w && my >= r->y && my < r->y + r->h) return r->link_idx;
+    }
+    return -1;
 }
 
 static int hit_code_command(int w, int h, const gui_state_t *st, int mx, int my) {
@@ -6856,6 +7388,19 @@ static void cmd_gui(int argc, char **argv) {
                                     handle_code_command(&st, code_cmd);
                                 } else if (hit_browser_load_button(w, h, &st, mx, my)) {
                                     browser_load(&st);
+                                } else if (hit_browser_nav_button(w, h, &st, mx, my) == 1) {
+                                    browser_go_back(&st);
+                                } else if (hit_browser_nav_button(w, h, &st, mx, my) == 2) {
+                                    browser_go_forward(&st);
+                                } else if (hit_browser_link(w, h, &st, mx, my) >= 0) {
+                                    int link_idx = hit_browser_link(w, h, &st, mx, my);
+                                    char resolved[BROWSER_URL_CAP];
+                                    if (browser_resolve_href(&st, st.browser_link_href[link_idx],
+                                                             resolved, sizeof(resolved)) == 0) {
+                                        browser_navigate(&st, resolved);
+                                    } else {
+                                        st.status = "该链接不支持跳转";
+                                    }
                                 } else {
                                     int note_file = hit_note_file(w, h, &st, mx, my);
                                     if (note_file >= 0) {
