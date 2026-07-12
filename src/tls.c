@@ -11,6 +11,7 @@
 #include "crypto/sha256.h"
 #include "crypto/x25519.h"
 #include "crypto/chacha20_poly1305.h"
+#include "crypto/aes_gcm.h"
 
 #define TLS_RECORD_HANDSHAKE 0x16            /**< TLS 握手记录类型 */
 #define TLS_RECORD_APPLICATION 0x17          /**< TLS 应用数据记录类型 */
@@ -23,6 +24,12 @@
 #define TLS_HANDSHAKE_CERT_VERIFY 0x0f       /**< CertificateVerify 握手消息类型 */
 #define TLS_HANDSHAKE_FINISHED 0x14          /**< Finished 握手消息类型 */
 #define TLS_CHACHA20_POLY1305_SHA256 0x1303  /**< ChaCha20-Poly1305-SHA256 密码套件编号 */
+#define TLS_AES_128_GCM_SHA256 0x1301        /**< AES-128-GCM-SHA256 密码套件编号——RFC 8446
+                                                *  规定 TLS 1.3 实现必须支持这个，覆盖面比
+                                                *  ChaCha20-Poly1305 广，不少服务器（比如很多
+                                                *  微软的站点）在 TLS 1.3 下只提供这个，不提供
+                                                *  ChaCha20-Poly1305——只提供后者会导致这些站点
+                                                *  握手失败。 */
 
 static const char *last_error = "tls not started";  /**< 最近一次 TLS 错误信息 */
 
@@ -49,7 +56,16 @@ typedef struct {
     uint64_t client_app_seq;          /**< 客户端应用数据序列号 */
     uint64_t server_app_seq;          /**< 服务端应用数据序列号 */
     int app_keys_ready;               /**< 应用密钥是否已就绪标志 */
+    uint16_t cipher_suite;            /**< 协商到的密码套件（TLS_AES_128_GCM_SHA256 或
+                                        *   TLS_CHACHA20_POLY1305_SHA256），决定后续所有
+                                        *   记录加解密走 AES-128-GCM 还是 ChaCha20-Poly1305，
+                                        *   以及派生 key 时用 16 字节还是 32 字节 */
 } tls_ctx_t;
+
+/** 当前协商套件下加密 key 该有的字节数（IV 两种套件都是 12 字节，不用区分） */
+static uint32_t cipher_key_len(const tls_ctx_t *ctx) {
+    return ctx->cipher_suite == TLS_AES_128_GCM_SHA256 ? 16 : 32;
+}
 
 /**
  * @brief 获取最近一次 TLS 错误信息
@@ -222,7 +238,11 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
     body[n++] = 0x03; body[n++] = 0x03;
     tls_random(body + n, 32); n += 32;
     body[n++] = 0;
-    body[n++] = 0; body[n++] = 2;
+    /* 报两个套件：AES-128-GCM 在前（TLS 1.3 强制要求实现、绝大多数服务器
+     * 都支持），ChaCha20-Poly1305 在后——选哪个是服务端决定，客户端这里
+     * 只是把两个都摆上桌，不表示优先级。 */
+    body[n++] = 0; body[n++] = 4;
+    body[n++] = 0x13; body[n++] = 0x01;
     body[n++] = 0x13; body[n++] = 0x03;
     body[n++] = 1; body[n++] = 0;
 
@@ -286,7 +306,8 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
  * @param peer_key  输出服务端 X25519 公钥（32 字节）
  * @return 0 成功，-1 失败
  */
-static int parse_server_hello(const uint8_t *hs, uint32_t len, uint8_t peer_key[32]) {
+static int parse_server_hello(const uint8_t *hs, uint32_t len, uint8_t peer_key[32],
+                              uint16_t *out_cipher_suite) {
     if (!hs || len < 42 || hs[0] != TLS_HANDSHAKE_SERVER_HELLO) return -1;
     uint32_t hs_len = get_u24(hs + 1);
     if (hs_len + 4 > len) return -1;
@@ -298,7 +319,9 @@ static int parse_server_hello(const uint8_t *hs, uint32_t len, uint8_t peer_key[
     uint8_t sid_len = *p++;
     if (p + sid_len + 3 > end) return -1;
     p += sid_len;
-    if (get_u16(p) != TLS_CHACHA20_POLY1305_SHA256) return -1;
+    uint16_t chosen = get_u16(p);
+    if (chosen != TLS_CHACHA20_POLY1305_SHA256 && chosen != TLS_AES_128_GCM_SHA256) return -1;
+    *out_cipher_suite = chosen;
     p += 2;
     p++;
     if (p + 2 > end) return -1;
@@ -347,8 +370,13 @@ static int derive_handshake_keys(tls_ctx_t *ctx, const uint8_t shared_secret[32]
     transcript_hash(ctx, thash);
     hkdf_expand_label(handshake_secret, "c hs traffic", thash, 32, ctx->client_hs_secret, 32);
     hkdf_expand_label(handshake_secret, "s hs traffic", thash, 32, ctx->server_hs_secret, 32);
-    hkdf_expand_label(ctx->client_hs_secret, "key", 0, 0, ctx->client_hs_key, 32);
-    hkdf_expand_label(ctx->server_hs_secret, "key", 0, 0, ctx->server_hs_key, 32);
+    /* key 的字节数跟着协商到的套件走（16=AES-128-GCM，32=ChaCha20-Poly1305）
+     * ——HKDF-Expand-Label 把请求的输出长度编进了 info 里（RFC 8446 §7.1
+     * 的 L 字段），16 字节请求和 32 字节截断成 16 字节不是一回事，必须用
+     * 正确的长度参数调用，不能先派生 32 字节再截断。 */
+    uint16_t klen = (uint16_t)cipher_key_len(ctx);
+    hkdf_expand_label(ctx->client_hs_secret, "key", 0, 0, ctx->client_hs_key, klen);
+    hkdf_expand_label(ctx->server_hs_secret, "key", 0, 0, ctx->server_hs_key, klen);
     hkdf_expand_label(ctx->client_hs_secret, "iv", 0, 0, ctx->client_hs_iv, 12);
     hkdf_expand_label(ctx->server_hs_secret, "iv", 0, 0, ctx->server_hs_iv, 12);
     return 0;
@@ -378,8 +406,9 @@ static int derive_app_keys(tls_ctx_t *ctx, const uint8_t handshake_secret[32]) {
     transcript_hash(ctx, thash);
     hkdf_expand_label(master, "c ap traffic", thash, 32, csecret, 32);
     hkdf_expand_label(master, "s ap traffic", thash, 32, ssecret, 32);
-    hkdf_expand_label(csecret, "key", 0, 0, ctx->client_app_key, 32);
-    hkdf_expand_label(ssecret, "key", 0, 0, ctx->server_app_key, 32);
+    uint16_t klen = (uint16_t)cipher_key_len(ctx);
+    hkdf_expand_label(csecret, "key", 0, 0, ctx->client_app_key, klen);
+    hkdf_expand_label(ssecret, "key", 0, 0, ctx->server_app_key, klen);
     hkdf_expand_label(csecret, "iv", 0, 0, ctx->client_app_iv, 12);
     hkdf_expand_label(ssecret, "iv", 0, 0, ctx->server_app_iv, 12);
     ctx->app_keys_ready = 1;
@@ -430,9 +459,15 @@ static int decrypt_record(tls_ctx_t *ctx, int app_keys, const uint8_t hdr_type,
     uint64_t *seq = app_keys ? &ctx->server_app_seq : &ctx->server_hs_seq;
     tls_nonce(iv, *seq, nonce);
     (*seq)++;
-    if (chacha20_poly1305_open(key, nonce, aad, sizeof(aad),
-                               cipher, cipher_len - 16, cipher + cipher_len - 16, plain) < 0)
-        return -1;
+    int ok;
+    if (ctx->cipher_suite == TLS_AES_128_GCM_SHA256) {
+        ok = aes128_gcm_open(key, nonce, aad, sizeof(aad),
+                             cipher, cipher_len - 16, cipher + cipher_len - 16, plain);
+    } else {
+        ok = chacha20_poly1305_open(key, nonce, aad, sizeof(aad),
+                                    cipher, cipher_len - 16, cipher + cipher_len - 16, plain);
+    }
+    if (ok < 0) return -1;
     uint32_t n = cipher_len - 16;
     while (n && plain[n - 1] == 0) n--;
     if (!n) return -1;
@@ -460,7 +495,11 @@ static int send_encrypted_record(tls_ctx_t *ctx, int app_keys, uint8_t inner_typ
     put_u16(out + 3, (uint16_t)cipher_len);
     tls_nonce(iv, *seq, nonce);
     (*seq)++;
-    chacha20_poly1305_seal(key, nonce, out, 5, inner, inner_len, cipher, cipher + inner_len);
+    if (ctx->cipher_suite == TLS_AES_128_GCM_SHA256) {
+        aes128_gcm_seal(key, nonce, out, 5, inner, inner_len, cipher, cipher + inner_len);
+    } else {
+        chacha20_poly1305_seal(key, nonce, out, 5, inner, inner_len, cipher, cipher + inner_len);
+    }
     return net_tcp_send(&ctx->tcp, out, cipher_len + 5);
 }
 
@@ -530,7 +569,7 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
         net_tcp_close(&ctx.tcp);
         return TLS_STATUS_ERROR;
     }
-    if (parse_server_hello(record, rlen, public_key) < 0) {
+    if (parse_server_hello(record, rlen, public_key, &ctx.cipher_suite) < 0) {
         set_error("tls serverhello parse failed");
         net_tcp_close(&ctx.tcp);
         return TLS_STATUS_ERROR;

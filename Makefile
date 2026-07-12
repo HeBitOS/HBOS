@@ -196,6 +196,7 @@ C_SRCS = \
 	$(SRC_DIR)/crypto/sha256.c \
 	$(SRC_DIR)/crypto/x25519.c \
 	$(SRC_DIR)/crypto/chacha20_poly1305.c \
+	$(SRC_DIR)/crypto/aes_gcm.c \
 	$(SRC_DIR)/user/app_runtime.c \
 	$(SRC_DIR)/user/syscall.c \
 	$(SRC_DIR)/user/ldso.c \

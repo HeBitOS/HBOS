@@ -1,8 +1,15 @@
 /* Crypto known-answer-test self-checks.
  *
  * Vectors: NIST FIPS 180-2 (SHA-256), RFC 7748 (X25519), RFC 7539
- * (ChaCha20 / Poly1305 / ChaCha20-Poly1305 AEAD). All literal byte
- * values come straight from those documents.
+ * (ChaCha20 / Poly1305 / ChaCha20-Poly1305 AEAD), FIPS-197 Appendix B
+ * (AES-128 single block). The AES-128-GCM AEAD vector isn't hand-copied
+ * from a spec document (transcribing 40+ hex-byte GCM test vectors by
+ * hand is exactly the kind of thing that silently introduces a typo —
+ * this happened once already while validating this code against the
+ * NIST GCM spec test case by hand); instead it's cross-checked against
+ * Python's `cryptography` library (OpenSSL-backed) for a fixed
+ * key/nonce/AAD/plaintext, so the known-answer here is machine-verified
+ * against an independent, trusted implementation rather than eyeballed.
  *
  * Pure CPU work — no IO. Safe to call any time. Returns 0 on PASS,
  * -1 on FAIL with a one-line FAIL <name> message.
@@ -14,6 +21,7 @@
 #include "sha256.h"
 #include "chacha20_poly1305.h"
 #include "x25519.h"
+#include "aes_gcm.h"
 
 extern int  console_puts(const char *s);
 extern void console_putchar(int c);
@@ -167,6 +175,59 @@ int crypto_selftest(void) {
         ok = chacha20_poly1305_open(key, nonce, (const uint8_t*)aad_bad, 6,
                                     cipher, plen, tag, roundtrip);
         CC_CHECK("aead aad tamper detected", ok < 0);
+    }
+    /* ---- AES-128 single block: FIPS-197 Appendix B ---- */
+    {
+        const uint8_t key[16] = {
+            0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+            0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f
+        };
+        const uint8_t pt[16] = {
+            0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+            0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff
+        };
+        const uint8_t want[16] = {
+            0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,
+            0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a
+        };
+        uint8_t out[16];
+        aes128_encrypt_block(key, pt, out);
+        CC_CHECK("aes128 fips197 appendix-b", eq(out, want, 16));
+    }
+    /* ---- AES-128-GCM AEAD round-trip (see file header re: how this
+     * known-answer was derived) ---- */
+    {
+        uint8_t key[16], nonce[12];
+        for (int i = 0; i < 16; i++) key[i] = (uint8_t)i;
+        for (int i = 0; i < 12; i++) nonce[i] = (uint8_t)i;
+        const char *aad = "header";
+        const char *plain = "the quick brown fox jumps over the lazy dog";
+        size_t plen = 43;
+        const uint8_t want_ct[43] = {
+            0xe7,0x04,0xc2,0xee,0x17,0x6e,0x9e,0x37,
+            0x20,0xf2,0x03,0xf8,0x59,0xd4,0x1e,0x28,
+            0xd5,0x49,0x62,0xc6,0x39,0x98,0x90,0x86,
+            0x95,0x01,0x9e,0x5b,0x71,0x36,0x82,0x18,
+            0xed,0xc1,0xfb,0x9b,0x95,0xfa,0xce,0xc3,
+            0x24,0x9b,0x6e,
+        };
+        const uint8_t want_tag[16] = {
+            0x97,0xf4,0xd8,0x54,0xca,0xda,0xa7,0x37,
+            0xd5,0x88,0x40,0x46,0x94,0x3d,0x4d,0xd3
+        };
+        uint8_t cipher[64], tag[16], roundtrip[64];
+        aes128_gcm_seal(key, nonce, (const uint8_t*)aad, 6,
+                        (const uint8_t*)plain, plen, cipher, tag);
+        CC_CHECK("aes128-gcm ciphertext known-answer", eq(cipher, want_ct, plen));
+        CC_CHECK("aes128-gcm tag known-answer", eq(tag, want_tag, 16));
+        int ok = aes128_gcm_open(key, nonce, (const uint8_t*)aad, 6,
+                                 cipher, plen, tag, roundtrip);
+        CC_CHECK("aes128-gcm roundtrip ok", ok == 0);
+        CC_CHECK("aes128-gcm plaintext matches", eq(roundtrip, (const uint8_t*)plain, plen));
+        cipher[0] ^= 1;
+        ok = aes128_gcm_open(key, nonce, (const uint8_t*)aad, 6,
+                             cipher, plen, tag, roundtrip);
+        CC_CHECK("aes128-gcm tamper detected", ok < 0);
     }
     /* ---- X25519: RFC 7748 §6.1 vector ---- */
     {
