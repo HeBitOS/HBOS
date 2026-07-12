@@ -3509,11 +3509,15 @@ enum {
  * 样式（browser_style_get）上打补丁。选这个方案是因为链接/CSS 覆盖只
  * 影响少数块，不值得把整条流都改成变长记录格式。 */
 #define BR_META_MARK 0x01
-#define BR_META_LEN  6 /* mark + flags + r + g + b + link_idx_plus1 */
-#define BR_FLAG_COLOR     0x01
-#define BR_FLAG_BOLD_ON   0x02
-#define BR_FLAG_UNDER_ON  0x04
-#define BR_FLAG_SCALE2    0x08
+#define BR_META_LEN  9 /* mark + flags + r + g + b + link_idx_plus1 + bg_r + bg_g + bg_b */
+#define BR_FLAG_COLOR        0x01
+#define BR_FLAG_BOLD_ON      0x02
+#define BR_FLAG_UNDER_ON     0x04
+#define BR_FLAG_SCALE2       0x08
+#define BR_FLAG_BG           0x10
+#define BR_FLAG_ALIGN_CENTER 0x20
+#define BR_FLAG_ALIGN_RIGHT  0x40
+#define BR_FLAG_EXTRA_GAP    0x80
 
 static int tag_ci_eq(const char *name, int len, const char *lit) {
     int i = 0;
@@ -3581,6 +3585,11 @@ typedef struct {
     int bold;        int has_bold;
     int underline;   int has_underline;
     int scale2;       int has_scale;
+    uint32_t bg_color; int has_bg;
+    int align;         int has_align; /* 0=left 1=center 2=right */
+    int gap;            int has_gap;  /* margin/margin-top/margin-bottom 非零 -> 块后多留一行；
+                                        * 这是行文本渲染器，没有真正的像素级盒模型，margin 只
+                                        * 映射成"要不要多留白"这一个二值信号，不是精确像素值 */
 } css_decl_t;
 
 #define CSS_RULE_MAX 32
@@ -3659,6 +3668,21 @@ static void css_apply_decl(css_decl_t *d, const char *prop, uint32_t plen, const
         while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
         d->scale2 = (n >= 20) || strstr(val, "large") != 0;
         d->has_scale = 1;
+    } else if (tag_ci_eq(prop, (int)plen, "background-color") || tag_ci_eq(prop, (int)plen, "background")) {
+        uint32_t c;
+        if (css_parse_color(val, &c)) { d->bg_color = c; d->has_bg = 1; }
+    } else if (tag_ci_eq(prop, (int)plen, "text-align")) {
+        int a = -1;
+        if (strstr(val, "center")) a = 1;
+        else if (strstr(val, "right")) a = 2;
+        else if (strstr(val, "left")) a = 0;
+        if (a >= 0) { d->align = a; d->has_align = 1; }
+    } else if (tag_ci_eq(prop, (int)plen, "margin") || tag_ci_eq(prop, (int)plen, "margin-top") ||
+               tag_ci_eq(prop, (int)plen, "margin-bottom")) {
+        int n = 0; const char *p = val;
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+        d->gap = (n > 0) ? 1 : 0; d->has_gap = 1;
     }
 }
 
@@ -3757,6 +3781,9 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
         if (r->decl.has_bold) { out->bold = r->decl.bold; out->has_bold = 1; }
         if (r->decl.has_underline) { out->underline = r->decl.underline; out->has_underline = 1; }
         if (r->decl.has_scale) { out->scale2 = r->decl.scale2; out->has_scale = 1; }
+        if (r->decl.has_bg) { out->bg_color = r->decl.bg_color; out->has_bg = 1; }
+        if (r->decl.has_align) { out->align = r->decl.align; out->has_align = 1; }
+        if (r->decl.has_gap) { out->gap = r->decl.gap; out->has_gap = 1; }
     }
     if (inline_style && inline_style[0]) {
         css_decl_t inl;
@@ -3765,22 +3792,31 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
         if (inl.has_bold) { out->bold = inl.bold; out->has_bold = 1; }
         if (inl.has_underline) { out->underline = inl.underline; out->has_underline = 1; }
         if (inl.has_scale) { out->scale2 = inl.scale2; out->has_scale = 1; }
+        if (inl.has_bg) { out->bg_color = inl.bg_color; out->has_bg = 1; }
+        if (inl.has_align) { out->align = inl.align; out->has_align = 1; }
+        if (inl.has_gap) { out->gap = inl.gap; out->has_gap = 1; }
     }
 }
 
 /* 把当前活跃的 link 下标 + CSS 覆盖编码成 BR_META_MARK 扩展前缀（没有
  * 覆盖也没有链接时不写这几个字节，保持零开销）。 */
 static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, const css_decl_t *ov) {
-    int has_meta = (link_idx >= 0) || (ov && (ov->has_color || ov->has_bold || ov->has_underline || ov->has_scale));
+    int has_meta = (link_idx >= 0) || (ov && (ov->has_color || ov->has_bold || ov->has_underline ||
+                                              ov->has_scale || ov->has_bg || ov->has_align || ov->has_gap));
     if (!has_meta) return;
     if (*pos + BR_META_LEN >= cap) return;
     uint8_t flags = 0;
     uint8_t r = 0, g = 0, b = 0;
+    uint8_t bg_r = 0, bg_g = 0, bg_b = 0;
     if (ov) {
         if (ov->has_color) { flags |= BR_FLAG_COLOR; r = (uint8_t)(ov->color >> 16); g = (uint8_t)(ov->color >> 8); b = (uint8_t)ov->color; }
         if (ov->has_bold && ov->bold) flags |= BR_FLAG_BOLD_ON;
         if (ov->has_underline && ov->underline) flags |= BR_FLAG_UNDER_ON;
         if (ov->has_scale && ov->scale2) flags |= BR_FLAG_SCALE2;
+        if (ov->has_bg) { flags |= BR_FLAG_BG; bg_r = (uint8_t)(ov->bg_color >> 16); bg_g = (uint8_t)(ov->bg_color >> 8); bg_b = (uint8_t)ov->bg_color; }
+        if (ov->has_align && ov->align == 1) flags |= BR_FLAG_ALIGN_CENTER;
+        if (ov->has_align && ov->align == 2) flags |= BR_FLAG_ALIGN_RIGHT;
+        if (ov->has_gap && ov->gap) flags |= BR_FLAG_EXTRA_GAP;
     }
     uint8_t link_byte = (link_idx >= 0 && link_idx < 254) ? (uint8_t)(link_idx + 1) : 0;
     out[(*pos)++] = (char)BR_META_MARK;
@@ -3789,6 +3825,9 @@ static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, c
     out[(*pos)++] = (char)g;
     out[(*pos)++] = (char)b;
     out[(*pos)++] = (char)link_byte;
+    out[(*pos)++] = (char)bg_r;
+    out[(*pos)++] = (char)bg_g;
+    out[(*pos)++] = (char)bg_b;
 }
 
 static void browser_render_from_html(gui_state_t *st, const char *html, char *out, uint32_t cap, uint32_t *out_len) {
@@ -4184,22 +4223,34 @@ typedef struct {
     int underline;
     int is_hr;
     int gap_after;   /* 块结束后追加的空行数（标题留白） */
+    int has_bg;      /* 块背景（代码块/引用块用，让它们从正文里"浮"出来） */
+    uint32_t bg_color;
+    int left_bar;    /* 左侧强调竖线（引用块用，标出"这是引用"而不是普通缩进段落） */
+    int align;       /* 0=left 1=center 2=right，CSS text-align 覆盖用 */
 } browser_style_t;
 
 static void browser_style_get(int type, browser_style_t *s) {
     uint32_t body_col = rgb(218, 230, 238);
     s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
     s->mono = 0; s->bold = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
+    s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0;
     switch (type) {
+        case BRK_P:   s->gap_after = 1; break; /* 段落之间留白——之前没有，所以文字全堆成一片 */
         case BRK_H1: s->color = rgb(255, 255, 255); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
         case BRK_H2: s->color = rgb(120, 200, 255); s->bold = 1; s->gap_after = 1; break;
-        case BRK_H3: s->color = rgb(150, 190, 225); s->bold = 1; break;
+        case BRK_H3: s->color = rgb(150, 190, 225); s->bold = 1; s->gap_after = 1; break;
         case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
         case BRK_LINK: s->color = rgb(78, 192, 236); s->underline = 1; break;
-        case BRK_CODE: s->color = rgb(150, 235, 170); s->mono = 1; break;
+        case BRK_CODE:
+            s->color = rgb(150, 235, 170); s->mono = 1; s->indent = 10;
+            s->has_bg = 1; s->bg_color = rgb(24, 30, 38); s->gap_after = 1;
+            break;
         case BRK_HR: s->is_hr = 1; break;
         case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
-        case BRK_QUOTE: s->color = rgb(150, 160, 170); s->indent = 12; break;
+        case BRK_QUOTE:
+            s->color = rgb(170, 180, 190); s->indent = 16;
+            s->has_bg = 1; s->bg_color = rgb(28, 34, 42); s->left_bar = 1; s->gap_after = 1;
+            break;
         case BRK_IMG: s->color = rgb(150, 140, 170); s->indent = 4; break;
         default: break;
     }
@@ -4258,21 +4309,33 @@ static int browser_draw_segment(int x, int w, int *cy, int row_unit, int scroll,
 
         if (row_unit >= scroll && *drawn_rows < max_lines) {
             int rowh = rh * bs.scale;
+            /* 块背景/左侧强调竖线按行画（不是先算好整块高度再画一次），因为
+             * 折行数量是边读边定的；每行背景横跨整个可用宽度，不管这一行
+             * 文字本身多长——这样代码块/引用块才有"整块从正文里浮出来"的
+             * 视觉效果，不是只有文字底下那一小条。 */
+            if (bs.has_bg) rect(x, *cy - 1, w, rowh, bs.bg_color);
+            if (bs.left_bar) rect(x, *cy - 1, 3, rowh, bs.color);
+            int line_x = text_x;
+            if (bs.align != 0 && !bs.mono) {
+                int tw = text_width(line, bs.scale);
+                if (bs.align == 1) line_x = x + (avail_w - tw) / 2 + bs.indent;
+                else line_x = x + avail_w - tw;
+            }
             if (bs.bullet && first_row)
                 text(x + bs.indent, *cy, "•", bs.color, 1);
             if (bs.mono) {
-                text_mono(text_x, *cy, text_x + avail_w, line, bs.color);
+                text_mono(line_x, *cy, line_x + avail_w, line, bs.color);
             } else {
-                if (bs.bold) text(text_x + 1, *cy, line, bs.color, bs.scale);
-                text(text_x, *cy, line, bs.color, bs.scale);
+                if (bs.bold) text(line_x + 1, *cy, line, bs.color, bs.scale);
+                text(line_x, *cy, line, bs.color, bs.scale);
                 if (bs.underline) {
                     int tw = text_width(line, bs.scale);
-                    rect(text_x, *cy + rowh - 3, tw, 1, bs.color);
+                    rect(line_x, *cy + rowh - 3, tw, 1, bs.color);
                 }
             }
             if (link_idx >= 0) {
                 int tw = text_width(line, bs.scale);
-                browser_add_link_rect(text_x, *cy, tw, rowh, link_idx);
+                browser_add_link_rect(line_x, *cy, tw, rowh, link_idx);
             }
             *cy += rowh;
             (*drawn_rows)++;
@@ -4309,6 +4372,7 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
             uint8_t flags = (uint8_t)buf[i + 1];
             uint8_t r = (uint8_t)buf[i + 2], g = (uint8_t)buf[i + 3], b = (uint8_t)buf[i + 4];
             uint8_t link_byte = (uint8_t)buf[i + 5];
+            uint8_t bg_r = (uint8_t)buf[i + 6], bg_g = (uint8_t)buf[i + 7], bg_b = (uint8_t)buf[i + 8];
             i += BR_META_LEN;
             browser_style_t bs_meta;
             browser_style_get(type, &bs_meta);
@@ -4316,6 +4380,10 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
             if (flags & BR_FLAG_BOLD_ON) bs_meta.bold = 1;
             if (flags & BR_FLAG_UNDER_ON) bs_meta.underline = 1;
             if (flags & BR_FLAG_SCALE2) bs_meta.scale = 2;
+            if (flags & BR_FLAG_BG) { bs_meta.has_bg = 1; bs_meta.bg_color = ((uint32_t)bg_r << 16) | ((uint32_t)bg_g << 8) | bg_b; }
+            if (flags & BR_FLAG_ALIGN_CENTER) bs_meta.align = 1;
+            if (flags & BR_FLAG_ALIGN_RIGHT) bs_meta.align = 2;
+            if (flags & BR_FLAG_EXTRA_GAP) bs_meta.gap_after = 1;
             if (link_byte) link_idx = link_byte - 1;
             uint32_t start = i;
             while (i < len && buf[i] != '\n') i++;
