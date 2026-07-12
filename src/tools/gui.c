@@ -4337,10 +4337,17 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
     return row_unit;
 }
 
-static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
+static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
     browser_init(st);
     int view_w = win_w - 72;
     if (view_w < 320) view_w = 320;
+    /* 内容框跟着窗口高度走，不再是固定 196px——之前窗口最大化后底下一大片
+     * 都是空的，只有顶上一小条固定区域在显示网页内容，用户反馈里点名说
+     * "浏览器做得非常不好"就是这个。74 是其它 app（比如任务管理器）也在用
+     * 的窗口顶部/底部固定内边距（ty 相对 win_y 的 42px 偏移 + 32px 底部
+     * 留白），content_box_h 再减去内容框起始点相对 ty 的 146px 偏移。 */
+    int content_box_h = win_h - 74 - 146;
+    if (content_box_h < 80) content_box_h = 80;
     const net_device_t *dev = net_primary();
     char ipbuf[16];
     net_ipv4_to_str(dev->ip, ipbuf);
@@ -4385,14 +4392,15 @@ static void draw_browser_app(int tx, int ty, int win_w, gui_state_t *st) {
     append_str(line, sizeof(line), &pos, st->status ? st->status : "浏览器就绪");
     text_clipped(tx, ty + 136, tx + view_w - 8, line, rgb(168, 190, 204), 1);
     /* 内容区：先画，若发现滚动越过末尾则钳回并重画一遍（含背景）。 */
+    int inner_h = content_box_h - 24;
     for (int pass = 0; pass < 2; pass++) {
-        rect(tx, ty + 146, view_w, 196, rgb(4, 9, 14));
-        border(tx, ty + 146, view_w, 196, rgb(50, 74, 90));
-        int total = draw_rendered_page(tx + 12, ty + 158, view_w - 24, 172,
+        rect(tx, ty + 146, view_w, content_box_h, rgb(4, 9, 14));
+        border(tx, ty + 146, view_w, content_box_h, rgb(50, 74, 90));
+        int total = draw_rendered_page(tx + 12, ty + 158, view_w - 24, inner_h,
                                        st->browser_render, st->browser_render_len,
                                        st->browser_scroll);
         int rh = gui_font_line_height() + 3;
-        int max_scroll = total - 172 / rh;
+        int max_scroll = total - inner_h / rh;
         if (max_scroll < 0) max_scroll = 0;
         if (st->browser_scroll <= max_scroll) break;
         st->browser_scroll = max_scroll;
@@ -4469,7 +4477,7 @@ static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state
     if (mode == GUI_APP_NOTES) draw_notes_app(tx, ty, win_w, st);
     else if (mode == GUI_APP_UWC) draw_uwc_app(tx, ty, st);
     else if (mode == GUI_APP_SNAKE) draw_snake_app(tx, ty, st);
-    else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, st);
+    else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, win_h, st);
     else if (mode == GUI_APP_CODE) draw_code_app(tx, ty, win_w, win_h, st);
     else if (mode == GUI_APP_DIAG) draw_diag_app(tx, ty, win_w, win_h, st);
 }
@@ -6617,16 +6625,25 @@ static void draw_splash_window(int w, int h, int ticks, int light) {
     text(sx + 18, sy + sh - 16, "点击任意位置进入桌面", scol, 1);
 }
 
-/* Win11 风格 toast 通知：右下角浮窗，自右滑入，定时淡出（由 toast_ticks 驱动） */
-static void draw_toast(int w, int h, gui_state_t *st) {
-    if (st->toast_ticks <= 0 || !st->toast_msg[0]) return;
-    int light = st->theme_light;
+/* toast 静止位置的几何（宽度随消息文字变化，位置固定在右下角），供
+ * draw_toast 和调用方算脏矩形共用，避免两边算法不小心画不一致。 */
+static void toast_metrics(int w, int h, gui_state_t *st, int *out_x, int *out_y, int *out_w, int *out_h) {
     int tw = text_width(st->toast_msg, 1);
     int bw = tw + ui_s(36);
     if (bw < ui_s(200)) bw = ui_s(200);
     int bh = ui_s(56);
-    int bx = w - bw - ui_s(20);
-    int by = h - TASKBAR_H - bh - ui_s(16);
+    *out_x = w - bw - ui_s(20);
+    *out_y = h - TASKBAR_H - bh - ui_s(16);
+    *out_w = bw;
+    *out_h = bh;
+}
+
+/* Win11 风格 toast 通知：右下角浮窗，自右滑入，定时淡出（由 toast_ticks 驱动） */
+static void draw_toast(int w, int h, gui_state_t *st) {
+    if (st->toast_ticks <= 0 || !st->toast_msg[0]) return;
+    int light = st->theme_light;
+    int bx, by, bw, bh;
+    toast_metrics(w, h, st, &bx, &by, &bw, &bh);
 
     /* 进场：前 8 帧自右滑入 */
     int appear = TOAST_TICKS - st->toast_ticks;
@@ -7545,14 +7562,24 @@ static void cmd_gui(int argc, char **argv) {
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
+        /* splash/toast 之前每帧都 gui_dirty_mark_full()（整屏重绘），和上面
+         * 任务栏时钟注释里说的是同一类问题——欢迎窗口显示的那 90 帧、每条
+         * 通知显示的那几秒，整屏重绘的开销让 GUI 明显发卡（用户实测反馈：
+         * "显示通知浮窗和欢迎界面没消失时特别卡"）。这两个浮层的绘制区域
+         * 都是已知的固定矩形（splash 屏幕居中定长；toast 右下角，宽度随
+         * 消息文字变、滑入动画只会让它更靠右），改成只标记这块区域，不用
+         * 每帧都重画整个桌面+所有窗口。 */
         if (st.splash_ticks > 0) {
             st.splash_ticks--;
-            gui_dirty_mark_full();
+            int sw = ui_s(440), sh = ui_s(208);
+            gui_damage_region((w - sw) / 2, (h - sh) / 2, sw, sh, w, h);
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (st.toast_ticks > 0) {
             st.toast_ticks--;
-            gui_dirty_mark_full();
+            int tx, ty, tw2, th2;
+            toast_metrics(w, h, &st, &tx, &ty, &tw2, &th2);
+            gui_damage_region(tx, ty, tw2 + 8 * 14, th2, w, h); /* +滑入动画最大右侧偏移 */
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         /* 任务栏时钟只在重绘时刷新；若没有输入/动画驱动重绘（长时间静置桌面），
