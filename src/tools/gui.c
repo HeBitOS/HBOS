@@ -4154,12 +4154,22 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
             if (dec) { ch = dec; i += consumed; }
         }
         if (ch == '\r') continue;
-        if (ch == '\n' || ch == '\t') ch = ' ';
-        if (ch == ' ') {
-            if (space) continue;
-            space = 1;
-        } else {
+        if (cur_style == BRK_CODE) {
+            /* <pre>/<code> 里之前跟其它文字一样把换行/连续空格全折叠掉，
+             * 多行代码块被压成一整行、缩进也没了，代码块比没有语法高亮
+             * 更严重的问题其实是这个。保留真实换行（另起一个 BRK_CODE 块）
+             * 和每一个空格（不折叠）。 */
+            if (ch == '\n') { BRFLUSH(); continue; }
+            if (ch == '\t') ch = ' ';
             space = 0;
+        } else {
+            if (ch == '\n' || ch == '\t') ch = ' ';
+            if (ch == ' ') {
+                if (space) continue;
+                space = 1;
+            } else {
+                space = 0;
+            }
         }
         if (in_cell) {
             if (row_buf_len + 1 < sizeof(row_buf)) row_buf[row_buf_len++] = ch;
