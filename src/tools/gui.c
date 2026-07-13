@@ -3448,6 +3448,41 @@ static const char *http_body_ptr(const char *buf) {
     return p ? p + 4 : buf;
 }
 
+/* 常见 HTML 实体解码成单个字符——共用给 browser_text_from_html（纯文本
+ * 版，供保存网页）和 browser_render_from_html（带样式渲染版）两处，之前
+ * 各自维护一份不同的小子集（一个只认 &amp;/&lt;/&gt;，另一个多认
+ * &nbsp;/&quot;），现在统一成一份、认得更多真实页面常用的实体。返回 0
+ * 表示不认识，*consumed 是除了开头 '&' 之外还要跳过的字节数（调用方
+ * 自己会额外 +1 算上 '&' 本身）。没有对应字形的符号类实体（版权号/
+ * 注册商标/商标）退化成字母近似，好过完全丢字符或者显示乱码——这是
+ * 位图字体渲染器，不是每个 Unicode 符号都有字形。数字实体 &#NNN;
+ * 只在落在可打印 ASCII 范围内才解码，避免把这个字体渲染不出来的
+ * 字符实体解码成乱码。 */
+static char br_decode_entity(const char *p, uint32_t *consumed) {
+    *consumed = 0;
+    if (strncmp(p, "&amp;", 5) == 0)   { *consumed = 4; return '&'; }
+    if (strncmp(p, "&lt;", 4) == 0)    { *consumed = 3; return '<'; }
+    if (strncmp(p, "&gt;", 4) == 0)    { *consumed = 3; return '>'; }
+    if (strncmp(p, "&quot;", 6) == 0)  { *consumed = 5; return '"'; }
+    if (strncmp(p, "&apos;", 6) == 0)  { *consumed = 5; return '\''; }
+    if (strncmp(p, "&nbsp;", 6) == 0)  { *consumed = 5; return ' '; }
+    if (strncmp(p, "&mdash;", 7) == 0) { *consumed = 6; return '-'; }
+    if (strncmp(p, "&ndash;", 7) == 0) { *consumed = 6; return '-'; }
+    if (strncmp(p, "&hellip;", 8) == 0){ *consumed = 7; return '.'; }
+    if (strncmp(p, "&copy;", 6) == 0)  { *consumed = 5; return 'C'; }
+    if (strncmp(p, "&reg;", 5) == 0)   { *consumed = 4; return 'R'; }
+    if (strncmp(p, "&trade;", 7) == 0) { *consumed = 6; return 'T'; }
+    if (p[1] == '#' && p[2] >= '0' && p[2] <= '9') {
+        uint32_t k = 2, val = 0;
+        while (p[k] >= '0' && p[k] <= '9' && val < 0x110000) { val = val * 10 + (uint32_t)(p[k] - '0'); k++; }
+        if (p[k] == ';' && val >= 32 && val < 127) {
+            *consumed = k;
+            return (char)val;
+        }
+    }
+    return 0;
+}
+
 static void browser_text_from_html(const char *html, char *out, uint32_t cap, uint32_t *out_len) {
     uint32_t pos = 0;
     int tag = 0;
@@ -3467,9 +3502,9 @@ static void browser_text_from_html(const char *html, char *out, uint32_t cap, ui
             continue;
         }
         if (c == '&') {
-            if (strncmp(html + i, "&amp;", 5) == 0) { c = '&'; i += 4; }
-            else if (strncmp(html + i, "&lt;", 4) == 0) { c = '<'; i += 3; }
-            else if (strncmp(html + i, "&gt;", 4) == 0) { c = '>'; i += 3; }
+            uint32_t consumed;
+            char dec = br_decode_entity(html + i, &consumed);
+            if (dec) { c = dec; i += consumed; }
         }
         if (c == '\r') continue;
         if (c == '\n' || c == '\t') c = ' ';
@@ -3500,6 +3535,9 @@ enum {
     BRK_STRONG = '8',
     BRK_QUOTE  = '9',
     BRK_IMG    = 'i',
+    BRK_LI_NUM = 'n', /* <ol> 里的 <li>：编号是当普通文字写进去的（"1. "），
+                        * 不是靠 browser_style_get 的 bullet 标志画点——所以
+                        * 这个类型不带 bullet，缩进倒是跟 BRK_LI 一样 */
 };
 #define BR_STACK_MAX 8
 
@@ -3830,6 +3868,12 @@ static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, c
     out[(*pos)++] = (char)bg_b;
 }
 
+/* <title> 内容——被 skip_mode 捕获，不进正文渲染流；供窗口标题栏用
+ * （见 draw_browser_app 里的 wm_set_app_title 调用）。 */
+#define BROWSER_TITLE_CAP 64
+static char g_browser_page_title[BROWSER_TITLE_CAP];
+static uint32_t g_browser_title_len;
+
 static void browser_render_from_html(gui_state_t *st, const char *html, char *out, uint32_t cap, uint32_t *out_len) {
     uint32_t pos = 0;
     int space = 1;
@@ -3845,11 +3889,29 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     int skip_mode = 0;
     const char *skip_close = "";
     int in_style_block = 0;
+    int in_title_block = 0;
     static char style_buf[4096];
     uint32_t style_buf_len = 0;
+    /* 表格：不做真正的列宽计算/对齐（这是行文本渲染器，没有真正的表格
+     * 布局引擎），把一整行 <tr> 的所有单元格文字用 " | " 接起来，当一个
+     * 普通块输出——至少内容和行结构保住了，不是把表格内容打散丢进正文
+     * 里变成读不懂的一堆字。<th> 所在行整行加粗，近似"表头"视觉效果。 */
+    int in_row = 0;
+    int in_cell = 0;
+    int row_has_th = 0;
+    static char row_buf[512];
+    uint32_t row_buf_len = 0;
+    /* 有序列表编号：只跟踪一层（不是真正的嵌套计数器栈），<ol> 套 <ul>
+     * 套 <ol> 这种深嵌套的编号可能不完全准确，对这个渲染器的定位来说
+     * 是可以接受的简化。 */
+    int in_ordered_list = 0;
+    int li_number = 0;
 
     g_css_rule_count = 0;
     st->browser_link_count = 0;
+
+    g_browser_page_title[0] = 0;
+    g_browser_title_len = 0;
 
 #define BREMIT(c) do { if (pos + 1 < cap) out[pos++] = (char)(c); } while (0)
 #define BRFLUSH() do { if (!space) { BREMIT('\n'); space = 1; need_prefix = 1; } } while (0)
@@ -3870,10 +3932,17 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                         css_parse_stylesheet(style_buf, style_buf_len);
                         in_style_block = 0;
                     }
+                    if (in_title_block) {
+                        g_browser_page_title[g_browser_title_len] = 0;
+                        in_title_block = 0;
+                    }
                     continue;
                 }
             }
             if (in_style_block && style_buf_len + 1 < sizeof(style_buf)) style_buf[style_buf_len++] = c;
+            if (in_title_block && g_browser_title_len + 1 < sizeof(g_browser_page_title) &&
+                c != '\r' && c != '\n')
+                g_browser_page_title[g_browser_title_len++] = (c == '\t') ? ' ' : c;
             continue;
         }
 
@@ -3900,6 +3969,15 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 BRFLUSH();
                 skip_mode = 1; in_style_block = 1; style_buf_len = 0;
                 skip_close = "style";
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "title")) {
+                /* <title> 之前完全没被特殊处理，内容会直接混进正文渲染出来
+                 * （网页标题变成页面第一行文字）；现在跟 script/style 一样
+                 * 跳过不渲染，顺便捕获下来给窗口标题栏用。 */
+                skip_mode = 1; in_title_block = 1; g_browser_title_len = 0;
+                skip_close = "title";
                 i = j;
                 continue;
             }
@@ -3932,6 +4010,79 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 for (uint32_t k = 0; label[k] && pos + 1 < cap; k++) BREMIT(label[k]);
                 BREMIT('\n');
                 need_prefix = 1; space = 1;
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "tr")) {
+                BRFLUSH();
+                in_row = 1; in_cell = 0; row_has_th = 0; row_buf_len = 0;
+                i = j;
+                continue;
+            }
+            if (closing && tag_ci_eq(nm, nl, "tr")) {
+                if (in_row) {
+                    row_buf[row_buf_len < sizeof(row_buf) ? row_buf_len : sizeof(row_buf) - 1] = 0;
+                    if (row_buf_len > 0) {
+                        BREMIT(BRK_P);
+                        css_decl_t row_ov;
+                        memset(&row_ov, 0, sizeof(row_ov));
+                        if (row_has_th) { row_ov.bold = 1; row_ov.has_bold = 1; }
+                        br_emit_meta(out, cap, &pos, -1, &row_ov);
+                        for (uint32_t k = 0; k < row_buf_len && pos + 1 < cap; k++) BREMIT(row_buf[k]);
+                        BREMIT('\n');
+                        need_prefix = 1; space = 1;
+                    }
+                    in_row = 0; in_cell = 0;
+                }
+                i = j;
+                continue;
+            }
+            if (!closing && (tag_ci_eq(nm, nl, "td") || tag_ci_eq(nm, nl, "th"))) {
+                if (in_row) {
+                    if (row_buf_len > 0 && row_buf_len + 3 < sizeof(row_buf)) {
+                        row_buf[row_buf_len++] = ' '; row_buf[row_buf_len++] = '|'; row_buf[row_buf_len++] = ' ';
+                    }
+                    in_cell = 1;
+                    if (tag_ci_eq(nm, nl, "th")) row_has_th = 1;
+                }
+                i = j;
+                continue;
+            }
+            if (closing && (tag_ci_eq(nm, nl, "td") || tag_ci_eq(nm, nl, "th"))) {
+                in_cell = 0;
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "ol")) {
+                in_ordered_list = 1; li_number = 0;
+                i = j;
+                continue;
+            }
+            if (closing && tag_ci_eq(nm, nl, "ol")) {
+                in_ordered_list = 0;
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "ul")) {
+                in_ordered_list = 0; /* <ol> 套 <ul> 时切回项目符号 */
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "li") && in_ordered_list) {
+                BRFLUSH();
+                li_number++;
+                BREMIT(BRK_LI_NUM);
+                char numbuf[8];
+                int nn = 0;
+                char tmp[8]; int tn = 0; int v = li_number;
+                while (v > 0) { tmp[tn++] = (char)('0' + v % 10); v /= 10; }
+                if (tn == 0) tmp[tn++] = '0';
+                while (tn > 0) numbuf[nn++] = tmp[--tn];
+                numbuf[nn++] = '.'; numbuf[nn++] = ' ';
+                for (int k = 0; k < nn && pos + 1 < cap; k++) BREMIT(numbuf[k]);
+                space = 0; need_prefix = 0;
+                cur_style = BRK_LI_NUM; cur_link_idx = -1;
+                memset(&cur_override, 0, sizeof(cur_override));
                 i = j;
                 continue;
             }
@@ -3998,11 +4149,9 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
 
         char ch = c;
         if (ch == '&') {
-            if (strncmp(html + i, "&amp;", 5) == 0) { ch = '&'; i += 4; }
-            else if (strncmp(html + i, "&lt;", 4) == 0) { ch = '<'; i += 3; }
-            else if (strncmp(html + i, "&gt;", 4) == 0) { ch = '>'; i += 3; }
-            else if (strncmp(html + i, "&nbsp;", 6) == 0) { ch = ' '; i += 5; }
-            else if (strncmp(html + i, "&quot;", 6) == 0) { ch = '"'; i += 5; }
+            uint32_t consumed;
+            char dec = br_decode_entity(html + i, &consumed);
+            if (dec) { ch = dec; i += consumed; }
         }
         if (ch == '\r') continue;
         if (ch == '\n' || ch == '\t') ch = ' ';
@@ -4012,8 +4161,14 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
         } else {
             space = 0;
         }
-        if (need_prefix) { BREMIT(cur_style); BRMETA(); need_prefix = 0; }
-        BREMIT(ch);
+        if (in_cell) {
+            if (row_buf_len + 1 < sizeof(row_buf)) row_buf[row_buf_len++] = ch;
+        } else if (!in_row) {
+            /* in_row 但不在任何 <td>/<th> 里的杂散文字（格式不太规范的表格
+             * 常见）直接丢弃，不然会混进正常文档流里，位置很怪 */
+            if (need_prefix) { BREMIT(cur_style); BRMETA(); need_prefix = 0; }
+            BREMIT(ch);
+        }
     }
     BRFLUSH();
     out[pos < cap ? pos : cap - 1] = 0;
@@ -4118,6 +4273,17 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     if (!https || strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
         st->status = "浏览器加载完成";
     if (push_history) browser_hist_push(st, st->browser_url);
+    /* <title> 抓到了就用它做窗口标题（"浏览器 - 页面标题"），跟真实浏览器
+     * 标题栏/标签页显示网页标题一样；没有 <title> 就保持默认的"浏览器"。 */
+    if (g_browser_page_title[0]) {
+        static char win_title[BROWSER_TITLE_CAP + 16];
+        uint32_t ap = 0;
+        append_str(win_title, sizeof(win_title), &ap, "浏览器 - ");
+        append_str(win_title, sizeof(win_title), &ap, g_browser_page_title);
+        wm_set_app_title(GUI_APP_BROWSER, win_title);
+    } else {
+        wm_set_app_title(GUI_APP_BROWSER, "浏览器");
+    }
 }
 
 static void browser_load(gui_state_t *st) {
@@ -4240,6 +4406,7 @@ static void browser_style_get(int type, browser_style_t *s) {
         case BRK_H2: s->color = rgb(120, 200, 255); s->bold = 1; s->gap_after = 1; break;
         case BRK_H3: s->color = rgb(150, 190, 225); s->bold = 1; s->gap_after = 1; break;
         case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
+        case BRK_LI_NUM: s->color = body_col; s->indent = 16; break;
         case BRK_LINK: s->color = rgb(78, 192, 236); s->underline = 1; break;
         case BRK_CODE:
             s->color = rgb(150, 235, 170); s->mono = 1; s->indent = 10;
