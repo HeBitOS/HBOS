@@ -3548,6 +3548,10 @@ enum {
     BRK_EM     = 'e', /* <em>/<i>：假斜体，见 g_text_italic */
     BRK_DT     = 'd', /* <dt>：术语，加粗 */
     BRK_DD     = 'D', /* <dd>：释义，缩进 */
+    BRK_TROW   = 'r', /* 表格行：单元格文本用 BR_CELL_MARK 分隔，绘制端跨
+                        * 连续 BRK_TROW 块统一算列宽后按列对齐（见
+                        * br_table_scan/br_draw_table_row），<th> 行 meta
+                        * 带加粗标志当表头画 */
     BRK_LI_NUM = 'n', /* <ol> 里的 <li>：编号是当普通文字写进去的（"1. "），
                         * 不是靠 browser_style_get 的 bullet 标志画点——所以
                         * 这个类型不带 bullet，缩进倒是跟 BRK_LI 一样 */
@@ -3579,6 +3583,11 @@ enum {
  * 一行，是"看起来完全不像浏览器"的最大单一原因。 */
 #define BR_RUN_MARK 0x02
 #define BR_RUN_MAX  16
+
+/* 表格单元格分隔字节（BRK_TROW 块内），以及列数上限（超出的单元格并进
+ * 最后一列）。正文里的原始控制字节在发射端就被过滤，不会撞车。 */
+#define BR_CELL_MARK 0x03
+#define BR_TBL_COLS  8
 
 static int br_is_inline_type(int t) {
     return t == BRK_LINK || t == BRK_STRONG || t == BRK_EM;
@@ -4129,7 +4138,7 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 if (in_row) {
                     row_buf[row_buf_len < sizeof(row_buf) ? row_buf_len : sizeof(row_buf) - 1] = 0;
                     if (row_buf_len > 0) {
-                        BREMIT(BRK_P);
+                        BREMIT(BRK_TROW);
                         css_decl_t row_ov;
                         memset(&row_ov, 0, sizeof(row_ov));
                         if (row_has_th) { row_ov.bold = 1; row_ov.has_bold = 1; }
@@ -4145,9 +4154,8 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
             }
             if (!closing && (tag_ci_eq(nm, nl, "td") || tag_ci_eq(nm, nl, "th"))) {
                 if (in_row) {
-                    if (row_buf_len > 0 && row_buf_len + 3 < sizeof(row_buf)) {
-                        row_buf[row_buf_len++] = ' '; row_buf[row_buf_len++] = '|'; row_buf[row_buf_len++] = ' ';
-                    }
+                    if (row_buf_len > 0 && row_buf_len + 1 < sizeof(row_buf))
+                        row_buf[row_buf_len++] = (char)BR_CELL_MARK;
                     in_cell = 1;
                     if (tag_ci_eq(nm, nl, "th")) row_has_th = 1;
                 }
@@ -4795,6 +4803,108 @@ static int browser_flow_block(int x, int w, int *cy, int row_unit, int scroll, i
 #undef BRF_ROW_END
 }
 
+/* 取 BRK_TROW 行文本里第 col 个单元格（BR_CELL_MARK 分隔）；最后一列
+ * 把超出列数上限的分隔符当空格吞掉，内容不丢。返回字节长度。 */
+static uint32_t br_table_cell(const char *buf, uint32_t start, uint32_t seg_len, int col,
+                              char *out, uint32_t out_cap) {
+    uint32_t p = start, end = start + seg_len;
+    int c = 0;
+    while (p < end && c < col) {
+        if ((unsigned char)buf[p] == BR_CELL_MARK) c++;
+        p++;
+    }
+    if (c < col) { out[0] = 0; return 0; }
+    uint32_t n = 0;
+    int merge_rest = (col == BR_TBL_COLS - 1);
+    while (p < end && n + 1 < out_cap) {
+        if ((unsigned char)buf[p] == BR_CELL_MARK) {
+            if (!merge_rest) break;
+            out[n++] = ' ';
+            p++;
+            continue;
+        }
+        out[n++] = buf[p++];
+    }
+    out[n] = 0;
+    return n;
+}
+
+/* 跨连续 BRK_TROW 块统一计算列宽：每列取所有行里最宽的单元格 + 内边距，
+ * 总宽超出可用宽度时按比例压缩（列内文字由 text_clipped 截断）。这是
+ * "真正的表格列对齐"的核心——单看一行不可能知道别的行有多宽。 */
+static void br_table_scan(const char *buf, uint32_t len, uint32_t pos, int avail_w,
+                          int *col_w, int *ncols_out) {
+    for (int c = 0; c < BR_TBL_COLS; c++) col_w[c] = 0;
+    int ncols = 0;
+    char cell[96];
+    while (pos < len && (unsigned char)buf[pos] == BRK_TROW) {
+        pos++;
+        browser_style_t dummy; int li;
+        pos = br_read_style(buf, len, pos, BRK_TROW, &dummy, &li);
+        uint32_t start = pos;
+        while (pos < len && buf[pos] != '\n') pos++;
+        uint32_t seg_len = pos - start;
+        if (pos < len) pos++;
+        for (int c = 0; c < BR_TBL_COLS; c++) {
+            uint32_t n = br_table_cell(buf, start, seg_len, c, cell, sizeof(cell));
+            if (!n && c > 0) break;
+            int w = text_width(cell, 1) + 14;
+            if (w > col_w[c]) col_w[c] = w;
+            if (c + 1 > ncols) ncols = c + 1;
+        }
+    }
+    if (ncols < 1) ncols = 1;
+    int total = 0;
+    for (int c = 0; c < ncols; c++) total += col_w[c];
+    if (total > avail_w && total > 0) {
+        for (int c = 0; c < ncols; c++) {
+            col_w[c] = col_w[c] * avail_w / total;
+            if (col_w[c] < 36) col_w[c] = 36;
+        }
+    }
+    *ncols_out = ncols;
+}
+
+/* 画一个表格行：单元格按列起点对齐（text_clipped 截断超宽内容）、列间
+ * 细竖线、行下横线；表头行（meta 加粗）加底纹。 */
+static int br_draw_table_row(int x, int *cy, int row_unit, int scroll, int max_lines,
+                             int *drawn_rows, const char *buf, uint32_t start, uint32_t seg_len,
+                             const browser_style_t *bs, const int *col_w, int ncols,
+                             int last_row) {
+    int rh = gui_font_line_height() + 3;
+    int total_w = 0;
+    for (int c = 0; c < ncols; c++) total_w += col_w[c];
+    if (row_unit >= scroll && *drawn_rows < max_lines) {
+        uint32_t grid_col = rgb(58, 74, 90);
+        if (bs->bold) rect(x, *cy - 1, total_w, rh, rgb(34, 44, 56));
+        int cx = x;
+        char cell[128];
+        for (int c = 0; c < ncols; c++) {
+            uint32_t n = br_table_cell(buf, start, seg_len, c, cell, sizeof(cell));
+            if (n) {
+                int clip_r = cx + col_w[c] - 6;
+                if (bs->bold) text_clipped(cx + 7, *cy, clip_r, cell, bs->color, 1);
+                text_clipped(cx + 6, *cy, clip_r, cell, bs->color, 1);
+            }
+            if (c > 0) rect(cx, *cy - 1, 1, rh, grid_col);
+            cx += col_w[c];
+        }
+        rect(x, *cy - 1, 1, rh, grid_col);
+        rect(cx, *cy - 1, 1, rh, grid_col);
+        rect(x, *cy + rh - 1, total_w + 1, 1, grid_col);
+        if (row_unit == scroll || *drawn_rows == 0)
+            rect(x, *cy - 1, total_w + 1, 1, grid_col);
+        *cy += rh;
+        (*drawn_rows)++;
+    }
+    row_unit++;
+    if (last_row) { /* 表格结束后留一行空隙，和段落间距一致 */
+        if (row_unit >= scroll && *drawn_rows < max_lines) { *cy += rh; (*drawn_rows)++; }
+        row_unit++;
+    }
+    return row_unit;
+}
+
 // 按块类型渲染标记流（见 browser_render_from_html）：标题更大更亮、链接带
 // 下划线、列表带圆点、代码用等宽字体、<hr> 画分隔线——而非纯文本平铺。
 // 先把一个块解成运行数组（[type][meta?] 文本 { 0x02 [type][meta?] 文本 }*），
@@ -4811,7 +4921,10 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
     int drawn_rows = 0;
     int cy = y;
     uint32_t i = 0;
+    int tbl_active = 0, tbl_ncols = 0;
+    int tbl_col_w[BR_TBL_COLS];
     while (i < len) {
+        uint32_t blk_pos = i;
         int type = (unsigned char)buf[i++];
         br_run_t runs[BR_RUN_MAX];
         int nrun = 1;
@@ -4836,6 +4949,19 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
          * 变成隔行双倍行距、背景条也断开。 */
         if (type == BRK_CODE && i < len && (unsigned char)buf[i] == BRK_CODE)
             for (int r = 0; r < nrun; r++) runs[r].bs.gap_after = 0;
+        if (type == BRK_TROW) {
+            /* 表格：第一行时向前扫完整张表算列宽，之后每行按列对齐画 */
+            if (!tbl_active) {
+                br_table_scan(buf, len, blk_pos, w - 10, tbl_col_w, &tbl_ncols);
+                tbl_active = 1;
+            }
+            int last_row = !(i < len && (unsigned char)buf[i] == BRK_TROW);
+            row_unit = br_draw_table_row(x, &cy, row_unit, scroll, max_lines, &drawn_rows,
+                                         buf, runs[0].start, runs[0].len, &runs[0].bs,
+                                         tbl_col_w, tbl_ncols, last_row);
+            if (last_row) tbl_active = 0;
+            continue;
+        }
         if (runs[0].bs.is_hr || runs[0].bs.mono || (nrun == 1 && runs[0].bs.align != 0)) {
             for (int r = 0; r < nrun; r++)
                 row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines, &drawn_rows,
