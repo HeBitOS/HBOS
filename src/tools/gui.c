@@ -336,6 +336,11 @@ static uint32_t g_gui_surface_pitch = 0;
 static int g_gui_surface_w = 0;
 static int g_gui_surface_h = 0;
 static uint8_t g_layer_opacity = 255;
+/* 假斜体：没有真正的斜体字形数据，靠 blit_glyph 逐行加一点递减的水平位移
+ * 模拟倾斜（顶部偏右、底部不动），跟粗体的"描边两次"是同一类"没有字形
+ * 数据就用像素技巧凑"的思路。只在 <em>/<i> 或 font-style:italic 命中时
+ * 临时置 1，画完立刻复位，不影响其余所有 text() 调用者。 */
+static int g_text_italic = 0;
 
 /* ── Script GUI hooks (defined after text()/key_poll()) ─────── */
 static const fb_info_t *g_script_fb;
@@ -677,11 +682,14 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
         if (cx >= g_gui_surface_w || cy >= g_gui_surface_h) return;
         if (cx + cw > g_gui_surface_w) cw = g_gui_surface_w - cx;
         if (cy + ch > g_gui_surface_h) ch = g_gui_surface_h - cy;
+        int italic_max = (g_text_italic && dh > 1) ? scale : 0;
         for (int yy = 0; yy < ch; yy++) {
             int sy = (off_y + yy) / scale;
             const uint8_t *cov_row = g->coverage + (uint32_t)sy * width;
             uint32_t *row = g_gui_surface +
                             (uint32_t)(cy + yy) * g_gui_surface_pitch + (uint32_t)cx;
+            /* 顶部行（yy 小）位移最大，底部行位移为 0——字形看起来往右上方倾斜。 */
+            int shift = italic_max ? (int)((int64_t)(dh - 1 - (off_y + yy)) * italic_max / (dh - 1)) : 0;
             for (int xx = 0; xx < cw; xx++) {
                 uint32_t cov = smooth
                     ? cov_bilinear(g->coverage, width, g->height,
@@ -690,7 +698,9 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
                 if (cov == 0) continue;
                 uint32_t a = cov * fg_a / 255;
                 if (a == 0) continue;
-                uint32_t dst = row[xx];
+                int dxx = xx + shift;
+                if (dxx < 0 || cx + dxx >= g_gui_surface_w) continue;
+                uint32_t dst = row[dxx];
                 uint32_t inv = 255 - a;
                 uint32_t dr = (dst >> 16) & 0xFF;
                 uint32_t dg = (dst >> 8) & 0xFF;
@@ -698,7 +708,7 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
                 uint32_t out_r = (src_r * a + dr * inv) / 255;
                 uint32_t out_g = (src_g * a + dg * inv) / 255;
                 uint32_t out_b = (src_b * a + db * inv) / 255;
-                row[xx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+                row[dxx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
             }
         }
         return;
@@ -3535,6 +3545,7 @@ enum {
     BRK_STRONG = '8',
     BRK_QUOTE  = '9',
     BRK_IMG    = 'i',
+    BRK_EM     = 'e', /* <em>/<i>：假斜体，见 g_text_italic */
     BRK_LI_NUM = 'n', /* <ol> 里的 <li>：编号是当普通文字写进去的（"1. "），
                         * 不是靠 browser_style_get 的 bullet 标志画点——所以
                         * 这个类型不带 bullet，缩进倒是跟 BRK_LI 一样 */
@@ -3547,7 +3558,7 @@ enum {
  * 样式（browser_style_get）上打补丁。选这个方案是因为链接/CSS 覆盖只
  * 影响少数块，不值得把整条流都改成变长记录格式。 */
 #define BR_META_MARK 0x01
-#define BR_META_LEN  9 /* mark + flags + r + g + b + link_idx_plus1 + bg_r + bg_g + bg_b */
+#define BR_META_LEN  10 /* mark + flags + r + g + b + link_idx_plus1 + bg_r + bg_g + bg_b + flags2 */
 #define BR_FLAG_COLOR        0x01
 #define BR_FLAG_BOLD_ON      0x02
 #define BR_FLAG_UNDER_ON     0x04
@@ -3556,6 +3567,8 @@ enum {
 #define BR_FLAG_ALIGN_CENTER 0x20
 #define BR_FLAG_ALIGN_RIGHT  0x40
 #define BR_FLAG_EXTRA_GAP    0x80
+/* flags 字节 8 位已经用满，斜体单独开第二个 flags 字节。 */
+#define BR_FLAG2_ITALIC_ON   0x01
 
 static int tag_ci_eq(const char *name, int len, const char *lit) {
     int i = 0;
@@ -3574,6 +3587,7 @@ static int browser_style_for_tag(const char *name, int len) {
     if (tag_ci_eq(name, len, "li")) return BRK_LI;
     if (tag_ci_eq(name, len, "a")) return BRK_LINK;
     if (tag_ci_eq(name, len, "strong") || tag_ci_eq(name, len, "b")) return BRK_STRONG;
+    if (tag_ci_eq(name, len, "em") || tag_ci_eq(name, len, "i")) return BRK_EM;
     if (tag_ci_eq(name, len, "pre") || tag_ci_eq(name, len, "code")) return BRK_CODE;
     if (tag_ci_eq(name, len, "blockquote")) return BRK_QUOTE;
     if (tag_ci_eq(name, len, "img")) return BRK_IMG;
@@ -3621,6 +3635,7 @@ static int br_attr_value(const char *tag, uint32_t tag_len, const char *name,
 typedef struct {
     uint32_t color; int has_color;
     int bold;        int has_bold;
+    int italic;      int has_italic;
     int underline;   int has_underline;
     int scale2;       int has_scale;
     uint32_t bg_color; int has_bg;
@@ -3698,6 +3713,9 @@ static void css_apply_decl(css_decl_t *d, const char *prop, uint32_t plen, const
             break;
         }
         d->bold = is_bold; d->has_bold = 1;
+    } else if (tag_ci_eq(prop, (int)plen, "font-style")) {
+        d->italic = (strstr(val, "italic") != 0) || (strstr(val, "oblique") != 0);
+        d->has_italic = 1;
     } else if (tag_ci_eq(prop, (int)plen, "text-decoration")) {
         d->underline = (strstr(val, "underline") != 0);
         d->has_underline = 1;
@@ -3817,6 +3835,7 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
         if (!match) continue;
         if (r->decl.has_color) { out->color = r->decl.color; out->has_color = 1; }
         if (r->decl.has_bold) { out->bold = r->decl.bold; out->has_bold = 1; }
+        if (r->decl.has_italic) { out->italic = r->decl.italic; out->has_italic = 1; }
         if (r->decl.has_underline) { out->underline = r->decl.underline; out->has_underline = 1; }
         if (r->decl.has_scale) { out->scale2 = r->decl.scale2; out->has_scale = 1; }
         if (r->decl.has_bg) { out->bg_color = r->decl.bg_color; out->has_bg = 1; }
@@ -3828,6 +3847,7 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
         css_parse_decls(&inl, inline_style, (uint32_t)strlen(inline_style));
         if (inl.has_color) { out->color = inl.color; out->has_color = 1; }
         if (inl.has_bold) { out->bold = inl.bold; out->has_bold = 1; }
+        if (inl.has_italic) { out->italic = inl.italic; out->has_italic = 1; }
         if (inl.has_underline) { out->underline = inl.underline; out->has_underline = 1; }
         if (inl.has_scale) { out->scale2 = inl.scale2; out->has_scale = 1; }
         if (inl.has_bg) { out->bg_color = inl.bg_color; out->has_bg = 1; }
@@ -3839,16 +3859,18 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
 /* 把当前活跃的 link 下标 + CSS 覆盖编码成 BR_META_MARK 扩展前缀（没有
  * 覆盖也没有链接时不写这几个字节，保持零开销）。 */
 static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, const css_decl_t *ov) {
-    int has_meta = (link_idx >= 0) || (ov && (ov->has_color || ov->has_bold || ov->has_underline ||
-                                              ov->has_scale || ov->has_bg || ov->has_align || ov->has_gap));
+    int has_meta = (link_idx >= 0) || (ov && (ov->has_color || ov->has_bold || ov->has_italic ||
+                                              ov->has_underline || ov->has_scale || ov->has_bg ||
+                                              ov->has_align || ov->has_gap));
     if (!has_meta) return;
     if (*pos + BR_META_LEN >= cap) return;
-    uint8_t flags = 0;
+    uint8_t flags = 0, flags2 = 0;
     uint8_t r = 0, g = 0, b = 0;
     uint8_t bg_r = 0, bg_g = 0, bg_b = 0;
     if (ov) {
         if (ov->has_color) { flags |= BR_FLAG_COLOR; r = (uint8_t)(ov->color >> 16); g = (uint8_t)(ov->color >> 8); b = (uint8_t)ov->color; }
         if (ov->has_bold && ov->bold) flags |= BR_FLAG_BOLD_ON;
+        if (ov->has_italic && ov->italic) flags2 |= BR_FLAG2_ITALIC_ON;
         if (ov->has_underline && ov->underline) flags |= BR_FLAG_UNDER_ON;
         if (ov->has_scale && ov->scale2) flags |= BR_FLAG_SCALE2;
         if (ov->has_bg) { flags |= BR_FLAG_BG; bg_r = (uint8_t)(ov->bg_color >> 16); bg_g = (uint8_t)(ov->bg_color >> 8); bg_b = (uint8_t)ov->bg_color; }
@@ -3866,6 +3888,7 @@ static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, c
     out[(*pos)++] = (char)bg_r;
     out[(*pos)++] = (char)bg_g;
     out[(*pos)++] = (char)bg_b;
+    out[(*pos)++] = (char)flags2;
 }
 
 /* <title> 内容——被 skip_mode 捕获，不进正文渲染流；供窗口标题栏用
@@ -4396,6 +4419,7 @@ typedef struct {
     int bullet;
     int mono;
     int bold;
+    int italic;
     int underline;
     int is_hr;
     int gap_after;   /* 块结束后追加的空行数（标题留白） */
@@ -4408,7 +4432,7 @@ typedef struct {
 static void browser_style_get(int type, browser_style_t *s) {
     uint32_t body_col = rgb(218, 230, 238);
     s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
-    s->mono = 0; s->bold = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
+    s->mono = 0; s->bold = 0; s->italic = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
     s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0;
     switch (type) {
         case BRK_P:   s->gap_after = 1; break; /* 段落之间留白——之前没有，所以文字全堆成一片 */
@@ -4424,6 +4448,7 @@ static void browser_style_get(int type, browser_style_t *s) {
             break;
         case BRK_HR: s->is_hr = 1; break;
         case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
+        case BRK_EM: s->color = body_col; s->italic = 1; break;
         case BRK_QUOTE:
             s->color = rgb(170, 180, 190); s->indent = 16;
             s->has_bg = 1; s->bg_color = rgb(28, 34, 42); s->left_bar = 1; s->gap_after = 1;
@@ -4503,8 +4528,10 @@ static int browser_draw_segment(int x, int w, int *cy, int row_unit, int scroll,
             if (bs.mono) {
                 text_mono(line_x, *cy, line_x + avail_w, line, bs.color);
             } else {
+                g_text_italic = bs.italic;
                 if (bs.bold) text(line_x + 1, *cy, line, bs.color, bs.scale);
                 text(line_x, *cy, line, bs.color, bs.scale);
+                g_text_italic = 0;
                 if (bs.underline) {
                     int tw = text_width(line, bs.scale);
                     rect(line_x, *cy + rowh - 3, tw, 1, bs.color);
@@ -4550,11 +4577,13 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
             uint8_t r = (uint8_t)buf[i + 2], g = (uint8_t)buf[i + 3], b = (uint8_t)buf[i + 4];
             uint8_t link_byte = (uint8_t)buf[i + 5];
             uint8_t bg_r = (uint8_t)buf[i + 6], bg_g = (uint8_t)buf[i + 7], bg_b = (uint8_t)buf[i + 8];
+            uint8_t flags2 = (uint8_t)buf[i + 9];
             i += BR_META_LEN;
             browser_style_t bs_meta;
             browser_style_get(type, &bs_meta);
             if (flags & BR_FLAG_COLOR) bs_meta.color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
             if (flags & BR_FLAG_BOLD_ON) bs_meta.bold = 1;
+            if (flags2 & BR_FLAG2_ITALIC_ON) bs_meta.italic = 1;
             if (flags & BR_FLAG_UNDER_ON) bs_meta.underline = 1;
             if (flags & BR_FLAG_SCALE2) bs_meta.scale = 2;
             if (flags & BR_FLAG_BG) { bs_meta.has_bg = 1; bs_meta.bg_color = ((uint32_t)bg_r << 16) | ((uint32_t)bg_g << 8) | bg_b; }
