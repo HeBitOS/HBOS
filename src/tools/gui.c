@@ -3572,6 +3572,71 @@ enum {
 /* flags 字节 8 位已经用满，斜体单独开第二个 flags 字节。 */
 #define BR_FLAG2_ITALIC_ON   0x01
 
+/* 行内运行分隔符：块内样式切换（<strong>/<em>/<a> 开合）不再另起一行，
+ * 而是在文本流里写 0x02 + 新 [type][可选 meta]，绘制端把同一块里的多个
+ * 运行（run）连续排在同一视觉行里再统一折行——之前每次样式变化都强制
+ * 换行，"This is <em>x</em> inline" 会被拆成三行、导航栏链接全部各占
+ * 一行，是"看起来完全不像浏览器"的最大单一原因。 */
+#define BR_RUN_MARK 0x02
+#define BR_RUN_MAX  16
+
+static int br_is_inline_type(int t) {
+    return t == BRK_LINK || t == BRK_STRONG || t == BRK_EM;
+}
+
+// 每种块类型对应的绘制样式：颜色、字号倍率、缩进、项目符号、等宽字体、
+// 加粗（双次偏移描边模拟）、下划线（链接）、分隔线。让浏览器渲染标题/
+// 列表/链接/代码块时有真实的视觉层次，而不是清一色的纯文字。
+// （定义在发射端 browser_render_from_html 之前：行内标签的样式继承在
+// 发射时就要查外层块的基础样式。）
+typedef struct {
+    uint32_t color;
+    int scale;
+    int indent;
+    int bullet;
+    int mono;
+    int bold;
+    int italic;
+    int underline;
+    int is_hr;
+    int gap_after;   /* 块结束后追加的空行数（标题留白） */
+    int has_bg;      /* 块背景（代码块/引用块用，让它们从正文里"浮"出来） */
+    uint32_t bg_color;
+    int left_bar;    /* 左侧强调竖线（引用块用，标出"这是引用"而不是普通缩进段落） */
+    int align;       /* 0=left 1=center 2=right，CSS text-align 覆盖用 */
+} browser_style_t;
+
+static void browser_style_get(int type, browser_style_t *s) {
+    uint32_t body_col = rgb(218, 230, 238);
+    s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
+    s->mono = 0; s->bold = 0; s->italic = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
+    s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0;
+    switch (type) {
+        case BRK_P:   s->gap_after = 1; break; /* 段落之间留白——之前没有，所以文字全堆成一片 */
+        case BRK_H1: s->color = rgb(255, 255, 255); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
+        case BRK_H2: s->color = rgb(120, 200, 255); s->bold = 1; s->gap_after = 1; break;
+        case BRK_H3: s->color = rgb(150, 190, 225); s->bold = 1; s->gap_after = 1; break;
+        case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
+        case BRK_LI_NUM: s->color = body_col; s->indent = 16; break;
+        case BRK_LINK: s->color = rgb(78, 192, 236); s->underline = 1; break;
+        case BRK_CODE:
+            s->color = rgb(150, 235, 170); s->mono = 1; s->indent = 10;
+            s->has_bg = 1; s->bg_color = rgb(24, 30, 38); s->gap_after = 1;
+            break;
+        case BRK_HR: s->is_hr = 1; break;
+        case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
+        case BRK_EM: s->color = body_col; s->italic = 1; break;
+        case BRK_DT: s->color = rgb(255, 255, 255); s->bold = 1; break;
+        case BRK_DD: s->color = body_col; s->indent = 20; s->gap_after = 1; break;
+        case BRK_QUOTE:
+            s->color = rgb(170, 180, 190); s->indent = 16;
+            s->has_bg = 1; s->bg_color = rgb(28, 34, 42); s->left_bar = 1; s->gap_after = 1;
+            break;
+        case BRK_IMG: s->color = rgb(150, 140, 170); s->indent = 4; break;
+        default: break;
+    }
+}
+
 static int tag_ci_eq(const char *name, int len, const char *lit) {
     int i = 0;
     for (; i < len; i++) {
@@ -3905,6 +3970,9 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     uint32_t pos = 0;
     int space = 1;
     int need_prefix = 1;
+    int run_sep = 0;   /* 前缀写出时先写 BR_RUN_MARK（行内运行切换，见上） */
+    int line_runs = 1; /* 当前行已写出的运行数：达到 BR_RUN_MAX 就退化成换行，
+                        * 和解码端的 runs[] 定长数组保持一致 */
     int style_stack[BR_STACK_MAX];
     int link_idx_stack[BR_STACK_MAX];
     css_decl_t override_stack[BR_STACK_MAX];
@@ -3941,7 +4009,12 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     g_browser_title_len = 0;
 
 #define BREMIT(c) do { if (pos + 1 < cap) out[pos++] = (char)(c); } while (0)
-#define BRFLUSH() do { if (!space) { BREMIT('\n'); space = 1; need_prefix = 1; } } while (0)
+/* 收行：只要当前行有内容（前缀已写出，或有 pending 的行内运行分隔符）
+ * 就补 '\n'。原来的判据是"最后一个字符不是空格"（!space），行尾恰好是
+ * 空格时不收行，后面直接 BREMIT 块类型字节会把它当正文字符混进当前行；
+ * run_sep 也必须在这里丢弃——真正换行之后是新块前缀，行首写 0x02 会让
+ * 解码端错位。 */
+#define BRFLUSH() do { if (!need_prefix || run_sep) { BREMIT('\n'); space = 1; need_prefix = 1; run_sep = 0; } } while (0)
 #define BRMETA() br_emit_meta(out, cap, &pos, cur_link_idx, &cur_override)
 
     for (uint32_t i = 0; html[i] && pos + 2 < cap; i++) {
@@ -4009,9 +4082,15 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 continue;
             }
             if (!closing && tag_ci_eq(nm, nl, "br")) {
-                BRFLUSH();
-                BREMIT(BRK_P); BRMETA(); BREMIT('\n');
-                need_prefix = 1; space = 1;
+                /* <br> = 纯换行：行上有内容就收行；行首的 <br>（连续
+                 * <br><br> 的第二个）才输出空块表示空一行。原来无条件
+                 * 追加一个空块，单个 <br> 会带出一整行空白，和真实浏览器
+                 * 行为不符。 */
+                if (!need_prefix || run_sep) {
+                    BREMIT('\n'); space = 1; need_prefix = 1; run_sep = 0;
+                } else {
+                    BREMIT(cur_style); BREMIT('\n'); space = 1;
+                }
                 i = j;
                 continue;
             }
@@ -4129,6 +4208,28 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                     br_attr_value(html + attr_start, attr_len, "style", style_val, sizeof(style_val));
                     css_decl_t resolved;
                     css_resolve_for_tag(nm, nl, class_val, style_val, &resolved);
+                    /* 行内标签继承外层样式：<h1>里的<em>保持大字号/加粗，
+                     * <p style="color:red">里的<b>保持红色——行内元素现在
+                     * 和外层文字排在同一行，字号/颜色突变会非常扎眼。
+                     * 只填充 resolved 里没有显式指定的字段。 */
+                    if (br_is_inline_type(st_type)) {
+                        browser_style_t pbs;
+                        browser_style_get(cur_style, &pbs);
+                        if (!resolved.has_scale && (pbs.scale >= 2 ||
+                            (cur_override.has_scale && cur_override.scale2))) {
+                            resolved.scale2 = 1; resolved.has_scale = 1;
+                        }
+                        if (!resolved.has_bold && (pbs.bold ||
+                            (cur_override.has_bold && cur_override.bold))) {
+                            resolved.bold = 1; resolved.has_bold = 1;
+                        }
+                        if (!resolved.has_color && cur_override.has_color) {
+                            resolved.color = cur_override.color; resolved.has_color = 1;
+                        }
+                        if (!resolved.has_italic && cur_override.has_italic) {
+                            resolved.italic = cur_override.italic; resolved.has_italic = 1;
+                        }
+                    }
                     new_override = resolved;
                     if (st_type == BRK_LINK) {
                         char href[96];
@@ -4151,12 +4252,27 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
             }
             int override_changed = memcmp(&new_override, &cur_override, sizeof(css_decl_t)) != 0;
             if (new_style != old_style || new_link_idx != cur_link_idx || override_changed) {
-                /* 样式/链接/CSS 覆盖任一变化：即使前面文字以空格结尾也强制换行，
-                 * 否则新样式的前缀字节不会被写出（比如 "Hello <strong>world"，
-                 * 或者连续两个 class 不同的 <p> 因为块类型都是 BRK_P 而被
-                 * BRFLUSH() 那条分支悄悄吞掉，第二个的 CSS 覆盖就丢了）。 */
-                if (!need_prefix) BREMIT('\n');
-                space = 1; need_prefix = 1;
+                /* 样式/链接/CSS 覆盖任一变化都得让新前缀被写出（比如
+                 * "Hello <strong>world"，或者连续两个 class 不同的 <p> 因为
+                 * 块类型都是 BRK_P 而被 BRFLUSH() 那条分支悄悄吞掉）。
+                 * 行内标签（a/strong/em）的切换写运行分隔符而不是换行，
+                 * 文字留在同一视觉行由绘制端流式排版。 */
+                int inline_tr = br_is_inline_type(new_style) || br_is_inline_type(old_style);
+                if (inline_tr && line_runs >= BR_RUN_MAX - 1) inline_tr = 0;
+                if (need_prefix) {
+                    /* 上一个前缀还没写出（标签之间没有文字）：只更新样式。
+                     * 例外：pending 的运行分隔符碰上块级切换（比如段落末尾
+                     * 的空 <strong></strong> 后面跟 </p><p>），得把它转成
+                     * 真正的换行，否则下一段会接在上一行屁股后面。 */
+                    if (run_sep && !inline_tr) { BREMIT('\n'); run_sep = 0; space = 1; }
+                } else if (inline_tr) {
+                    run_sep = 1; need_prefix = 1;
+                    /* 注意不动 space：行内切换前后的空格语义要保持（
+                     * "is <strong>bold</strong> ok" 里两个空格都得留下）。 */
+                } else {
+                    BREMIT('\n');
+                    space = 1; need_prefix = 1;
+                }
             } else {
                 BRFLUSH();
             }
@@ -4181,6 +4297,9 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
             if (dec) { ch = dec; i += consumed; }
         }
         if (ch == '\r') continue;
+        /* 除 \n/\t 外的控制字节直接丢弃：0x01/0x02 在渲染流里是元数据
+         * 标记，正文里混进原始控制字节会让解码端错位。 */
+        if ((unsigned char)ch < 0x20 && ch != '\n' && ch != '\t') continue;
         if (cur_style == BRK_CODE) {
             /* <pre>/<code> 里之前跟其它文字一样把换行/连续空格全折叠掉，
              * 多行代码块被压成一整行、缩进也没了，代码块比没有语法高亮
@@ -4203,7 +4322,11 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
         } else if (!in_row) {
             /* in_row 但不在任何 <td>/<th> 里的杂散文字（格式不太规范的表格
              * 常见）直接丢弃，不然会混进正常文档流里，位置很怪 */
-            if (need_prefix) { BREMIT(cur_style); BRMETA(); need_prefix = 0; }
+            if (need_prefix) {
+                if (run_sep) { BREMIT(BR_RUN_MARK); run_sep = 0; line_runs++; }
+                else line_runs = 1;
+                BREMIT(cur_style); BRMETA(); need_prefix = 0;
+            }
             BREMIT(ch);
         }
     }
@@ -4413,56 +4536,6 @@ static void browser_save_page(gui_state_t *st) {
     st->status = "网页已保存到文件";
 }
 
-// 每种块类型对应的绘制样式：颜色、字号倍率、缩进、项目符号、等宽字体、
-// 加粗（双次偏移描边模拟）、下划线（链接）、分隔线。让浏览器渲染标题/
-// 列表/链接/代码块时有真实的视觉层次，而不是清一色的纯文字。
-typedef struct {
-    uint32_t color;
-    int scale;
-    int indent;
-    int bullet;
-    int mono;
-    int bold;
-    int italic;
-    int underline;
-    int is_hr;
-    int gap_after;   /* 块结束后追加的空行数（标题留白） */
-    int has_bg;      /* 块背景（代码块/引用块用，让它们从正文里"浮"出来） */
-    uint32_t bg_color;
-    int left_bar;    /* 左侧强调竖线（引用块用，标出"这是引用"而不是普通缩进段落） */
-    int align;       /* 0=left 1=center 2=right，CSS text-align 覆盖用 */
-} browser_style_t;
-
-static void browser_style_get(int type, browser_style_t *s) {
-    uint32_t body_col = rgb(218, 230, 238);
-    s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
-    s->mono = 0; s->bold = 0; s->italic = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
-    s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0;
-    switch (type) {
-        case BRK_P:   s->gap_after = 1; break; /* 段落之间留白——之前没有，所以文字全堆成一片 */
-        case BRK_H1: s->color = rgb(255, 255, 255); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
-        case BRK_H2: s->color = rgb(120, 200, 255); s->bold = 1; s->gap_after = 1; break;
-        case BRK_H3: s->color = rgb(150, 190, 225); s->bold = 1; s->gap_after = 1; break;
-        case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
-        case BRK_LI_NUM: s->color = body_col; s->indent = 16; break;
-        case BRK_LINK: s->color = rgb(78, 192, 236); s->underline = 1; break;
-        case BRK_CODE:
-            s->color = rgb(150, 235, 170); s->mono = 1; s->indent = 10;
-            s->has_bg = 1; s->bg_color = rgb(24, 30, 38); s->gap_after = 1;
-            break;
-        case BRK_HR: s->is_hr = 1; break;
-        case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
-        case BRK_EM: s->color = body_col; s->italic = 1; break;
-        case BRK_DT: s->color = rgb(255, 255, 255); s->bold = 1; break;
-        case BRK_DD: s->color = body_col; s->indent = 20; s->gap_after = 1; break;
-        case BRK_QUOTE:
-            s->color = rgb(170, 180, 190); s->indent = 16;
-            s->has_bg = 1; s->bg_color = rgb(28, 34, 42); s->left_bar = 1; s->gap_after = 1;
-            break;
-        case BRK_IMG: s->color = rgb(150, 140, 170); s->indent = 4; break;
-        default: break;
-    }
-}
 
 /* 链接点击命中区域——每次 draw_rendered_page 重新填充（滚动/窗口大小
  * 变化后旧的矩形就作废了），draw_browser_app 一帧内可能画两遍（滚动钳
@@ -4560,11 +4633,174 @@ static int browser_draw_segment(int x, int w, int *cy, int row_unit, int scroll,
     return row_unit;
 }
 
+/* 解码一个 [type][可选 BR_META] 前缀：块基础样式 + meta 覆盖 + 链接下标。
+ * 返回消费后的新下标。 */
+static uint32_t br_read_style(const char *buf, uint32_t len, uint32_t i, int type,
+                              browser_style_t *bs, int *link_idx) {
+    *link_idx = -1;
+    browser_style_get(type, bs);
+    if (i < len && (unsigned char)buf[i] == BR_META_MARK && i + BR_META_LEN <= len) {
+        uint8_t flags = (uint8_t)buf[i + 1];
+        uint8_t r = (uint8_t)buf[i + 2], g = (uint8_t)buf[i + 3], b = (uint8_t)buf[i + 4];
+        uint8_t link_byte = (uint8_t)buf[i + 5];
+        uint8_t bg_r = (uint8_t)buf[i + 6], bg_g = (uint8_t)buf[i + 7], bg_b = (uint8_t)buf[i + 8];
+        uint8_t flags2 = (uint8_t)buf[i + 9];
+        i += BR_META_LEN;
+        if (flags & BR_FLAG_COLOR) bs->color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+        if (flags & BR_FLAG_BOLD_ON) bs->bold = 1;
+        if (flags2 & BR_FLAG2_ITALIC_ON) bs->italic = 1;
+        if (flags & BR_FLAG_UNDER_ON) bs->underline = 1;
+        if (flags & BR_FLAG_SCALE2) bs->scale = 2;
+        if (flags & BR_FLAG_BG) { bs->has_bg = 1; bs->bg_color = ((uint32_t)bg_r << 16) | ((uint32_t)bg_g << 8) | bg_b; }
+        if (flags & BR_FLAG_ALIGN_CENTER) bs->align = 1;
+        if (flags & BR_FLAG_ALIGN_RIGHT) bs->align = 2;
+        if (flags & BR_FLAG_EXTRA_GAP) bs->gap_after = 1;
+        if (link_byte) *link_idx = link_byte - 1;
+    }
+    return i;
+}
+
+/* 一个块内的一段同样式文本（见 BR_RUN_MARK）。 */
+typedef struct {
+    browser_style_t bs;
+    int link_idx;
+    uint32_t start, len;
+} br_run_t;
+
+/* 宽松的 UTF-8 解码：只需要"是不是 CJK"和字节数，不做严格校验。 */
+static uint32_t br_utf8_next(const char *s, uint32_t pos, uint32_t end, uint32_t *cp_out) {
+    uint8_t c = (uint8_t)s[pos];
+    uint32_t n = 1, cp = c;
+    if (c >= 0xF0) n = 4; else if (c >= 0xE0) n = 3; else if (c >= 0xC0) n = 2;
+    if (pos + n > end) n = 1;
+    if (n == 2) cp = ((uint32_t)(c & 0x1F) << 6) | ((uint8_t)s[pos + 1] & 0x3F);
+    else if (n == 3) cp = ((uint32_t)(c & 0x0F) << 12) |
+                          (((uint32_t)((uint8_t)s[pos + 1] & 0x3F)) << 6) |
+                          ((uint8_t)s[pos + 2] & 0x3F);
+    else if (n == 4) cp = 0x20000; /* 增补平面基本都是表意文字，按 CJK 处理 */
+    *cp_out = cp;
+    return n;
+}
+
+/* CJK/全角区（可以在任意字之后折行，不需要空格分词） */
+static int br_cp_is_cjk(uint32_t cp) { return cp >= 0x2E80; }
+
+/* 画一个已排好位置的词：粗体双描边 / 斜体 / 下划线 / 链接命中矩形。
+ * py 是行顶；不同字号的运行落在同一行时按行底对齐（近似基线对齐）。 */
+static void br_draw_tok(int px, int py, int rowh, int rh, const char *tok, int tw,
+                        const browser_style_t *bs, int link_idx) {
+    int ty_tok = py + (rowh - rh * bs->scale);
+    g_text_italic = bs->italic;
+    if (bs->bold) text(px + 1, ty_tok, tok, bs->color, bs->scale);
+    text(px, ty_tok, tok, bs->color, bs->scale);
+    g_text_italic = 0;
+    if (bs->underline) rect(px, py + rowh - 3, tw, 1, bs->color);
+    if (link_idx >= 0) browser_add_link_rect(px, py, tw, rowh, link_idx);
+}
+
+/* 流式排版一个块：把块内所有运行的词依次从左到右排，超宽按词折行（CJK
+ * 按字折行），单个超长词按码点硬切。这是"行内元素不再各占一行 + 单词不再
+ * 被从中间劈开"两件事的共同实现——之前 browser_draw_segment 按固定列数
+ * 每 max_cols 个字节切一刀。行高取块内最大字号（标题里嵌行内元素时整行
+ * 用大行高，小字号运行底对齐）。 */
+static int browser_flow_block(int x, int w, int *cy, int row_unit, int scroll, int max_lines,
+                              int *drawn_rows, const char *buf, const br_run_t *runs, int nrun) {
+    int rh = gui_font_line_height() + 3;
+    const browser_style_t *base = &runs[0].bs;
+    int maxscale = 1, any_text = 0;
+    for (int r = 0; r < nrun; r++) {
+        if (runs[r].bs.scale > maxscale) maxscale = runs[r].bs.scale;
+        if (runs[r].len) any_text = 1;
+    }
+    if (!any_text) { /* 空块 = 空一行（段落间距等机制依赖这个行为） */
+        if (row_unit >= scroll && *drawn_rows < max_lines) { *cy += rh; (*drawn_rows)++; }
+        return row_unit + 1;
+    }
+    int rowh = rh * maxscale;
+    int text_x0 = x + base->indent + (base->bullet ? 14 : 0);
+    int x_right = x + w - 6;
+    int avail = x_right - text_x0;
+    int pen = text_x0;
+    int row_open = 0, first_row = 1;
+    char tok[64];
+
+#define BRF_VIS() (row_unit >= scroll && *drawn_rows < max_lines)
+#define BRF_ROW_BEGIN() do { if (!row_open) { row_open = 1; if (BRF_VIS()) { \
+            if (base->has_bg) rect(x, *cy - 1, w, rowh, base->bg_color); \
+            if (base->left_bar) rect(x, *cy - 1, 3, rowh, base->color); \
+            if (base->bullet && first_row) text(x + base->indent, *cy, "•", base->color, 1); \
+        } } } while (0)
+#define BRF_ROW_END() do { if (BRF_VIS()) { *cy += rowh; (*drawn_rows)++; } \
+        row_unit += maxscale; row_open = 0; first_row = 0; pen = text_x0; } while (0)
+
+    for (int r = 0; r < nrun; r++) {
+        const browser_style_t *bs = &runs[r].bs;
+        uint32_t p = runs[r].start, endp = runs[r].start + runs[r].len;
+        int space_w = gui_cp_advance(' ', bs->scale);
+        while (p < endp) {
+            if (buf[p] == ' ') {
+                p++;
+                /* 行首空格吞掉；行内空格推进画笔（背景色已整行铺开，无须画） */
+                if (row_open && pen > text_x0 && pen + space_w <= x_right) pen += space_w;
+                continue;
+            }
+            /* 取一个词：连续非空格；CJK 单字自成一词（无空格也能折行） */
+            uint32_t tl = 0, q = p;
+            while (q < endp && buf[q] != ' ' && tl + 4 < sizeof(tok)) {
+                uint32_t cp, n = br_utf8_next(buf, q, endp, &cp);
+                if (br_cp_is_cjk(cp)) {
+                    if (tl == 0) { memcpy(tok + tl, buf + q, n); tl += n; q += n; }
+                    break;
+                }
+                memcpy(tok + tl, buf + q, n); tl += n; q += n;
+            }
+            tok[tl] = 0;
+            int tw = text_width(tok, bs->scale);
+            if (pen + tw > x_right && pen > text_x0) BRF_ROW_END();
+            /* 单词本身超过整行宽度：按码点硬切成多行（长 URL/长标识符） */
+            while (tw > avail && tl > 0) {
+                uint32_t fit = 0; int fw = 0;
+                while (fit < tl) {
+                    uint32_t cp, n = br_utf8_next(tok, fit, tl, &cp);
+                    char one[8];
+                    memcpy(one, tok + fit, n); one[n] = 0;
+                    int cw = text_width(one, bs->scale);
+                    if (fw + cw > avail && fit > 0) break;
+                    fw += cw; fit += n;
+                }
+                if (fit >= tl) break; /* 剩余部分能放下了，走正常绘制 */
+                char save = tok[fit]; tok[fit] = 0;
+                BRF_ROW_BEGIN();
+                if (BRF_VIS()) br_draw_tok(pen, *cy, rowh, rh, tok, fw, bs, runs[r].link_idx);
+                tok[fit] = save;
+                memmove(tok, tok + fit, tl - fit);
+                tl -= fit; tok[tl] = 0;
+                tw = text_width(tok, bs->scale);
+                BRF_ROW_END();
+            }
+            BRF_ROW_BEGIN();
+            if (BRF_VIS() && tl) br_draw_tok(pen, *cy, rowh, rh, tok, tw, bs, runs[r].link_idx);
+            pen += tw;
+            p = q;
+        }
+    }
+    if (row_open) BRF_ROW_END();
+    if (base->gap_after) {
+        if (row_unit >= scroll && *drawn_rows < max_lines) { *cy += rh; (*drawn_rows)++; }
+        row_unit++;
+    }
+    return row_unit;
+#undef BRF_VIS
+#undef BRF_ROW_BEGIN
+#undef BRF_ROW_END
+}
+
 // 按块类型渲染标记流（见 browser_render_from_html）：标题更大更亮、链接带
 // 下划线、列表带圆点、代码用等宽字体、<hr> 画分隔线——而非纯文本平铺。
-// 还要解码 BR_META_MARK 扩展前缀（链接下标 + CSS 覆盖，见 br_emit_meta）。
-// 返回内容总行数（row-unit 计），供调用方钳制滚动量——之前滚动值可以无限
-// 增长滚过末尾，得按等次数反向按键才能滚回来。
+// 先把一个块解成运行数组（[type][meta?] 文本 { 0x02 [type][meta?] 文本 }*），
+// 正常文本块交给 browser_flow_block 流式排版；代码块（mono，要保留空格逐字
+// 排布）、HR、带对齐的单运行块走原来的整行路径。
+// 返回内容总行数（row-unit 计），供调用方钳制滚动量。
 static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint32_t len, int scroll) {
     g_browser_link_rect_count = 0;
     if (!len) return 0;
@@ -4577,42 +4813,38 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
     uint32_t i = 0;
     while (i < len) {
         int type = (unsigned char)buf[i++];
-        int link_idx = -1;
-        if (i < len && (unsigned char)buf[i] == BR_META_MARK && i + BR_META_LEN <= len) {
-            uint8_t flags = (uint8_t)buf[i + 1];
-            uint8_t r = (uint8_t)buf[i + 2], g = (uint8_t)buf[i + 3], b = (uint8_t)buf[i + 4];
-            uint8_t link_byte = (uint8_t)buf[i + 5];
-            uint8_t bg_r = (uint8_t)buf[i + 6], bg_g = (uint8_t)buf[i + 7], bg_b = (uint8_t)buf[i + 8];
-            uint8_t flags2 = (uint8_t)buf[i + 9];
-            i += BR_META_LEN;
-            browser_style_t bs_meta;
-            browser_style_get(type, &bs_meta);
-            if (flags & BR_FLAG_COLOR) bs_meta.color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-            if (flags & BR_FLAG_BOLD_ON) bs_meta.bold = 1;
-            if (flags2 & BR_FLAG2_ITALIC_ON) bs_meta.italic = 1;
-            if (flags & BR_FLAG_UNDER_ON) bs_meta.underline = 1;
-            if (flags & BR_FLAG_SCALE2) bs_meta.scale = 2;
-            if (flags & BR_FLAG_BG) { bs_meta.has_bg = 1; bs_meta.bg_color = ((uint32_t)bg_r << 16) | ((uint32_t)bg_g << 8) | bg_b; }
-            if (flags & BR_FLAG_ALIGN_CENTER) bs_meta.align = 1;
-            if (flags & BR_FLAG_ALIGN_RIGHT) bs_meta.align = 2;
-            if (flags & BR_FLAG_EXTRA_GAP) bs_meta.gap_after = 1;
-            if (link_byte) link_idx = link_byte - 1;
-            uint32_t start = i;
-            while (i < len && buf[i] != '\n') i++;
-            uint32_t seg_len = i - start;
-            if (i < len) i++;
-            row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines, &drawn_rows,
-                                            buf, start, seg_len, &bs_meta, link_idx);
-            continue;
+        br_run_t runs[BR_RUN_MAX];
+        int nrun = 1;
+        i = br_read_style(buf, len, i, type, &runs[0].bs, &runs[0].link_idx);
+        runs[0].start = i; runs[0].len = 0;
+        while (i < len && buf[i] != '\n') {
+            if ((unsigned char)buf[i] == BR_RUN_MARK && i + 1 < len && nrun < BR_RUN_MAX) {
+                runs[nrun - 1].len = i - runs[nrun - 1].start;
+                i++;
+                int t2 = (unsigned char)buf[i++];
+                i = br_read_style(buf, len, i, t2, &runs[nrun].bs, &runs[nrun].link_idx);
+                runs[nrun].start = i; runs[nrun].len = 0;
+                nrun++;
+            } else {
+                i++;
+            }
         }
-        browser_style_t bs;
-        browser_style_get(type, &bs);
-        uint32_t start = i;
-        while (i < len && buf[i] != '\n') i++;
-        uint32_t seg_len = i - start;
+        runs[nrun - 1].len = i - runs[nrun - 1].start;
         if (i < len) i++;
-        row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines, &drawn_rows,
-                                        buf, start, seg_len, &bs, -1);
+        /* 多行代码块的行间不留空行：<pre> 的每一行是独立的 BRK_CODE 块
+         * （见发射端），gap_after 只该出现在整个代码块结束后，否则代码
+         * 变成隔行双倍行距、背景条也断开。 */
+        if (type == BRK_CODE && i < len && (unsigned char)buf[i] == BRK_CODE)
+            for (int r = 0; r < nrun; r++) runs[r].bs.gap_after = 0;
+        if (runs[0].bs.is_hr || runs[0].bs.mono || (nrun == 1 && runs[0].bs.align != 0)) {
+            for (int r = 0; r < nrun; r++)
+                row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines, &drawn_rows,
+                                                buf, runs[r].start, runs[r].len, &runs[r].bs,
+                                                runs[r].link_idx);
+        } else {
+            row_unit = browser_flow_block(x, w, &cy, row_unit, scroll, max_lines, &drawn_rows,
+                                          buf, runs, nrun);
+        }
     }
     return row_unit;
 }
