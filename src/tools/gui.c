@@ -3546,6 +3546,8 @@ enum {
     BRK_QUOTE  = '9',
     BRK_IMG    = 'i',
     BRK_EM     = 'e', /* <em>/<i>：假斜体，见 g_text_italic */
+    BRK_DT     = 'd', /* <dt>：术语，加粗 */
+    BRK_DD     = 'D', /* <dd>：释义，缩进 */
     BRK_LI_NUM = 'n', /* <ol> 里的 <li>：编号是当普通文字写进去的（"1. "），
                         * 不是靠 browser_style_get 的 bullet 标志画点——所以
                         * 这个类型不带 bullet，缩进倒是跟 BRK_LI 一样 */
@@ -3591,6 +3593,8 @@ static int browser_style_for_tag(const char *name, int len) {
     if (tag_ci_eq(name, len, "pre") || tag_ci_eq(name, len, "code")) return BRK_CODE;
     if (tag_ci_eq(name, len, "blockquote")) return BRK_QUOTE;
     if (tag_ci_eq(name, len, "img")) return BRK_IMG;
+    if (tag_ci_eq(name, len, "dt")) return BRK_DT;
+    if (tag_ci_eq(name, len, "dd")) return BRK_DD;
     /* p/div/span 本身没有专属块类型（都渲染成普通段落 BRK_P），但必须在
      * 这里被"认出来"才会走 do_push 那条分支去解析它们的 class/style 属性
      * ——真实页面里 class/内联 style 多半就打在这几个标签上，不认出来的
@@ -4449,6 +4453,8 @@ static void browser_style_get(int type, browser_style_t *s) {
         case BRK_HR: s->is_hr = 1; break;
         case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
         case BRK_EM: s->color = body_col; s->italic = 1; break;
+        case BRK_DT: s->color = rgb(255, 255, 255); s->bold = 1; break;
+        case BRK_DD: s->color = body_col; s->indent = 20; s->gap_after = 1; break;
         case BRK_QUOTE:
             s->color = rgb(170, 180, 190); s->indent = 16;
             s->has_bg = 1; s->bg_color = rgb(28, 34, 42); s->left_bar = 1; s->gap_after = 1;
