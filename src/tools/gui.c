@@ -6518,6 +6518,17 @@ static void handle_app_key(gui_state_t *st, int key) {
                         n - st->browser_url_cursor + 1);
                 st->browser_url_cursor--;
             }
+        } else if (key == GUI_KEY_DELETE) {
+            /* 之前地址栏只认 Backspace，Delete 完全没反应 */
+            if (st->browser_url_cursor < n) {
+                memmove(st->browser_url + st->browser_url_cursor,
+                        st->browser_url + st->browser_url_cursor + 1,
+                        n - st->browser_url_cursor);
+            }
+        } else if (key == GUI_KEY_HOME) {
+            st->browser_url_cursor = 0;
+        } else if (key == GUI_KEY_END) {
+            st->browser_url_cursor = n;
         } else if (key == GUI_KEY_LEFT) {
             if (st->browser_url_cursor > 0) st->browser_url_cursor--;
         } else if (key == GUI_KEY_RIGHT) {
@@ -6526,6 +6537,12 @@ static void handle_app_key(gui_state_t *st, int key) {
             if (st->browser_scroll > 0) st->browser_scroll--;
         } else if (key == GUI_KEY_DOWN) {
             st->browser_scroll++;
+        } else if (key == GUI_KEY_PGUP) {
+            /* 整页滚动：一次滚 10 行（视口高度因窗口而异，取个稳妥值） */
+            st->browser_scroll -= 10;
+            if (st->browser_scroll < 0) st->browser_scroll = 0;
+        } else if (key == GUI_KEY_PGDOWN) {
+            st->browser_scroll += 10;  /* 越界由 draw_browser_app 的钳制兜住 */
         } else if (key >= 32 && key <= 126) {
             if (n + 1 < BROWSER_URL_CAP) {
                 memmove(st->browser_url + st->browser_url_cursor + 1,
