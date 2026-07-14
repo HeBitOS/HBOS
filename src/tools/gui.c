@@ -3548,6 +3548,7 @@ enum {
     BRK_EM     = 'e', /* <em>/<i>：假斜体，见 g_text_italic */
     BRK_DT     = 'd', /* <dt>：术语，加粗 */
     BRK_DD     = 'D', /* <dd>：释义，缩进 */
+    BRK_H4     = 'm', /* <h4>-<h6>：比 h3 再低一级的层次（加粗浅灰） */
     BRK_TROW   = 'r', /* 表格行：单元格文本用 BR_CELL_MARK 分隔，绘制端跨
                         * 连续 BRK_TROW 块统一算列宽后按列对齐（见
                         * br_table_scan/br_draw_table_row），<th> 行 meta
@@ -3575,6 +3576,7 @@ enum {
 #define BR_FLAG_EXTRA_GAP    0x80
 /* flags 字节 8 位已经用满，斜体单独开第二个 flags 字节。 */
 #define BR_FLAG2_ITALIC_ON   0x01
+#define BR_FLAG2_INDENT_SHIFT 1   /* 位 1-2：嵌套列表缩进级别（0-3） */
 
 /* 行内运行分隔符：块内样式切换（<strong>/<em>/<a> 开合）不再另起一行，
  * 而是在文本流里写 0x02 + 新 [type][可选 meta]，绘制端把同一块里的多个
@@ -3628,6 +3630,7 @@ static void browser_style_get(int type, browser_style_t *s) {
         case BRK_H1: s->color = rgb(12, 13, 16); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
         case BRK_H2: s->color = rgb(24, 26, 30); s->bold = 1; s->gap_after = 1; break;
         case BRK_H3: s->color = rgb(40, 44, 50); s->bold = 1; s->gap_after = 1; break;
+        case BRK_H4: s->color = rgb(72, 78, 86); s->bold = 1; s->gap_after = 1; break;
         case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
         case BRK_LI_NUM: s->color = body_col; s->indent = 16; break;
         case BRK_LINK: s->color = rgb(24, 90, 200); s->underline = 1; break;
@@ -3662,7 +3665,8 @@ static int tag_ci_eq(const char *name, int len, const char *lit) {
 static int browser_style_for_tag(const char *name, int len) {
     if (tag_ci_eq(name, len, "h1")) return BRK_H1;
     if (tag_ci_eq(name, len, "h2")) return BRK_H2;
-    if (len == 2 && (name[0] == 'h' || name[0] == 'H') && name[1] >= '3' && name[1] <= '6') return BRK_H3;
+    if (len == 2 && (name[0] == 'h' || name[0] == 'H') && name[1] == '3') return BRK_H3;
+    if (len == 2 && (name[0] == 'h' || name[0] == 'H') && name[1] >= '4' && name[1] <= '6') return BRK_H4;
     if (tag_ci_eq(name, len, "li")) return BRK_LI;
     if (tag_ci_eq(name, len, "a")) return BRK_LINK;
     if (tag_ci_eq(name, len, "strong") || tag_ci_eq(name, len, "b")) return BRK_STRONG;
@@ -3721,6 +3725,8 @@ typedef struct {
     int scale2;       int has_scale;
     uint32_t bg_color; int has_bg;
     int align;         int has_align; /* 0=left 1=center 2=right */
+    int indent_lvl;     int has_indent; /* 嵌套列表缩进级别 0-3（flags2 两个位），
+                                          * 不是 CSS 属性，发射端按 <ul>/<ol> 嵌套深度填 */
     int gap;            int has_gap;  /* margin/margin-top/margin-bottom 非零 -> 块后多留一行；
                                         * 这是行文本渲染器，没有真正的像素级盒模型，margin 只
                                         * 映射成"要不要多留白"这一个二值信号，不是精确像素值 */
@@ -3942,7 +3948,7 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
 static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, const css_decl_t *ov) {
     int has_meta = (link_idx >= 0) || (ov && (ov->has_color || ov->has_bold || ov->has_italic ||
                                               ov->has_underline || ov->has_scale || ov->has_bg ||
-                                              ov->has_align || ov->has_gap));
+                                              ov->has_align || ov->has_gap || ov->has_indent));
     if (!has_meta) return;
     if (*pos + BR_META_LEN >= cap) return;
     uint8_t flags = 0, flags2 = 0;
@@ -3952,6 +3958,7 @@ static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, c
         if (ov->has_color) { flags |= BR_FLAG_COLOR; r = (uint8_t)(ov->color >> 16); g = (uint8_t)(ov->color >> 8); b = (uint8_t)ov->color; }
         if (ov->has_bold && ov->bold) flags |= BR_FLAG_BOLD_ON;
         if (ov->has_italic && ov->italic) flags2 |= BR_FLAG2_ITALIC_ON;
+        if (ov->has_indent) flags2 |= (uint8_t)((ov->indent_lvl & 3) << BR_FLAG2_INDENT_SHIFT);
         if (ov->has_underline && ov->underline) flags |= BR_FLAG_UNDER_ON;
         if (ov->has_scale && ov->scale2) flags |= BR_FLAG_SCALE2;
         if (ov->has_bg) { flags |= BR_FLAG_BG; bg_r = (uint8_t)(ov->bg_color >> 16); bg_g = (uint8_t)(ov->bg_color >> 8); bg_b = (uint8_t)ov->bg_color; }
@@ -4011,8 +4018,14 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     /* 有序列表编号：只跟踪一层（不是真正的嵌套计数器栈），<ol> 套 <ul>
      * 套 <ol> 这种深嵌套的编号可能不完全准确，对这个渲染器的定位来说
      * 是可以接受的简化。 */
-    int in_ordered_list = 0;
-    int li_number = 0;
+    /* 列表嵌套栈：每层记录是否有序 + 当前编号。之前只有单层
+     * in_ordered_list/li_number，嵌套 </ol> 一关就把外层的状态也清了
+     * （外层后续项丢编号），嵌套时内外层编号也互相踩。 */
+#define BR_LIST_DEPTH_MAX 5
+    int list_depth = 0;                  /* 0 = 不在任何列表里 */
+    int ol_flag[BR_LIST_DEPTH_MAX + 1];  /* 该层是不是 <ol> */
+    int ol_num[BR_LIST_DEPTH_MAX + 1];   /* 该层当前编号 */
+    ol_flag[0] = 0; ol_num[0] = 0;
 
     g_css_rule_count = 0;
     st->browser_link_count = 0;
@@ -4170,25 +4183,29 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 i = j;
                 continue;
             }
-            if (!closing && tag_ci_eq(nm, nl, "ol")) {
-                in_ordered_list = 1; li_number = 0;
+            if (!closing && (tag_ci_eq(nm, nl, "ol") || tag_ci_eq(nm, nl, "ul"))) {
+                if (list_depth < BR_LIST_DEPTH_MAX) list_depth++;
+                ol_flag[list_depth] = tag_ci_eq(nm, nl, "ol");
+                ol_num[list_depth] = 0;
                 i = j;
                 continue;
             }
-            if (closing && tag_ci_eq(nm, nl, "ol")) {
-                in_ordered_list = 0;
+            if (closing && (tag_ci_eq(nm, nl, "ol") || tag_ci_eq(nm, nl, "ul"))) {
+                if (list_depth > 0) list_depth--;
                 i = j;
                 continue;
             }
-            if (!closing && tag_ci_eq(nm, nl, "ul")) {
-                in_ordered_list = 0; /* <ol> 套 <ul> 时切回项目符号 */
-                i = j;
-                continue;
-            }
-            if (!closing && tag_ci_eq(nm, nl, "li") && in_ordered_list) {
+            if (!closing && tag_ci_eq(nm, nl, "li") && ol_flag[list_depth]) {
                 BRFLUSH();
-                li_number++;
+                ol_num[list_depth]++;
+                int li_number = ol_num[list_depth];
                 BREMIT(BRK_LI_NUM);
+                memset(&cur_override, 0, sizeof(cur_override));
+                if (list_depth > 1) {
+                    cur_override.indent_lvl = (list_depth - 1 > 3) ? 3 : list_depth - 1;
+                    cur_override.has_indent = 1;
+                    br_emit_meta(out, cap, &pos, -1, &cur_override);
+                }
                 char numbuf[8];
                 int nn = 0;
                 char tmp[8]; int tn = 0; int v = li_number;
@@ -4199,7 +4216,6 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 for (int k = 0; k < nn && pos + 1 < cap; k++) BREMIT(numbuf[k]);
                 space = 0; need_prefix = 0;
                 cur_style = BRK_LI_NUM; cur_link_idx = -1;
-                memset(&cur_override, 0, sizeof(cur_override));
                 i = j;
                 continue;
             }
@@ -4223,6 +4239,10 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                      * <p style="color:red">里的<b>保持红色——行内元素现在
                      * 和外层文字排在同一行，字号/颜色突变会非常扎眼。
                      * 只填充 resolved 里没有显式指定的字段。 */
+                    if (st_type == BRK_LI && list_depth > 1 && !resolved.has_indent) {
+                        resolved.indent_lvl = (list_depth - 1 > 3) ? 3 : list_depth - 1;
+                        resolved.has_indent = 1;
+                    }
                     if (br_is_inline_type(st_type)) {
                         browser_style_t pbs;
                         browser_style_get(cur_style, &pbs);
@@ -4669,6 +4689,10 @@ static uint32_t br_read_style(const char *buf, uint32_t len, uint32_t i, int typ
         if (flags & BR_FLAG_COLOR) bs->color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
         if (flags & BR_FLAG_BOLD_ON) bs->bold = 1;
         if (flags2 & BR_FLAG2_ITALIC_ON) bs->italic = 1;
+        {
+            int lvl = (flags2 >> BR_FLAG2_INDENT_SHIFT) & 3;
+            if (lvl) bs->indent += 18 * lvl;
+        }
         if (flags & BR_FLAG_UNDER_ON) bs->underline = 1;
         if (flags & BR_FLAG_SCALE2) bs->scale = 2;
         if (flags & BR_FLAG_BG) { bs->has_bg = 1; bs->bg_color = ((uint32_t)bg_r << 16) | ((uint32_t)bg_g << 8) | bg_b; }
