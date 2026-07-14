@@ -3616,32 +3616,35 @@ typedef struct {
 } browser_style_t;
 
 static void browser_style_get(int type, browser_style_t *s) {
-    uint32_t body_col = rgb(218, 230, 238);
+    /* 亮色调色板：页面区是白底（Chrome 默认渲染就是白底黑字），正文近黑、
+     * 链接 Chrome 蓝、代码块浅灰底——之前的暗色是"终端风"，不是浏览器该
+     * 有的样子。 */
+    uint32_t body_col = rgb(32, 33, 36);
     s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
     s->mono = 0; s->bold = 0; s->italic = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
     s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0;
     switch (type) {
         case BRK_P:   s->gap_after = 1; break; /* 段落之间留白——之前没有，所以文字全堆成一片 */
-        case BRK_H1: s->color = rgb(255, 255, 255); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
-        case BRK_H2: s->color = rgb(120, 200, 255); s->bold = 1; s->gap_after = 1; break;
-        case BRK_H3: s->color = rgb(150, 190, 225); s->bold = 1; s->gap_after = 1; break;
+        case BRK_H1: s->color = rgb(12, 13, 16); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
+        case BRK_H2: s->color = rgb(24, 26, 30); s->bold = 1; s->gap_after = 1; break;
+        case BRK_H3: s->color = rgb(40, 44, 50); s->bold = 1; s->gap_after = 1; break;
         case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
         case BRK_LI_NUM: s->color = body_col; s->indent = 16; break;
-        case BRK_LINK: s->color = rgb(78, 192, 236); s->underline = 1; break;
+        case BRK_LINK: s->color = rgb(24, 90, 200); s->underline = 1; break;
         case BRK_CODE:
-            s->color = rgb(150, 235, 170); s->mono = 1; s->indent = 10;
-            s->has_bg = 1; s->bg_color = rgb(24, 30, 38); s->gap_after = 1;
+            s->color = rgb(36, 41, 47); s->mono = 1; s->indent = 10;
+            s->has_bg = 1; s->bg_color = rgb(243, 245, 247); s->gap_after = 1;
             break;
         case BRK_HR: s->is_hr = 1; break;
-        case BRK_STRONG: s->color = rgb(255, 255, 255); s->bold = 1; break;
+        case BRK_STRONG: s->color = rgb(12, 13, 16); s->bold = 1; break;
         case BRK_EM: s->color = body_col; s->italic = 1; break;
-        case BRK_DT: s->color = rgb(255, 255, 255); s->bold = 1; break;
+        case BRK_DT: s->color = rgb(12, 13, 16); s->bold = 1; break;
         case BRK_DD: s->color = body_col; s->indent = 20; s->gap_after = 1; break;
         case BRK_QUOTE:
-            s->color = rgb(170, 180, 190); s->indent = 16;
-            s->has_bg = 1; s->bg_color = rgb(28, 34, 42); s->left_bar = 1; s->gap_after = 1;
+            s->color = rgb(90, 98, 106); s->indent = 16;
+            s->has_bg = 1; s->bg_color = rgb(246, 248, 250); s->left_bar = 1; s->gap_after = 1;
             break;
-        case BRK_IMG: s->color = rgb(150, 140, 170); s->indent = 4; break;
+        case BRK_IMG: s->color = rgb(130, 120, 160); s->indent = 4; break;
         default: break;
     }
 }
@@ -4395,6 +4398,15 @@ static void browser_hist_push(gui_state_t *st, const char *url) {
     st->browser_hist_pos = st->browser_hist_count - 1;
 }
 
+/* 浏览器自己的状态文本：st->status 是所有应用共享的一个指针，别的应用
+ * （比如开始菜单）留下的状态不该出现在浏览器的状态气泡里——气泡只在
+ * st->status 仍指向浏览器最后一次设置的字符串时才显示。 */
+static const char *g_browser_status;
+static void br_status(gui_state_t *st, const char *msg) {
+    st->status = msg;
+    g_browser_status = msg;
+}
+
 static void browser_load_internal(gui_state_t *st, int push_history) {
     browser_init(st);
     char host[96];
@@ -4404,19 +4416,19 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     const char *err = gui_parse_url(st->browser_url, &https, host, sizeof(host), &port, &path);
     if (err) {
         browser_set_plain(st, err);
-        st->status = "浏览器 URL 错误";
+        br_status(st, "浏览器 URL 错误");
         return;
     }
-    st->status = "浏览器加载中";
+    br_status(st, "浏览器加载中");
     if (!net_primary()->dhcp_ok && net_dhcp() < 0) {
         browser_set_plain2(st, "网络未配置: ", net_last_error());
-        st->status = "浏览器网络失败";
+        br_status(st, "浏览器网络失败");
         return;
     }
     uint32_t ip = 0;
     if (net_dns_resolve(host, &ip) < 0) {
         browser_set_plain2(st, "DNS 失败: ", net_last_error());
-        st->status = "浏览器 DNS 失败";
+        br_status(st, "浏览器 DNS 失败");
         return;
     }
     static char response[BROWSER_FETCH_CAP];
@@ -4427,11 +4439,11 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     if (ok < 0 && https) {
         port = 80;
         ok = net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
-        if (ok == 0) st->status = "HTTPS 失败，已用 HTTP 回退";
+        if (ok == 0) br_status(st, "HTTPS 失败，已用 HTTP 回退");
     }
     if (ok < 0) {
         browser_set_plain2(st, "加载失败: ", https ? tls_error : net_last_error());
-        st->status = "浏览器加载失败";
+        br_status(st, "浏览器加载失败");
         return;
     }
     const char *body = http_body_ptr(response);
@@ -4439,7 +4451,7 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
     st->browser_scroll = 0;
     if (!https || strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
-        st->status = "浏览器加载完成";
+        br_status(st, "浏览器加载完成");
     if (push_history) browser_hist_push(st, st->browser_url);
     /* <title> 抓到了就用它做窗口标题（"浏览器 - 页面标题"），跟真实浏览器
      * 标题栏/标签页显示网页标题一样；没有 <title> 就保持默认的"浏览器"。 */
@@ -4528,7 +4540,7 @@ static void browser_save_page(gui_state_t *st) {
     browser_init(st);
     char path[GUI_PATH_MAX];
     if (gui_path_join(gui_file_path(st), "browser-page.txt", path, sizeof(path)) < 0) {
-        st->status = "保存路径过长";
+        br_status(st, "保存路径过长");
         return;
     }
     vfs_node_t *node = vfs_lookup(path);
@@ -4536,12 +4548,12 @@ static void browser_save_page(gui_state_t *st) {
     if (!node || node->type != VFS_NODE_FILE ||
         vfs_truncate(node) < 0 ||
         vfs_write(node, 0, st->browser_page, st->browser_page_len) < 0) {
-        st->status = "网页保存失败";
+        br_status(st, "网页保存失败");
         return;
     }
     (void)fs_sync();
     (void)gui_select_path(st, path);
-    st->status = "网页已保存到文件";
+    br_status(st, "网页已保存到文件");
 }
 
 
@@ -4570,7 +4582,7 @@ static int browser_draw_segment(int x, int w, int *cy, int row_unit, int scroll,
 
     if (bs.is_hr) {
         if (row_unit >= scroll && *drawn_rows < max_lines) {
-            rect(x, *cy + rh / 2, w, 2, rgb(70, 90, 105));
+            rect(x, *cy + rh / 2, w, 2, rgb(214, 218, 222));
             *cy += rh; (*drawn_rows)++;
         }
         return row_unit + 1;
@@ -4875,8 +4887,8 @@ static int br_draw_table_row(int x, int *cy, int row_unit, int scroll, int max_l
     int total_w = 0;
     for (int c = 0; c < ncols; c++) total_w += col_w[c];
     if (row_unit >= scroll && *drawn_rows < max_lines) {
-        uint32_t grid_col = rgb(58, 74, 90);
-        if (bs->bold) rect(x, *cy - 1, total_w, rh, rgb(34, 44, 56));
+        uint32_t grid_col = rgb(202, 208, 214);
+        if (bs->bold) rect(x, *cy - 1, total_w, rh, rgb(241, 243, 245));
         int cx = x;
         char cell[128];
         for (int c = 0; c < ncols; c++) {
@@ -4975,27 +4987,106 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
     return row_unit;
 }
 
+/* ── Chrome 风格浏览器 UI ──
+ * 布局（相对 tx/ty，tx = win_x+30, ty = win_y+42，和命中测试共享）：
+ *   ty+0  .. ty+30  标签页条（活动标签 = 工具栏同色圆角上矩形，内含标题）
+ *   ty+30 .. ty+72  工具栏：← → ⟳ 圆形图标按钮 + 圆角胶囊地址栏 + ⋮
+ *   ty+72 .. 底部   白底页面区（Chrome 默认页面就是白底黑字）
+ * 工具栏/页面横向铺满窗口内区（win_x+1 .. win_x+win_w-1），不是旧版
+ * 只占中间一条。 */
+#define BR_TOOL_H 42
+#define BR_TAB_H  30
+#define BR_BTN_R  14
+/* 三个圆形按钮的圆心（相对 tx/ty），命中测试同用 */
+#define BR_BACK_CX   6
+#define BR_FWD_CX    40
+#define BR_RELOAD_CX 74
+#define BR_BTN_CY    (BR_TAB_H + BR_TOOL_H / 2)
+
+static void br_icon_arrow(int cx, int cy, int dir, uint32_t col) {
+    rect(cx - 6, cy - 1, 13, 2, col);
+    int tip = cx + dir * 6;
+    for (int i = 1; i <= 4; i++) {
+        rect(tip - dir * i, cy - 1 - i, 2, 2, col);
+        rect(tip - dir * i, cy - 1 + i, 2, 2, col);
+    }
+}
+
+static void br_icon_reload(int cx, int cy, uint32_t col, uint32_t bg) {
+    gui_fill_circle(cx, cy, 7, col);
+    gui_fill_circle(cx, cy, 5, bg);
+    rect(cx + 1, cy - 8, 7, 5, bg);   /* 圆环缺口 */
+    rect(cx + 3, cy - 7, 2, 6, col);  /* 箭头柄 */
+    rect(cx + 1, cy - 3, 6, 2, col);  /* 箭头翼 */
+}
+
 static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
     browser_init(st);
-    int view_w = win_w - 72;
-    if (view_w < 320) view_w = 320;
-    /* 内容框跟着窗口高度走，不再是固定 196px——之前窗口最大化后底下一大片
-     * 都是空的，只有顶上一小条固定区域在显示网页内容，用户反馈里点名说
-     * "浏览器做得非常不好"就是这个。74 是其它 app（比如任务管理器）也在用
-     * 的窗口顶部/底部固定内边距（ty 相对 win_y 的 42px 偏移 + 32px 底部
-     * 留白），content_box_h 再减去内容框起始点相对 ty 的 146px 偏移。 */
-    int content_box_h = win_h - 74 - 146;
-    if (content_box_h < 80) content_box_h = 80;
-    const net_device_t *dev = net_primary();
-    char ipbuf[16];
-    net_ipv4_to_str(dev->ip, ipbuf);
-    text(tx, ty, "浏览器", rgb(78, 192, 236), 1);
-    text(tx, ty + 30, "Enter加载  点击链接跳转  ↑↓滚动  Ctrl+S保存", rgb(148, 162, 174), 1);
-    rect(tx, ty + 58, view_w, 32, rgb(6, 14, 22));
-    border(tx, ty + 58, view_w, 32, rgb(78, 192, 236));
-    text(tx + 10, ty + 68, st->browser_url, rgb(232, 242, 248), 1);
-    // 闪烁插入光标：跟随实际光标位置（左右键可移动），超出输入框宽度时钳制在
-    // 框内，避免长网址把光标画到边框外面。
+    int wx = tx - 29;            /* 窗口内区左边缘（win_x+1） */
+    int ww = win_w - 2;          /* 窗口内区宽度 */
+    if (ww < 340) ww = 340;
+    uint32_t strip_bg = rgb(32, 33, 36);   /* Chrome 深色标签条 */
+    uint32_t tool_bg  = rgb(53, 54, 58);   /* 工具栏 = 活动标签同色 */
+    uint32_t pill_bg  = rgb(40, 41, 45);   /* 地址栏胶囊 */
+    uint32_t icon_col = rgb(198, 202, 208);
+    uint32_t icon_dis = rgb(104, 108, 114);
+
+    /* 标签页条 + 活动标签 */
+    rect(wx, ty, ww, BR_TAB_H, strip_bg);
+    int tab_w = 240;
+    if (tab_w > ww - 80) tab_w = ww - 80;
+    int tab_x = wx + 10;
+    fill_round_rect(tab_x, ty + 4, tab_w, BR_TAB_H - 4, 9, tool_bg, RR_TOP);
+    gui_fill_circle(tab_x + 16, ty + 4 + (BR_TAB_H - 4) / 2, 4, rgb(120, 170, 240)); /* favicon 占位点 */
+    {
+        /* 标签标题直接用页面标题（没有就显示"新标签页"） */
+        const char *t = g_browser_page_title[0] ? g_browser_page_title : "新标签页";
+        text_clipped(tab_x + 30, ty + 9, tab_x + tab_w - 24, t, rgb(225, 228, 232), 1);
+    }
+    /* 标签上的 × */
+    {
+        int xx = tab_x + tab_w - 16, xy = ty + 4 + (BR_TAB_H - 4) / 2 - 1;
+        for (int i = 0; i < 5; i++) {
+            rect(xx + i - 2, xy + i - 2, 1, 1, icon_col);
+            rect(xx + 2 - i, xy + i - 2, 1, 1, icon_col);
+        }
+    }
+    /* 新建标签 +（纯装饰，和 Chrome 一样放在标签右侧） */
+    rect(tab_x + tab_w + 12, ty + BR_TAB_H / 2, 11, 1, icon_dis);
+    rect(tab_x + tab_w + 17, ty + BR_TAB_H / 2 - 5, 1, 11, icon_dis);
+
+    /* 工具栏 */
+    rect(wx, ty + BR_TAB_H, ww, BR_TOOL_H, tool_bg);
+    int can_back = st->browser_hist_pos > 0;
+    int can_fwd  = st->browser_hist_pos + 1 < st->browser_hist_count;
+    br_icon_arrow(tx + BR_BACK_CX, ty + BR_BTN_CY, -1, can_back ? icon_col : icon_dis);
+    br_icon_arrow(tx + BR_FWD_CX, ty + BR_BTN_CY, 1, can_fwd ? icon_col : icon_dis);
+    br_icon_reload(tx + BR_RELOAD_CX, ty + BR_BTN_CY, icon_col, tool_bg);
+    /* 右侧 ⋮ 菜单点（装饰） */
+    for (int i = 0; i < 3; i++)
+        rect(wx + ww - 18, ty + BR_TAB_H + BR_TOOL_H / 2 - 5 + i * 4, 2, 2, icon_col);
+
+    /* 胶囊地址栏 */
+    int pill_x = tx + BR_RELOAD_CX + 24;
+    int pill_r = wx + ww - 32;
+    int pill_h = 28;
+    int pill_y = ty + BR_TAB_H + (BR_TOOL_H - pill_h) / 2;
+    fill_round_rect(pill_x, pill_y, pill_r - pill_x, pill_h, pill_h / 2, pill_bg, RR_ALL);
+    /* https 锁 / http 空心圆点 */
+    int ind_x = pill_x + 14;
+    int ind_cy = pill_y + pill_h / 2;
+    if (st->browser_url[0] == 'h' && st->browser_url[4] == 's') {
+        rect(ind_x - 3, ind_cy - 1, 8, 6, rgb(160, 200, 170));      /* 锁体 */
+        rect(ind_x - 2, ind_cy - 4, 1, 3, rgb(160, 200, 170));      /* 锁梁 */
+        rect(ind_x + 3, ind_cy - 4, 1, 3, rgb(160, 200, 170));
+        rect(ind_x - 1, ind_cy - 5, 4, 1, rgb(160, 200, 170));
+    } else {
+        gui_fill_circle(ind_x, ind_cy, 4, icon_dis);
+        gui_fill_circle(ind_x, ind_cy, 2, pill_bg);
+    }
+    int url_x = pill_x + 28;
+    text_clipped(url_x, pill_y + 5, pill_r - 10, st->browser_url, rgb(208, 212, 218), 1);
+    /* 闪烁插入光标 */
     {
         uint32_t cur = st->browser_url_cursor;
         uint32_t n = (uint32_t)strlen(st->browser_url);
@@ -5003,39 +5094,25 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
         char prefix[BROWSER_URL_CAP];
         memcpy(prefix, st->browser_url, cur);
         prefix[cur] = 0;
-        int caret_x = tx + 10 + text_width(prefix, 1);
-        if (caret_x > tx + view_w - 10) caret_x = tx + view_w - 10;
+        int caret_x = url_x + text_width(prefix, 1);
+        if (caret_x > pill_r - 10) caret_x = pill_r - 10;
         static uint32_t browser_caret_ticks = 0;
         browser_caret_ticks++;
-        if ((browser_caret_ticks / 15) % 2) {
-            rect(caret_x + 1, ty + 66, 2, 18, rgb(78, 192, 236));
-        }
+        if ((browser_caret_ticks / 15) % 2)
+            rect(caret_x + 1, pill_y + 5, 2, 18, rgb(220, 224, 230));
     }
-    draw_small_button(tx, ty + 104, 96, "Enter 加载", rgb(78, 192, 236));
-    draw_small_button(tx + 108, ty + 104, 68, "保存", rgb(85, 180, 120));
-    int can_back = st->browser_hist_pos > 0;
-    int can_fwd  = st->browser_hist_pos + 1 < st->browser_hist_count;
-    draw_small_button(tx + 178, ty + 104, 44, "后退",
-                      can_back ? rgb(120, 150, 180) : rgb(60, 68, 78));
-    draw_small_button(tx + 224, ty + 104, 44, "前进",
-                      can_fwd ? rgb(120, 150, 180) : rgb(60, 68, 78));
-    char line[128];
-    uint32_t pos = 0;
-    line[0] = 0;
-    append_str(line, sizeof(line), &pos, dev->dhcp_ok ? "网络 " : "未配置 ");
-    append_str(line, sizeof(line), &pos, net_driver_name(dev->driver));
-    append_str(line, sizeof(line), &pos, " ");
-    append_str(line, sizeof(line), &pos, ipbuf);
-    append_str(line, sizeof(line), &pos, "  ");
-    append_str(line, sizeof(line), &pos, st->status ? st->status : "浏览器就绪");
-    text_clipped(tx, ty + 136, tx + view_w - 8, line, rgb(168, 190, 204), 1);
-    /* 内容区：先画，若发现滚动越过末尾则钳回并重画一遍（含背景）。 */
-    int inner_h = content_box_h - 24;
+
+    /* 页面区：白底（Chrome 默认渲染），铺满窗口剩余高度 */
+    int page_y = ty + BR_TAB_H + BR_TOOL_H;
+    /* 底部留 32px：那是 draw_app_window_body 之后统一画的窗口状态栏
+     * （加载中/出错文本都显示在那里，Chrome 底部状态气泡的等价物）。 */
+    int page_h = win_h - 42 - (BR_TAB_H + BR_TOOL_H) - 32;
+    if (page_h < 80) page_h = 80;
+    int inner_h = page_h - 20;
     int total = 0, max_scroll = 0, visible_rows = 0;
     for (int pass = 0; pass < 2; pass++) {
-        rect(tx, ty + 146, view_w, content_box_h, rgb(4, 9, 14));
-        border(tx, ty + 146, view_w, content_box_h, rgb(50, 74, 90));
-        total = draw_rendered_page(tx + 12, ty + 158, view_w - 24, inner_h,
+        rect(wx, page_y, ww, page_h, rgb(255, 255, 255));
+        total = draw_rendered_page(wx + 18, page_y + 12, ww - 44, inner_h,
                                    st->browser_render, st->browser_render_len,
                                    st->browser_scroll);
         int rh = gui_font_line_height() + 3;
@@ -5045,20 +5122,18 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
         if (st->browser_scroll <= max_scroll) break;
         st->browser_scroll = max_scroll;
     }
-    /* 滚动条：内容超出可视区域才画（跟真实浏览器一样，装得下就不显示），
-     * 右边缘一条细槽 + 一段按比例算高度/位置的滑块，让人一眼知道页面
-     * 还剩多少、看到哪了——之前完全没有任何视觉反馈，只能凭感觉滚。 */
+    /* Chrome 式滚动条：浅色细槽 + 灰滑块，内容装得下就不显示 */
     if (total > visible_rows && visible_rows > 0) {
-        int sb_x = tx + view_w - 8;
-        int sb_y = ty + 146 + 2;
-        int sb_h = content_box_h - 4;
-        rect(sb_x, sb_y, 4, sb_h, rgb(20, 26, 34));
+        int sb_x = wx + ww - 10;
+        int sb_y = page_y + 2;
+        int sb_h = page_h - 4;
+        rect(sb_x, sb_y, 6, sb_h, rgb(241, 243, 244));
         int thumb_h = sb_h * visible_rows / total;
-        if (thumb_h < 16) thumb_h = 16;
+        if (thumb_h < 20) thumb_h = 20;
         if (thumb_h > sb_h) thumb_h = sb_h;
         int thumb_y = sb_y;
         if (max_scroll > 0) thumb_y += (sb_h - thumb_h) * st->browser_scroll / max_scroll;
-        rect(sb_x, thumb_y, 4, thumb_h, rgb(90, 120, 145));
+        fill_round_rect(sb_x, thumb_y, 6, thumb_h, 3, rgb(154, 160, 166), RR_ALL);
     }
 }
 
@@ -6171,7 +6246,8 @@ static int hit_note_editor(int w, int h, gui_state_t *st, int mx, int my, uint32
     return 1;
 }
 
-/* "Enter 加载" 按钮命中测试；矩形与 draw_browser_app 里画的那个必须保持一致。 */
+/* 重新加载（⟳）按钮命中测试：Chrome 式工具栏的第三个圆形按钮，圆心/半径
+ * 与 draw_browser_app 的 BR_RELOAD_CX/BR_BTN_CY/BR_BTN_R 保持一致。 */
 static int hit_browser_load_button(int w, int h, const gui_state_t *st, int mx, int my) {
     if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
     const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
@@ -6180,13 +6256,14 @@ static int hit_browser_load_button(int w, int h, const gui_state_t *st, int mx, 
     int win_x, win_y, win_w, win_h;
     gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
     (void)win_w; (void)win_h;
-    int tx = win_x + 30;
-    int ty = win_y + 42;
-    int bx = tx, by = ty + 104, bw = 96;
-    return (mx >= bx && mx < bx + bw && my >= by && my < by + ACTION_H);
+    int cx = win_x + 30 + BR_RELOAD_CX;
+    int cy = win_y + 42 + BR_BTN_CY;
+    return (mx >= cx - BR_BTN_R && mx < cx + BR_BTN_R &&
+            my >= cy - BR_BTN_R && my < cy + BR_BTN_R);
 }
 
-/* 0=没点中，1=后退，2=前进；矩形要和 draw_browser_app 里画的保持一致。 */
+/* 0=没点中，1=后退，2=前进；圆心与 draw_browser_app 的 BR_BACK_CX/BR_FWD_CX
+ * 保持一致（命中区按外接正方形算，圆形按钮的常规近似）。 */
 static int hit_browser_nav_button(int w, int h, const gui_state_t *st, int mx, int my) {
     if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
     const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
@@ -6195,11 +6272,12 @@ static int hit_browser_nav_button(int w, int h, const gui_state_t *st, int mx, i
     int win_x, win_y, win_w, win_h;
     gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
     (void)win_w; (void)win_h;
-    int tx = win_x + 30;
-    int ty = win_y + 42;
-    int by = ty + 104;
-    if (mx >= tx + 178 && mx < tx + 178 + 44 && my >= by && my < by + ACTION_H) return 1;
-    if (mx >= tx + 224 && mx < tx + 224 + 44 && my >= by && my < by + ACTION_H) return 2;
+    int cy = win_y + 42 + BR_BTN_CY;
+    if (my < cy - BR_BTN_R || my >= cy + BR_BTN_R) return 0;
+    int bx = win_x + 30 + BR_BACK_CX;
+    int fx = win_x + 30 + BR_FWD_CX;
+    if (mx >= bx - BR_BTN_R && mx < bx + BR_BTN_R) return 1;
+    if (mx >= fx - BR_BTN_R && mx < fx + BR_BTN_R) return 2;
     return 0;
 }
 
