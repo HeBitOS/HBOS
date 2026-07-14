@@ -4638,17 +4638,34 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     text_clipped(tx, ty + 136, tx + view_w - 8, line, rgb(168, 190, 204), 1);
     /* 内容区：先画，若发现滚动越过末尾则钳回并重画一遍（含背景）。 */
     int inner_h = content_box_h - 24;
+    int total = 0, max_scroll = 0, visible_rows = 0;
     for (int pass = 0; pass < 2; pass++) {
         rect(tx, ty + 146, view_w, content_box_h, rgb(4, 9, 14));
         border(tx, ty + 146, view_w, content_box_h, rgb(50, 74, 90));
-        int total = draw_rendered_page(tx + 12, ty + 158, view_w - 24, inner_h,
-                                       st->browser_render, st->browser_render_len,
-                                       st->browser_scroll);
+        total = draw_rendered_page(tx + 12, ty + 158, view_w - 24, inner_h,
+                                   st->browser_render, st->browser_render_len,
+                                   st->browser_scroll);
         int rh = gui_font_line_height() + 3;
-        int max_scroll = total - inner_h / rh;
+        visible_rows = inner_h / rh;
+        max_scroll = total - visible_rows;
         if (max_scroll < 0) max_scroll = 0;
         if (st->browser_scroll <= max_scroll) break;
         st->browser_scroll = max_scroll;
+    }
+    /* 滚动条：内容超出可视区域才画（跟真实浏览器一样，装得下就不显示），
+     * 右边缘一条细槽 + 一段按比例算高度/位置的滑块，让人一眼知道页面
+     * 还剩多少、看到哪了——之前完全没有任何视觉反馈，只能凭感觉滚。 */
+    if (total > visible_rows && visible_rows > 0) {
+        int sb_x = tx + view_w - 8;
+        int sb_y = ty + 146 + 2;
+        int sb_h = content_box_h - 4;
+        rect(sb_x, sb_y, 4, sb_h, rgb(20, 26, 34));
+        int thumb_h = sb_h * visible_rows / total;
+        if (thumb_h < 16) thumb_h = 16;
+        if (thumb_h > sb_h) thumb_h = sb_h;
+        int thumb_y = sb_y;
+        if (max_scroll > 0) thumb_y += (sb_h - thumb_h) * st->browser_scroll / max_scroll;
+        rect(sb_x, thumb_y, 4, thumb_h, rgb(90, 120, 145));
     }
 }
 
