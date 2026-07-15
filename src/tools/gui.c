@@ -1448,6 +1448,14 @@ static const int CURSOR_RESIZE_NESW_VY[10] = { 17, 8, 12, 5, 1, 1, 10, 6, 13, 17
 static const int CURSOR_TEXT_VX[12] = { 0, 14, 14,  9,  9, 14, 14, 0, 0, 5, 5, 0 };
 static const int CURSOR_TEXT_VY[12] = { 0,  0,  4,  4, 18, 18, 22, 22, 18, 18, 4, 4 };
 
+/* 手型链接光标（食指伸出的简化手掌轮廓），悬停在浏览器链接上时用——
+ * 和文本工字光标一样走 CURSOR_HOVER_* 伪 edge 值。 */
+#define CURSOR_HOVER_LINK -51
+#define CURSOR_HAND_W 15
+#define CURSOR_HAND_H 18
+static const int CURSOR_HAND_VX[10] = { 5, 8, 8, 13, 14, 12, 4, 2, 2, 5 };
+static const int CURSOR_HAND_VY[10] = { 0, 0, 7,  8, 13, 17, 17, 12, 9, 9 };
+
 static void draw_polygon_cursor(int x, int y, const int *vx, const int *vy, int n, int bw, int bh) {
     uint32_t c = rgb(148, 148, 148);
     uint32_t d = rgb(20, 27, 34);
@@ -1481,6 +1489,10 @@ static void draw_cursor(int x, int y, int edge) {
     case CURSOR_HOVER_TEXT:
         draw_polygon_cursor(x, y, CURSOR_TEXT_VX, CURSOR_TEXT_VY, 12,
                              CURSOR_TEXT_W, CURSOR_TEXT_H);
+        return;
+    case CURSOR_HOVER_LINK:
+        draw_polygon_cursor(x, y, CURSOR_HAND_VX, CURSOR_HAND_VY, 10,
+                             CURSOR_HAND_W, CURSOR_HAND_H);
         return;
     default:
         draw_polygon_cursor(x, y, CURSOR_VX, CURSOR_VY, 4, CURSOR_ARROW_W, CURSOR_ARROW_H);
@@ -7900,6 +7912,36 @@ static void cmd_gui(int argc, char **argv) {
                 if ((st.app_mode == GUI_APP_NOTES && hit_note_editor(w, h, &st, mx, my, &hover_off)) ||
                     (st.app_mode == GUI_APP_CODE && hit_code_editor(w, h, &st, mx, my, &hover_off)))
                     cursor_edge = CURSOR_HOVER_TEXT;
+            }
+            /* 浏览器链接悬停：手型光标 + 状态栏预览目标 URL（Chrome 把目标
+             * 地址显示在左下角，这里等价物是窗口底部状态栏）。 */
+            {
+                static int br_hover_idx = -1;
+                static const char *br_saved_status = 0;
+                static char br_hover_buf[120];
+                int hl = -1;
+                if (cursor_edge == WM_EDGE_NONE && st.app_mode == GUI_APP_BROWSER)
+                    hl = hit_browser_link(w, h, &st, mx, my);
+                if (hl >= 0) cursor_edge = CURSOR_HOVER_LINK;
+                if (hl != br_hover_idx) {
+                    br_hover_idx = hl;
+                    if (hl >= 0 && hl < st.browser_link_count) {
+                        if (st.status != br_hover_buf) br_saved_status = st.status;
+                        uint32_t bp = 0;
+                        br_hover_buf[0] = 0;
+                        append_str(br_hover_buf, sizeof(br_hover_buf), &bp, "打开 ");
+                        append_str(br_hover_buf, sizeof(br_hover_buf), &bp,
+                                   st.browser_link_href[hl]);
+                        st.status = br_hover_buf;
+                    } else if (st.status == br_hover_buf) {
+                        st.status = br_saved_status ? br_saved_status : "就绪";
+                    }
+                    /* 直接 gui_damage_region 不行：紧接着的鼠标移动分支会
+                     * gui_dirty_reset() 把这条脏矩形吞掉、只重画光标区域，
+                     * 状态栏像素一直是旧的。悬停进出是单次事件，整帧重绘
+                     * 一次的代价可以接受。 */
+                    redraw = 1;
+                }
             }
 
             /* 右键：弹出上下文菜单（窗口上→窗口菜单，否则→桌面菜单） */
