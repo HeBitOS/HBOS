@@ -3589,6 +3589,7 @@ enum {
 /* flags 字节 8 位已经用满，斜体单独开第二个 flags 字节。 */
 #define BR_FLAG2_ITALIC_ON   0x01
 #define BR_FLAG2_INDENT_SHIFT 1   /* 位 1-2：嵌套列表缩进级别（0-3） */
+#define BR_FLAG2_BORDER      0x08 /* CSS border：块四周 1px 边框 */
 
 /* 行内运行分隔符：块内样式切换（<strong>/<em>/<a> 开合）不再另起一行，
  * 而是在文本流里写 0x02 + 新 [type][可选 meta]，绘制端把同一块里的多个
@@ -3627,6 +3628,7 @@ typedef struct {
     uint32_t bg_color;
     int left_bar;    /* 左侧强调竖线（引用块用，标出"这是引用"而不是普通缩进段落） */
     int align;       /* 0=left 1=center 2=right，CSS text-align 覆盖用 */
+    int border;      /* CSS border：块四周 1px 边框（卡片式布局常用） */
 } browser_style_t;
 
 static void browser_style_get(int type, browser_style_t *s) {
@@ -3636,7 +3638,7 @@ static void browser_style_get(int type, browser_style_t *s) {
     uint32_t body_col = rgb(32, 33, 36);
     s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
     s->mono = 0; s->bold = 0; s->italic = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
-    s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0;
+    s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0; s->border = 0;
     switch (type) {
         case BRK_P:   s->gap_after = 1; break; /* 段落之间留白——之前没有，所以文字全堆成一片 */
         case BRK_H1: s->color = rgb(12, 13, 16); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
@@ -3737,6 +3739,7 @@ typedef struct {
     int scale2;       int has_scale;
     uint32_t bg_color; int has_bg;
     int align;         int has_align; /* 0=left 1=center 2=right */
+    int border;         int has_border; /* border: 非 none -> 块四周画 1px 边框 */
     int indent_lvl;     int has_indent; /* 嵌套列表缩进级别 0-3（flags2 两个位），
                                           * 不是 CSS 属性，发射端按 <ul>/<ol> 嵌套深度填 */
     int gap;            int has_gap;  /* margin/margin-top/margin-bottom 非零 -> 块后多留一行；
@@ -3832,8 +3835,14 @@ static void css_apply_decl(css_decl_t *d, const char *prop, uint32_t plen, const
         else if (strstr(val, "right")) a = 2;
         else if (strstr(val, "left")) a = 0;
         if (a >= 0) { d->align = a; d->has_align = 1; }
+    } else if (tag_ci_eq(prop, (int)plen, "border")) {
+        d->border = (strstr(val, "none") == 0);
+        d->has_border = 1;
     } else if (tag_ci_eq(prop, (int)plen, "margin") || tag_ci_eq(prop, (int)plen, "margin-top") ||
-               tag_ci_eq(prop, (int)plen, "margin-bottom")) {
+               tag_ci_eq(prop, (int)plen, "margin-bottom") ||
+               tag_ci_eq(prop, (int)plen, "padding") ||
+               tag_ci_eq(prop, (int)plen, "padding-top") ||
+               tag_ci_eq(prop, (int)plen, "padding-bottom")) {
         int n = 0; const char *p = val;
         while (*p == ' ') p++;
         while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
@@ -3939,6 +3948,7 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
         if (r->decl.has_scale) { out->scale2 = r->decl.scale2; out->has_scale = 1; }
         if (r->decl.has_bg) { out->bg_color = r->decl.bg_color; out->has_bg = 1; }
         if (r->decl.has_align) { out->align = r->decl.align; out->has_align = 1; }
+        if (r->decl.has_border) { out->border = r->decl.border; out->has_border = 1; }
         if (r->decl.has_gap) { out->gap = r->decl.gap; out->has_gap = 1; }
     }
     if (inline_style && inline_style[0]) {
@@ -3951,6 +3961,7 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
         if (inl.has_scale) { out->scale2 = inl.scale2; out->has_scale = 1; }
         if (inl.has_bg) { out->bg_color = inl.bg_color; out->has_bg = 1; }
         if (inl.has_align) { out->align = inl.align; out->has_align = 1; }
+        if (inl.has_border) { out->border = inl.border; out->has_border = 1; }
         if (inl.has_gap) { out->gap = inl.gap; out->has_gap = 1; }
     }
 }
@@ -3960,7 +3971,8 @@ static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
 static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, const css_decl_t *ov) {
     int has_meta = (link_idx >= 0) || (ov && (ov->has_color || ov->has_bold || ov->has_italic ||
                                               ov->has_underline || ov->has_scale || ov->has_bg ||
-                                              ov->has_align || ov->has_gap || ov->has_indent));
+                                              ov->has_align || ov->has_gap || ov->has_indent ||
+                                              ov->has_border));
     if (!has_meta) return;
     if (*pos + BR_META_LEN >= cap) return;
     uint8_t flags = 0, flags2 = 0;
@@ -3971,6 +3983,7 @@ static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, c
         if (ov->has_bold && ov->bold) flags |= BR_FLAG_BOLD_ON;
         if (ov->has_italic && ov->italic) flags2 |= BR_FLAG2_ITALIC_ON;
         if (ov->has_indent) flags2 |= (uint8_t)((ov->indent_lvl & 3) << BR_FLAG2_INDENT_SHIFT);
+        if (ov->has_border && ov->border) flags2 |= BR_FLAG2_BORDER;
         if (ov->has_underline && ov->underline) flags |= BR_FLAG_UNDER_ON;
         if (ov->has_scale && ov->scale2) flags |= BR_FLAG_SCALE2;
         if (ov->has_bg) { flags |= BR_FLAG_BG; bg_r = (uint8_t)(ov->bg_color >> 16); bg_g = (uint8_t)(ov->bg_color >> 8); bg_b = (uint8_t)ov->bg_color; }
@@ -4705,6 +4718,7 @@ static uint32_t br_read_style(const char *buf, uint32_t len, uint32_t i, int typ
             int lvl = (flags2 >> BR_FLAG2_INDENT_SHIFT) & 3;
             if (lvl) bs->indent += 18 * lvl;
         }
+        if (flags2 & BR_FLAG2_BORDER) bs->border = 1;
         if (flags & BR_FLAG_UNDER_ON) bs->underline = 1;
         if (flags & BR_FLAG_SCALE2) bs->scale = 2;
         if (flags & BR_FLAG_BG) { bs->has_bg = 1; bs->bg_color = ((uint32_t)bg_r << 16) | ((uint32_t)bg_g << 8) | bg_b; }
@@ -4754,6 +4768,8 @@ static void br_draw_tok(int px, int py, int rowh, int rh, const char *tok, int t
     if (link_idx >= 0) browser_add_link_rect(px, py, tw, rowh, link_idx);
 }
 
+#define BR_BORDER_COL rgb(196, 202, 208) /* CSS border 的固定颜色（浅灰） */
+
 /* 流式排版一个块：把块内所有运行的词依次从左到右排，超宽按词折行（CJK
  * 按字折行），单个超长词按码点硬切。这是"行内元素不再各占一行 + 单词不再
  * 被从中间劈开"两件事的共同实现——之前 browser_draw_segment 按固定列数
@@ -4783,6 +4799,11 @@ static int browser_flow_block(int x, int w, int *cy, int row_unit, int scroll, i
 #define BRF_VIS() (row_unit >= scroll && *drawn_rows < max_lines)
 #define BRF_ROW_BEGIN() do { if (!row_open) { row_open = 1; if (BRF_VIS()) { \
             if (base->has_bg) rect(x, *cy - 1, w, rowh, base->bg_color); \
+            if (base->border) { \
+                rect(x, *cy - 1, 1, rowh, BR_BORDER_COL); \
+                rect(x + w - 1, *cy - 1, 1, rowh, BR_BORDER_COL); \
+                if (first_row) rect(x, *cy - 1, w, 1, BR_BORDER_COL); \
+            } \
             if (base->left_bar) rect(x, *cy - 1, 3, rowh, base->color); \
             if (base->bullet && first_row) text(x + base->indent, *cy, "•", base->color, 1); \
         } } } while (0)
@@ -4841,6 +4862,9 @@ static int browser_flow_block(int x, int w, int *cy, int row_unit, int scroll, i
         }
     }
     if (row_open) BRF_ROW_END();
+    /* 边框底边：块的所有行画完后补一条（顶边/左右竖边在 BRF_ROW_BEGIN 里） */
+    if (base->border && row_unit > scroll && *drawn_rows <= max_lines)
+        rect(x, *cy - 1, w, 1, BR_BORDER_COL);
     if (base->gap_after) {
         if (row_unit >= scroll && *drawn_rows < max_lines) { *cy += rh; (*drawn_rows)++; }
         row_unit++;
