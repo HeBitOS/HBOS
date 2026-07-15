@@ -237,7 +237,12 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
 
     body[n++] = 0x03; body[n++] = 0x03;
     tls_random(body + n, 32); n += 32;
-    body[n++] = 0;
+    /* legacy_session_id：TLS 1.3 中间盒兼容模式要求 32 字节随机假 id
+     * （RFC 8446 附录 D.4，Chrome 始终这么发）。之前发空 id，example.com
+     * 这类简单源站不在乎，但 baidu/bing 的 CDN 前端直接掐连接（表现为
+     * "serverhello read failed"）。 */
+    body[n++] = 32;
+    tls_random(body + n, 32); n += 32;
     /* 报两个套件：AES-128-GCM 在前（TLS 1.3 强制要求实现、绝大多数服务器
      * 都支持），ChaCha20-Poly1305 在后——选哪个是服务端决定，客户端这里
      * 只是把两个都摆上桌，不表示优先级。 */
@@ -276,11 +281,14 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
     memcpy(body + n, public_key, 32); n += 32;
 
     put_u16(body + n, 0x000d); n += 2;
-    put_u16(body + n, 8); n += 2;
-    put_u16(body + n, 6); n += 2;
-    put_u16(body + n, 0x0403); n += 2;
-    put_u16(body + n, 0x0804); n += 2;
-    put_u16(body + n, 0x0401); n += 2;
+    put_u16(body + n, 14); n += 2;
+    put_u16(body + n, 12); n += 2;
+    put_u16(body + n, 0x0403); n += 2;  /* ecdsa_secp256r1_sha256 */
+    put_u16(body + n, 0x0804); n += 2;  /* rsa_pss_rsae_sha256 */
+    put_u16(body + n, 0x0401); n += 2;  /* rsa_pkcs1_sha256 */
+    put_u16(body + n, 0x0805); n += 2;  /* rsa_pss_rsae_sha384 */
+    put_u16(body + n, 0x0806); n += 2;  /* rsa_pss_rsae_sha512 */
+    put_u16(body + n, 0x0503); n += 2;  /* ecdsa_secp384r1_sha384 */
 
     put_u16(body + ext_len_pos, (uint16_t)(n - ext_start));
 
@@ -424,7 +432,7 @@ static int derive_app_keys(tls_ctx_t *ctx, const uint8_t handshake_secret[32]) {
  */
 static int tcp_read_exact(tls_ctx_t *ctx, uint8_t *buf, uint32_t need) {
     uint32_t got = 0;
-    for (int idle = 0; got < need && idle < 160;) {
+    for (int idle = 0; got < need && idle < 400;) {
         uint32_t n = 0;
         if (net_tcp_recv(&ctx->tcp, buf + got, need - got, &n, 4) < 0) return -1;
         if (n == 0) idle++;
@@ -559,13 +567,29 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
         return TLS_STATUS_ERROR;
     }
 
+    /* 兼容性 ChangeCipherSpec（RFC 8446 D.4）：紧跟 ClientHello 发出，
+     * 让路径上把 TLS 1.3 当 1.2 看的中间盒闭嘴。 */
+    static const uint8_t ccs[6] = {TLS_RECORD_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01};
+    net_tcp_send(&ctx.tcp, ccs, sizeof(ccs));
+
     uint8_t rtype;
     static uint8_t record[18432];
     static uint8_t plain[18432];
     static uint8_t hsbuf[24576];
     uint32_t rlen = 0;
-    if (read_record(&ctx, &rtype, record, sizeof(record), &rlen) < 0 || rtype != TLS_RECORD_HANDSHAKE) {
+    if (read_record(&ctx, &rtype, record, sizeof(record), &rlen) < 0) {
         set_error("tls serverhello read failed");
+        net_tcp_close(&ctx.tcp);
+        return TLS_STATUS_ERROR;
+    }
+    if (rtype == TLS_RECORD_ALERT) {
+        /* 和"读不到"区分开：服务器明确拒绝了 ClientHello */
+        set_error("tls alert before serverhello");
+        net_tcp_close(&ctx.tcp);
+        return TLS_STATUS_ERROR;
+    }
+    if (rtype != TLS_RECORD_HANDSHAKE) {
+        set_error("tls unexpected first record");
         net_tcp_close(&ctx.tcp);
         return TLS_STATUS_ERROR;
     }
