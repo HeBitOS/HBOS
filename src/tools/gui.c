@@ -4492,6 +4492,40 @@ static void br_status(gui_state_t *st, const char *msg) {
 /* 前置声明：图片 src 相对当前页面 URL 补全，逻辑和 <a href> 完全一样。 */
 static int browser_resolve_href(const gui_state_t *st, const char *href, char *out, uint32_t out_cap);
 
+/* HTTP 状态码（"HTTP/1.x NNN ..."），解析失败返回 -1。 */
+static int br_http_status(const char *buf) {
+    if (strncmp(buf, "HTTP/", 5) != 0) return -1;
+    const char *p = buf + 5;
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    int code = 0;
+    while (*p >= '0' && *p <= '9') code = code * 10 + (*p++ - '0');
+    return code ? code : -1;
+}
+
+/* 提取 Location 响应头的值（大小写不敏感、去前导空格、到行尾）。 */
+static int br_http_location(const char *buf, char *out, uint32_t cap) {
+    const char *hdr_end = strstr(buf, "\r\n\r\n");
+    const char *p = buf;
+    while (p && (!hdr_end || p < hdr_end)) {
+        p = strstr(p, "\r\n");
+        if (!p) break;
+        p += 2;
+        if (tag_ci_eq(p, 9, "location:")) {
+            p += 9;
+            while (*p == ' ') p++;
+            uint32_t n = 0;
+            while (p[n] && p[n] != '\r' && p[n] != '\n' && n + 1 < cap) {
+                out[n] = p[n];
+                n++;
+            }
+            out[n] = 0;
+            return n ? 0 : -1;
+        }
+    }
+    return -1;
+}
+
 /* 页面加载后统一抓取并解码所有已登记的内联图片。每张独立抓取一次
  * （串行，复用同一个静态响应缓冲），解码进对应槽位；失败/超尺寸/JPEG
  * 等不支持的就把该槽宽高留 0，绘制端画占位。 */
@@ -4527,49 +4561,69 @@ static void browser_fetch_images(gui_state_t *st) {
 
 static void browser_load_internal(gui_state_t *st, int push_history) {
     browser_init(st);
-    char host[96];
-    const char *path = "/";
-    uint16_t port = 80;
-    int https = 0;
-    const char *err = gui_parse_url(st->browser_url, &https, host, sizeof(host), &port, &path);
-    if (err) {
-        browser_set_plain(st, err);
-        br_status(st, "浏览器 URL 错误");
-        return;
-    }
     br_status(st, "浏览器加载中");
     if (!net_primary()->dhcp_ok && net_dhcp() < 0) {
         browser_set_plain2(st, "网络未配置: ", net_last_error());
         br_status(st, "浏览器网络失败");
         return;
     }
-    uint32_t ip = 0;
-    if (net_dns_resolve(host, &ip) < 0) {
-        browser_set_plain2(st, "DNS 失败: ", net_last_error());
-        br_status(st, "浏览器 DNS 失败");
-        return;
-    }
     static char response[BROWSER_FETCH_CAP];
     uint32_t len = 0;
-    int ok = https ? tls_https_get(host, ip, port, path, response, sizeof(response), &len)
-                   : net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
-    const char *tls_error = https ? tls_last_error() : "";
-    if (ok < 0 && https) {
-        port = 80;
-        ok = net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
-        if (ok == 0) br_status(st, "HTTPS 失败，已用 HTTP 回退");
-    }
-    if (ok < 0) {
-        browser_set_plain2(st, "加载失败: ", https ? tls_error : net_last_error());
-        br_status(st, "浏览器加载失败");
-        return;
+    /* 重定向循环：真实网站首页 301/302 到 www/https 非常普遍，之前浏览器
+     * 不跟随（只有 shell 的 wget 会），用户看到的就是一页 301 Moved 文本。
+     * 最多 4 跳防环；每跳把地址栏更新为当前 URL（既是 Chrome 行为，也让
+     * browser_resolve_href 用它做相对 Location 的基准）。 */
+    for (int hop = 0; ; hop++) {
+        char host[96];
+        const char *path = "/";
+        uint16_t port = 80;
+        int https = 0;
+        const char *err = gui_parse_url(st->browser_url, &https, host, sizeof(host), &port, &path);
+        if (err) {
+            browser_set_plain(st, err);
+            br_status(st, "浏览器 URL 错误");
+            return;
+        }
+        uint32_t ip = 0;
+        if (net_dns_resolve(host, &ip) < 0) {
+            browser_set_plain2(st, "DNS 失败: ", net_last_error());
+            br_status(st, "浏览器 DNS 失败");
+            return;
+        }
+        int ok = https ? tls_https_get(host, ip, port, path, response, sizeof(response), &len)
+                       : net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
+        const char *tls_error = https ? tls_last_error() : "";
+        if (ok < 0 && https) {
+            port = 80;
+            ok = net_http_request("GET", host, ip, port, path, response, sizeof(response), &len);
+            if (ok == 0) br_status(st, "HTTPS 失败，已用 HTTP 回退");
+        }
+        if (ok < 0) {
+            browser_set_plain2(st, "加载失败: ", https ? tls_error : net_last_error());
+            br_status(st, "浏览器加载失败");
+            return;
+        }
+        int code = br_http_status(response);
+        if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308) break;
+        if (hop >= 3) {
+            browser_set_plain(st, "重定向次数过多");
+            br_status(st, "浏览器加载失败");
+            return;
+        }
+        char loc[160];
+        if (br_http_location(response, loc, sizeof(loc)) < 0) break; /* 没 Location 就按普通页渲染 */
+        char next_url[BROWSER_URL_CAP];
+        if (browser_resolve_href(st, loc, next_url, sizeof(next_url)) < 0) break;
+        strncpy(st->browser_url, next_url, BROWSER_URL_CAP - 1);
+        st->browser_url[BROWSER_URL_CAP - 1] = 0;
+        st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
     }
     const char *body = http_body_ptr(response);
     browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
     browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
     browser_fetch_images(st); /* 渲染登记了图片 src，这里逐张抓取解码 */
     st->browser_scroll = 0;
-    if (!https || strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
+    if (strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
         br_status(st, "浏览器加载完成");
     if (push_history) browser_hist_push(st, st->browser_url);
     /* <title> 抓到了就用它做窗口标题（"浏览器 - 页面标题"），跟真实浏览器
