@@ -24,6 +24,8 @@
 #define TLS_HANDSHAKE_CERT_VERIFY 0x0f       /**< CertificateVerify 握手消息类型 */
 #define TLS_HANDSHAKE_FINISHED 0x14          /**< Finished 握手消息类型 */
 #define TLS_CHACHA20_POLY1305_SHA256 0x1303  /**< ChaCha20-Poly1305-SHA256 密码套件编号 */
+#define TLS12_ECDHE_RSA_AES128_GCM   0xC02F  /**< TLS 1.2 ECDHE_RSA_WITH_AES_128_GCM_SHA256 */
+#define TLS12_ECDHE_ECDSA_AES128_GCM 0xC02B  /**< TLS 1.2 ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 */
 #define TLS_AES_128_GCM_SHA256 0x1301        /**< AES-128-GCM-SHA256 密码套件编号——RFC 8446
                                                 *  规定 TLS 1.3 实现必须支持这个，覆盖面比
                                                 *  ChaCha20-Poly1305 广，不少服务器（比如很多
@@ -246,9 +248,14 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
     /* 报两个套件：AES-128-GCM 在前（TLS 1.3 强制要求实现、绝大多数服务器
      * 都支持），ChaCha20-Poly1305 在后——选哪个是服务端决定，客户端这里
      * 只是把两个都摆上桌，不表示优先级。 */
-    body[n++] = 0; body[n++] = 4;
-    body[n++] = 0x13; body[n++] = 0x01;
-    body[n++] = 0x13; body[n++] = 0x03;
+    /* 同时报 TLS 1.3 和 1.2 的套件：ServerHello 按 supported_versions
+     * 扩展（1.3）或 legacy 版本字段（1.2）分支。大量真实网站（尤其国内
+     * CDN 前端）只支持 1.2，只报 1.3 套件会被直接 handshake_failure。 */
+    body[n++] = 0; body[n++] = 8;
+    body[n++] = 0x13; body[n++] = 0x01;   /* TLS_AES_128_GCM_SHA256 */
+    body[n++] = 0x13; body[n++] = 0x03;   /* TLS_CHACHA20_POLY1305_SHA256 */
+    body[n++] = 0xC0; body[n++] = 0x2F;   /* ECDHE_RSA_AES128_GCM (1.2) */
+    body[n++] = 0xC0; body[n++] = 0x2B;   /* ECDHE_ECDSA_AES128_GCM (1.2) */
     body[n++] = 1; body[n++] = 0;
 
     uint32_t ext_len_pos = n; n += 2;
@@ -264,9 +271,14 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
         memcpy(body + n, host, host_len); n += host_len;
     }
 
+    /* supported_versions：同时报 TLS 1.3 和 1.2。服务器一旦看到这个扩展就
+     * 只用它做版本协商（忽略 legacy_version 字段），所以只列 1.3 会让强制
+     * 1.2 的服务器找不到公共版本、直接 alert；1.3 在前表示优先。 */
     put_u16(body + n, 0x002b); n += 2;
-    put_u16(body + n, 3); n += 2;
-    body[n++] = 2; body[n++] = 0x03; body[n++] = 0x04;
+    put_u16(body + n, 5); n += 2;
+    body[n++] = 4;
+    body[n++] = 0x03; body[n++] = 0x04;
+    body[n++] = 0x03; body[n++] = 0x03;
 
     put_u16(body + n, 0x000a); n += 2;
     put_u16(body + n, 4); n += 2;
@@ -289,6 +301,16 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
     put_u16(body + n, 0x0805); n += 2;  /* rsa_pss_rsae_sha384 */
     put_u16(body + n, 0x0806); n += 2;  /* rsa_pss_rsae_sha512 */
     put_u16(body + n, 0x0503); n += 2;  /* ecdsa_secp384r1_sha384 */
+
+    /* ec_point_formats：uncompressed——1.2 的 ECDHE 服务器普遍要求 */
+    put_u16(body + n, 0x000b); n += 2;
+    put_u16(body + n, 2); n += 2;
+    body[n++] = 1; body[n++] = 0;
+
+    /* renegotiation_info：空——1.2 服务器普遍要求安全重协商信号 */
+    put_u16(body + n, 0xff01); n += 2;
+    put_u16(body + n, 1); n += 2;
+    body[n++] = 0;
 
     put_u16(body + ext_len_pos, (uint16_t)(n - ext_start));
 
@@ -315,42 +337,54 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
  * @return 0 成功，-1 失败
  */
 static int parse_server_hello(const uint8_t *hs, uint32_t len, uint8_t peer_key[32],
-                              uint16_t *out_cipher_suite) {
+                              uint16_t *out_cipher_suite, int *out_is13,
+                              uint8_t server_random[32], uint32_t *out_msg_end) {
     if (!hs || len < 42 || hs[0] != TLS_HANDSHAKE_SERVER_HELLO) return -1;
     uint32_t hs_len = get_u24(hs + 1);
     if (hs_len + 4 > len) return -1;
     const uint8_t *p = hs + 4;
     const uint8_t *end = p + hs_len;
     if (p + 38 > end) return -1;
-    p += 2;
+    p += 2;                       /* legacy_version：1.3/1.2 都是 0x0303 */
+    memcpy(server_random, p, 32); /* 1.2 的 PRF 要用 */
     p += 32;
     uint8_t sid_len = *p++;
     if (p + sid_len + 3 > end) return -1;
     p += sid_len;
     uint16_t chosen = get_u16(p);
-    if (chosen != TLS_CHACHA20_POLY1305_SHA256 && chosen != TLS_AES_128_GCM_SHA256) return -1;
-    *out_cipher_suite = chosen;
     p += 2;
-    p++;
-    if (p + 2 > end) return -1;
-    uint16_t ext_len = get_u16(p); p += 2;
-    if (p + ext_len > end) return -1;
-    const uint8_t *ext_end = p + ext_len;
+    p++;                          /* compression method */
     int saw_tls13 = 0;
     int saw_key = 0;
-    while (p + 4 <= ext_end) {
-        uint16_t type = get_u16(p); p += 2;
-        uint16_t elen = get_u16(p); p += 2;
-        if (p + elen > ext_end) return -1;
-        if (type == 0x002b && elen >= 2 && get_u16(p) == 0x0304) {
-            saw_tls13 = 1;
-        } else if (type == 0x0033 && elen >= 36 && get_u16(p) == 0x001d && get_u16(p + 2) == 32) {
-            memcpy(peer_key, p + 4, 32);
-            saw_key = 1;
+    /* 1.2 的 ServerHello 可以完全没有扩展块 */
+    if (p + 2 <= end) {
+        uint16_t ext_len = get_u16(p); p += 2;
+        if (p + ext_len <= end) {
+            const uint8_t *ext_end = p + ext_len;
+            while (p + 4 <= ext_end) {
+                uint16_t type = get_u16(p); p += 2;
+                uint16_t elen = get_u16(p); p += 2;
+                if (p + elen > ext_end) return -1;
+                if (type == 0x002b && elen >= 2 && get_u16(p) == 0x0304) {
+                    saw_tls13 = 1;
+                } else if (type == 0x0033 && elen >= 36 && get_u16(p) == 0x001d && get_u16(p + 2) == 32) {
+                    memcpy(peer_key, p + 4, 32);
+                    saw_key = 1;
+                }
+                p += elen;
+            }
         }
-        p += elen;
     }
-    return (saw_tls13 && saw_key) ? 0 : -1;
+    *out_cipher_suite = chosen;
+    *out_is13 = saw_tls13;
+    if (out_msg_end) *out_msg_end = hs_len + 4;
+    if (saw_tls13) {
+        if (chosen != TLS_CHACHA20_POLY1305_SHA256 && chosen != TLS_AES_128_GCM_SHA256) return -1;
+        return saw_key ? 0 : -1;
+    }
+    /* TLS 1.2：套件必须是我们报的两个 ECDHE-AES128-GCM 之一 */
+    if (chosen != TLS12_ECDHE_RSA_AES128_GCM && chosen != TLS12_ECDHE_ECDSA_AES128_GCM) return -1;
+    return 0;
 }
 
 /**
@@ -422,6 +456,8 @@ static int derive_app_keys(tls_ctx_t *ctx, const uint8_t handshake_secret[32]) {
     ctx->app_keys_ready = 1;
     return 0;
 }
+
+
 
 /**
  * @brief 从 TCP 连接精确读取指定字节数
@@ -526,6 +562,316 @@ static int build_http_get(const char *host, const char *path, uint8_t *out, uint
     return 0;
 }
 
+/* ══ TLS 1.2 路径（ECDHE-x25519 + AES-128-GCM）══
+ * 大量真实网站只提供 TLS 1.2；ServerHello 没带 supported_versions=1.3 就
+ * 走这里。与 1.3 路径一致：不验证证书链（没有 X.509 解析器），提供的是
+ * 传输加密而非服务器身份认证。 */
+
+/* TLS 1.2 PRF = P_SHA256（RFC 5246 §5）。label 最长 15 字节 + seed 最长
+ * 64 字节，缓冲区按此上限取整。 */
+static void tls12_prf(const uint8_t *secret, uint32_t secret_len, const char *label,
+                      const uint8_t *seed, uint32_t seed_len, uint8_t *out, uint32_t out_len) {
+    uint8_t ls[96];
+    uint32_t ls_len = 0;
+    for (const char *p = label; *p; p++) ls[ls_len++] = (uint8_t)*p;
+    memcpy(ls + ls_len, seed, seed_len);
+    ls_len += seed_len;
+    uint8_t a[32];
+    hmac_sha256(secret, secret_len, ls, ls_len, a); /* A(1) */
+    uint8_t buf[32 + 96];
+    uint32_t done = 0;
+    while (done < out_len) {
+        memcpy(buf, a, 32);
+        memcpy(buf + 32, ls, ls_len);
+        uint8_t block[32];
+        hmac_sha256(secret, secret_len, buf, 32 + ls_len, block);
+        uint32_t take = (out_len - done < 32) ? out_len - done : 32;
+        memcpy(out + done, block, take);
+        done += take;
+        hmac_sha256(secret, secret_len, a, 32, a); /* A(i+1) */
+    }
+}
+
+/* 1.2 的 AES-GCM 记录密钥（RFC 5288）：AEAD 套件没有 MAC 密钥，
+ * key_block = client_key(16) server_key(16) client_salt(4) server_salt(4)。 */
+typedef struct {
+    uint8_t ckey[16], skey[16];
+    uint8_t csalt[4], ssalt[4];
+    uint64_t cseq, sseq;
+} tls12_keys_t;
+
+/* 1.2 记录发送：显式 nonce（8 字节序列号）跟在记录头后面上线，
+ * nonce = salt(4) || explicit(8)，AAD = seq || type || 0x0303 || 明文长。 */
+static int tls12_send(tls_ctx_t *ctx, tls12_keys_t *k, uint8_t type,
+                      const uint8_t *plain, uint32_t plen) {
+    uint8_t out[5 + 8 + 1024 + 16];
+    if (plen > 1024) return -1;
+    out[0] = type; out[1] = 0x03; out[2] = 0x03;
+    put_u16(out + 3, (uint16_t)(8 + plen + 16));
+    uint8_t nonce[12];
+    memcpy(nonce, k->csalt, 4);
+    for (int i = 0; i < 8; i++) nonce[4 + i] = (uint8_t)(k->cseq >> ((7 - i) * 8));
+    memcpy(out + 5, nonce + 4, 8);
+    uint8_t aad[13];
+    for (int i = 0; i < 8; i++) aad[i] = (uint8_t)(k->cseq >> ((7 - i) * 8));
+    aad[8] = type; aad[9] = 0x03; aad[10] = 0x03;
+    put_u16(aad + 11, (uint16_t)plen);
+    aes128_gcm_seal(k->ckey, nonce, aad, sizeof(aad), plain, plen,
+                    out + 13, out + 13 + plen);
+    k->cseq++;
+    return net_tcp_send(&ctx->tcp, out, 5 + 8 + plen + 16);
+}
+
+/* 1.2 记录解密（服务器→客户端），rec 指向记录体（显式 nonce 开头） */
+static int tls12_open(tls12_keys_t *k, uint8_t type, const uint8_t *rec, uint32_t rlen,
+                      uint8_t *plain, uint32_t *plen) {
+    if (rlen < 8 + 16) return -1;
+    uint8_t nonce[12];
+    memcpy(nonce, k->ssalt, 4);
+    memcpy(nonce + 4, rec, 8);
+    uint32_t n = rlen - 8 - 16;
+    uint8_t aad[13];
+    for (int i = 0; i < 8; i++) aad[i] = (uint8_t)(k->sseq >> ((7 - i) * 8));
+    aad[8] = type; aad[9] = 0x03; aad[10] = 0x03;
+    put_u16(aad + 11, (uint16_t)n);
+    if (aes128_gcm_open(k->skey, nonce, aad, sizeof(aad), rec + 8, n, rec + 8 + n, plain) < 0)
+        return -1;
+    k->sseq++;
+    *plen = n;
+    return 0;
+}
+
+/* ServerHello 之后的完整 TLS 1.2 流程：读服务器握手飞行（Certificate/
+ * ServerKeyExchange/ServerHelloDone，可能和 ServerHello 挤在同一条记录里，
+ * 剩余字节由调用方通过 hsbuf 传进来）→ 发 ClientKeyExchange + CCS +
+ * Finished → 校验服务器 Finished → 发 HTTP GET 收响应。
+ * transcript 进来时已含 ClientHello + ServerHello。 */
+static int tls12_run(tls_ctx_t *ctx, const char *host, const char *path,
+                     const uint8_t client_random[32], const uint8_t server_random[32],
+                     const uint8_t private_key[32],
+                     uint8_t *hsbuf, uint32_t hsbuf_cap, uint32_t hsbuf_len,
+                     uint8_t *record, uint32_t record_cap, uint8_t *plain,
+                     char *out, uint32_t out_cap, uint32_t *out_len) {
+    uint8_t server_pub[32];
+    int saw_ske = 0, saw_done = 0;
+    uint8_t rtype;
+    uint32_t rlen = 0;
+
+    for (int guard = 0; guard < 32 && !saw_done; guard++) {
+        /* 先消化 hsbuf 里已有的完整消息，再考虑收新记录 */
+        uint32_t pos = 0;
+        while (pos + 4 <= hsbuf_len) {
+            uint8_t htype = hsbuf[pos];
+            uint32_t hlen = get_u24(hsbuf + pos + 1);
+            if (pos + 4 + hlen > hsbuf_len) break;
+            const uint8_t *body = hsbuf + pos + 4;
+            if (htype == 0x0b) {
+                /* Certificate：不验证（没有 X.509），只进 transcript */
+            } else if (htype == 0x0c) {
+                /* ServerKeyExchange：curve_type(3) + named_curve(0x001d) +
+                 * pubkey_len(32) + pubkey；签名部分跳过（同证书，不验证） */
+                if (hlen < 36 || body[0] != 3 || get_u16(body + 1) != 0x001d || body[3] != 32) {
+                    set_error("tls12 bad server key exchange");
+                    net_tcp_close(&ctx->tcp);
+                    return TLS_STATUS_ERROR;
+                }
+                memcpy(server_pub, body + 4, 32);
+                saw_ske = 1;
+            } else if (htype == 0x0d) {
+                set_error("tls12 client cert required");
+                net_tcp_close(&ctx->tcp);
+                return TLS_STATUS_ERROR;
+            } else if (htype == 0x0e) {
+                saw_done = 1;
+            } else {
+                set_error("tls12 unexpected handshake");
+                net_tcp_close(&ctx->tcp);
+                return TLS_STATUS_ERROR;
+            }
+            sha256_update(&ctx->transcript, hsbuf + pos, hlen + 4);
+            pos += hlen + 4;
+            if (saw_done) break;
+        }
+        if (pos) {
+            if (pos < hsbuf_len) memmove(hsbuf, hsbuf + pos, hsbuf_len - pos);
+            hsbuf_len -= pos;
+        }
+        if (saw_done) break;
+        if (read_record(ctx, &rtype, record, record_cap, &rlen) < 0) {
+            set_error("tls12 handshake read failed");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        if (rtype == TLS_RECORD_ALERT) {
+            set_error("tls12 alert in handshake");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        if (rtype != TLS_RECORD_HANDSHAKE) continue;
+        if (rlen > hsbuf_cap - hsbuf_len) {
+            set_error("tls12 handshake too large");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        memcpy(hsbuf + hsbuf_len, record, rlen);
+        hsbuf_len += rlen;
+    }
+    if (!saw_done || !saw_ske) {
+        set_error("tls12 server flight incomplete");
+        net_tcp_close(&ctx->tcp);
+        return TLS_STATUS_ERROR;
+    }
+
+    /* ClientKeyExchange（明文记录） */
+    uint8_t public_key[32];
+    x25519_public_key(public_key, private_key);
+    uint8_t cke[4 + 33];
+    cke[0] = 0x10;
+    put_u24(cke + 1, 33);
+    cke[4] = 32;
+    memcpy(cke + 5, public_key, 32);
+    uint8_t cke_rec[5 + sizeof(cke)];
+    cke_rec[0] = TLS_RECORD_HANDSHAKE;
+    cke_rec[1] = 0x03; cke_rec[2] = 0x03;
+    put_u16(cke_rec + 3, sizeof(cke));
+    memcpy(cke_rec + 5, cke, sizeof(cke));
+    if (net_tcp_send(&ctx->tcp, cke_rec, sizeof(cke_rec)) < 0) {
+        set_error(net_last_error());
+        net_tcp_close(&ctx->tcp);
+        return TLS_STATUS_ERROR;
+    }
+    sha256_update(&ctx->transcript, cke, sizeof(cke));
+
+    /* premaster = x25519 共享密钥 → master → key_block */
+    uint8_t premaster[32];
+    x25519_shared_secret(premaster, private_key, server_pub);
+    uint8_t zero[32];
+    memset(zero, 0, sizeof(zero));
+    if (memcmp(premaster, zero, 32) == 0) {
+        set_error("tls12 x25519 failed");
+        net_tcp_close(&ctx->tcp);
+        return TLS_STATUS_ERROR;
+    }
+    uint8_t randoms[64];
+    uint8_t master[48];
+    memcpy(randoms, client_random, 32);
+    memcpy(randoms + 32, server_random, 32);
+    tls12_prf(premaster, 32, "master secret", randoms, 64, master, 48);
+    memcpy(randoms, server_random, 32);      /* key expansion 的 seed 顺序相反 */
+    memcpy(randoms + 32, client_random, 32);
+    uint8_t key_block[40];
+    tls12_prf(master, 48, "key expansion", randoms, 64, key_block, 40);
+    tls12_keys_t keys;
+    memset(&keys, 0, sizeof(keys));
+    memcpy(keys.ckey, key_block, 16);
+    memcpy(keys.skey, key_block + 16, 16);
+    memcpy(keys.csalt, key_block + 32, 4);
+    memcpy(keys.ssalt, key_block + 36, 4);
+
+    /* CCS + 客户端 Finished（第一条加密记录） */
+    static const uint8_t ccs12[6] = {TLS_RECORD_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01};
+    net_tcp_send(&ctx->tcp, ccs12, sizeof(ccs12));
+    uint8_t th[32];
+    transcript_hash(ctx, th);
+    uint8_t fin[16];
+    fin[0] = TLS_HANDSHAKE_FINISHED;
+    put_u24(fin + 1, 12);
+    tls12_prf(master, 48, "client finished", th, 32, fin + 4, 12);
+    if (tls12_send(ctx, &keys, TLS_RECORD_HANDSHAKE, fin, 16) < 0) {
+        set_error("tls12 finished send failed");
+        net_tcp_close(&ctx->tcp);
+        return TLS_STATUS_ERROR;
+    }
+    sha256_update(&ctx->transcript, fin, 16);
+
+    /* 服务器 CCS + Finished */
+    int server_encrypted = 0, server_fin_ok = 0;
+    for (int guard = 0; guard < 16 && !server_fin_ok; guard++) {
+        if (read_record(ctx, &rtype, record, record_cap, &rlen) < 0) {
+            set_error("tls12 server finished read failed");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        if (rtype == TLS_RECORD_CHANGE_CIPHER_SPEC) {
+            server_encrypted = 1;
+            continue;
+        }
+        if (rtype == TLS_RECORD_ALERT) {
+            set_error("tls12 alert after finished");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        if (rtype != TLS_RECORD_HANDSHAKE) continue;
+        if (!server_encrypted) {
+            /* CCS 前的明文握手消息（比如没被我们请求的会话票据）：进
+             * transcript 后忽略 */
+            sha256_update(&ctx->transcript, record, rlen);
+            continue;
+        }
+        uint32_t plen = 0;
+        if (tls12_open(&keys, rtype, record, rlen, plain, &plen) < 0) {
+            set_error("tls12 finished decrypt failed");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        if (plen < 16 || plain[0] != TLS_HANDSHAKE_FINISHED) {
+            set_error("tls12 bad server finished");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        uint8_t th2[32];
+        uint8_t expect[12];
+        transcript_hash(ctx, th2);
+        tls12_prf(master, 48, "server finished", th2, 32, expect, 12);
+        if (memcmp(expect, plain + 4, 12) != 0) {
+            set_error("tls12 server finished verify failed");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        server_fin_ok = 1;
+    }
+    if (!server_fin_ok) {
+        set_error("tls12 server finished missing");
+        net_tcp_close(&ctx->tcp);
+        return TLS_STATUS_ERROR;
+    }
+
+    /* HTTP GET + 响应 */
+    uint8_t req[512];
+    uint32_t req_len = 0;
+    if (build_http_get(host, path, req, sizeof(req), &req_len) < 0 ||
+        tls12_send(ctx, &keys, TLS_RECORD_APPLICATION, req, req_len) < 0) {
+        set_error("tls12 http send failed");
+        net_tcp_close(&ctx->tcp);
+        return TLS_STATUS_ERROR;
+    }
+    uint32_t total = 0;
+    for (int guard = 0; guard < 80 && total + 1 < out_cap; guard++) {
+        if (read_record(ctx, &rtype, record, record_cap, &rlen) < 0) break;
+        if (rtype == TLS_RECORD_ALERT) break;
+        if (rtype != TLS_RECORD_APPLICATION) continue;
+        uint32_t plen = 0;
+        if (tls12_open(&keys, rtype, record, rlen, plain, &plen) < 0) {
+            set_error("tls12 app decrypt failed");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+        uint32_t copy = plen;
+        if (total + copy >= out_cap) copy = out_cap - total - 1;
+        if (copy) memcpy(out + total, plain, copy);
+        total += copy;
+    }
+    net_tcp_close(&ctx->tcp);
+    out[total] = 0;
+    *out_len = total;
+    if (!total) {
+        set_error("tls12 empty response");
+        return TLS_STATUS_ERROR;
+    }
+    set_error("ok");
+    return TLS_STATUS_OK;
+}
+
 int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path,
                   char *out, uint32_t out_cap, uint32_t *out_len) {
     if (out && out_cap) out[0] = 0;
@@ -567,10 +913,11 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
         return TLS_STATUS_ERROR;
     }
 
-    /* 兼容性 ChangeCipherSpec（RFC 8446 D.4）：紧跟 ClientHello 发出，
-     * 让路径上把 TLS 1.3 当 1.2 看的中间盒闭嘴。 */
-    static const uint8_t ccs[6] = {TLS_RECORD_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01};
-    net_tcp_send(&ctx.tcp, ccs, sizeof(ccs));
+    /* 兼容性 ChangeCipherSpec（RFC 8446 D.4）不能在这里紧跟 ClientHello 发：
+     * 我们现在报双版本（1.3 + 1.2），如果对端选 1.2，一个早到的 CCS 会排在
+     * ClientKeyExchange 之前，被 1.2 服务器判成 unexpected_message 而中断
+     * 握手。改为各自在第二飞行里发——1.3 路径在 client Finished 之前发（见
+     * 下方），1.2 路径由 tls12_run 在 ClientKeyExchange 之后发。 */
 
     uint8_t rtype;
     static uint8_t record[18432];
@@ -593,12 +940,28 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
         net_tcp_close(&ctx.tcp);
         return TLS_STATUS_ERROR;
     }
-    if (parse_server_hello(record, rlen, public_key, &ctx.cipher_suite) < 0) {
+    int is_tls13 = 0;
+    uint8_t server_random[32];
+    uint32_t sh_msg_end = 0;
+    if (parse_server_hello(record, rlen, public_key, &ctx.cipher_suite,
+                           &is_tls13, server_random, &sh_msg_end) < 0) {
         set_error("tls serverhello parse failed");
         net_tcp_close(&ctx.tcp);
         return TLS_STATUS_ERROR;
     }
-    sha256_update(&ctx.transcript, record, get_u24(record + 1) + 4);
+    sha256_update(&ctx.transcript, record, sh_msg_end);
+
+    if (!is_tls13) {
+        /* TLS 1.2：client_random 就是 ClientHello 里 type(1)+len(3)+
+         * version(2) 之后的 32 字节；ServerHello 之后跟在同一条记录里的
+         * 握手字节（Certificate/SKE/Done）先搬进 hsbuf 交给 1.2 引擎。 */
+        const uint8_t *client_random = client_hs + 6;
+        uint32_t leftover = (rlen > sh_msg_end) ? rlen - sh_msg_end : 0;
+        if (leftover) memmove(hsbuf, record + sh_msg_end, leftover);
+        return tls12_run(&ctx, host, path, client_random, server_random,
+                         private_key, hsbuf, sizeof(hsbuf), leftover,
+                         record, sizeof(record), plain, out, out_cap, out_len);
+    }
 
     uint8_t shared_secret[32];
     x25519_shared_secret(shared_secret, private_key, public_key);
@@ -692,6 +1055,12 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
     hkdf_expand_label(ctx.client_hs_secret, "finished", 0, 0, fin_key, 32);
     hmac_sha256(fin_key, 32, fin_hash, 32, verify);
     derive_app_keys(&ctx, handshake_secret);
+    /* 中间盒兼容 CCS（RFC 8446 D.4）：紧挨在客户端 Finished 之前发出——
+     * 明文、不进 transcript。放在这里而不是紧跟 ClientHello，是为了不破坏
+     * 双版本 ClientHello 落到 TLS 1.2 时的握手顺序（见上方注释）。 */
+    static const uint8_t ccs13[6] = {TLS_RECORD_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01};
+    net_tcp_send(&ctx.tcp, ccs13, sizeof(ccs13));
+
     uint8_t finished[36];
     finished[0] = TLS_HANDSHAKE_FINISHED;
     put_u24(finished + 1, 32);
