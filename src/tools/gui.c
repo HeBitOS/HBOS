@@ -3470,6 +3470,26 @@ static const char *http_body_ptr(const char *buf) {
     return p ? p + 4 : buf;
 }
 
+#include "../png.h"
+#include "../bmp.h"
+void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
+                     int clip_x, int clip_y, int clip_w, int clip_h);
+
+/* ── 浏览器内联图片 ──
+ * <img> 现在真的抓取并渲染（PNG/BMP），不再只画 [图片] 占位。固定 4 个槽，
+ * 每个一块静态 RGB 缓冲——kfree() 是空操作，不能每次换页堆分配。抓取/解码
+ * 在页面加载后统一做（browser_fetch_images），渲染流里 BRK_IMG 块带一个
+ * 槽位字节，绘制时命中就贴图、否则退回占位文字。JPEG 仍不支持（没有
+ * Huffman/IDCT），遇到就走占位。 */
+#define BR_IMG_SLOTS 4
+#define BR_IMG_MAX_W 360
+#define BR_IMG_MAX_H 270
+static uint8_t g_br_img_rgb[BR_IMG_SLOTS][BR_IMG_MAX_W * BR_IMG_MAX_H * 3];
+static int g_br_img_w[BR_IMG_SLOTS];
+static int g_br_img_h[BR_IMG_SLOTS];
+static char g_br_img_src[BR_IMG_SLOTS][160];
+static int g_br_img_count;
+
 /* 常见 HTML 实体解码成单个字符——共用给 browser_text_from_html（纯文本
  * 版，供保存网页）和 browser_render_from_html（带样式渲染版）两处，之前
  * 各自维护一份不同的小子集（一个只认 &amp;/&lt;/&gt;，另一个多认
@@ -4054,6 +4074,7 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
 
     g_css_rule_count = 0;
     st->browser_link_count = 0;
+    g_br_img_count = 0;
 
     g_browser_page_title[0] = 0;
     g_browser_title_len = 0;
@@ -4156,7 +4177,23 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 char alt[64];
                 if (!br_attr_value(html + attr_start, attr_len, "alt", alt, sizeof(alt)) || !alt[0])
                     strcpy(alt, "图片");
+                char src[160];
+                int slot = 0; /* 0 = 无槽（占位），1..BR_IMG_SLOTS = 有槽 */
+                if (br_attr_value(html + attr_start, attr_len, "src", src, sizeof(src)) && src[0] &&
+                    g_br_img_count < BR_IMG_SLOTS) {
+                    int s = g_br_img_count++;
+                    uint32_t sl = (uint32_t)strlen(src);
+                    if (sl >= sizeof(g_br_img_src[0])) sl = sizeof(g_br_img_src[0]) - 1;
+                    memcpy(g_br_img_src[s], src, sl);
+                    g_br_img_src[s][sl] = 0;
+                    g_br_img_w[s] = 0; g_br_img_h[s] = 0; /* 加载后再解码填充 */
+                    slot = s + 1;
+                }
                 BREMIT(BRK_IMG);
+                /* 槽位标记字节：加 0x10 偏移避开 0x01/0x02/0x03 三个流标记
+                 * （否则 slot=1 的 0x01 会被 br_read_style 当成 BR_META_MARK
+                 * 误吞后续字节）。绘制端取低 4 位。 */
+                BREMIT((char)(0x10 | slot));
                 char label[80];
                 uint32_t lp = 0;
                 label[lp++] = '[';
@@ -4452,6 +4489,42 @@ static void br_status(gui_state_t *st, const char *msg) {
     g_browser_status = msg;
 }
 
+/* 前置声明：图片 src 相对当前页面 URL 补全，逻辑和 <a href> 完全一样。 */
+static int browser_resolve_href(const gui_state_t *st, const char *href, char *out, uint32_t out_cap);
+
+/* 页面加载后统一抓取并解码所有已登记的内联图片。每张独立抓取一次
+ * （串行，复用同一个静态响应缓冲），解码进对应槽位；失败/超尺寸/JPEG
+ * 等不支持的就把该槽宽高留 0，绘制端画占位。 */
+static void browser_fetch_images(gui_state_t *st) {
+    static uint8_t imgresp[BROWSER_FETCH_CAP];
+    for (int s = 0; s < g_br_img_count && s < BR_IMG_SLOTS; s++) {
+        g_br_img_w[s] = 0; g_br_img_h[s] = 0;
+        char url[192];
+        if (browser_resolve_href(st, g_br_img_src[s], url, sizeof(url)) < 0) continue;
+        int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
+        if (gui_parse_url(url, &https, host, sizeof(host), &port, &path)) continue;
+        uint32_t ip = 0;
+        if (net_dns_resolve(host, &ip) < 0) continue;
+        uint32_t len = 0;
+        int ok = https ? tls_https_get(host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len)
+                       : net_http_request("GET", host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len);
+        if (ok < 0) continue;
+        const char *body = http_body_ptr((char *)imgresp);
+        uint32_t body_off = (uint32_t)((const uint8_t *)body - imgresp);
+        if (body_off >= len) continue;
+        uint32_t blen = len - body_off;
+        const uint8_t *b = (const uint8_t *)body;
+        int w = 0, h = 0, dok;
+        if (blen >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G')
+            dok = png_decode(b, blen, g_br_img_rgb[s], sizeof(g_br_img_rgb[s]),
+                             BR_IMG_MAX_W, BR_IMG_MAX_H, &w, &h);
+        else
+            dok = bmp_decode(b, blen, g_br_img_rgb[s], sizeof(g_br_img_rgb[s]),
+                             BR_IMG_MAX_W, BR_IMG_MAX_H, &w, &h);
+        if (dok == 0) { g_br_img_w[s] = w; g_br_img_h[s] = h; }
+    }
+}
+
 static void browser_load_internal(gui_state_t *st, int push_history) {
     browser_init(st);
     char host[96];
@@ -4494,6 +4567,7 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     const char *body = http_body_ptr(response);
     browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
     browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
+    browser_fetch_images(st); /* 渲染登记了图片 src，这里逐张抓取解码 */
     st->browser_scroll = 0;
     if (!https || strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
         br_status(st, "浏览器加载完成");
@@ -5021,6 +5095,30 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
          * 变成隔行双倍行距、背景条也断开。 */
         if (type == BRK_CODE && i < len && (unsigned char)buf[i] == BRK_CODE)
             for (int r = 0; r < nrun; r++) runs[r].bs.gap_after = 0;
+        if (type == BRK_IMG) {
+            /* 首字节是 0x10|slot；有解码好的图就贴图，否则退回占位文字。 */
+            int slot = (runs[0].len > 0) ? ((unsigned char)buf[runs[0].start] & 0x0f) : 0;
+            uint32_t alt_start = runs[0].start + (runs[0].len > 0 ? 1 : 0);
+            uint32_t alt_len = (runs[0].len > 0) ? runs[0].len - 1 : 0;
+            if (slot >= 1 && slot <= BR_IMG_SLOTS && g_br_img_w[slot - 1] > 0) {
+                int iw = g_br_img_w[slot - 1], ih = g_br_img_h[slot - 1];
+                int img_rows = (ih + rh - 1) / rh;
+                if (row_unit >= scroll && drawn_rows < max_lines) {
+                    gui_blit_rgb888(x + 4, cy, g_br_img_rgb[slot - 1], iw, ih, x, y, w, h);
+                    cy += ih;
+                    drawn_rows += img_rows;
+                }
+                row_unit += img_rows;
+                if (row_unit >= scroll && drawn_rows < max_lines) { cy += rh; drawn_rows++; }
+                row_unit++; /* 图后留一行 */
+            } else {
+                browser_style_t ph;
+                browser_style_get(BRK_IMG, &ph);
+                row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines,
+                                                &drawn_rows, buf, alt_start, alt_len, &ph, -1);
+            }
+            continue;
+        }
         if (type == BRK_TROW) {
             /* 表格：第一行时向前扫完整张表算列宽，之后每行按列对齐画 */
             if (!tbl_active) {
