@@ -3471,6 +3471,7 @@ static const char *http_body_ptr(const char *buf) {
 }
 
 #include "../png.h"
+#include "../jpeg.h"
 #include "../bmp.h"
 void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
                      int clip_x, int clip_y, int clip_w, int clip_h);
@@ -4552,6 +4553,9 @@ static void browser_fetch_images(gui_state_t *st) {
         if (blen >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G')
             dok = png_decode(b, blen, g_br_img_rgb[s], sizeof(g_br_img_rgb[s]),
                              BR_IMG_MAX_W, BR_IMG_MAX_H, &w, &h);
+        else if (blen >= 4 && b[0] == 0xFF && b[1] == 0xD8)
+            dok = jpeg_decode(b, blen, g_br_img_rgb[s], sizeof(g_br_img_rgb[s]),
+                              BR_IMG_MAX_W, BR_IMG_MAX_H, &w, &h);
         else
             dok = bmp_decode(b, blen, g_br_img_rgb[s], sizeof(g_br_img_rgb[s]),
                              BR_IMG_MAX_W, BR_IMG_MAX_H, &w, &h);
@@ -6253,7 +6257,8 @@ static void gui_open_selected_file(gui_state_t *st) {
             st->status = "已用代码工作台打开";
         return;
     }
-    if (gui_has_suffix(full, ".bmp") || gui_has_suffix(full, ".png")) {
+    if (gui_has_suffix(full, ".bmp") || gui_has_suffix(full, ".png") ||
+        gui_has_suffix(full, ".jpg") || gui_has_suffix(full, ".jpeg")) {
         app_imgview_set_path(st, full);
         if (gui_open_window(st, WM_WIN_APP, GUI_APP_IMGVIEW, 0) >= 0)
             st->status = "已用图片查看器打开";

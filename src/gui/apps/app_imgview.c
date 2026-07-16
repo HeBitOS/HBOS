@@ -5,6 +5,7 @@
 #include "gui_draw.h"
 #include "../../bmp.h"
 #include "../../png.h"
+#include "../../jpeg.h"
 #include "../../fs.h"
 #include "../../string.h"
 
@@ -51,6 +52,9 @@ static void imgview_load(gui_state_t *st) {
     if (n >= 8 && raw[0] == 0x89 && raw[1] == 'P' && raw[2] == 'N' && raw[3] == 'G') {
         ok = png_decode(raw, n, g_imgview_rgb, sizeof(g_imgview_rgb),
                         IMGVIEW_MAX_W, IMGVIEW_MAX_H, &w, &h);
+    } else if (n >= 4 && raw[0] == 0xFF && raw[1] == 0xD8) {
+        ok = jpeg_decode(raw, n, g_imgview_rgb, sizeof(g_imgview_rgb),
+                         IMGVIEW_MAX_W, IMGVIEW_MAX_H, &w, &h);
     } else {
         ok = bmp_decode(raw, n, g_imgview_rgb, sizeof(g_imgview_rgb),
                         IMGVIEW_MAX_W, IMGVIEW_MAX_H, &w, &h);
