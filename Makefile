@@ -180,6 +180,8 @@ C_SRCS = \
 	$(SRC_DIR)/ext2.c \
 	$(SRC_DIR)/fat32.c \
 	$(SRC_DIR)/bmp.c \
+	$(SRC_DIR)/inflate.c \
+	$(SRC_DIR)/png.c \
 	$(SRC_DIR)/wav.c \
 	$(SRC_DIR)/ac97.c \
 	$(SRC_DIR)/tty.c \

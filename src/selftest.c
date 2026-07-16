@@ -9,6 +9,13 @@
 #include "graphics/graphics.h"
 #include "user/app.h"
 #include "user/syscall.h"
+#include "png.h"
+
+/* 2x2 真彩 PNG（像素 红/绿/蓝/黄），用于自检 inflate+png 解码链路。 */
+static const unsigned char SELFTEST_PNG[78] = {
+    137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,2,0,0,0,2,8,2,0,0,0,
+    253,212,154,115,0,0,0,21,73,68,65,84,120,156,5,193,1,1,0,0,0,128,16,255,
+    79,23,66,80,25,30,239,4,252,164,1,116,243,0,0,0,0,73,69,78,68,174,66,96,130};
 
 static int selftest_fail(const char *name) {
     console_puts("[SELFTEST] POSIX/ramfs: FAIL ");
@@ -100,6 +107,19 @@ int selftest_run(void) {
     CHECK("syscall unlink", hbos_unlink("__syscall") == 0);
     CHECK("app registry", hbos_app_find("hello") != NULL);
 
+    /* PNG 解码链路（inflate + png）：2x2 红/绿/蓝/黄，验证维度和四个像素。 */
+    static unsigned char png_rgb[2 * 2 * 3];
+    int pw = 0, ph = 0;
+    CHECK("png decode",
+          png_decode(SELFTEST_PNG, sizeof(SELFTEST_PNG), png_rgb, sizeof(png_rgb),
+                     64, 64, &pw, &ph) == 0);
+    CHECK("png dims", pw == 2 && ph == 2);
+    CHECK("png px0 red",   png_rgb[0] == 255 && png_rgb[1] == 0   && png_rgb[2] == 0);
+    CHECK("png px1 green", png_rgb[3] == 0   && png_rgb[4] == 255 && png_rgb[5] == 0);
+    CHECK("png px2 blue",  png_rgb[6] == 0   && png_rgb[7] == 0   && png_rgb[8] == 255);
+    CHECK("png px3 yellow",png_rgb[9] == 255 && png_rgb[10] == 255 && png_rgb[11] == 0);
+
+    console_puts("[SELFTEST] PNG decode: PASS\n");
     console_puts("[SELFTEST] POSIX/ramfs: PASS\n");
     return 0;
 }

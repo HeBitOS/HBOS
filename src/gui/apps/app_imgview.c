@@ -4,6 +4,7 @@
 #include "gui_app.h"
 #include "gui_draw.h"
 #include "../../bmp.h"
+#include "../../png.h"
 #include "../../fs.h"
 #include "../../string.h"
 
@@ -30,7 +31,7 @@ static void imgview_load(gui_state_t *st) {
     st->imgview_h = 0;
 
     file_t *f = fs_find_file(st->imgview_path);
-    if (!f || f->size < 54) return;
+    if (!f || f->size < 8) return;
 
     /* 借用像素缓冲区末尾的空间当读取暂存区不合适（解码时还要用），
      * 这里直接读到一块静态字节缓冲，容量按 FAT32/HBFS 常见的小图片场景
@@ -43,11 +44,18 @@ static void imgview_load(gui_state_t *st) {
     uint32_t got = fs_read_file_data(f, 0, raw, n);
     if (got != n) return;
 
+    /* 按魔数选解码器（不看扩展名）：PNG 签名 0x89 'P' 'N' 'G' 走 png.c，
+     * 否则按 BMP 试。这样浏览器/文件管理器传进来的 .png 也能显示了。 */
     int w = 0, h = 0;
-    if (bmp_decode(raw, n, g_imgview_rgb, sizeof(g_imgview_rgb),
-                   IMGVIEW_MAX_W, IMGVIEW_MAX_H, &w, &h) < 0) {
-        return;
+    int ok;
+    if (n >= 8 && raw[0] == 0x89 && raw[1] == 'P' && raw[2] == 'N' && raw[3] == 'G') {
+        ok = png_decode(raw, n, g_imgview_rgb, sizeof(g_imgview_rgb),
+                        IMGVIEW_MAX_W, IMGVIEW_MAX_H, &w, &h);
+    } else {
+        ok = bmp_decode(raw, n, g_imgview_rgb, sizeof(g_imgview_rgb),
+                        IMGVIEW_MAX_W, IMGVIEW_MAX_H, &w, &h);
     }
+    if (ok < 0) return;
     st->imgview_w = w;
     st->imgview_h = h;
     st->imgview_error = 0;

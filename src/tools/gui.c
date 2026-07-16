@@ -6101,7 +6101,7 @@ static void gui_open_selected_file(gui_state_t *st) {
             st->status = "已用代码工作台打开";
         return;
     }
-    if (gui_has_suffix(full, ".bmp")) {
+    if (gui_has_suffix(full, ".bmp") || gui_has_suffix(full, ".png")) {
         app_imgview_set_path(st, full);
         if (gui_open_window(st, WM_WIN_APP, GUI_APP_IMGVIEW, 0) >= 0)
             st->status = "已用图片查看器打开";
