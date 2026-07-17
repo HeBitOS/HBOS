@@ -3768,7 +3768,7 @@ typedef struct {
                                         * 映射成"要不要多留白"这一个二值信号，不是精确像素值 */
 } css_decl_t;
 
-#define CSS_RULE_MAX 32
+#define CSS_RULE_MAX 96
 typedef struct {
     char selector[32]; /* "tagname" 或 ".classname" */
     css_decl_t decl;
@@ -3903,9 +3903,27 @@ static void css_parse_stylesheet(const char *css, uint32_t len) {
     uint32_t i = 0;
     while (i < len && g_css_rule_count < CSS_RULE_MAX) {
         while (i < len && (css[i] == ' ' || css[i] == '\n' || css[i] == '\t' || css[i] == '\r')) i++;
-        uint32_t sel_start = i;
-        while (i < len && css[i] != '{') i++;
         if (i >= len) break;
+        /* 注释：整段跳过（真实样式表里注释可能含 {}，不跳会让解析错位） */
+        if (i + 1 < len && css[i] == '/' && css[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(css[i] == '*' && css[i + 1] == '/')) i++;
+            i = (i + 1 < len) ? i + 2 : len;
+            continue;
+        }
+        /* 杂散 '}'：@media 头被掀掉后块尾多出的收尾，直接吞掉 */
+        if (css[i] == '}') { i++; continue; }
+        /* @ 规则：@import/@charset 到分号；@media 之类掀掉头部进块继续
+         * （块内就是普通规则，块尾 '}' 由上面兜住） */
+        if (css[i] == '@') {
+            while (i < len && css[i] != '{' && css[i] != ';') i++;
+            if (i < len) i++;
+            continue;
+        }
+        uint32_t sel_start = i;
+        while (i < len && css[i] != '{' && css[i] != '}') i++;
+        if (i >= len) break;
+        if (css[i] == '}') { i++; continue; }
         uint32_t sel_end = i;
         while (sel_end > sel_start && (css[sel_end - 1] == ' ' || css[sel_end - 1] == '\n' ||
                                         css[sel_end - 1] == '\t' || css[sel_end - 1] == '\r')) sel_end--;
@@ -4031,6 +4049,13 @@ static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, c
 static char g_browser_page_title[BROWSER_TITLE_CAP];
 static uint32_t g_browser_title_len;
 
+/* 外链样式表：<link rel="stylesheet"> 同步抓取并喂给 css_parse_stylesheet。
+ * 每页最多 2 张、单张 ≤64KB——真实站点样式表动辄几百 KB，且大部分是
+ * 这个渲染器表达不了的布局规则，抓前两张把颜色/字重这类能用的捞出来
+ * 就是收益的大头。 */
+static void browser_fetch_stylesheet(gui_state_t *st, const char *href);
+static int g_br_css_fetches;
+
 static void browser_render_from_html(gui_state_t *st, const char *html, char *out, uint32_t cap, uint32_t *out_len) {
     uint32_t pos = 0;
     int space = 1;
@@ -4076,6 +4101,7 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     g_css_rule_count = 0;
     st->browser_link_count = 0;
     g_br_img_count = 0;
+    g_br_css_fetches = 0;
 
     g_browser_page_title[0] = 0;
     g_browser_title_len = 0;
@@ -4153,6 +4179,15 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 i = j;
                 continue;
             }
+            if (!closing && tag_ci_eq(nm, nl, "link")) {
+                char relv[24], hrefv[160];
+                if (br_attr_value(html + attr_start, attr_len, "rel", relv, sizeof(relv)) &&
+                    tag_ci_eq(relv, (int)strlen(relv), "stylesheet") &&
+                    br_attr_value(html + attr_start, attr_len, "href", hrefv, sizeof(hrefv)))
+                    browser_fetch_stylesheet(st, hrefv);
+                i = j;
+                continue;
+            }
             if (!closing && tag_ci_eq(nm, nl, "br")) {
                 /* <br> = 纯换行：行上有内容就收行；行首的 <br>（连续
                  * <br><br> 的第二个）才输出空块表示空一行。原来无条件
@@ -4180,8 +4215,22 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                     strcpy(alt, "图片");
                 char src[160];
                 int slot = 0; /* 0 = 无槽（占位），1..BR_IMG_SLOTS = 有槽 */
-                if (br_attr_value(html + attr_start, attr_len, "src", src, sizeof(src)) && src[0] &&
-                    g_br_img_count < BR_IMG_SLOTS) {
+                /* 真实站点普遍懒加载：src 是占位图，真实地址在 data-src/
+                 * data-original 里——优先取懒加载属性。另外把明显解不了的
+                 * 格式（svg/webp/gif）直接排除，不浪费本来就只有 4 个的
+                 * 图片槽位。 */
+                int has_src = br_attr_value(html + attr_start, attr_len, "data-src", src, sizeof(src)) ||
+                              br_attr_value(html + attr_start, attr_len, "data-original", src, sizeof(src)) ||
+                              br_attr_value(html + attr_start, attr_len, "src", src, sizeof(src));
+                if (has_src && src[0]) {
+                    uint32_t sl0 = (uint32_t)strlen(src);
+                    if ((sl0 >= 4 && (tag_ci_eq(src + sl0 - 4, 4, ".svg") ||
+                                      tag_ci_eq(src + sl0 - 4, 4, ".gif"))) ||
+                        (sl0 >= 5 && tag_ci_eq(src + sl0 - 5, 5, ".webp")) ||
+                        strncmp(src, "data:", 5) == 0)
+                        has_src = 0;
+                }
+                if (has_src && src[0] && g_br_img_count < BR_IMG_SLOTS) {
                     int s = g_br_img_count++;
                     uint32_t sl = (uint32_t)strlen(src);
                     if (sl >= sizeof(g_br_img_src[0])) sl = sizeof(g_br_img_src[0]) - 1;
@@ -4527,6 +4576,26 @@ static int br_http_location(const char *buf, char *out, uint32_t cap) {
     return -1;
 }
 
+static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
+    if (g_br_css_fetches >= 2) return;
+    static char cssbuf[64 * 1024];
+    char url[192];
+    if (browser_resolve_href(st, href, url, sizeof(url)) < 0) return;
+    int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
+    if (gui_parse_url(url, &https, host, sizeof(host), &port, &path)) return;
+    uint32_t ip = 0;
+    if (net_dns_resolve(host, &ip) < 0) return;
+    uint32_t len = 0;
+    int ok = https ? tls_https_get(host, ip, port, path, cssbuf, sizeof(cssbuf), &len)
+                   : net_http_request("GET", host, ip, port, path, cssbuf, sizeof(cssbuf), &len);
+    if (ok < 0) return;
+    g_br_css_fetches++;
+    const char *body = http_body_ptr(cssbuf);
+    uint32_t body_off = (uint32_t)(body - cssbuf);
+    if (body_off >= len) return;
+    css_parse_stylesheet(body, len - body_off);
+}
+
 /* 页面加载后统一抓取并解码所有已登记的内联图片。每张独立抓取一次
  * （串行，复用同一个静态响应缓冲），解码进对应槽位；失败/超尺寸/JPEG
  * 等不支持的就把该槽宽高留 0，绘制端画占位。 */
@@ -4659,6 +4728,17 @@ static int browser_resolve_href(const gui_state_t *st, const char *href, char *o
     if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) {
         strncpy(out, href, out_cap - 1);
         out[out_cap - 1] = 0;
+        return 0;
+    }
+    if (href[0] == '/' && href[1] == '/') {
+        /* 协议相对 URL（"//news.baidu.com/x"）：继承当前页面的 scheme。
+         * 大站 CDN 链接几乎全是这种写法；之前它落进"绝对路径"分支被拼成
+         * "https://www.baidu.com//news.baidu.com"，点新闻直接跳错。 */
+        const char *scheme = (strncmp(st->browser_url, "https://", 8) == 0) ? "https:" : "http:";
+        uint32_t pos = 0;
+        for (const char *p = scheme; *p && pos + 1 < out_cap; p++) out[pos++] = *p;
+        for (uint32_t k = 0; href[k] && pos + 1 < out_cap; k++) out[pos++] = href[k];
+        out[pos] = 0;
         return 0;
     }
     const char *cur = st->browser_url;
