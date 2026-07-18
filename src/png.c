@@ -12,7 +12,7 @@
 
 /* 内部 inflate 暂存：容纳 max(512x384) RGBA + 每行 1 字节滤波标志。
  * 和图片查看器 IMGVIEW_MAX_W/H 对齐；更大的图直接拒绝。 */
-#define PNG_MAX_W 512
+#define PNG_MAX_W 560   /* 容纳 2x 视网膜 logo（百度 logo 就是 540x258） */
 #define PNG_MAX_H 384
 #define PNG_RAW_CAP ((uint32_t)PNG_MAX_H * (1 + PNG_MAX_W * 4))
 static uint8_t g_png_raw[PNG_RAW_CAP];
@@ -40,6 +40,8 @@ int png_decode(const uint8_t *data, uint32_t size, uint8_t *out_rgb, uint32_t ou
     uint32_t width = 0, height = 0;
     int bit_depth = 0, color_type = 0, interlace = 0;
     int got_ihdr = 0;
+    static uint8_t palette[256 * 3];
+    int pal_n = 0;
 
     /* IDAT 拼接：把所有 IDAT 数据段收集成一段连续 zlib 流。用 g_png_raw 尾部
      * 借地方存压缩数据不安全（会和解压输出打架），另开一个静态缓冲。 */
@@ -64,8 +66,14 @@ int png_decode(const uint8_t *data, uint32_t size, uint8_t *out_rgb, uint32_t ou
             if ((int)width > max_w || (int)height > max_h) return -1;
             if ((int)width > PNG_MAX_W || (int)height > PNG_MAX_H) return -1;
             if (bit_depth != 8) return -1;
-            if (color_type != 2 && color_type != 6) return -1;
+            /* 2=真彩 6=真彩+A 3=调色板 0=灰度（logo/图标大量用调色板） */
+            if (color_type != 2 && color_type != 6 && color_type != 3 && color_type != 0)
+                return -1;
             if (interlace != 0) return -1;
+        } else if (ctype[0] == 'P' && ctype[1] == 'L' && ctype[2] == 'T' && ctype[3] == 'E') {
+            if (clen > 256 * 3 || clen % 3) return -1;
+            for (uint32_t i = 0; i < clen; i++) palette[i] = cdata[i];
+            pal_n = (int)(clen / 3);
         } else if (ctype[0] == 'I' && ctype[1] == 'D' && ctype[2] == 'A' && ctype[3] == 'T') {
             if (idat_len + clen > sizeof(idat)) return -1;
             for (uint32_t i = 0; i < clen; i++) idat[idat_len++] = cdata[i];
@@ -75,8 +83,10 @@ int png_decode(const uint8_t *data, uint32_t size, uint8_t *out_rgb, uint32_t ou
         pos += 12 + clen; /* length + type + data + crc */
     }
     if (!got_ihdr || idat_len == 0) return -1;
+    if (color_type == 3 && pal_n == 0) return -1; /* 调色板图必须有 PLTE */
 
-    int channels = (color_type == 6) ? 4 : 3;
+    /* 每像素采样字节数：真彩 3 / 真彩+A 4 / 调色板 1（索引）/ 灰度 1 */
+    int channels = (color_type == 6) ? 4 : (color_type == 2) ? 3 : 1;
     uint32_t stride = width * (uint32_t)channels;
     uint32_t raw_need = height * (stride + 1);
     if (raw_need > sizeof(g_png_raw)) return -1;
@@ -109,15 +119,26 @@ int png_decode(const uint8_t *data, uint32_t size, uint8_t *out_rgb, uint32_t ou
         }
     }
 
-    /* 打包成 RGB888（丢弃 alpha，不做合成——占位透明区显示原色即可）。 */
+    /* 打包成 RGB888。真彩直接取；调色板按索引查 PLTE；灰度三通道同值；
+     * alpha 丢弃（不合成，透明区显示原色即可）。 */
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t *cur = g_png_raw + y * (stride + 1) + 1;
         uint8_t *dst = out_rgb + y * width * 3;
         for (uint32_t x = 0; x < width; x++) {
             const uint8_t *px = cur + x * channels;
-            dst[x * 3 + 0] = px[0];
-            dst[x * 3 + 1] = px[1];
-            dst[x * 3 + 2] = px[2];
+            if (color_type == 3) {
+                int idx = px[0];
+                if (idx >= pal_n) idx = 0;
+                dst[x * 3 + 0] = palette[idx * 3 + 0];
+                dst[x * 3 + 1] = palette[idx * 3 + 1];
+                dst[x * 3 + 2] = palette[idx * 3 + 2];
+            } else if (color_type == 0) {
+                dst[x * 3 + 0] = dst[x * 3 + 1] = dst[x * 3 + 2] = px[0];
+            } else {
+                dst[x * 3 + 0] = px[0];
+                dst[x * 3 + 1] = px[1];
+                dst[x * 3 + 2] = px[2];
+            }
         }
     }
     *out_w = (int)width;

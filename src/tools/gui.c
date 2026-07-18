@@ -3482,9 +3482,9 @@ void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
  * 在页面加载后统一做（browser_fetch_images），渲染流里 BRK_IMG 块带一个
  * 槽位字节，绘制时命中就贴图、否则退回占位文字。JPEG 仍不支持（没有
  * Huffman/IDCT），遇到就走占位。 */
-#define BR_IMG_SLOTS 4
-#define BR_IMG_MAX_W 360
-#define BR_IMG_MAX_H 270
+#define BR_IMG_SLOTS 5
+#define BR_IMG_MAX_W 560
+#define BR_IMG_MAX_H 360
 static uint8_t g_br_img_rgb[BR_IMG_SLOTS][BR_IMG_MAX_W * BR_IMG_MAX_H * 3];
 static int g_br_img_w[BR_IMG_SLOTS];
 static int g_br_img_h[BR_IMG_SLOTS];
@@ -4067,11 +4067,13 @@ static uint32_t g_br_dns_ip[BR_SUB_HOSTS];
 static int g_br_dns_n;
 static int g_br_sub_fails;
 
-static int br_sub_resolve(const char *host, uint32_t *ip) {
+static int br_sub_resolve(const char *host, uint32_t *ip, int *cached) {
+    if (cached) *cached = 0;
     for (int i = 0; i < g_br_dns_n; i++) {
         if (strcmp(g_br_dns_host[i], host) == 0) {
+            if (cached) *cached = 1;         /* 命中缓存（含负缓存） */
             *ip = g_br_dns_ip[i];
-            return g_br_dns_ip[i] ? 0 : -1; /* 0 = 之前解析失败（负缓存） */
+            return g_br_dns_ip[i] ? 0 : -1;
         }
     }
     int ok = net_dns_resolve(host, ip);
@@ -4607,6 +4609,49 @@ static int br_http_status(const char *buf) {
     return code ? code : -1;
 }
 
+/* 提取 <meta http-equiv="refresh" content="N; url=URL">（大小写不敏感）。
+ * 无 JS 站点的标准跳转兜底——百度 https 首页就是一个纯 JS 跳转页，靠
+ * <noscript> 里这个 meta 把无脚本浏览器导到真实内容页；不认它就停在
+ * 一页空白。只扫 <head>（body 里出现的 refresh 极少且多是广告刷新）。 */
+static int br_meta_refresh(const char *body, char *out, uint32_t cap) {
+    const char *head_end = strstr(body, "</head>");
+    const char *scan_end = head_end ? head_end : body + strlen(body);
+    for (const char *p = body; p < scan_end; p++) {
+        if (*p != '<') continue;
+        if (!tag_ci_eq(p + 1, 5, "meta ") && !tag_ci_eq(p + 1, 4, "meta")) continue;
+        const char *tag_end = p;
+        while (tag_end < scan_end && *tag_end != '>') tag_end++;
+        /* 必须同时含 http-equiv=refresh 和 content= */
+        int is_refresh = 0;
+        for (const char *q = p; q + 7 < tag_end; q++)
+            if (tag_ci_eq(q, 7, "refresh")) { is_refresh = 1; break; }
+        if (!is_refresh) continue;
+        const char *c = 0;
+        for (const char *q = p; q + 8 < tag_end; q++)
+            if (tag_ci_eq(q, 8, "content=")) { c = q + 8; break; }
+        if (!c) continue;
+        char quote = (*c == '"' || *c == '\'') ? *c : 0;
+        if (quote) c++;
+        /* content = "秒数 ; url = 目标"，找 "url=" */
+        const char *u = 0;
+        for (const char *q = c; q < tag_end; q++) {
+            if (quote && *q == quote) break;
+            if (tag_ci_eq(q, 4, "url=")) { u = q + 4; break; }
+        }
+        if (!u) continue;
+        while (*u == ' ' || *u == '\'' || *u == '"') u++;
+        uint32_t n = 0;
+        while (u + n < tag_end && u[n] != '"' && u[n] != '\'' &&
+               u[n] != '>' && u[n] != ' ' && n + 1 < cap) {
+            out[n] = u[n];
+            n++;
+        }
+        out[n] = 0;
+        return n ? 0 : -1;
+    }
+    return -1;
+}
+
 /* 提取 Location 响应头的值（大小写不敏感、去前导空格、到行尾）。 */
 static int br_http_location(const char *buf, char *out, uint32_t cap) {
     const char *hdr_end = strstr(buf, "\r\n\r\n");
@@ -4631,14 +4676,14 @@ static int br_http_location(const char *buf, char *out, uint32_t cap) {
 }
 
 static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
-    if (g_br_css_fetches >= 2 || g_br_sub_fails >= 2) return;
+    if (g_br_css_fetches >= 2 || g_br_sub_fails >= 4) return;
     static char cssbuf[64 * 1024];
     char url[192];
     if (browser_resolve_href(st, href, url, sizeof(url)) < 0) return;
     int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
     if (gui_parse_url(url, &https, host, sizeof(host), &port, &path)) return;
-    uint32_t ip = 0;
-    if (br_sub_resolve(host, &ip) < 0) { g_br_sub_fails++; return; }
+    uint32_t ip = 0; int cached = 0;
+    if (br_sub_resolve(host, &ip, &cached) < 0) { if (!cached) g_br_sub_fails++; return; }
     uint32_t len = 0;
     int ok = https ? tls_https_get(host, ip, port, path, cssbuf, sizeof(cssbuf), &len)
                    : net_http_request("GET", host, ip, port, path, cssbuf, sizeof(cssbuf), &len);
@@ -4657,13 +4702,13 @@ static void browser_fetch_images(gui_state_t *st) {
     static uint8_t imgresp[BROWSER_FETCH_CAP];
     for (int s = 0; s < g_br_img_count && s < BR_IMG_SLOTS; s++) {
         g_br_img_w[s] = 0; g_br_img_h[s] = 0;
-        if (g_br_sub_fails >= 2) continue; /* 预算耗尽：余下图片直接占位 */
+        if (g_br_sub_fails >= 4) continue; /* 预算耗尽：余下图片直接占位 */
         char url[192];
         if (browser_resolve_href(st, g_br_img_src[s], url, sizeof(url)) < 0) continue;
         int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
         if (gui_parse_url(url, &https, host, sizeof(host), &port, &path)) continue;
-        uint32_t ip = 0;
-        if (br_sub_resolve(host, &ip) < 0) { g_br_sub_fails++; continue; }
+        uint32_t ip = 0; int cached = 0;
+        if (br_sub_resolve(host, &ip, &cached) < 0) { if (!cached) g_br_sub_fails++; continue; }
         uint32_t len = 0;
         int ok = https ? tls_https_get(host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len)
                        : net_http_request("GET", host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len);
@@ -4732,14 +4777,21 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
             return;
         }
         int code = br_http_status(response);
-        if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308) break;
+        char loc[160];
+        int is_http_redir = (code == 301 || code == 302 || code == 303 ||
+                             code == 307 || code == 308);
+        if (is_http_redir) {
+            if (br_http_location(response, loc, sizeof(loc)) < 0) break;
+        } else {
+            /* 非 3xx：看正文里有没有 <meta refresh> 跳转（无 JS 兜底）。
+             * 没有就按普通页渲染。 */
+            if (br_meta_refresh(http_body_ptr(response), loc, sizeof(loc)) < 0) break;
+        }
         if (hop >= 3) {
             browser_set_plain(st, "重定向次数过多");
             br_status(st, "浏览器加载失败");
             return;
         }
-        char loc[160];
-        if (br_http_location(response, loc, sizeof(loc)) < 0) break; /* 没 Location 就按普通页渲染 */
         char next_url[BROWSER_URL_CAP];
         if (browser_resolve_href(st, loc, next_url, sizeof(next_url)) < 0) break;
         strncpy(st->browser_url, next_url, BROWSER_URL_CAP - 1);
