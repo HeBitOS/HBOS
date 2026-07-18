@@ -4056,6 +4056,36 @@ static uint32_t g_browser_title_len;
 static void browser_fetch_stylesheet(gui_state_t *st, const char *href);
 static int g_br_css_fetches;
 
+/* 子资源（样式表/图片）抓取预算：页面加载是同步的，受限网络里每个打不通
+ * 的 CDN 域名要吃满 DNS+TCP 超时（各约 2 秒），6 个子资源就能把 GUI 冻住
+ * 30 秒——用户实测百度首页正是这个数。对策：同一次加载内 DNS 结果缓存
+ * （失败也记，负缓存让同域名后续资源直接跳过），累计失败 2 次就放弃余下
+ * 全部子资源。 */
+#define BR_SUB_HOSTS 4
+static char g_br_dns_host[BR_SUB_HOSTS][96];
+static uint32_t g_br_dns_ip[BR_SUB_HOSTS];
+static int g_br_dns_n;
+static int g_br_sub_fails;
+
+static int br_sub_resolve(const char *host, uint32_t *ip) {
+    for (int i = 0; i < g_br_dns_n; i++) {
+        if (strcmp(g_br_dns_host[i], host) == 0) {
+            *ip = g_br_dns_ip[i];
+            return g_br_dns_ip[i] ? 0 : -1; /* 0 = 之前解析失败（负缓存） */
+        }
+    }
+    int ok = net_dns_resolve(host, ip);
+    if (g_br_dns_n < BR_SUB_HOSTS) {
+        uint32_t hl = (uint32_t)strlen(host);
+        if (hl >= sizeof(g_br_dns_host[0])) hl = sizeof(g_br_dns_host[0]) - 1;
+        memcpy(g_br_dns_host[g_br_dns_n], host, hl);
+        g_br_dns_host[g_br_dns_n][hl] = 0;
+        g_br_dns_ip[g_br_dns_n] = (ok == 0) ? *ip : 0;
+        g_br_dns_n++;
+    }
+    return ok;
+}
+
 static void browser_render_from_html(gui_state_t *st, const char *html, char *out, uint32_t cap, uint32_t *out_len) {
     uint32_t pos = 0;
     int space = 1;
@@ -4102,6 +4132,8 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     st->browser_link_count = 0;
     g_br_img_count = 0;
     g_br_css_fetches = 0;
+    g_br_dns_n = 0;
+    g_br_sub_fails = 0;
 
     g_browser_page_title[0] = 0;
     g_browser_title_len = 0;
@@ -4443,6 +4475,28 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
         /* 除 \n/\t 外的控制字节直接丢弃：0x01/0x02 在渲染流里是元数据
          * 标记，正文里混进原始控制字节会让解码端错位。 */
         if ((unsigned char)ch < 0x20 && ch != '\n' && ch != '\t') continue;
+        /* 字体没有的符号类码点整段跳过：私有区图标字（大站图标字体全在
+         * 这）、emoji、零宽字符、变体选择符、杂项符号——不过滤的话每个都
+         * 画成 '?'（百度热榜每行开头的 "?" 就是这么来的）。只在字节确实
+         * 来自原文（不是实体解码产物，那些都是 ASCII）时才做序列判断。 */
+        if ((uint8_t)ch >= 0xE0 && (uint8_t)ch == (uint8_t)html[i]) {
+            uint8_t b0 = (uint8_t)ch;
+            uint32_t n = (b0 >= 0xF0) ? 4 : 3;
+            uint32_t cp = b0 & (uint32_t)((n == 4) ? 0x07 : 0x0F);
+            int valid = 1;
+            for (uint32_t k = 1; k < n; k++) {
+                uint8_t bk = (uint8_t)html[i + k];
+                if ((bk & 0xC0) != 0x80) { valid = 0; break; }
+                cp = (cp << 6) | (uint32_t)(bk & 0x3F);
+            }
+            if (valid && ((cp >= 0xE000 && cp <= 0xF8FF) || cp >= 0x1F000 ||
+                          (cp >= 0xFE00 && cp <= 0xFE0F) ||
+                          (cp >= 0x200B && cp <= 0x200D) || cp == 0xFEFF ||
+                          (cp >= 0x2600 && cp <= 0x27BF))) {
+                i += n - 1;
+                continue;
+            }
+        }
         if (cur_style == BRK_CODE) {
             /* <pre>/<code> 里之前跟其它文字一样把换行/连续空格全折叠掉，
              * 多行代码块被压成一整行、缩进也没了，代码块比没有语法高亮
@@ -4577,18 +4631,18 @@ static int br_http_location(const char *buf, char *out, uint32_t cap) {
 }
 
 static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
-    if (g_br_css_fetches >= 2) return;
+    if (g_br_css_fetches >= 2 || g_br_sub_fails >= 2) return;
     static char cssbuf[64 * 1024];
     char url[192];
     if (browser_resolve_href(st, href, url, sizeof(url)) < 0) return;
     int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
     if (gui_parse_url(url, &https, host, sizeof(host), &port, &path)) return;
     uint32_t ip = 0;
-    if (net_dns_resolve(host, &ip) < 0) return;
+    if (br_sub_resolve(host, &ip) < 0) { g_br_sub_fails++; return; }
     uint32_t len = 0;
     int ok = https ? tls_https_get(host, ip, port, path, cssbuf, sizeof(cssbuf), &len)
                    : net_http_request("GET", host, ip, port, path, cssbuf, sizeof(cssbuf), &len);
-    if (ok < 0) return;
+    if (ok < 0) { g_br_sub_fails++; return; }
     g_br_css_fetches++;
     const char *body = http_body_ptr(cssbuf);
     uint32_t body_off = (uint32_t)(body - cssbuf);
@@ -4603,16 +4657,17 @@ static void browser_fetch_images(gui_state_t *st) {
     static uint8_t imgresp[BROWSER_FETCH_CAP];
     for (int s = 0; s < g_br_img_count && s < BR_IMG_SLOTS; s++) {
         g_br_img_w[s] = 0; g_br_img_h[s] = 0;
+        if (g_br_sub_fails >= 2) continue; /* 预算耗尽：余下图片直接占位 */
         char url[192];
         if (browser_resolve_href(st, g_br_img_src[s], url, sizeof(url)) < 0) continue;
         int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
         if (gui_parse_url(url, &https, host, sizeof(host), &port, &path)) continue;
         uint32_t ip = 0;
-        if (net_dns_resolve(host, &ip) < 0) continue;
+        if (br_sub_resolve(host, &ip) < 0) { g_br_sub_fails++; continue; }
         uint32_t len = 0;
         int ok = https ? tls_https_get(host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len)
                        : net_http_request("GET", host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len);
-        if (ok < 0) continue;
+        if (ok < 0) { g_br_sub_fails++; continue; }
         const char *body = http_body_ptr((char *)imgresp);
         uint32_t body_off = (uint32_t)((const uint8_t *)body - imgresp);
         if (body_off >= len) continue;
@@ -8188,11 +8243,16 @@ static void cmd_gui(int argc, char **argv) {
                     br_hover_idx = hl;
                     if (hl >= 0 && hl < st.browser_link_count) {
                         if (st.status != br_hover_buf) br_saved_status = st.status;
+                        /* 预览解析后的完整地址（协议相对/相对路径都补全），
+                         * 和点击后真正要去的地方一致 */
+                        char resolved[BROWSER_URL_CAP];
+                        const char *show = st.browser_link_href[hl];
+                        if (browser_resolve_href(&st, show, resolved, sizeof(resolved)) == 0)
+                            show = resolved;
                         uint32_t bp = 0;
                         br_hover_buf[0] = 0;
                         append_str(br_hover_buf, sizeof(br_hover_buf), &bp, "打开 ");
-                        append_str(br_hover_buf, sizeof(br_hover_buf), &bp,
-                                   st.browser_link_href[hl]);
+                        append_str(br_hover_buf, sizeof(br_hover_buf), &bp, show);
                         st.status = br_hover_buf;
                     } else if (st.status == br_hover_buf) {
                         st.status = br_saved_status ? br_saved_status : "就绪";
