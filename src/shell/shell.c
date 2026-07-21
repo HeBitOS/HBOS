@@ -92,6 +92,10 @@ void task_yield(void);
 #define KEY_F4      0x10D
 #define KEY_F5      0x10E
 #define KEY_F6      0x10F
+#define KEY_SHIFT_UP    0x110
+#define KEY_SHIFT_DOWN  0x111
+#define KEY_SHIFT_LEFT  0x112
+#define KEY_SHIFT_RIGHT 0x113
 static int shift_pressed = 0, caps_lock = 0, num_lock = 1;
 
 static inline uint8_t inb(uint16_t port) {
@@ -308,11 +312,11 @@ int kb_poll_key(void) {
         ext_scancode = 0;
         if (sc & 0x80) return 0;
         if (sc == 0x47) return KEY_HOME;
-        if (sc == 0x48) return KEY_UP;
+        if (sc == 0x48) return shift_pressed ? KEY_SHIFT_UP    : KEY_UP;
         if (sc == 0x4F) return KEY_END;
-        if (sc == 0x50) return KEY_DOWN;
-        if (sc == 0x4B) return KEY_LEFT;
-        if (sc == 0x4D) return KEY_RIGHT;
+        if (sc == 0x50) return shift_pressed ? KEY_SHIFT_DOWN  : KEY_DOWN;
+        if (sc == 0x4B) return shift_pressed ? KEY_SHIFT_LEFT  : KEY_LEFT;
+        if (sc == 0x4D) return shift_pressed ? KEY_SHIFT_RIGHT : KEY_RIGHT;
         if (sc == 0x49) return KEY_PGUP;
         if (sc == 0x51) return KEY_PGDWN;
         if (sc == 0x52) return KEY_INSERT;
@@ -1048,14 +1052,49 @@ void cmd_exit(int argc, char **argv) {
     shell_exit_flag = 1;
 }
 
+// ============================================================
+// 启动模式偏好（第一次启动时选的 GUI/Shell，记住后不再询问）
+// ============================================================
+// 存成磁盘上的一个小文件；只有挂载了持久化后端（HBFS/ext2/FAT32，见
+// fs_mount_disk）时才能跨重启保留 —— 纯 ramfs 场景下（没有可用磁盘）
+// 这个偏好每次开机都会丢失，退化为"每次都问"，属于预期行为。
+#define STARTUP_PREF_FILE "/startup.cfg"
+
+int shell_get_startup_pref(void) {
+    file_t *f = fs_find_file(STARTUP_PREF_FILE);
+    if (!f || f->size == 0) return 0;   /* 还没设置过（第一次启动） */
+    char buf[4] = {0};
+    fs_read_file_data(f, 0, buf, sizeof(buf) - 1);
+    if (buf[0] == 'g' || buf[0] == 't') return buf[0];
+    return 0;
+}
+
+int shell_set_startup_pref(int mode) {
+    if (mode != 'g' && mode != 't') return -1;
+    file_t *f = fs_create_file(STARTUP_PREF_FILE);
+    if (!f) return -1;
+    char buf[2];
+    buf[0] = (char)mode;
+    buf[1] = '\n';
+    if (fs_write_file_data(f, 0, buf, sizeof(buf)) < 0) return -1;
+    (void)fs_sync();
+    return 0;
+}
+
 void shell_run(void) {
     char cmd_line[CMD_BUF_SIZE];
     char history_draft[CMD_BUF_SIZE];
     int cmd_len = 0, cmd_pos = 0;
     bool browsing_history = false;
 
-    kb_controller_init();
-    usb_kbd_init();
+    /* 走带 kb_initialized 门禁的 kb_init()，不要直接调 kb_controller_init()：
+     * 后面读第一个键（G/T 选择）会走 get_key() -> kb_init()，如果这里绕过
+     * 门禁直接调，kb_initialized 没被置位，controller_init 会在 get_key()
+     * 里再跑一遍——PS/2 控制器无响应/不存在的真机上，每次忙等待都要
+     * 烧光整个 100000 次自旋预算，重复一遍等于启动菜单出现前平白多等一倍
+     * 时间（用户反馈"开机后要很久才能跳出选择界面"，日志确认这里是重复
+     * 初始化，不是单次探测本身慢）。 */
+    kb_init();
 
     console_puts(
         "\x1b[34m"
@@ -1070,24 +1109,38 @@ void shell_run(void) {
         "输入 \x1b[0mhelp\x1b[90m 查看命令\x1b[0m\r\n\r\n"
     );
 
-    // Boot selector: choose the graphical desktop or the text shell once at
-    // startup. Picking GUI also means a key is pressed before the GUI's
-    // mouse_init runs, which keeps the PS/2 controller state clean.
-    console_puts(
-        "\r\n  \x1b[1m\x1b[36m请选择启动模式 / Select boot mode\x1b[0m\r\n"
-        "    \x1b[32m[G / Enter]\x1b[0m 图形桌面 GUI       "
-        "\x1b[33m[T]\x1b[0m 命令行 Shell\r\n  > "
-    );
-    while (1) {
-        int c = get_key();
-        if (c == 't' || c == 'T') {
-            console_puts("Shell\r\n\r\n");
-            break;
-        }
-        if (c == 'g' || c == 'G' || c == '\n' || c == '\r') {
-            console_puts("GUI\r\n");
-            cmd_execute("gui");
-            break;
+    // Boot selector: choose the graphical desktop or the text shell. Only
+    // asked once, ever — the choice is remembered on disk (see
+    // shell_get_startup_pref/shell_set_startup_pref above) and reused on
+    // every later boot without prompting. `startup gui`/`startup shell`
+    // (src/tools/system.c) or the GUI Settings app can change it afterwards.
+    // Picking GUI also means a key is pressed before the GUI's mouse_init
+    // runs, which keeps the PS/2 controller state clean.
+    int startup_pref = shell_get_startup_pref();
+    if (startup_pref == 'g') {
+        console_puts("\r\n\x1b[90m已记住启动选择：图形桌面 GUI（用 startup 命令可修改）\x1b[0m\r\n");
+        cmd_execute("gui");
+    } else if (startup_pref == 't') {
+        console_puts("\r\n\x1b[90m已记住启动选择：命令行 Shell（用 startup 命令可修改）\x1b[0m\r\n\r\n");
+    } else {
+        console_puts(
+            "\r\n  \x1b[1m\x1b[36m请选择启动模式 / Select boot mode\x1b[0m\r\n"
+            "    \x1b[32m[G / Enter]\x1b[0m 图形桌面 GUI       "
+            "\x1b[33m[T]\x1b[0m 命令行 Shell\r\n  > "
+        );
+        while (1) {
+            int c = get_key();
+            if (c == 't' || c == 'T') {
+                console_puts("Shell\r\n\r\n");
+                shell_set_startup_pref('t');
+                break;
+            }
+            if (c == 'g' || c == 'G' || c == '\n' || c == '\r') {
+                console_puts("GUI\r\n");
+                shell_set_startup_pref('g');
+                cmd_execute("gui");
+                break;
+            }
         }
     }
 
