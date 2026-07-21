@@ -4695,6 +4695,29 @@ static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
     css_parse_stylesheet(body, len - body_off);
 }
 
+/* 图床变换后缀改写（B 站 hdslb 等）：真实站点的图片 URL 普遍长这样
+ *   xxx.jpg@672w_378h_1c_!web-home-common-cover.webp?mirror=1
+ * '@' 后面是图床的实时变换参数。把它整个换成 "480w_360h"（等比缩放进
+ * 480x360 框），一石三鸟：尺寸落进我们的解码上限、砍掉 .webp/.avif 格式
+ * 后缀（图床按源扩展名回退到 baseline JPEG/PNG）、去掉无用的追踪 query。
+ * 没有 ".jpg@/.png@" 模式的 URL 原样不动。 */
+static void br_img_url_rewrite(char *url, uint32_t cap) {
+    uint32_t n = (uint32_t)strlen(url);
+    for (uint32_t i = 4; i + 1 < n; i++) {
+        if (url[i] != '@') continue;
+        int is_img_ext =
+            (i >= 4 && tag_ci_eq(url + i - 4, 4, ".jpg")) ||
+            (i >= 4 && tag_ci_eq(url + i - 4, 4, ".png")) ||
+            (i >= 5 && tag_ci_eq(url + i - 5, 5, ".jpeg"));
+        if (!is_img_ext) continue;
+        const char *spec = "480w_360h";
+        uint32_t p = i + 1;
+        for (const char *q = spec; *q && p + 1 < cap; q++) url[p++] = *q;
+        url[p] = 0;
+        return;
+    }
+}
+
 /* 页面加载后统一抓取并解码所有已登记的内联图片。每张独立抓取一次
  * （串行，复用同一个静态响应缓冲），解码进对应槽位；失败/超尺寸/JPEG
  * 等不支持的就把该槽宽高留 0，绘制端画占位。 */
@@ -4705,6 +4728,7 @@ static void browser_fetch_images(gui_state_t *st) {
         if (g_br_sub_fails >= 4) continue; /* 预算耗尽：余下图片直接占位 */
         char url[192];
         if (browser_resolve_href(st, g_br_img_src[s], url, sizeof(url)) < 0) continue;
+        br_img_url_rewrite(url, sizeof(url));
         int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
         if (gui_parse_url(url, &https, host, sizeof(host), &port, &path)) continue;
         uint32_t ip = 0; int cached = 0;
