@@ -125,6 +125,28 @@ static int ps2_mouse_init(void) {
     if (write_cmd(0xA8) < 0) { int_enable(); return -1; }
     flush_output();
 
+    /* IntelliMouse（滚轮）探测：标准魔法序列——连续把采样率设成
+     * 200/100/80，再发 Get Device ID (0xF2)。支持滚轮的鼠标看到这个序列
+     * 会把设备 ID 从 0x00 改成 0x03，之后每个数据包多带一个第 4 字节
+     * （滚轮增量，见下面解析循环里 packet[3] 那段——已经写好了，只是
+     * mouse_packet_size 一直停在 3，从没触发过）。任何一步失败就放弃，
+     * 退回原来的 3 字节协议，不影响现有的移动/按键。 */
+    {
+        uint8_t rates[3] = {200, 100, 80};
+        int ok = 1;
+        for (int i = 0; i < 3 && ok; i++) {
+            if (write_mouse(0xF3) < 0 || read_ack() < 0) ok = 0;
+            else if (write_mouse(rates[i]) < 0 || read_ack() < 0) ok = 0;
+        }
+        if (ok && write_mouse(0xF2) == 0 && read_ack() == 0) {
+            uint8_t dev_id = 0xFF;
+            if (read_data(&dev_id) == 0 && dev_id == 0x03) {
+                mouse_packet_size = 4;
+            }
+        }
+        flush_output();
+    }
+
     /* Enable data reporting */
     for (int attempt = 0; attempt < 4; attempt++) {
         flush_output();

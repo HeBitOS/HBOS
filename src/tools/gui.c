@@ -6512,6 +6512,16 @@ static void handle_wheel(gui_state_t *st, int dz) {
         st->code_scroll += steps;
         code_clamp_scroll(st);
         st->status = "滚动代码";
+    } else if (st->app_mode == GUI_APP_BROWSER) {
+        /* 注意方向和上面几个分支相反（是 -= steps 不是 += steps）：这几个
+         * 分支原本的 +steps 语义是"steps 为正=列表下一项/编辑器视图下移"，
+         * 用真实滚轮实测（QEMU input-send-event wheel-down/up）验证过，
+         * wheel-down（应让网页显示更靠后内容、滚动位置增大）此时 steps
+         * 恰好是 -1，wheel-up 是 +1——和其它分支的符号是反的，所以这里
+         * 单独取负号，不动 steps 本身（其它分支继续用原来的语义）。 */
+        st->browser_scroll -= steps;
+        if (st->browser_scroll < 0) st->browser_scroll = 0;
+        st->status = "滚动网页";
     }
 }
 
