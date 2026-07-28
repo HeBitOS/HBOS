@@ -107,7 +107,7 @@ hive
 是 HBOS 的独立桌面项目，包含窗口管理器、合成器、桌面 Shell、用户态控件库
 和应用 SDK。
 
-当前 HIVE Toolkit 1.1 提供：
+当前 HIVE Toolkit 1.2 提供：
 
 - Label、Button、Textbox、Checkbox、List、Progress、Slider；
 - 行布局、网格布局与窗口尺寸变化后的重新排布；
@@ -129,7 +129,7 @@ HAX（HBOS Application eXecutable）是 HBOS 的用户应用格式。应用本�
 ```c
 #include <hax.h>
 
-HAX_APP("hello", "Hello from HBOS", HAX_KIND_TUI);
+HAX_APP("myapp", "My HBOS application", HAX_KIND_TUI);
 
 int main(int argc, char **argv) {
     (void)argc;
@@ -139,8 +139,8 @@ int main(int argc, char **argv) {
 }
 ```
 
-把源码保存到 `app/hello.c` 后运行 `make`，构建系统会自动生成并打包
-`hello.hax`。应用也可以放在独立仓库：
+把源码保存到 `app/myapp.c` 后运行 `make`，构建系统会自动生成并打包
+`myapp.hax`。这只是开发示例，不作为系统预装应用。应用也可以放在独立仓库：
 
 ```bash
 make APP_DIR=/path/to/apps hax-apps

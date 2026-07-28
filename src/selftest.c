@@ -106,7 +106,7 @@ int selftest_run(void) {
     CHECK("syscall close", hbos_close(fd) == 0);
     CHECK("syscall unlink", hbos_unlink("__syscall") == 0);
 #if HBOS_BUNDLE_APPS
-    CHECK("app registry", hbos_app_find("hello") != NULL);
+    CHECK("app registry", hbos_app_find("uwc") != NULL);
 #else
     CHECK("empty app registry", hbos_app_count() == 0);
 #endif

@@ -11,7 +11,7 @@
  * @code
  *   #include <hax.h>
  *
- *   HAX_APP("hello", "我的第一个 HBOS 应用", HAX_KIND_TUI);
+ *   HAX_APP("myapp", "我的第一个 HBOS 应用", HAX_KIND_TUI);
  *
  *   int main(int argc, char **argv) {
  *       hax_println("你好，HBOS！");
@@ -20,8 +20,8 @@
  * @endcode
  *
  * 编译（由 `make` 自动完成；也可手动）：
- *   xhcc app/hello.c -o app/hello.hax        # 等价于链接 HAX 运行时
- * 系统启动后即出现在 `apps` 列表，可用 `run hello` 运行。
+ *   xhcc app/myapp.c -o app/myapp.hax        # 等价于链接 HAX 运行时
+ * 系统启动后即出现在 `apps` 列表，可用 `run myapp` 运行。
  */
 #ifndef HBOS_HAX_H
 #define HBOS_HAX_H
@@ -285,6 +285,10 @@ static inline void hax_gui_circle(int cx, int cy, int r, HCOLOR c) {
 #define HAX_EV_KEY   1   /**< ev[1]=键值 */
 #define HAX_EV_MOUSE 2   /**< 移动/按键；ev[1]=x ev[2]=y ev[3]=按键，离开时 x=y=-1 */
 #define HAX_EV_CLOSE 3   /**< 窗口被请求关闭 */
+#define HAX_EV_RESIZE 4  /**< v2：a=内容宽 b=内容高 */
+#define HAX_EV_MOVE   5  /**< v2：a=桌面 x b=桌面 y */
+#define HAX_EV_FOCUS  6  /**< v2：a=1 获得焦点，0 失去焦点 */
+#define HAX_EV_STATE  7  /**< v2：a=HAX_WIN_STATE_* */
 
 /** 打开一个窗口（内容区 w×h），成功返回窗口 id（≥0），失败 -1 */
 static inline int hax_win_open(const char *title, int w, int h) {
@@ -311,6 +315,12 @@ static inline void hax_win_text(int x, int y, const char *s, HCOLOR c) {
     __syscall6(HBOS_SYS_WIN_TEXT, x, y, (long)s, (long)c, 0, 0);
 }
 
+/** 上传一块 0xAARRGGBB 位图；stride 为每行像素数，0 表示 w。 */
+static inline void hax_win_blit(int x, int y, int w, int h,
+                                const HU32 *pixels, int stride) {
+    __syscall6(HBOS_SYS_WIN_BLIT, x, y, w, h, (long)pixels, stride);
+}
+
 /** 提交一帧（让出 CPU，使合成器尽快显示） */
 static inline void hax_win_present(void) {
     __syscall1(HBOS_SYS_WIN_PRESENT, 0);
@@ -324,6 +334,188 @@ static inline int hax_win_poll(int *ev4) {
 /** 关闭并销毁窗口 */
 static inline void hax_win_close(void) {
     __syscall1(HBOS_SYS_WIN_CLOSE, 0);
+}
+
+/* ── 版本化窗口 API v2 ─────────────────────────────────────────────
+ * v1 包装继续绑定“当前任务的兼容窗口”；v2 始终使用显式、不透明句柄，因此
+ * 同一个应用可同时创建多个窗口，旧句柄也不会误命中已回收的窗口槽。 */
+#define HAX_WIN_ABI_MAJOR 1u
+#define HAX_WIN_ABI_MINOR 1u
+
+#define HAX_WIN_CAP_MULTI_WINDOW (1u << 0)
+#define HAX_WIN_CAP_RESIZE       (1u << 1)
+#define HAX_WIN_CAP_ARGB         (1u << 2)
+#define HAX_WIN_CAP_DIRTY_RECT   (1u << 3)
+#define HAX_WIN_CAP_BATCH_DRAW   (1u << 4)
+#define HAX_WIN_CAP_FOCUS_EVENTS (1u << 5)
+
+#define HAX_WIN_STATE_NORMAL    0
+#define HAX_WIN_STATE_MINIMIZED 1
+#define HAX_WIN_STATE_MAXIMIZED 2
+
+#define HAX_WIN_STATE_FOCUSED    (1u << 0)
+#define HAX_WIN_STATE_WANT_CLOSE (1u << 1)
+
+enum {
+    HAX_WIN2_QUERY = 0,
+    HAX_WIN2_CREATE,
+    HAX_WIN2_GET_STATE,
+    HAX_WIN2_SET_TITLE,
+    HAX_WIN2_SET_GEOMETRY,
+    HAX_WIN2_SET_WINDOW_STATE,
+    HAX_WIN2_DRAW_BATCH,
+    HAX_WIN2_PRESENT,
+    HAX_WIN2_POLL,
+    HAX_WIN2_CLOSE,
+};
+
+enum {
+    HAX_DRAW_CLEAR = 1,
+    HAX_DRAW_FILL,
+    HAX_DRAW_TEXT,
+    HAX_DRAW_ARGB,
+};
+
+typedef HI32 hax_window_t;
+
+typedef struct {
+    HU32 struct_size;
+    HU16 abi_major, abi_minor;
+    HU32 capabilities;
+    HU32 max_windows;
+    HU32 event_queue_size;
+    HU32 reserved[3];
+} hax_window_caps_t;
+
+typedef struct {
+    HU32 struct_size;
+    HU16 abi_major, abi_minor;
+    const char *title;
+    HI32 width, height;
+    HU32 flags;
+    HU32 reserved[3];
+} hax_window_create_t;
+
+typedef struct {
+    HU32 struct_size;
+    HU16 abi_major, abi_minor;
+    HI32 x, y, width, height;
+    HI32 window_state;
+    HU32 flags;
+    HU32 reserved[2];
+} hax_window_state_t;
+
+typedef struct {
+    HI32 x, y, width, height;
+} hax_rect_t;
+
+typedef struct {
+    HU32 type;
+    HI32 x, y, width, height;
+    HCOLOR color;
+    const void *data;
+    HI32 stride;
+    HU32 reserved;
+} hax_draw_command_t;
+
+typedef struct {
+    HU32 struct_size;
+    HU16 abi_major, abi_minor;
+    const hax_draw_command_t *commands;
+    HU32 count;
+    HU32 reserved[3];
+} hax_draw_batch_t;
+
+typedef struct {
+    HU32 struct_size;
+    HU16 abi_major, abi_minor;
+    HU32 type;
+    HI32 a, b, c;
+    HU32 window;
+    HU32 reserved[2];
+} hax_window_event_t;
+
+static inline int hax_window_call(HU32 operation, hax_window_t window,
+                                  void *data) {
+    return (int)__syscall3(HBOS_SYS_WIN2, operation, window, (long)data);
+}
+
+static inline int hax_window_query(hax_window_caps_t *caps) {
+    if (!caps) return -1;
+    memset(caps, 0, sizeof(*caps));
+    caps->struct_size = (HU32)sizeof(*caps);
+    caps->abi_major = HAX_WIN_ABI_MAJOR;
+    caps->abi_minor = HAX_WIN_ABI_MINOR;
+    return hax_window_call(HAX_WIN2_QUERY, 0, caps);
+}
+
+static inline hax_window_t hax_window_create(const char *title, int w, int h,
+                                              HU32 flags) {
+    hax_window_create_t create;
+    memset(&create, 0, sizeof(create));
+    create.struct_size = (HU32)sizeof(create);
+    create.abi_major = HAX_WIN_ABI_MAJOR;
+    create.abi_minor = HAX_WIN_ABI_MINOR;
+    create.title = title;
+    create.width = w; create.height = h; create.flags = flags;
+    return (hax_window_t)hax_window_call(HAX_WIN2_CREATE, 0, &create);
+}
+
+static inline int hax_window_get_state(hax_window_t window,
+                                       hax_window_state_t *state) {
+    if (!state) return -1;
+    memset(state, 0, sizeof(*state));
+    state->struct_size = (HU32)sizeof(*state);
+    state->abi_major = HAX_WIN_ABI_MAJOR;
+    state->abi_minor = HAX_WIN_ABI_MINOR;
+    return hax_window_call(HAX_WIN2_GET_STATE, window, state);
+}
+
+static inline int hax_window_set_title(hax_window_t window,
+                                       const char *title) {
+    return title ? hax_window_call(HAX_WIN2_SET_TITLE, window, (void *)title) : -1;
+}
+
+static inline int hax_window_set_geometry(hax_window_t window,
+                                          hax_rect_t geometry) {
+    return hax_window_call(HAX_WIN2_SET_GEOMETRY, window, &geometry);
+}
+
+static inline int hax_window_set_state(hax_window_t window, int state) {
+    return hax_window_call(HAX_WIN2_SET_WINDOW_STATE, window, &state);
+}
+
+static inline int hax_window_draw(hax_window_t window,
+                                  const hax_draw_command_t *commands,
+                                  HU32 count) {
+    if (!commands || count == 0) return count == 0 ? 0 : -1;
+    hax_draw_batch_t batch;
+    memset(&batch, 0, sizeof(batch));
+    batch.struct_size = (HU32)sizeof(batch);
+    batch.abi_major = HAX_WIN_ABI_MAJOR;
+    batch.abi_minor = HAX_WIN_ABI_MINOR;
+    batch.commands = commands;
+    batch.count = count;
+    return hax_window_call(HAX_WIN2_DRAW_BATCH, window, &batch);
+}
+
+static inline int hax_window_present(hax_window_t window,
+                                     const hax_rect_t *dirty) {
+    return hax_window_call(HAX_WIN2_PRESENT, window, (void *)dirty);
+}
+
+static inline int hax_window_poll(hax_window_t window,
+                                  hax_window_event_t *event) {
+    if (!event) return -1;
+    memset(event, 0, sizeof(*event));
+    event->struct_size = (HU32)sizeof(*event);
+    event->abi_major = HAX_WIN_ABI_MAJOR;
+    event->abi_minor = HAX_WIN_ABI_MINOR;
+    return hax_window_call(HAX_WIN2_POLL, window, event);
+}
+
+static inline int hax_window_close(hax_window_t window) {
+    return hax_window_call(HAX_WIN2_CLOSE, window, NULL);
 }
 
 /* HIVE 标准窗口控件（按钮、文本框、复选框、列表、滑杆等）。 */

@@ -17,7 +17,7 @@
 
 #include <stdint.h>
 
-#define WINSRV_MAX      4     /**< 最多并发应用窗口数 */
+#define WINSRV_MAX      8     /**< 最多并发应用窗口数 */
 #define WINSRV_EVQ      32    /**< 每窗口事件队列深度 */
 #define WINSRV_TITLE    32    /**< 标题最大字节 */
 #define WINSRV_MIN_W    120
@@ -31,6 +31,16 @@ enum {
     WINEV_KEY   = 1,   /**< a = 键值 */
     WINEV_MOUSE = 2,   /**< a=x b=y c=按键；离开为 x=y=-1，按下后捕获至松开 */
     WINEV_CLOSE = 3,   /**< 用户点了关闭按钮，应用应退出 */
+    WINEV_RESIZE = 4,  /**< a=内容宽 b=内容高 */
+    WINEV_MOVE = 5,    /**< a=桌面 x b=桌面 y */
+    WINEV_FOCUS = 6,   /**< a=1 获得焦点，0 失去焦点 */
+    WINEV_STATE = 7,   /**< a=WINSRV_STATE_* */
+};
+
+enum {
+    WINSRV_STATE_NORMAL = 0,
+    WINSRV_STATE_MINIMIZED = 1,
+    WINSRV_STATE_MAXIMIZED = 2,
 };
 
 typedef struct {
@@ -40,6 +50,7 @@ typedef struct {
 
 typedef struct {
     int       used;
+    uint32_t  generation;            /**< 句柄代数，防止旧句柄误命中新窗口 */
     uint32_t  owner_task;            /**< 拥有此窗口的任务 ID */
     char      title[WINSRV_TITLE];
     int       x, y, w, h;            /**< 窗口位置与内容尺寸（不含装饰） */
@@ -47,6 +58,10 @@ typedef struct {
     uint64_t  surface_phys;
     int       surface_pages;
     int       want_close;            /**< GUI 请求关闭 */
+    int       state;                 /**< WINSRV_STATE_* */
+    int       focused;
+    int       dirty;
+    int       dirty_x, dirty_y, dirty_w, dirty_h;
     winsrv_event_t evq[WINSRV_EVQ];
     int       ev_head, ev_tail;
 } winsrv_window_t;
@@ -55,6 +70,8 @@ typedef struct {
 
 /** 为任务创建窗口，返回窗口 id（0..WINSRV_MAX-1）或 -1 */
 int  winsrv_create(uint32_t owner_task, const char *title, int w, int h);
+/** v2：允许同一任务创建多个窗口，返回不透明句柄或 -1 */
+int  winsrv_create_handle(uint32_t owner_task, const char *title, int w, int h);
 
 /** 销毁窗口并释放表面 */
 void winsrv_destroy(int id);
@@ -67,9 +84,13 @@ winsrv_window_t *winsrv_get(int id);
 
 /** 找到某任务拥有的窗口，无则 NULL */
 winsrv_window_t *winsrv_for_task(uint32_t owner_task);
+/** 校验句柄及 owner 后返回窗口。 */
+winsrv_window_t *winsrv_for_handle(uint32_t owner_task, int handle);
+int  winsrv_handle(const winsrv_window_t *win);
 
 /** 当前活动窗口数 */
 int  winsrv_count(void);
+int  winsrv_has_dirty(void);
 
 /** 回收所有 owner 任务已结束的窗口；返回回收数量 */
 int  winsrv_reap_dead(void);
@@ -78,6 +99,11 @@ int  winsrv_reap_dead(void);
 void winsrv_clear(winsrv_window_t *win, uint32_t color);
 void winsrv_fill (winsrv_window_t *win, int x, int y, int w, int h, uint32_t color);
 void winsrv_text (winsrv_window_t *win, int x, int y, const char *s, uint32_t color);
+void winsrv_blit_argb(winsrv_window_t *win, int x, int y, int w, int h,
+                      const uint32_t *pixels, int stride);
+int  winsrv_resize(winsrv_window_t *win, int w, int h);
+void winsrv_set_title(winsrv_window_t *win, const char *title);
+void winsrv_mark_dirty(winsrv_window_t *win, int x, int y, int w, int h);
 
 /* ── 事件队列 ─────────────────────────────────────────────── */
 void winsrv_push_event(winsrv_window_t *win, int type, int a, int b, int c);

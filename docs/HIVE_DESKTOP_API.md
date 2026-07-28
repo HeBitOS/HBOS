@@ -1,7 +1,7 @@
 # HIVE 桌面与应用 API
 
 > HIVE：HBOS Interface & Visual Environment
-> 当前工具包版本：1.1
+> 当前工具包版本：1.2
 > 首选头文件：`app/include/hive.h`
 
 ## 分层
@@ -54,9 +54,10 @@ done:
 }
 ```
 
-## 1.1 能力
+## 1.2 能力
 
-- 控件：Label、Button、Textbox、Checkbox、List、Progress、Slider。
+- 控件：Label、Button、Textbox、Checkbox、List、Progress、Slider、
+  Scrollbar、Menu、Image 和自定义 Canvas。
 - 布局：内边距、纵向行布局、等分网格，窗口尺寸变化时可重新排布。
 - 输入：悬停、按下、拖动、松开、窗口外释放捕获、Tab 焦点、Enter/Space、
   方向键、Home/End、PageUp/PageDown。
@@ -66,6 +67,39 @@ done:
   `hive_theme_t`。
 - 独立性：UI 状态由应用自己的 `hive_ui_t` 持有，不访问桌面或内核私有状态。
 
+## 显式窗口 API
+
+HIVE 1.2 保留 `hive_window_open()` 等单窗口兼容接口，并新增带不透明句柄的
+显式接口：
+
+```c
+hive_window_caps_t caps;
+if (hive_window_query(&caps) < 0 ||
+    !(caps.capabilities & HAX_WIN_CAP_MULTI_WINDOW))
+    return 1;
+
+hive_window_t first = hive_window_create("First", 360, 240, 0);
+hive_window_t second = hive_window_create("Second", 320, 200, 0);
+
+hive_draw_command_t commands[] = {
+    {.type = HAX_DRAW_CLEAR, .color = 0xFF121820},
+    {.type = HAX_DRAW_FILL, .x = 20, .y = 20, .width = 120, .height = 36,
+     .color = 0xFF14A6E0},
+};
+hive_window_draw(first, commands, 2);
+hive_window_rect_t dirty = {20, 20, 120, 36};
+hive_window_present_rect(first, &dirty);
+```
+
+公开能力包括：
+
+- 同一任务多窗口和带代数校验的句柄，已回收窗口的旧句柄不会误命中新窗口。
+- 带 `struct_size`、ABI major/minor 的能力、创建、状态和事件结构。
+- 标题、几何、普通/最小化/最大化状态，以及 Move、Resize、Focus、State 事件。
+- 批量 Clear/Fill/Text/ARGB 绘制和可选脏矩形提交。
+- 事件队列满时合并连续鼠标移动，并保证按键状态变化和关闭事件能够入队。
+- no-GUI 构建保留系统调用编号；能力查询返回零能力，其余 v2 操作明确失败。
+
 ## 交互约定
 
 1. 按钮在鼠标松开且指针仍位于控件内时触发，避免拖出后误操作。
@@ -74,12 +108,9 @@ done:
 4. 禁用控件不得保留焦点或 pressed 状态。
 5. 应用每轮应清空事件队列、重绘、提交，然后调用 `hive_yield()`。
 
-## 应用适配状态
+## 应用接入要求
 
-| 应用 | 状态 | 使用能力 |
-|---|---|---|
-| `widgets.hax` | HIVE 1.1 | 全控件、响应式布局、状态联动 |
-| `wdemo.hax` | 已从手写命中检测迁移 | Button、Checkbox、Slider、Progress、键盘操作 |
-
+演示级的 `widgets.hax` 和 `wdemo.hax` 不再随系统打包。HIVE 控件行为由
+`scripts/test_hive_ui.c` 与 `scripts/test_hive_winsrv.c` 维护回归覆盖。
 后续迁移顺序建议为：计算器 → 设置 → 记事本 → 文件管理器。迁移完成的应用
 不得直接包含 `gui_state.h`、`wm.h`、`winsrv.h` 或调用 framebuffer。

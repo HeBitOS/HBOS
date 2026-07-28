@@ -227,7 +227,6 @@ C_SRCS = \
 	$(SRC_DIR)/tools/net.c \
 	$(SRC_DIR)/tools/editor.c \
 	$(SRC_DIR)/tools/cc.c \
-	$(SRC_DIR)/tools/python.c \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/tools/tcc_runtime_seed.c \
 	$(SRC_DIR)/tools/audio.c \
@@ -561,7 +560,11 @@ hive-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Iapp/include -Isrc/user \
 		scripts/test_hive_ui.c -o $(BUILD_DIR)/test_hive_ui
 	$(BUILD_DIR)/test_hive_ui
-	@echo "✓ HIVE UI 1.1 event/layout tests"
+	$(CC) -O2 -Wall -Wextra -Isrc \
+		scripts/test_hive_winsrv.c src/gui/winsrv.c \
+		-o $(BUILD_DIR)/test_hive_winsrv
+	$(BUILD_DIR)/test_hive_winsrv
+	@echo "✓ HIVE UI 1.2 event/layout/widget tests"
 
 nogui:
 	@$(MAKE) --no-print-directory BUILD_DIR=$(NOGUI_BUILD_DIR) \

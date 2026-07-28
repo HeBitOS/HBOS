@@ -15,7 +15,6 @@
 | `app.c` | app 命令 (用户程序管理) |
 | `net.c` | net 命令 (网络工具) |
 | `cc.c`, `cc.h` | C 编译器 + 图形 builtin 钩子表 (`cc_gfx_t`) |
-| `python.c`, `python.h` | ★ Python 解释器 (内建) |
 | `cppe.c` | C 预处理器 |
 | `editor.c` | 文本编辑器 |
 | `system/` | 系统工具 (reboot, poweroff 等) |
@@ -37,7 +36,6 @@ static inline void tool_init_all(void) {
     tool_gui_init();     // ★ gui 命令 (启动桌面)
     tool_net_init();     // net 命令 (dhcp, ping, wget, ...)
     tool_cc_init();      // cc/gcc 命令 (C 编译器 + GUI 脚本)
-    tool_python_init();  // python/python3/py 命令 (Python 解释器)
     tool_cppe_init();    // cpp 命令 (预处理器)
 }
 
@@ -117,16 +115,16 @@ static int hit_task_window(...);       // 任务栏窗口按钮
 
 ---
 
-## C / Python GUI 脚本系统
+## C GUI 脚本系统
 
 ### 架构
 
 ```
 cc_gfx_t (src/tools/cc.h)
-    ↑ cc_set_gfx()    ↑ py_set_gfx()
-    cc.c             python.c
-         ↖         ↗
-          gui.c (g_sgfx hooks + code_gui_run())
+    ↑ cc_set_gfx()
+    cc.c
+      ↑
+    gui.c (g_sgfx hooks + code_gui_run())
 ```
 
 ### cc_gfx_t 钩子表 (`src/tools/cc.h`)
@@ -144,7 +142,6 @@ typedef struct {
 ```
 
 - `cc_set_gfx(hooks)` — 给 C 解释器设置图形钩子，`NULL` 清除
-- `py_set_gfx(hooks)` — 给 Python 解释器设置图形钩子
 
 ### C 脚本 builtin 函数 (`cc.c`)
 
@@ -159,37 +156,15 @@ typedef struct {
 | `get_key()` | 非阻塞取键；0=无 |
 | `wait_key()` | 阻塞取键；内部调 `task_yield()` |
 
-### Python 解释器 (`python.c` ~650 行)
-
-**支持语法：**
-- 变量赋值 / 增量赋值 (`+=`, `-=`, `*=`, `/=`)
-- `if` / `elif` / `else`（缩进块）
-- `while` 循环
-- `for i in range(n)` / `range(start, stop)` / `range(start, stop, step)`
-- `def` 函数定义 + `return` / `break` / `continue`
-- 表达式：算术 `+ - * / // % **`，比较 `== != < > <= >=`，逻辑 `and or not`
-- 字符串字面量（单/双引号），字符串 + 拼接
-
-**内建函数：** `print()`, `int()`, `str()`, `len()`, `abs()`  
-**图形 builtin：** `rgb`, `rect`, `text`, `clear`, `present`, `get_key`, `wait_key`, `screen_w`, `screen_h`
-
-**命令行：**
-```bash
-python file.py          # 运行
-python --new file.py    # 生成 GUI 样板
-python3 / py            # 别名
-```
-
 ### 代码工作台 "GUI运行" 按钮
 
 - 位置：代码工作台第 4 个按钮（紫色 `rgb(215,100,244)`）
 - 逻辑（`code_gui_run()` in `gui.c`）：
   1. 保存文件
   2. 清屏为黑色并 present
-  3. 根据文件扩展名 `.py` → Python，否则 → C
-  4. 挂载 `g_sgfx` 钩子（`g_script_fb` 指向当前 fb）
-  5. 调 `py_run_file()` 或 `hbos_gcc_run_file()`（同步，阻塞 GUI）
-  6. 清除钩子，`gui_dirty_mark_full()` 重绘
+  3. 挂载 `g_sgfx` 钩子（`g_script_fb` 指向当前 fb）
+  4. 调 `hbos_gcc_run_file()`（同步，阻塞 GUI）
+  5. 清除钩子，`gui_dirty_mark_full()` 重绘
 
 ### GUI 脚本执行模型
 
@@ -203,7 +178,6 @@ python3 / py            # 别名
 
 ```bash
 gcc --new myapp.c      # C GUI App 样板
-python --new myapp.py  # Python GUI App 样板
 ```
 
 样板包含：矩形动画 + 键盘控制（A/D 移动，ESC 退出）

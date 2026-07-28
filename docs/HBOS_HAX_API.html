@@ -51,7 +51,7 @@
   <div style="height:4.5cm;"></div>
   <div style="background:#14a6e0; color:#fff; padding:22px 18px; font-size:11pt; font-weight:600;">
     HBOS APPLICATION DEVELOPER GUIDE<br>
-    <span style="font-size:9.5pt; font-weight:400;">2026/07/28 &nbsp;·&nbsp; VERSION 1.4 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; SDK rev.5（HAX ABI + HIVE 1.1）</span>
+    <span style="font-size:9.5pt; font-weight:400;">2026/07/28 &nbsp;·&nbsp; VERSION 1.5 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; SDK rev.6（HAX ABI + HIVE 1.2）</span>
   </div>
 </div>
 
@@ -89,13 +89,13 @@
   <div class="s">3.4 参数传递</div>
   <div class="s">3.5 退出码约定</div>
   <div class="c">第 4 章 — 完整示例</div>
-  <div class="s">4.1 hello —— 最小应用（TUI）</div>
-  <div class="s">4.2 guess —— 猜数字游戏（GUI）</div>
+  <div class="s">4.1 最小应用（TUI，文档示例）</div>
+  <div class="s">4.2 输入循环（GUI，文档示例）</div>
   <div class="s">4.3 catf —— 读取并显示文件</div>
   <div class="s">4.4 ls —— 列出目录内容</div>
-  <div class="s">4.5 paint —— GUI 全屏画布涂鸦</div>
-  <div class="s">4.6 wdemo —— HIVE 并发窗口计数器</div>
-  <div class="s">4.7 widgets —— HIVE 1.1 控件示例</div>
+  <div class="s">4.5 GUI 全屏画布（文档示例）</div>
+  <div class="s">4.6 HIVE 并发窗口（文档示例）</div>
+  <div class="s">4.7 HIVE 1.2 控件（文档示例）</div>
   <div class="c">附录 A — 底层 POSIX 系统调用速查</div>
   <div class="c">附录 B — hax_meta_t 二进制布局</div>
   <div class="c">附录 C — 常见构建错误排查</div>
@@ -406,9 +406,14 @@ while (hax_win_active(&amp;w, &amp;h)) {        /* 窗口被关闭时返回 0 */
 hax_win_close();</pre>
 <div class="note">
 <b>实现：</b>HIVE 合成器在桌面合成阶段把每个窗口表面贴到屏幕并加标题栏/边框；输入由桌面路由到聚焦
-窗口的事件队列。应用退出后窗口自动回收。最多 4 个并发窗口，单窗口最大 900×640。窗口应用应从
+窗口的事件队列。应用退出后窗口自动回收。最多 8 个并发窗口，单窗口最大 900×640。窗口应用应从
 <b>开始菜单</b>或在 GUI 终端用 <code>run</code> 启动（均为非阻塞）。鼠标按下后由内容窗口捕获，
 移动和松开事件会继续投递；连续移动事件自动合并，防止事件队列被填满。</div>
+<p><b>HIVE 1.2 / 窗口 ABI v2：</b>应用可用 <code>hive_window_query</code> 查询能力，
+通过 <code>hive_window_create</code> 创建多个带显式代数句柄的窗口，并独立设置标题、几何和
+普通/最小化/最大化状态。<code>hive_window_draw</code> 支持批量 Clear、Fill、Text 与 ARGB
+位图上传，<code>hive_window_present_rect</code> 支持脏矩形提交；事件扩展为 Move、Resize、
+Focus 与 State。旧 <code>hive_window_open</code> 单窗口接口保持兼容。</p>
 
 <h2>2.9 HIVE 标准窗口控件 API</h2>
 <p><b>HIVE</b>（HBOS Interface &amp; Visual Environment）是 HBOS 的桌面环境和 GUI
@@ -424,8 +429,12 @@ hax_win_close();</pre>
 <tr><td>列表</td><td><code>hive_ui_add_list</code></td><td>点击、上下键、PageUp/PageDown → SELECT</td></tr>
 <tr><td>进度条</td><td><code>hive_ui_add_progress</code></td><td><code>hive_ui_set_value</code> 更新</td></tr>
 <tr><td>滑杆</td><td><code>hive_ui_add_slider</code></td><td>拖动、方向键、Home/End → CHANGE</td></tr>
+<tr><td>滚动条</td><td><code>hive_ui_add_scrollbar</code></td><td>横向/纵向拖动、方向键、PageUp/PageDown</td></tr>
+<tr><td>菜单</td><td><code>hive_ui_add_menu</code></td><td>鼠标或键盘选择 → SELECT</td></tr>
+<tr><td>图片</td><td><code>hive_ui_add_image</code></td><td>上传 0xAARRGGBB 位图</td></tr>
+<tr><td>画布</td><td><code>hive_ui_add_canvas</code></td><td>应用回调自定义绘制</td></tr>
 </table>
-<p>当前 <code>HIVE_API_MAJOR=1</code>、<code>HIVE_API_MINOR=1</code>。单个 UI 最多
+<p>当前 <code>HIVE_API_MAJOR=1</code>、<code>HIVE_API_MINOR=2</code>。单个 UI 最多
 48 个控件，不使用动态内存；状态完全属于应用自己的 <code>hive_ui_t</code>。
 主题统一提供普通、悬停、按下、禁用、选择和焦点环颜色。</p>
 <table>
@@ -459,7 +468,7 @@ while (hive_window_active(&amp;w, &amp;h)) {
     hive_yield();
 }
 done: hive_window_close();</pre>
-<div class="warn">HIVE 1.1 能按 UTF-8 码点移动和删除已有文本，但窗口键盘事件目前仍只
+<div class="warn">HIVE 1.2 能按 UTF-8 码点移动和删除已有文本，但窗口键盘事件目前仍只
 直接产生可打印 ASCII；完整中文输入法、剪贴板、文本选择和无障碍语义将在后续版本追加。</div>
 </div>
 
@@ -482,21 +491,10 @@ done: hive_window_close();</pre>
 
 <h2>3.2 apps / run 命令</h2>
 <pre>HBOS&gt; apps
-hello     - 最小 HAX 示例：问候并回显参数   [TUI .hax]
-guess     - 猜数字小游戏（1-100）            [GUI .hax]
 catf      - 读取并显示文件内容               [TUI .hax]
-ls        - 列出目录下的文件与子目录         [TUI .hax]
-paint     - GUI 画布示例：鼠标涂鸦           [GUI .hax]
-wdemo     - HIVE 并发窗口计数器              [GUI .hax]
-widgets   - HIVE 控件与布局示例               [GUI .hax]
+leapyear  - 闰年判定                         [TUI GUI .hax]
 
-HBOS&gt; run hello
-你好，HBOS！这是一个 .hax 应用。
-我的 PID 是 7
-
-HBOS&gt; run hello 一 二 三
-你好，HBOS！
-收到参数: 一 二 三</pre>
+HBOS&gt; run leapyear</pre>
 <table>
 <tr><th>命令</th><th>作用</th></tr>
 <tr><td><code>apps</code></td><td>列出所有已注册应用（内建命令 + .hax 应用），显示名称、描述、类型标签</td></tr>
@@ -506,7 +504,7 @@ HBOS&gt; run hello 一 二 三
 <h2>3.3 在图形桌面运行</h2>
 <p>在 HIVE 桌面中，打开“终端”窗口后即可像命令行一样输入 <code>apps</code> 与 <code>run</code> 命令。
 此外，<code>HAX_KIND_GUI</code>（或 <code>BOTH</code>）类型的应用会<b>自动追加到开始菜单</b>（已固定应用网格的内置项之后），
-点击图标即可启动，等价于 <code>run &lt;名&gt;</code>——这正是 GUI 画布应用（如 paint）的推荐启动方式。</p>
+点击图标即可启动，等价于 <code>run &lt;名&gt;</code>。</p>
 
 <h2>3.4 参数传递</h2>
 <p><code>run myapp a b c</code> 等价于 C 程序的 <code>main(4, {"myapp","a","b","c",NULL})</code>：</p>
@@ -532,13 +530,15 @@ HBOS&gt; run hello 一 二 三
 <!-- ── 第 4 章 ── -->
 <div class="chapter">
 <h1 style="page-break-before:always;">第 4 章<span class="en">COMPLETE EXAMPLES</span></h1>
+<div class="note">本章代码用于讲解 SDK，不作为预装应用打包。当前随系统保留的
+HAX 应用只有 <code>catf</code> 与 <code>leapyear</code>。</div>
 
-<h2>4.1 hello —— 最小应用（TUI）</h2>
+<h2>4.1 最小应用（TUI，文档示例）</h2>
 <p>演示：<code>HAX_APP()</code>、文本输出、参数处理、<code>hax_pid()</code>。</p>
-<pre>/* app/hello.c */
+<pre>/* myapp.c */
 #include &lt;hax.h&gt;
 
-HAX_APP("hello", "最小 HAX 示例：问候并回显参数", HAX_KIND_TUI);
+HAX_APP("myapp", "最小 HAX 应用", HAX_KIND_TUI);
 
 int main(int argc, char **argv) {
     hax_println("你好，HBOS！这是一个 .hax 应用。");
@@ -552,19 +552,19 @@ int main(int argc, char **argv) {
     }
     return 0;
 }</pre>
-<p>把文件放入 <code>./app/hello.c</code>，执行 <code>make</code>，重启后：</p>
-<pre>HBOS&gt; run hello 世界
+<p>把文件放入外部应用目录并构建后，可这样运行：</p>
+<pre>HBOS&gt; run myapp 世界
 你好，HBOS！这是一个 .hax 应用。
 我的 PID 是 5
 收到参数: 世界</pre>
 
-<h2>4.2 guess —— 猜数字游戏（GUI）</h2>
+<h2>4.2 输入循环（GUI，文档示例）</h2>
 <p>演示：<code>HAX_KIND_GUI</code>、循环输入、<code>atoi</code>、<code>hax_exit</code>。</p>
-<pre>/* app/guess.c */
+<pre>/* input-loop.c */
 #include &lt;hax.h&gt;
 #include &lt;libc/stdlib.h&gt;    /* atoi */
 
-HAX_APP("guess", "猜数字小游戏（1-100）", HAX_KIND_GUI);
+HAX_APP("input-loop", "输入循环示例", HAX_KIND_GUI);
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -661,19 +661,19 @@ int main(int argc, char **argv) {
     return 0;
 }</pre>
 
-<h2>4.5 paint —— GUI 画布涂鸦（GUI）</h2>
+<h2>4.5 GUI 全屏画布（文档示例）</h2>
 <p>演示：<code>hax_gui_begin</code> 探测、鼠标轮询绘制、按键退出、无 GUI 时回退。
 从图形桌面启动；按住左键涂鸦，<span class="kbd">c</span> 清屏，<span class="kbd">q</span> / <span class="kbd">ESC</span> 退出。</p>
-<pre>/* app/paint.c */
+<pre>/* canvas-example.c */
 #include &lt;hax.h&gt;
 
-HAX_APP("paint", "GUI 画布示例：鼠标涂鸦", HAX_KIND_GUI);
+HAX_APP("canvas-example", "GUI 全屏画布示例", HAX_KIND_GUI);
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     int w, h;
     if (!hax_gui_begin(&amp;w, &amp;h)) {
-        hax_println("paint 需要从图形桌面启动。");
+        hax_println("此示例需要从图形桌面启动。");
         return 1;
     }
     hax_gui_clear(0x10141A);
@@ -694,12 +694,12 @@ int main(int argc, char **argv) {
     }
     return 0;
 }</pre>
-<h2>4.6 wdemo —— 并发窗口计数器（GUI 窗口）</h2>
-<p><code>wdemo</code> 已从手写绘图和命中检测迁移到 HIVE 1.1，演示按钮、复选框、
+<h2>4.6 HIVE 并发窗口（文档示例）</h2>
+<p>以下片段演示按钮、复选框、
 滑杆、进度条、响应式布局及完整键盘操作。</p>
-<pre>/* app/wdemo.c（节选） */
+<pre>/* window-example.c（节选） */
 #include &lt;hive.h&gt;
-HIVE_APP("wdemo", "HIVE 并发窗口计数器");
+HIVE_APP("window-example", "HIVE 并发窗口示例");
 
 int main(int argc, char **argv) {
     hive_ui_t ui;
@@ -727,8 +727,8 @@ done:
     return 0;
 }</pre>
 
-<h2>4.7 widgets —— HIVE 1.1 控件示例（GUI 窗口）</h2>
-<p>完整源码位于 <code>app/widgets.c</code>，覆盖所有首批控件、悬停/按下反馈、
+<h2>4.7 HIVE 1.2 控件（文档示例）</h2>
+<p>以下片段覆盖首批控件、悬停/按下反馈、
 滑杆拖动、控件联动、动态文本和响应式网格。布局代码不硬编码每个控件的绝对宽度：</p>
 <pre>hive_layout_t layout;
 hive_layout_begin(&amp;layout, hive_rect(0,0,width,height), 20, 10);
@@ -754,7 +754,7 @@ while (hive_window_active(&amp;width, &amp;height)) {
     hive_window_present();
     hive_yield();
 }</pre>
-<p class="small">提示：把这些示例放进 <code>./app</code>，执行 <code>make</code>，无需修改任何其他文件即可看到它们出现在 <code>apps</code> 列表（GUI 类还会出现在桌面启动器）中。</p>
+<p class="small">提示：这些片段只用于 API 讲解；如需试验，请放入外部应用目录构建。</p>
 </div>
 
 <!-- ── 附录 A ── -->
@@ -786,12 +786,12 @@ while (hive_window_active(&amp;width, &amp;height)) {
 </table>
 <p>总大小：<b>104 字节</b>，结构体无填充（<code>__attribute__((packed))</code> 默认无需指定，字段已自然对齐）。</p>
 <p>验证命令（宿主 Linux）：</p>
-<pre>readelf -S build/app/hello.hax | grep haxmeta
+<pre>readelf -S build/app/leapyear.hax | grep haxmeta
 # 应看到 .haxmeta  PROGBITS  ... 104 字节
 
 python3 - &lt;&lt;'EOF'
 import struct, sys
-data = open("build/app/hello.hax","rb").read()
+data = open("build/app/leapyear.hax","rb").read()
 # 搜索 magic
 idx = data.find(b'HAXM')
 if idx &lt; 0: print("无 .haxmeta"); sys.exit(1)

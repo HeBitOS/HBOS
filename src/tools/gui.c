@@ -38,7 +38,6 @@ void app_hexview_set_path(gui_state_t *st, const char *path);
 #include "../shell/shell.h"
 #include "tool.h"
 #include "cc.h"
-#include "python.h"
 
 extern void task_yield(void);
 extern uint64_t pit_get_ticks(void);
@@ -1584,7 +1583,7 @@ void gui_app_text(int x, int y, const char *s, uint32_t color, int scale) {
 
 // 全屏画布应用独占 g_gui_surface 并自行 present（见上方注释），合成器的正常
 // 光标叠加不会运行；若直接把光标画进 g_gui_surface，会被应用当成画布内容
-// 永久保留（如 paint 会留下箭头形状的笔迹）。因此改为在 blit 到真实
+// 永久保留并形成光标笔迹。因此改为在 blit 到真实
 // framebuffer 之后，直接在硬件帧缓冲上叠一份光标像素——不进入应用的画布。
 static void present_screen_owner_cursor(const fb_info_t *fb, int x, int y) {
     uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
@@ -2890,12 +2889,6 @@ static void code_make_layout(int tx, int ty, int win_w, int win_h, code_layout_t
     if (l->file_rows < 3) l->file_rows = 3;
 }
 
-static int code_path_is_py(gui_state_t *st) {
-    const char *p = code_path(st);
-    int n = (int)strlen(p);
-    return n >= 3 && p[n-3]=='.' && p[n-2]=='p' && p[n-1]=='y';
-}
-
 static void code_gui_run(gui_state_t *st, const fb_info_t *fb) {
     code_load(st);
     if (code_save(st) < 0) return;
@@ -2903,40 +2896,21 @@ static void code_gui_run(gui_state_t *st, const fb_info_t *fb) {
     /* clear screen */
     rect(0, 0, g_gui_surface_w, g_gui_surface_h, rgb(10, 13, 18));
     gui_present_surface(fb);
-    if (code_path_is_py(st)) {
-        py_set_gfx(&g_sgfx);
-        int rc = py_run_file(code_path(st));
-        py_set_gfx(0);
-        if (rc != 0) {
-            char line[128]; uint32_t pos = 0; line[0] = 0;
-            int el = py_last_error_line();
-            if (el > 0) { append_str(line,sizeof(line),&pos,"Line "); append_uint(line,sizeof(line),&pos,(uint32_t)el); append_str(line,sizeof(line),&pos,": "); }
-            else append_str(line,sizeof(line),&pos,"Python error: ");
-            const char *em = py_last_error();
-            append_str(line,sizeof(line),&pos,em&&em[0]?em:"error");
-            code_set_output(line);
-            st->status = "Python 脚本错误";
-        } else {
-            code_set_output("Python GUI OK");
-            st->status = "Python 脚本运行完成";
-        }
+    cc_set_gfx(&g_sgfx);
+    int rc = hbos_gcc_run_file(code_path(st), 0);
+    cc_set_gfx(0);
+    if (rc != 0) {
+        char line[128]; uint32_t pos = 0; line[0] = 0;
+        int el = hbos_gcc_last_error_line();
+        if (el > 0) { append_str(line,sizeof(line),&pos,"Line "); append_uint(line,sizeof(line),&pos,(uint32_t)el); append_str(line,sizeof(line),&pos,": "); }
+        const char *em = hbos_gcc_last_error();
+        append_str(line,sizeof(line),&pos,em&&em[0]?em:"error");
+        code_set_output(line);
+        st->code_error_line = el;
+        st->status = "GUI 脚本错误";
     } else {
-        cc_set_gfx(&g_sgfx);
-        int rc = hbos_gcc_run_file(code_path(st), 0);
-        cc_set_gfx(0);
-        if (rc != 0) {
-            char line[128]; uint32_t pos = 0; line[0] = 0;
-            int el = hbos_gcc_last_error_line();
-            if (el > 0) { append_str(line,sizeof(line),&pos,"Line "); append_uint(line,sizeof(line),&pos,(uint32_t)el); append_str(line,sizeof(line),&pos,": "); }
-            const char *em = hbos_gcc_last_error();
-            append_str(line,sizeof(line),&pos,em&&em[0]?em:"error");
-            code_set_output(line);
-            st->code_error_line = el;
-            st->status = "GUI 脚本错误";
-        } else {
-            code_set_output("GUI OK");
-            st->status = "GUI 脚本运行完成";
-        }
+        code_set_output("GUI OK");
+        st->status = "GUI 脚本运行完成";
     }
     g_script_fb = 0;
 }
@@ -6325,6 +6299,11 @@ static void blit_app_surface(int dx, int dy, const uint32_t *src, int sw, int sh
 
 /* 画一个应用窗口：标题栏（标题 + 关闭按钮）+ 内容表面 + 边框 */
 static void draw_one_app_window(winsrv_window_t *win) {
+    if (!win) return;
+    if (win->state == WINSRV_STATE_MINIMIZED) {
+        win->dirty = 0;
+        return;
+    }
     int wx = win->x, wy = win->y, ww = win->w, wh = win->h;
     int th = APPWIN_TITLE_H;
     soft_shadow(wx - 2, wy - th - 2, ww + 4, wh + th + 6);
@@ -6337,6 +6316,7 @@ static void draw_one_app_window(winsrv_window_t *win) {
     /* 内容 */
     blit_app_surface(wx, wy, win->surface, ww, wh);
     border(wx, wy, ww, wh, rgb(52, 62, 74));
+    win->dirty = 0;
 }
 
 static void draw_app_windows(void) {
@@ -7751,14 +7731,14 @@ static void sm_launch(gui_state_t *st, const sm_entry_t *e) {
         if (he) {
             char *av[1]; av[0] = (char *)he->name;
             if (he->kind & HAX_KIND_GUI_WIN) {
-                /* 并发窗口应用（hax_win_open，如 wdemo）：必须非阻塞启动。
+                /* 并发窗口应用（hax_win_open）：必须非阻塞启动。
                  * 它靠合成器主循环持续跑帧才能把窗口内容合成到屏幕上，同步
                  * 等待会卡住本函数所在的合成器任务，窗口画面永远显示不出来。 */
                 hax_app_spawn(he->name, 1, av);
                 gui_toast(st, "已启动 ", he->name);
             } else {
-                /* 其余应用（纯控制台或独占画布风格，即使声明了 HAX_KIND_GUI，
-                 * 如 guess/paint）：同步等待退出，而非 fire-and-forget 的
+                /* 其余应用（纯控制台或独占画布风格，即使声明了 HAX_KIND_GUI）：
+                 * 同步等待退出，而非 fire-and-forget 的
                  * hax_app_spawn。纯控制台风格的 .hax 应用用 read(stdin) 直接
                  * 轮询键盘，若与合成器自身的按键轮询并发运行，两者会争抢同一份
                  * 全局键盘状态机（kb_poll_key 里的 shift/ctrl/ext_scancode
@@ -8259,6 +8239,7 @@ static void cmd_gui(int argc, char **argv) {
     int appwin_drag_dx = 0, appwin_drag_dy = 0;
     int appwin_mouse_capture = -1; /* 内容区按下后持续接收移动与松开 */
     int appwin_mouse_hover = -1;   /* 上次收到悬停事件的应用窗口 */
+    int appwin_focus = -1;         /* 键盘焦点窗口；不再假定最高槽位 */
     int resizing_window = -1;
     int resize_edge = WM_EDGE_NONE;
     int resize_orig_x = 0, resize_orig_y = 0, resize_orig_w = 0, resize_orig_h = 0;
@@ -8440,8 +8421,13 @@ static void cmd_gui(int argc, char **argv) {
         /* 键盘路由：存在应用窗口时，普通按键送给最顶层应用窗口（其拥有焦点）。
          * F2/F3/F4 已在上面处理，不受影响。 */
         if (key && winsrv_count() > 0 && !st.wm.start_menu_open) {
-            winsrv_window_t *fw = 0;
-            for (int i = WINSRV_MAX - 1; i >= 0; i--) { fw = winsrv_get(i); if (fw) break; }
+            winsrv_window_t *fw = winsrv_get(appwin_focus);
+            if (fw && fw->state == WINSRV_STATE_MINIMIZED) fw = 0;
+            for (int i = WINSRV_MAX - 1; !fw && i >= 0; i--) {
+                fw = winsrv_get(i);
+                if (fw && fw->state == WINSRV_STATE_MINIMIZED) fw = 0;
+                else if (fw) appwin_focus = i;
+            }
             if (fw) {
                 winsrv_push_event(fw, WINEV_KEY, key, 0, 0);
                 gui_dirty_mark_full();
@@ -8552,7 +8538,8 @@ static void cmd_gui(int argc, char **argv) {
                 if (target < 0) {
                     for (int i = WINSRV_MAX - 1; i >= 0; i--) {
                         winsrv_window_t *candidate = winsrv_get(i);
-                        if (!candidate) continue;
+                        if (!candidate ||
+                            candidate->state == WINSRV_STATE_MINIMIZED) continue;
                         if (mx >= candidate->x && mx < candidate->x + candidate->w &&
                             my >= candidate->y && my < candidate->y + candidate->h) {
                             target = i;
@@ -8632,6 +8619,10 @@ static void cmd_gui(int argc, char **argv) {
                     if (win->x > w - 40) win->x = w - 40;
                     redraw = 1;
                 } else {
+                    winsrv_window_t *ended = winsrv_get(appwin_drag);
+                    if (ended)
+                        winsrv_push_event(ended, WINEV_MOVE,
+                                          ended->x, ended->y, 0);
                     appwin_drag = -1;
                 }
             }
@@ -8794,7 +8785,7 @@ static void cmd_gui(int argc, char **argv) {
                 int appwin_hit = 0;
                 for (int i = WINSRV_MAX - 1; i >= 0 && !appwin_hit; i--) {
                     winsrv_window_t *win = winsrv_get(i);
-                    if (!win) continue;
+                    if (!win || win->state == WINSRV_STATE_MINIMIZED) continue;
                     int th = APPWIN_TITLE_H;
                     int cbx = win->x + win->w - 22;
                     if (mx >= cbx && mx < win->x + win->w &&
@@ -8815,6 +8806,16 @@ static void cmd_gui(int argc, char **argv) {
                         winsrv_push_event(win, WINEV_MOUSE,
                                           mx - win->x, my - win->y, st.buttons);
                         appwin_hit = 1;
+                    }
+                    if (appwin_hit && appwin_focus != i) {
+                        winsrv_window_t *old_focus = winsrv_get(appwin_focus);
+                        if (old_focus) {
+                            old_focus->focused = 0;
+                            winsrv_push_event(old_focus, WINEV_FOCUS, 0, 0, 0);
+                        }
+                        appwin_focus = i;
+                        win->focused = 1;
+                        winsrv_push_event(win, WINEV_FOCUS, 1, 0, 0);
                     }
                 }
                 if (appwin_hit) {
@@ -9191,7 +9192,7 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         /* 有并发应用窗口时，每帧重绘以反映它们的实时刷新 */
-        if (winsrv_count() > 0) {
+        if (winsrv_has_dirty()) {
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }

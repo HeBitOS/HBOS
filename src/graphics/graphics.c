@@ -46,6 +46,28 @@ static uint32_t *g_real_fb = NULL;
 static uint64_t g_real_fb_pitch = 0;
 static uint64_t g_real_fb_width = 0, g_real_fb_height = 0;
 
+/* 64 位成对复制 framebuffer 像素。源/目标同为 8 字节对齐关系时使用
+ * movq；否则安全回退到 32 位。真实 framebuffer 写入保持 volatile。 */
+static inline void console_blit_pixels(const volatile uint32_t *src,
+                                       volatile uint32_t *dst,
+                                       uint64_t pixels) {
+    if ((((uintptr_t)src ^ (uintptr_t)dst) & 7u) == 0) {
+        if (((uintptr_t)dst & 7u) && pixels) {
+            *dst++ = *src++;
+            pixels--;
+        }
+        const volatile uint64_t *src64 = (const volatile uint64_t *)src;
+        volatile uint64_t *dst64 = (volatile uint64_t *)dst;
+        while (pixels >= 2) {
+            *dst64++ = *src64++;
+            pixels -= 2;
+        }
+        src = (const volatile uint32_t *)src64;
+        dst = (volatile uint32_t *)dst64;
+    }
+    while (pixels--) *dst++ = *src++;
+}
+
 // Blit the back-buffer to the real hardware framebuffer in one pass.
 // Cheap no-op when the back-buffer isn't in use (VGA fallback, or a
 // resolution too large for the static buffer). Exposed (not static) so
@@ -60,8 +82,8 @@ void console_present(void) {
     uint64_t dst_pitch_px = g_real_fb_pitch / 4;
     for (uint64_t y = 0; y < h; y++) {
         const volatile uint32_t *src = fc->framebuffer + y * src_pitch_px;
-        uint32_t *dst = g_real_fb + y * dst_pitch_px;
-        for (uint64_t x = 0; x < w; x++) dst[x] = src[x];
+        volatile uint32_t *dst = g_real_fb + y * dst_pitch_px;
+        console_blit_pixels(src, dst, w);
     }
 }
 
@@ -87,20 +109,61 @@ static void console_present_rows(uint64_t row0, uint64_t row_count) {
     uint64_t dst_pitch_px = g_real_fb_pitch / 4;
     for (uint64_t y = y0; y < y1; y++) {
         const volatile uint32_t *src = fc->framebuffer + y * src_pitch_px;
-        uint32_t *dst = g_real_fb + y * dst_pitch_px;
-        for (uint64_t x = 0; x < w; x++) dst[x] = src[x];
+        volatile uint32_t *dst = g_real_fb + y * dst_pitch_px;
+        console_blit_pixels(src, dst, w);
     }
 }
 
-// Present after a single-character write: cheap per-row blit unless a
-// scroll happened between old_scroll_gen and now, in which case every row
-// may have moved and we fall back to the full-screen console_present().
-static void console_present_after_char(uint64_t old_cy, uint64_t new_cy, uint64_t old_scroll_gen) {
+/* 只提交一行中的字符单元范围。交互输入时通常仅覆盖“旧光标、字符、新光标”
+ * 2~3 个单元，比复制整条像素扫描行更便宜。 */
+static void console_present_cells(uint64_t row, uint64_t cell0, uint64_t cell1) {
+    if (!g_backbuf_active || !g_term || row >= g_term->rows) return;
+    struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
+    if (cell0 > cell1) {
+        uint64_t tmp = cell0; cell0 = cell1; cell1 = tmp;
+    }
+    if (cell0 >= g_term->cols) cell0 = g_term->cols - 1;
+    if (cell1 >= g_term->cols) cell1 = g_term->cols - 1;
+
+    uint64_t x0 = fc->offset_x + cell0 * fc->glyph_width;
+    uint64_t x1 = fc->offset_x + (cell1 + 1) * fc->glyph_width;
+    uint64_t y0 = fc->offset_y + row * fc->glyph_height;
+    uint64_t y1 = y0 + fc->glyph_height;
+    if (x0 >= fc->width || y0 >= fc->height) return;
+    if (x1 > fc->width) x1 = fc->width;
+    if (y1 > fc->height) y1 = fc->height;
+
+    uint64_t src_pitch_px = fc->pitch / 4;
+    uint64_t dst_pitch_px = g_real_fb_pitch / 4;
+    for (uint64_t y = y0; y < y1; y++) {
+        const volatile uint32_t *src =
+            fc->framebuffer + y * src_pitch_px + x0;
+        volatile uint32_t *dst = g_real_fb + y * dst_pitch_px + x0;
+        console_blit_pixels(src, dst, x1 - x0);
+    }
+}
+
+// Present after a single-character write: copy only the cursor path unless a
+// scroll happened, in which case every row may have moved.
+static void console_present_after_char(uint64_t old_cx, uint64_t old_cy,
+                                       uint64_t new_cx, uint64_t new_cy,
+                                       uint64_t old_scroll_gen) {
     if (!g_backbuf_active || !g_term) return;
     if (g_flanterm_scroll_gen != old_scroll_gen) { console_present(); return; }
-    uint64_t row0 = old_cy < new_cy ? old_cy : new_cy;
-    uint64_t rows = (old_cy < new_cy ? new_cy - old_cy : old_cy - new_cy) + 1;
-    console_present_rows(row0, rows);
+    if (old_cy == new_cy) {
+        console_present_cells(old_cy, old_cx, new_cx);
+        return;
+    }
+    if (new_cy > old_cy) {
+        console_present_cells(old_cy, old_cx, g_term->cols - 1);
+        if (new_cy > old_cy + 1)
+            console_present_rows(old_cy + 1, new_cy - old_cy - 1);
+        console_present_cells(new_cy, 0, new_cx);
+        return;
+    }
+    /* ANSI cursor-up/reposition: the operation may have touched any row
+     * between the two cursor locations, so copy that compact row range. */
+    console_present_rows(new_cy, old_cy - new_cy + 1);
 }
 
 // When set, console output is captured here instead of going to the terminal.
@@ -114,6 +177,7 @@ bool console_has_sink(void) { return g_console_sink != NULL; }
 static int vga_cursor = 0;
 static uint8_t vga_color = 0x0F;
 static bool use_vga_fallback = false;
+static bool vga_defer_cursor = false;
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -182,6 +246,11 @@ static void vga_scroll(void) {
     vga_cursor -= VGA_WIDTH;
 }
 
+static void vga_update_cursor(void) {
+    outb(0x3D4, 14); outb(0x3D5, (uint8_t)(vga_cursor >> 8));
+    outb(0x3D4, 15); outb(0x3D5, (uint8_t)(vga_cursor & 0xFF));
+}
+
 /* ANSI escape state: 0=idle, 1=ESC, 2=ESC[ */
 static int st = 0;
 
@@ -216,17 +285,21 @@ static void vga_putc_fallback(char c) {
     else if (c == '\b') { if (vga_cursor>0) { vga_cursor--; VGA_MEM[vga_cursor]=(vga_color<<8)|' '; } }
     else { VGA_MEM[vga_cursor] = (vga_color<<8)|(uint8_t)c; vga_cursor++; }
     if (vga_cursor >= VGA_WIDTH*VGA_HEIGHT) vga_scroll();
-    outb(0x3D4, 14); outb(0x3D5, vga_cursor >> 8);
-    outb(0x3D4, 15); outb(0x3D5, vga_cursor & 0xFF);
+    if (!vga_defer_cursor) vga_update_cursor();
 }
 
 static void vga_write_fallback(const char *str, uint64_t len) {
+    bool was_deferred = vga_defer_cursor;
+    vga_defer_cursor = true;
     for (uint64_t i = 0; i < len; i++) vga_putc_fallback(str[i]);
+    vga_defer_cursor = was_deferred;
+    if (!vga_defer_cursor) vga_update_cursor();
 }
 
 static void vga_clear_fallback(void) {
     for (int i = 0; i < VGA_WIDTH*VGA_HEIGHT; i++) VGA_MEM[i] = (vga_color<<8)|' ';
     vga_cursor = 0;
+    vga_update_cursor();
 }
 
 // ============================================================
@@ -372,6 +445,7 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
 
 #define SCROLLBACK_LINES 512
 #define MAX_LINE_LEN     256
+#define SCROLLBACK_GRID_CELLS 32768
 
 static char  scrollback[SCROLLBACK_LINES][MAX_LINE_LEN];
 static int   sb_head   = 0;    // next write position (circular)
@@ -383,10 +457,25 @@ static int   sb_no_capture = 0; // disable capture during scrollback redraw
 // Line accumulator for console_putchar capture
 static char  sb_line_buf[MAX_LINE_LEN];
 static int   sb_line_pos = 0;
+static int   sb_escape_state = 0; /* 0=文本，1=ESC，2=CSI */
+static struct flanterm_fb_char sb_grid_snapshot[SCROLLBACK_GRID_CELLS];
 
 // Call this from console_putchar to capture output
 static void sb_capture_char(char c) {
     if (sb_no_capture) return;
+    if (sb_escape_state == 1) {
+        sb_escape_state = (c == '[') ? 2 : 0;
+        return;
+    }
+    if (sb_escape_state == 2) {
+        if ((uint8_t)c >= 0x40 && (uint8_t)c <= 0x7e)
+            sb_escape_state = 0;
+        return;
+    }
+    if (c == '\x1b') {
+        sb_escape_state = 1;
+        return;
+    }
     if (c == '\n' || c == '\r') {
         sb_line_buf[sb_line_pos] = '\0';
         if (sb_line_pos > 0) {
@@ -401,43 +490,68 @@ static void sb_capture_char(char c) {
         sb_line_pos = 0;
     } else if (c == '\b') {
         if (sb_line_pos > 0) sb_line_pos--;
-    } else if (c >= 0x20 && c < 0x7f && sb_line_pos < MAX_LINE_LEN - 1) {
+    } else if ((uint8_t)c >= 0x20 && c != 0x7f &&
+               sb_line_pos < MAX_LINE_LEN - 1) {
         sb_line_buf[sb_line_pos++] = c;
     }
 }
 
 // Redraw screen from scrollback using flanterm's own rendering
 static void sb_redraw(void) {
-    if (!g_term) return;
+    if (!g_term || !g_backbuf_active || !g_real_fb) return;
+    struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     uint64_t rows = g_term->rows;
+    uint64_t cells = g_term->rows * g_term->cols;
+    if (cells > SCROLLBACK_GRID_CELLS) return;
 
-    sb_no_capture = 1; // prevent capturing our own output
+    /*
+     * 滚屏预览只画到真实 framebuffer。离屏 framebuffer 与 grid 在预览
+     * 结束前保持实时画面，PgDn/任意编辑键恢复时只需一次 present，不会像
+     * 旧实现那样先 CSI clear 掉 grid，再“刷新”出一张空屏。
+     */
+    memcpy(sb_grid_snapshot, fc->grid,
+           (size_t)cells * sizeof(sb_grid_snapshot[0]));
+    struct flanterm_context saved_term = *g_term;
+    volatile uint32_t *saved_fb = fc->framebuffer;
+    uint64_t saved_pitch = fc->pitch;
+    uint32_t saved_fg = fc->text_fg, saved_bg = fc->text_bg;
+    bool saved_backbuf = g_backbuf_active;
 
-    // Clear screen and move cursor to top
+    sb_no_capture = 1;
+    g_backbuf_active = false;
+    fc->framebuffer = g_real_fb;
+    fc->pitch = g_real_fb_pitch;
     flanterm_write(g_term, "\033[2J\033[H", 8);
     flanterm_flush(g_term);
-    console_present();
 
-    // Print scrollback lines from top to bottom of screen
     for (uint64_t r = 0; r < rows; r++) {
         int line_idx = sb_count - sb_offset - (int)(rows - 1 - r);
         if (line_idx < 0 || line_idx >= sb_count) {
-            // Empty line
             console_putchar('\n');
         } else {
             int idx = (sb_head - sb_count + line_idx + SCROLLBACK_LINES) % SCROLLBACK_LINES;
-            console_puts(scrollback[idx]);
+            for (int i = 0; scrollback[idx][i]; i++)
+                console_putchar(scrollback[idx][i]);
             console_putchar('\n');
         }
     }
 
     flanterm_flush(g_term);
-    console_present();
+    memcpy(fc->grid, sb_grid_snapshot,
+           (size_t)cells * sizeof(sb_grid_snapshot[0]));
+    if (fc->map) memset(fc->map, 0, fc->map_size);
+    fc->queue_i = 0;
+    fc->framebuffer = saved_fb;
+    fc->pitch = saved_pitch;
+    fc->text_fg = saved_fg;
+    fc->text_bg = saved_bg;
+    *g_term = saved_term;
+    g_backbuf_active = saved_backbuf;
     sb_no_capture = 0;
 }
 
 void console_scroll_up(int lines) {
-    if (!g_term || sb_count == 0) return;
+    if (!g_term || !g_backbuf_active || sb_count == 0 || lines <= 0) return;
     sb_active = true;
     sb_offset += lines;
     if (sb_offset > sb_count) sb_offset = sb_count;
@@ -450,13 +564,8 @@ void console_scroll_down(int lines) {
     if (sb_offset <= 0) {
         sb_offset = 0;
         sb_active = false;
-        // Restore live view — full_refresh redraws from flanterm's grid
-        sb_no_capture = 1;
-        console_clear();
-        if (g_term->full_refresh) g_term->full_refresh(g_term);
-        flanterm_flush(g_term);
+        /* 离屏实时画面从未被预览改写。 */
         console_present();
-        sb_no_capture = 0;
         return;
     }
     sb_redraw();
@@ -468,12 +577,7 @@ void console_scroll_reset(void) {
     if (!g_term || !sb_active) return;
     sb_offset = 0;
     sb_active = false;
-    sb_no_capture = 1;
-    console_clear();
-    if (g_term->full_refresh) g_term->full_refresh(g_term);
-    flanterm_flush(g_term);
     console_present();
-    sb_no_capture = 0;
 }
 
 // ============================================================
@@ -533,14 +637,28 @@ void console_write(const char *str, uint64_t len) {
     if (g_term) {
         // Fast path: pure ASCII
         int has_high = 0;
+        int has_escape = 0;
         for (uint64_t i = 0; i < len; i++) {
             if ((uint8_t)str[i] >= 0x80) { has_high = 1; break; }
+            if (str[i] == '\x1b') has_escape = 1;
         }
         if (!has_high) {
             for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
+            for (uint64_t i = 0; i < len; i++) sb_capture_char(str[i]);
+            struct flanterm_fb_context *fc =
+                (struct flanterm_fb_context *)g_term;
+            uint64_t old_cx = fc->cursor_x;
+            uint64_t old_cy = fc->cursor_y;
+            uint64_t old_scroll_gen = g_flanterm_scroll_gen;
             flanterm_write(g_term, str, len);
             flanterm_flush(g_term);
-            console_present();
+            if (has_escape) {
+                /* CSI can clear/repaint outside the cursor path. */
+                console_present();
+            } else {
+                console_present_after_char(old_cx, old_cy, fc->cursor_x,
+                                           fc->cursor_y, old_scroll_gen);
+            }
         } else {
             // Slow path: process byte-by-byte through UTF-8 decoder
             for (uint64_t i = 0; i < len; i++) {
@@ -563,7 +681,7 @@ void console_puts(const char *str) {
 void console_putchar(char c) {
     if (!g_initialized) return;
     if (g_console_sink) { g_console_sink(c); return; }
-    serial_mirror_char(c);
+    if (!sb_no_capture) serial_mirror_char(c);
 
     if (g_term) {
         // Framebuffer mode: UTF-8 decoding with CJK rendering
@@ -572,6 +690,7 @@ void console_putchar(char c) {
             g_u8_init = true;
         }
 
+        sb_capture_char(c);
         uint32_t codepoint;
         int result = utf8_feed(&g_u8st, (uint8_t)c, &codepoint);
 
@@ -581,11 +700,9 @@ void console_putchar(char c) {
             return;
         }
 
-        // Capture for scrollback (ASCII control/visible chars)
-        sb_capture_char(c);
-
         struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
-        uint64_t old_cy = fc->cursor_y, old_scroll_gen = g_flanterm_scroll_gen;
+        uint64_t old_cx = fc->cursor_x, old_cy = fc->cursor_y;
+        uint64_t old_scroll_gen = g_flanterm_scroll_gen;
 
         // Complete codepoint
         if (codepoint < 0x80) {
@@ -598,7 +715,8 @@ void console_putchar(char c) {
             // overpaints the glyph bitmap if available in the font table.
             cjk_render_at_cursor(codepoint);
         }
-        console_present_after_char(old_cy, fc->cursor_y, old_scroll_gen);
+        console_present_after_char(old_cx, old_cy, fc->cursor_x,
+                                   fc->cursor_y, old_scroll_gen);
     } else {
         // VGA text mode fallback
         vga_putc_fallback(c);
@@ -609,10 +727,12 @@ void console_putchar_raw(char c) {
     if (!g_initialized) return;
     if (g_term) {
         struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
-        uint64_t old_cy = fc->cursor_y, old_scroll_gen = g_flanterm_scroll_gen;
+        uint64_t old_cx = fc->cursor_x, old_cy = fc->cursor_y;
+        uint64_t old_scroll_gen = g_flanterm_scroll_gen;
         flanterm_putchar(g_term, (uint8_t)c);
         flanterm_flush(g_term);
-        console_present_after_char(old_cy, fc->cursor_y, old_scroll_gen);
+        console_present_after_char(old_cx, old_cy, fc->cursor_x,
+                                   fc->cursor_y, old_scroll_gen);
     } else {
         vga_putc_fallback(c);
     }

@@ -6,7 +6,6 @@
 /**
  * Graphics hook table for scripted GUI apps.
  * Set via cc_set_gfx() before running a script; clear with cc_set_gfx(NULL).
- * Python interpreter uses the same struct via py_set_gfx().
  */
 typedef struct {
     void (*rect)(int x, int y, int w, int h, uint32_t color);

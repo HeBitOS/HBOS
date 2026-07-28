@@ -7,7 +7,7 @@ int main(void) {
     hive_event_t event;
     hive_ui_init(&ui);
 
-    CHECK(HIVE_API_MAJOR == 1 && HIVE_API_MINOR >= 1);
+    CHECK(HIVE_API_MAJOR == 1 && HIVE_API_MINOR >= 2);
     CHECK(ui.focus_index == -1 && ui.hover_index == -1 &&
           ui.pressed_index == -1);
 
@@ -61,6 +61,35 @@ int main(void) {
     hive_rect_t cell = hive_grid_cell(row, 2, 10, 1);
     CHECK(row.x == 20 && row.w == 260 && row.y == 20);
     CHECK(cell.x == 155 && cell.w == 125);
+
+    CHECK(hive_ui_add_scrollbar(&ui, 4, hive_rect(150, 10, 18, 100),
+                                0, 200, 20, 40, 10, 1));
+    static const char *menu_items[] = {"Open", "Save", "Quit"};
+    CHECK(hive_ui_add_menu(&ui, 5, hive_rect(180, 10, 100, 68),
+                           menu_items, 3, 0));
+    static const HU32 image[4] = {
+        0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu
+    };
+    CHECK(hive_ui_add_image(&ui, 6, hive_rect(180, 90, 2, 2),
+                            image, 2, 2, 2));
+
+    mouse[0] = HAX_EV_MOUSE;
+    mouse[1] = 158; mouse[2] = 60; mouse[3] = 1;
+    CHECK(hive_ui_dispatch(&ui, mouse, &event));
+    CHECK(event.type == HIVE_EVENT_CHANGE && event.widget_id == 4);
+    CHECK(event.value == 100);
+    mouse[3] = 0;
+    hive_ui_dispatch(&ui, mouse, &event);
+
+    mouse[1] = 190; mouse[2] = 55; mouse[3] = 1;
+    hive_ui_dispatch(&ui, mouse, &event);
+    mouse[3] = 0;
+    CHECK(hive_ui_dispatch(&ui, mouse, &event));
+    CHECK(event.type == HIVE_EVENT_SELECT && event.widget_id == 5 &&
+          event.value == 2);
+
+    hive_window_caps_t caps;
+    CHECK(sizeof(caps) >= 32);
 
     return 0;
 }

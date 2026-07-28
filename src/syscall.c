@@ -1089,6 +1089,20 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return hax_app_find(name) ? 1 : 0;
         }
 
+        case HBOS_SYS_WIN2: {
+            uint32_t tid = task_current() ? task_current()->id : 0;
+            return (uint64_t)(long)gui_service_window_v2(
+                tid, (uint32_t)f->a0, (int)f->a1, (void *)f->a2);
+        }
+
+        case HBOS_SYS_WIN_BLIT: {
+            uint32_t tid = task_current() ? task_current()->id : 0;
+            gui_service_window_blit(tid, (int)f->a0, (int)f->a1,
+                                    (int)f->a2, (int)f->a3,
+                                    (const uint32_t *)f->a4, (int)f->a5);
+            return 0;
+        }
+
         default:
             return (uint64_t)(-ENOSYS);
     }

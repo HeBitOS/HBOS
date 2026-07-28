@@ -31,7 +31,6 @@ void tool_gui_init(void);
 #endif
 void tool_net_init(void);
 void tool_cc_init(void);
-void tool_python_init(void);
 void tool_cppe_init(void);
 void tool_audio_init(void);
 
@@ -50,7 +49,6 @@ static inline void tool_init_all(void) {
 #endif
     tool_net_init();
     tool_cc_init();
-    tool_python_init();
     tool_cppe_init();
     tool_audio_init();
 }

@@ -64,6 +64,12 @@ void gui_service_window_text(uint32_t owner_task, int x, int y, const char *s,
     (void)owner_task; (void)x; (void)y; (void)s; (void)color;
 }
 
+void gui_service_window_blit(uint32_t owner_task, int x, int y, int w, int h,
+                             const uint32_t *pixels, int stride) {
+    (void)owner_task; (void)x; (void)y; (void)w; (void)h;
+    (void)pixels; (void)stride;
+}
+
 void gui_service_window_present(uint32_t owner_task) {
     (void)owner_task;
 }
@@ -78,4 +84,21 @@ int gui_service_window_poll(uint32_t owner_task, int *event4) {
 
 void gui_service_window_close(uint32_t owner_task) {
     (void)owner_task;
+}
+
+int gui_service_window_v2(uint32_t owner_task, uint32_t operation,
+                          int handle, void *data) {
+    (void)owner_task;
+    (void)handle;
+    if (operation == GUI_SERVICE_V2_QUERY && data) {
+        gui_service_caps_t *caps = (gui_service_caps_t *)data;
+        if (caps->struct_size < sizeof(*caps)) return -1;
+        caps->abi_major = HBOS_GUI_SERVICE_ABI_MAJOR;
+        caps->abi_minor = HBOS_GUI_SERVICE_ABI_MINOR;
+        caps->capabilities = 0;
+        caps->max_windows = 0;
+        caps->event_queue_size = 0;
+        return 0;
+    }
+    return -1;
 }

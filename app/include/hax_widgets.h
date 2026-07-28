@@ -11,7 +11,7 @@
 #include <hax.h>
 
 #define HAX_UI_ABI_MAJOR 1u
-#define HAX_UI_ABI_MINOR 1u
+#define HAX_UI_ABI_MINOR 2u
 #define HAX_UI_MAX_WIDGETS 48
 
 /* 与 src/gui/gui_state.h 的公开窗口按键值保持一致。 */
@@ -49,14 +49,19 @@ typedef enum {
     HAX_WIDGET_CHECKBOX,
     HAX_WIDGET_LIST,
     HAX_WIDGET_PROGRESS,
-    HAX_WIDGET_SLIDER
+    HAX_WIDGET_SLIDER,
+    HAX_WIDGET_SCROLLBAR,
+    HAX_WIDGET_MENU,
+    HAX_WIDGET_IMAGE,
+    HAX_WIDGET_CANVAS
 } hax_widget_type_t;
 
 enum {
     HAX_WIDGET_VISIBLE  = 1u << 0,
     HAX_WIDGET_ENABLED  = 1u << 1,
     HAX_WIDGET_FOCUSABLE = 1u << 2,
-    HAX_WIDGET_PASSWORD = 1u << 3
+    HAX_WIDGET_PASSWORD = 1u << 3,
+    HAX_WIDGET_VERTICAL = 1u << 4
 };
 
 typedef enum {
@@ -68,6 +73,9 @@ typedef enum {
     HAX_UI_EVENT_FOCUS,
     HAX_UI_EVENT_CLOSE
 } hax_ui_event_type_t;
+
+typedef struct hax_widget hax_widget_t;
+typedef void (*hax_widget_draw_fn)(const hax_widget_t *widget, void *user_data);
 
 typedef struct {
     HU32 struct_size;
@@ -94,7 +102,7 @@ typedef struct {
     HCOLOR focus_ring;
 } hax_ui_theme_t;
 
-typedef struct {
+struct hax_widget {
     hax_widget_id_t id;
     hax_widget_type_t type;
     HU32 flags;
@@ -116,7 +124,14 @@ typedef struct {
     const char *const *items;
     HI32 item_count;
     HI32 selected;
-} hax_widget_t;
+
+    /* IMAGE/CANVAS/SCROLLBAR 扩展。图片为 0xAARRGGBB。 */
+    const HU32 *pixels;
+    HI32 image_width, image_height, image_stride;
+    HI32 page_size;
+    hax_widget_draw_fn draw;
+    void *user_data;
+};
 
 typedef struct {
     HU32 struct_size;
@@ -351,6 +366,57 @@ static inline hax_widget_t *hax_ui_add_slider(hax_ui_t *ui, hax_widget_id_t id,
     return w;
 }
 
+static inline hax_widget_t *hax_ui_add_scrollbar(
+        hax_ui_t *ui, hax_widget_id_t id, hax_ui_rect_t rect,
+        HI32 min_value, HI32 max_value, HI32 value, HI32 page_size,
+        HI32 step, int vertical) {
+    hax_widget_t *w = hax_ui_add_slider(ui, id, rect, min_value, max_value,
+                                        value, step);
+    if (!w) return NULL;
+    w->type = HAX_WIDGET_SCROLLBAR;
+    w->page_size = page_size > 0 ? page_size : 1;
+    if (vertical) w->flags |= HAX_WIDGET_VERTICAL;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_menu(
+        hax_ui_t *ui, hax_widget_id_t id, hax_ui_rect_t rect,
+        const char *const *items, HI32 item_count, HI32 selected) {
+    hax_widget_t *w = hax_ui_add_list(ui, id, rect, items, item_count, selected);
+    if (w) w->type = HAX_WIDGET_MENU;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_image(
+        hax_ui_t *ui, hax_widget_id_t id, hax_ui_rect_t rect,
+        const HU32 *pixels, HI32 width, HI32 height, HI32 stride) {
+    hax_widget_t *w = hax_ui_add_widget(ui, id, HAX_WIDGET_IMAGE, rect, "",
+                                        HAX_WIDGET_ENABLED);
+    if (!w || !pixels || width <= 0 || height <= 0) {
+        if (w) ui->widget_count--;
+        return NULL;
+    }
+    w->pixels = pixels;
+    w->image_width = width; w->image_height = height;
+    w->image_stride = stride > 0 ? stride : width;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_canvas(
+        hax_ui_t *ui, hax_widget_id_t id, hax_ui_rect_t rect,
+        hax_widget_draw_fn draw, void *user_data, int focusable) {
+    hax_widget_t *w = hax_ui_add_widget(
+        ui, id, HAX_WIDGET_CANVAS, rect, "",
+        HAX_WIDGET_ENABLED | (focusable ? HAX_WIDGET_FOCUSABLE : 0));
+    if (!w || !draw) {
+        if (w) ui->widget_count--;
+        return NULL;
+    }
+    w->draw = draw;
+    w->user_data = user_data;
+    return w;
+}
+
 static inline int hax_ui_set_enabled(hax_ui_t *ui, hax_widget_id_t id, int enabled) {
     hax_widget_t *w = hax_ui_widget(ui, id);
     if (!w) return 0;
@@ -397,7 +463,8 @@ static inline int hax_ui_set_value(hax_ui_t *ui, hax_widget_id_t id, HI32 value)
         return 1;
     }
     if (w->type == HAX_WIDGET_CHECKBOX) value = value ? 1 : 0;
-    if (w->type == HAX_WIDGET_PROGRESS || w->type == HAX_WIDGET_SLIDER) {
+    if (w->type == HAX_WIDGET_PROGRESS || w->type == HAX_WIDGET_SLIDER ||
+        w->type == HAX_WIDGET_SCROLLBAR) {
         if (value < w->min_value) value = w->min_value;
         if (value > w->max_value) value = w->max_value;
     }
@@ -565,6 +632,26 @@ static inline HI32 hax_ui_slider_value_at(const hax_widget_t *w, HI32 x) {
     return value;
 }
 
+static inline HI32 hax_ui_scrollbar_value_at(const hax_widget_t *w,
+                                              HI32 x, HI32 y) {
+    if (!w || w->type != HAX_WIDGET_SCROLLBAR ||
+        !(w->flags & HAX_WIDGET_VERTICAL))
+        return hax_ui_slider_value_at(w, x);
+    if (w->max_value <= w->min_value) return w->min_value;
+    HI32 track = w->rect.h - 16;
+    if (track < 1) track = 1;
+    HI32 pos = y - w->rect.y - 8;
+    if (pos < 0) pos = 0;
+    if (pos > track) pos = track;
+    HI32 value = w->min_value +
+        (HI32)(((HI64)pos * (w->max_value - w->min_value)) / track);
+    HI32 step = w->step > 0 ? w->step : 1;
+    value = w->min_value + ((value - w->min_value + step / 2) / step) * step;
+    if (value < w->min_value) value = w->min_value;
+    if (value > w->max_value) value = w->max_value;
+    return value;
+}
+
 static inline int hax_ui_activate(hax_widget_t *w, HI32 mouse_y,
                                    hax_ui_event_t *out) {
     if (!hax_ui_focusable(w)) return 0;
@@ -573,7 +660,7 @@ static inline int hax_ui_activate(hax_widget_t *w, HI32 mouse_y,
     } else if (w->type == HAX_WIDGET_CHECKBOX) {
         w->value = !w->value;
         hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, w->value);
-    } else if (w->type == HAX_WIDGET_LIST) {
+    } else if (w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_MENU) {
         HI32 row = (mouse_y - w->rect.y - 4) / 20;
         if (row >= 0 && row < w->item_count) {
             w->selected = row;
@@ -611,8 +698,9 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
             if (ui->pressed_index >= 0) {
                 hax_widget_t *w = &ui->widgets[ui->pressed_index];
                 ui->focus_index = ui->pressed_index;
-                if (w->type == HAX_WIDGET_SLIDER) {
-                    HI32 value = hax_ui_slider_value_at(w, ev4[1]);
+                if (w->type == HAX_WIDGET_SLIDER ||
+                    w->type == HAX_WIDGET_SCROLLBAR) {
+                    HI32 value = hax_ui_scrollbar_value_at(w, ev4[1], ev4[2]);
                     if (value != w->value) {
                         w->value = value;
                         hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, value);
@@ -622,9 +710,10 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
                 }
             }
         } else if (left && ui->pressed_index >= 0 &&
-                   ui->widgets[ui->pressed_index].type == HAX_WIDGET_SLIDER) {
+                   (ui->widgets[ui->pressed_index].type == HAX_WIDGET_SLIDER ||
+                    ui->widgets[ui->pressed_index].type == HAX_WIDGET_SCROLLBAR)) {
             hax_widget_t *w = &ui->widgets[ui->pressed_index];
-            HI32 value = hax_ui_slider_value_at(w, ev4[1]);
+            HI32 value = hax_ui_scrollbar_value_at(w, ev4[1], ev4[2]);
             if (value != w->value) {
                 w->value = value;
                 hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, value);
@@ -633,7 +722,8 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
             HI32 pressed = ui->pressed_index;
             ui->pressed_index = -1;
             if (pressed >= 0 && pressed == hit &&
-                ui->widgets[pressed].type != HAX_WIDGET_SLIDER) {
+                ui->widgets[pressed].type != HAX_WIDGET_SLIDER &&
+                ui->widgets[pressed].type != HAX_WIDGET_SCROLLBAR) {
                 hax_ui_activate(&ui->widgets[pressed], ev4[2], out);
             }
         }
@@ -665,7 +755,7 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
             hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, w->value);
             return 1;
         }
-        if (w->type == HAX_WIDGET_LIST &&
+        if ((w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_MENU) &&
             (key == HAX_KEY_UP || key == HAX_KEY_DOWN ||
              key == HAX_KEY_PGUP || key == HAX_KEY_PGDOWN)) {
             HI32 next = w->selected;
@@ -685,14 +775,18 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
             }
             return 1;
         }
-        if (w->type == HAX_WIDGET_SLIDER &&
+        if ((w->type == HAX_WIDGET_SLIDER ||
+             w->type == HAX_WIDGET_SCROLLBAR) &&
             (key == HAX_KEY_LEFT || key == HAX_KEY_DOWN ||
              key == HAX_KEY_RIGHT || key == HAX_KEY_UP ||
-             key == HAX_KEY_HOME || key == HAX_KEY_END)) {
+             key == HAX_KEY_HOME || key == HAX_KEY_END ||
+             key == HAX_KEY_PGUP || key == HAX_KEY_PGDOWN)) {
             HI32 value = w->value;
             HI32 step = w->step > 0 ? w->step : 1;
             if (key == HAX_KEY_LEFT || key == HAX_KEY_DOWN) value -= step;
             else if (key == HAX_KEY_RIGHT || key == HAX_KEY_UP) value += step;
+            else if (key == HAX_KEY_PGUP) value -= w->page_size;
+            else if (key == HAX_KEY_PGDOWN) value += w->page_size;
             else if (key == HAX_KEY_HOME) value = w->min_value;
             else if (key == HAX_KEY_END) value = w->max_value;
             if (value < w->min_value) value = w->min_value;
@@ -716,6 +810,20 @@ static inline hax_ui_event_type_t hax_ui_poll(hax_ui_t *ui, hax_ui_event_t *out)
         return HAX_UI_EVENT_NONE;
     }
     raw[0] = type;
+    hax_ui_dispatch(ui, raw, out);
+    return out ? out->type : HAX_UI_EVENT_NONE;
+}
+
+/** v2 显式窗口版本；控件事件语义与 hax_ui_poll 相同。 */
+static inline hax_ui_event_type_t hax_ui_poll_window(
+        hax_ui_t *ui, hax_window_t window, hax_ui_event_t *out) {
+    hax_window_event_t event;
+    int type = hax_window_poll(window, &event);
+    if (type <= HAX_EV_NONE) {
+        hax_ui_emit(out, HAX_UI_EVENT_NONE, 0, 0);
+        return HAX_UI_EVENT_NONE;
+    }
+    int raw[4] = {type, event.a, event.b, event.c};
     hax_ui_dispatch(ui, raw, out);
     return out ? out->type : HAX_UI_EVENT_NONE;
 }
@@ -753,6 +861,16 @@ static inline void hax_ui_draw(const hax_ui_t *ui) {
             hax_ui_draw_frame(w->rect, focused ? ui->theme.focus_ring :
                               hovered ? ui->theme.hover : ui->theme.border);
             const char *shown = w->buffer ? w->buffer : "";
+            char password[128];
+            if ((w->flags & HAX_WIDGET_PASSWORD) && w->buffer) {
+                HI32 chars = hax_ui_utf8_count(w->buffer, 0,
+                                               (HI32)strlen(w->buffer));
+                if (chars > (HI32)sizeof(password) - 1)
+                    chars = (HI32)sizeof(password) - 1;
+                for (HI32 p = 0; p < chars; p++) password[p] = '*';
+                password[chars] = 0;
+                shown = password;
+            }
             HI32 len = (HI32)strlen(shown);
             HI32 visible_chars = (w->rect.w - 14) / 8;
             if (visible_chars < 1) visible_chars = 1;
@@ -780,7 +898,7 @@ static inline void hax_ui_draw(const hax_ui_t *ui) {
                 hax_win_fill(box.x + 4, box.y + 4, box.w - 8, box.h - 8, ui->theme.accent);
             }
             hax_win_text(w->rect.x + 26, w->rect.y + 3, w->text, fg);
-        } else if (w->type == HAX_WIDGET_LIST) {
+        } else if (w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_MENU) {
             hax_win_fill(w->rect.x, w->rect.y, w->rect.w, w->rect.h, ui->theme.panel_bg);
             hax_ui_draw_frame(w->rect, focused ? ui->theme.focus_ring :
                               hovered ? ui->theme.hover : ui->theme.border);
@@ -803,7 +921,9 @@ static inline void hax_ui_draw(const hax_ui_t *ui) {
                 hax_win_fill(w->rect.x + 2, w->rect.y + 2, fill,
                              w->rect.h - 4, ui->theme.accent);
             hax_ui_draw_frame(w->rect, ui->theme.border);
-        } else if (w->type == HAX_WIDGET_SLIDER) {
+        } else if (w->type == HAX_WIDGET_SLIDER ||
+                   (w->type == HAX_WIDGET_SCROLLBAR &&
+                    !(w->flags & HAX_WIDGET_VERTICAL))) {
             HI32 range = w->max_value - w->min_value;
             HI32 track = w->rect.w - 16;
             if (track < 1) track = 1;
@@ -818,6 +938,26 @@ static inline void hax_ui_draw(const hax_ui_t *ui) {
             hax_win_fill(w->rect.x + 4 + pos, cy - 7, 9, 14, knob);
             if (focused)
                 hax_ui_draw_frame(w->rect, ui->theme.focus_ring);
+        } else if (w->type == HAX_WIDGET_SCROLLBAR) {
+            HI32 range = w->max_value - w->min_value;
+            HI32 track = w->rect.h - 16;
+            if (track < 1) track = 1;
+            HI32 pos = range > 0 ?
+                (HI32)(((HI64)track * (w->value - w->min_value)) / range) : 0;
+            HCOLOR knob = pressed ? ui->theme.pressed :
+                          hovered ? ui->theme.hover : ui->theme.accent;
+            hax_win_fill(w->rect.x + w->rect.w / 2 - 2, w->rect.y + 8,
+                         4, track, ui->theme.border);
+            hax_win_fill(w->rect.x + 3, w->rect.y + 4 + pos,
+                         w->rect.w - 6, 9, knob);
+            if (focused) hax_ui_draw_frame(w->rect, ui->theme.focus_ring);
+        } else if (w->type == HAX_WIDGET_IMAGE) {
+            HI32 bw = w->rect.w < w->image_width ? w->rect.w : w->image_width;
+            HI32 bh = w->rect.h < w->image_height ? w->rect.h : w->image_height;
+            hax_win_blit(w->rect.x, w->rect.y, bw, bh,
+                         w->pixels, w->image_stride);
+        } else if (w->type == HAX_WIDGET_CANVAS && w->draw) {
+            w->draw(w, w->user_data);
         }
     }
 }
