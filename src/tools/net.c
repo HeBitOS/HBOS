@@ -592,7 +592,7 @@ static void cmd_wget(int argc, char **argv) {
         console_puts("Usage: wget [-S] [-O file] http[s]://host[:port]/path [file]\n");
         return;
     }
-    static char response[8192];
+    static char response[196608];
     uint32_t len = 0;
     if (http_fetch("GET", url, response, sizeof(response), &len) < 0) {
         console_puts("wget: ");

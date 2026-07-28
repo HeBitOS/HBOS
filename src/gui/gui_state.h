@@ -28,11 +28,12 @@
  * 堆分配，因为这个内核的 kfree() 是空操作（core/heap.c），每次换页都
  * 新分配一块会永久漏内存，和 M2 图片/十六进制查看器缓冲区同一个考虑。 */
 #define BROWSER_PAGE_CAP (128 * 1024)
-/* 网络抓取缓冲要比 BROWSER_PAGE_CAP 大一截，留出响应头 + 未提取正文的
- * 富余（不是所有抓到的字节都会进 browser_page/browser_render）。 */
-#define BROWSER_FETCH_CAP (192 * 1024)
+/* 网络抓取缓冲：512KB 覆盖 bilibili 等大站用真实 Chrome UA 返回的 SSR 页面
+ * (200–350KB HTML + 响应头富余)。response[] 是 browser_load_internal 里的
+ * 独立 static 缓冲，不在 gui_state_t 内，增大不影响结构体大小。 */
+#define BROWSER_FETCH_CAP (512 * 1024)
 #define BROWSER_HIST_MAX 20
-#define BROWSER_LINK_MAX 64
+#define BROWSER_LINK_MAX 128
 #define CODE_EDIT_CAP 4096
 #define SNAKE_MAX (16 * 10)
 #define GUI_PATH_MAX 256
@@ -204,6 +205,10 @@ typedef struct gui_state {
     uint32_t hexview_len;      /* 实际读取的字节数（可能因超过上限被截断） */
     uint32_t hexview_file_size;/* 文件真实大小，用于判断是否被截断 */
     int  hexview_scroll;       /* 起始行号（每行 16 字节） */
+    /* 浏览器后台异步加载 */
+    int  browser_loading;       /* 1=正在后台抓取页面，0=空闲 */
+    int  browser_push_hist;     /* 本次加载是否需要向历史压栈 */
+    uint32_t browser_load_tid;  /* 后台抓取任务的 task ID（用于检测完成） */
 } gui_state_t;
 
 #endif

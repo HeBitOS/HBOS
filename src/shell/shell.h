@@ -61,6 +61,15 @@ void shell_run(void);
 // 输出 Shell 提示符
 void shell_print_prompt(void);
 
+// ============================================================
+// 启动模式偏好（第一次启动选择 GUI/Shell 后记住，跨重启不再询问）
+// ============================================================
+// 返回 'g'（图形桌面）、't'（命令行）或 0（尚未设置过，即将出现启动选择提示）。
+int shell_get_startup_pref(void);
+// 写入偏好并立即同步到磁盘；mode 必须是 'g' 或 't'。成功返回 0，失败返回 -1
+// （比如当前文件系统后端是纯 ramfs，没有可持久化的磁盘）。
+int shell_set_startup_pref(int mode);
+
 // 简易外部命令注册（供应用程序使用）
 void cmd_register_external(const char *name, const char *desc,
                            void (*handler)(int argc, char **argv));
@@ -91,6 +100,11 @@ int kb_poll_key(void);
 #define KB_KEY_F4      0x10D
 #define KB_KEY_F5      0x10E
 #define KB_KEY_F6      0x10F
+#define KB_KEY_SHIFT_UP    0x110
+#define KB_KEY_SHIFT_DOWN  0x111
+#define KB_KEY_SHIFT_LEFT  0x112
+#define KB_KEY_SHIFT_RIGHT 0x113
+#define KB_KEY_F9          0x114
 
 // NumLock 状态查询
 bool kb_is_numlock(void);

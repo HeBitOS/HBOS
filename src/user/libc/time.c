@@ -17,7 +17,7 @@ int gettimeofday(struct timeval *tv, void *tz) {
 }
 
 /* Howard Hinnant's days_from_civil / civil_from_days (public-domain-style
- * calendar algorithm), same one used kernel-side in src/gui/rtc_tz.h —
+ * calendar algorithm), same one used kernel-side in src/rtc_tz.h —
  * duplicated here rather than shared since that header is kernel-only. */
 static long civil_from_days_wday(long z) {
     return ((z % 7) + 7 + 4) % 7; /* z=0 (1970-01-01) was a Thursday = 4 */

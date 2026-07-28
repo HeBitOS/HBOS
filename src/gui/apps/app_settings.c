@@ -4,7 +4,8 @@
 #include "../../string.h"
 #include "../../version.h"
 #include "../../net.h"
-#include "../rtc_tz.h"
+#include "../../rtc_tz.h"
+#include "../../shell/shell.h"
 
 /* ── small button helper ─────────────────────────────────── */
 #define SB_W  80
@@ -72,6 +73,21 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     gui_text(x, y, "关闭后任务栏时钟只显示时:分，不显示秒", gui_rgb(120, 140, 160), 1);
     y += 16 + 8;
 
+    /* ── 开机默认启动方式 ── 第一次开机选一次后记住，之后不再询问；
+     * 这里跟命令行的 startup 命令改的是同一份磁盘偏好（shell_get/set_startup_pref）。 */
+    section(x, y, "开机默认启动");
+    y += 20;
+    {
+        int startup_pref = shell_get_startup_pref();
+        draw_sb(x,               y, SB_W + 10, startup_pref == 'g' ? "● 图形桌面" : "  图形桌面",
+                startup_pref == 'g' ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
+        draw_sb(x + SB_W + 18, y, SB_W + 10, startup_pref == 't' ? "● 命令行" : "  命令行",
+                startup_pref == 't' ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
+    }
+    y += SB_H + 6;
+    gui_text(x, y, "开机后直接进入所选模式，不再询问；也可用 startup 命令修改", gui_rgb(120, 140, 160), 1);
+    y += 16 + 8;
+
     /* ── 时区与网络时间 ── */
     section(x, y, "时区与网络时间");
     y += 20;
@@ -115,25 +131,6 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     gui_append_str(line, sizeof(line), &pos, " / ");
     gui_append_int(line, sizeof(line), &pos, nbase - 1);
     gui_text(x, y, line, gui_rgb(140, 160, 180), 1);
-    y += 18;
-
-    /* ── 快捷键提示 ── */
-    y += 6;
-    section(x, y, "快捷键");
-    y += 20;
-    gui_text(x, y,      "F2 / F3    字体缩小 / 放大", gui_rgb(120, 140, 160), 1);
-    y += 16;
-    gui_text(x, y,      "F4         深色 / 浅色主题",  gui_rgb(120, 140, 160), 1);
-    y += 16;
-    gui_text(x, y,      "F5         刷新桌面",         gui_rgb(120, 140, 160), 1);
-    y += 16;
-    gui_text(x, y,      "F6 / 空格   切换窗口",         gui_rgb(120, 140, 160), 1);
-    y += 16;
-    gui_text(x, y,      "Alt+↑      窗口最大化",       gui_rgb(120, 140, 160), 1);
-    y += 16;
-    gui_text(x, y,      "Alt+↓      窗口最小化",       gui_rgb(120, 140, 160), 1);
-    y += 16;
-    gui_text(x, y,      "Ctrl+A     全选（记事本/代码工作台）", gui_rgb(120, 140, 160), 1);
 }
 
 /* ── on_click ────────────────────────────────────────────── */
@@ -167,6 +164,21 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
     if (mx >= x && mx < x + SB_W + 30 && my >= y && my < y + SB_H) {
         st->taskbar_show_seconds = !st->taskbar_show_seconds;
         st->status = st->taskbar_show_seconds ? "任务栏时钟已显示秒数" : "任务栏时钟已隐藏秒数";
+        return 1;
+    }
+    y += SB_H + 30;
+
+    /* startup mode row */
+    y += 20;
+    int si = hit_row(mx, my, x, y, SB_W + 10, 8, 2);
+    if (si == 0) {
+        st->status = shell_set_startup_pref('g') == 0
+            ? "已设置：开机默认启动图形桌面" : "设置失败：当前无法持久化（无磁盘）";
+        return 1;
+    }
+    if (si == 1) {
+        st->status = shell_set_startup_pref('t') == 0
+            ? "已设置：开机默认启动命令行" : "设置失败：当前无法持久化（无磁盘）";
         return 1;
     }
     y += SB_H + 30;

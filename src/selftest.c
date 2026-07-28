@@ -105,7 +105,11 @@ int selftest_run(void) {
     CHECK("syscall compare", memcmp(b, "abi", 3) == 0);
     CHECK("syscall close", hbos_close(fd) == 0);
     CHECK("syscall unlink", hbos_unlink("__syscall") == 0);
+#if HBOS_BUNDLE_APPS
     CHECK("app registry", hbos_app_find("hello") != NULL);
+#else
+    CHECK("empty app registry", hbos_app_count() == 0);
+#endif
 
     /* PNG 解码链路（inflate + png）：2x2 红/绿/蓝/黄，验证维度和四个像素。 */
     static unsigned char png_rgb[2 * 2 * 3];

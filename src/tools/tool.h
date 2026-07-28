@@ -26,7 +26,9 @@ void tool_file_init(void);
 void tool_app_init(void);
 void tool_ata_init(void);
 void tool_disk_init(void);
+#if HBOS_ENABLE_GUI
 void tool_gui_init(void);
+#endif
 void tool_net_init(void);
 void tool_cc_init(void);
 void tool_python_init(void);
@@ -43,7 +45,9 @@ static inline void tool_init_all(void) {
     tool_app_init();
     tool_ata_init();
     tool_disk_init();
+#if HBOS_ENABLE_GUI
     tool_gui_init();
+#endif
     tool_net_init();
     tool_cc_init();
     tool_python_init();

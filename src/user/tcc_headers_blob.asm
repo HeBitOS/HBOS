@@ -7,9 +7,14 @@
 section .rodata
 bits 64
 
+%ifndef HBOS_BUILD_DIR
+%define HBOS_BUILD_DIR "build"
+%endif
+%strcat HBOS_TCC_HEADERS_PATH HBOS_BUILD_DIR, "/tcc/headers.bin"
+
 global _binary_build_tcc_headers_bin_start
 _binary_build_tcc_headers_bin_start:
-incbin "build/tcc/headers.bin"
+incbin HBOS_TCC_HEADERS_PATH
 
 global _binary_build_tcc_headers_bin_end
 _binary_build_tcc_headers_bin_end:

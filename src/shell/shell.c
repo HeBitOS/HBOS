@@ -96,6 +96,7 @@ void task_yield(void);
 #define KEY_SHIFT_DOWN  0x111
 #define KEY_SHIFT_LEFT  0x112
 #define KEY_SHIFT_RIGHT 0x113
+#define KEY_F9          0x114
 static int shift_pressed = 0, caps_lock = 0, num_lock = 1;
 
 static inline uint8_t inb(uint16_t port) {
@@ -367,6 +368,7 @@ int kb_poll_key(void) {
     if (sc == 0x3E) return KEY_F4;
     if (sc == 0x3F) return KEY_F5;
     if (sc == 0x40) return KEY_F6;
+    if (sc == 0x43) return KEY_F9;
     if (sc < 128) {
         char c = scancode_map[sc];
         if (c == 0) return 0;
@@ -1112,20 +1114,21 @@ void shell_run(void) {
     // Boot selector: choose the graphical desktop or the text shell. Only
     // asked once, ever — the choice is remembered on disk (see
     // shell_get_startup_pref/shell_set_startup_pref above) and reused on
-    // every later boot without prompting. `startup gui`/`startup shell`
-    // (src/tools/system.c) or the GUI Settings app can change it afterwards.
+    // every later boot without prompting. `startup hive`/`startup shell`
+    // (src/tools/system.c) or the HIVE Settings app can change it afterwards.
     // Picking GUI also means a key is pressed before the GUI's mouse_init
     // runs, which keeps the PS/2 controller state clean.
+#if HBOS_ENABLE_GUI
     int startup_pref = shell_get_startup_pref();
     if (startup_pref == 'g') {
-        console_puts("\r\n\x1b[90m已记住启动选择：图形桌面 GUI（用 startup 命令可修改）\x1b[0m\r\n");
-        cmd_execute("gui");
+        console_puts("\r\n\x1b[90m已记住启动选择：HIVE 桌面（用 startup 命令可修改）\x1b[0m\r\n");
+        cmd_execute("hive");
     } else if (startup_pref == 't') {
         console_puts("\r\n\x1b[90m已记住启动选择：命令行 Shell（用 startup 命令可修改）\x1b[0m\r\n\r\n");
     } else {
         console_puts(
             "\r\n  \x1b[1m\x1b[36m请选择启动模式 / Select boot mode\x1b[0m\r\n"
-            "    \x1b[32m[G / Enter]\x1b[0m 图形桌面 GUI       "
+            "    \x1b[32m[H / G / Enter]\x1b[0m HIVE 桌面       "
             "\x1b[33m[T]\x1b[0m 命令行 Shell\r\n  > "
         );
         while (1) {
@@ -1135,14 +1138,21 @@ void shell_run(void) {
                 shell_set_startup_pref('t');
                 break;
             }
-            if (c == 'g' || c == 'G' || c == '\n' || c == '\r') {
-                console_puts("GUI\r\n");
+            if (c == 'h' || c == 'H' || c == 'g' || c == 'G' ||
+                c == '\n' || c == '\r') {
+                console_puts("HIVE\r\n");
                 shell_set_startup_pref('g');
-                cmd_execute("gui");
+                cmd_execute("hive");
                 break;
             }
         }
     }
+#else
+    console_puts(
+        "\r\n\x1b[90m当前是 HBOS no-GUI 构建：桌面与内置 GUI 应用未链接，"
+        "直接进入命令行 Shell。\x1b[0m\r\n\r\n"
+    );
+#endif
 
     while (1) {
         if (shell_exit_flag) {

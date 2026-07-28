@@ -63,7 +63,9 @@ HBOS 的目标是在尽量低廉、低配置的电脑上做出足够好的实际
 - ✅ 命令分组管理 (系统/文件/图形/调试/用户)，基础命令已模块化到 `src/tools/`
 - ✅ 命令历史 / 搜索 / 上下键回滚 / PgUp-PgDn 上下文浏览
 - ✅ UTF-8 中文/CJK 字符显示（构建时 TTF → HZK16 点阵）
-- ✅ `gui` / `startx` 图形桌面，包含文件管理、磁盘管理、资源管理器、应用启动器和内置小游戏
+- ✅ `hive`（兼容 `gui` / `startx`）HIVE 桌面环境，包含窗口管理、应用启动器和系统工具
+- ✅ HIVE 用户态窗口工具包（布局、标签、按钮、文本框、复选框、列表、进度条、滑杆）
+- ✅ no-GUI 独立构建：不链接桌面、窗口管理器、GUI 资源或内嵌应用
 - ✅ 初步协作式多任务框架
 - ✅ 多阶段 AI 开发文档体系
 - ✅ 应用程序 API (硬件抽象层)
@@ -89,7 +91,17 @@ make release   # 构建发布产物：ISO + VMware VMDK + VirtualBox VDI
 make run       # QEMU BIOS 硬盘启动
 make run-uefi  # QEMU UEFI 硬盘启动
 make smoke     # 构建并自动验证 BIOS/UEFI ISO/HDD/VMDK 启动
+make nogui     # 构建不含桌面和应用的 BIOS/UEFI 双 ISO
+make nogui-smoke # 验证 no-GUI 组件边界及 BIOS/UEFI 启动
+make core-only # 构建 GUI 核心但不打包注册式/HAX 应用
 ```
+
+GUI 和应用可分开构建。应用源码位于外部仓库时，可使用
+`make APP_DIR=/path/to/apps hax-apps`；内核、GUI runtime 与应用之间的正式依赖
+边界见 [`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md)。
+HIVE API、交互约定和迁移状态见
+[`docs/HIVE_DESKTOP_API.md`](docs/HIVE_DESKTOP_API.md)；独立开发仓库为
+[`HeBitOS/HIVE`](https://github.com/HeBitOS/HIVE)。
 
 ### 真机优先级
 
@@ -199,7 +211,7 @@ hbosv2/
 | `diskmgr` / `disk` | File | 查看磁盘、分区和 HBFS 占用 |
 | `install` / `setup` | System | 显示安装向导 |
 | `install auto` | System | 自动准备 HBFS 持久化存储 |
-| `gui` / `startx` | Graphics | 启动 HBOS 图形桌面，可操作文件、查看资源、打开系统软件和小游戏 |
+| `hive` / `gui` / `startx` | Graphics | 启动 HIVE 桌面环境 |
 ## 应用程序开发 API
 
 ### 示例程序

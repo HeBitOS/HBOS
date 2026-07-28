@@ -283,7 +283,7 @@ static inline void hax_gui_circle(int cx, int cy, int r, HCOLOR c) {
  */
 #define HAX_EV_NONE  0
 #define HAX_EV_KEY   1   /**< ev[1]=键值 */
-#define HAX_EV_MOUSE 2   /**< ev[1]=x ev[2]=y ev[3]=按键位掩码 */
+#define HAX_EV_MOUSE 2   /**< 移动/按键；ev[1]=x ev[2]=y ev[3]=按键，离开时 x=y=-1 */
 #define HAX_EV_CLOSE 3   /**< 窗口被请求关闭 */
 
 /** 打开一个窗口（内容区 w×h），成功返回窗口 id（≥0），失败 -1 */
@@ -325,5 +325,8 @@ static inline int hax_win_poll(int *ev4) {
 static inline void hax_win_close(void) {
     __syscall1(HBOS_SYS_WIN_CLOSE, 0);
 }
+
+/* HIVE 标准窗口控件（按钮、文本框、复选框、列表、滑杆等）。 */
+#include "hax_widgets.h"
 
 #endif /* HBOS_HAX_H */

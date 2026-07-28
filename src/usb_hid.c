@@ -30,6 +30,10 @@ static int usb_mouse_index = -1;
 #define USB_KEY_END     0x107
 #define USB_KEY_INSERT  0x108
 #define USB_KEY_DELETE  0x109
+#define USB_KEY_SHIFT_UP    0x110
+#define USB_KEY_SHIFT_DOWN  0x111
+#define USB_KEY_SHIFT_LEFT  0x112
+#define USB_KEY_SHIFT_RIGHT 0x113
 
 /* USB HID keycode → ASCII (0x04..0x57 → a-z, 1-9, 0, Enter, etc.) */
 static int usb_keycode_to_key(uint8_t kc, int shift, int ctrl) {
@@ -62,10 +66,10 @@ static int usb_keycode_to_key(uint8_t kc, int shift, int ctrl) {
     if (kc == 0x4C) return USB_KEY_DELETE;
     if (kc == 0x4D) return USB_KEY_END;
     if (kc == 0x4E) return USB_KEY_PGDWN;
-    if (kc == 0x4F) return USB_KEY_RIGHT;
-    if (kc == 0x50) return USB_KEY_LEFT;
-    if (kc == 0x51) return USB_KEY_DOWN;
-    if (kc == 0x52) return USB_KEY_UP;
+    if (kc == 0x4F) return shift ? USB_KEY_SHIFT_RIGHT : USB_KEY_RIGHT;
+    if (kc == 0x50) return shift ? USB_KEY_SHIFT_LEFT  : USB_KEY_LEFT;
+    if (kc == 0x51) return shift ? USB_KEY_SHIFT_DOWN  : USB_KEY_DOWN;
+    if (kc == 0x52) return shift ? USB_KEY_SHIFT_UP    : USB_KEY_UP;
     return 0;
 }
 

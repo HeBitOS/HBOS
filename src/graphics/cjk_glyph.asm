@@ -6,9 +6,14 @@
 section .rodata
 align 16
 
+%ifndef HBOS_BUILD_DIR
+%define HBOS_BUILD_DIR "build"
+%endif
+%strcat HBOS_FONT_CJK_PATH HBOS_BUILD_DIR, "/font_cjk.bin"
+
 global _binary_build_font_cjk_bin_start
 _binary_build_font_cjk_bin_start:
-incbin "build/font_cjk.bin"
+incbin HBOS_FONT_CJK_PATH
 
 global _binary_build_font_cjk_bin_end
 _binary_build_font_cjk_bin_end:

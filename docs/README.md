@@ -2,6 +2,12 @@
 
 - **[HBOS_HAX_API.pdf](../HBOS_HAX_API.pdf)** —— HBOS 应用开发手册（HAX SDK / `.hax` 应用）。
   源文件为 [`HBOS_HAX_API.html`](HBOS_HAX_API.html)。
+- **[CHROMIUM_COMPAT_BASELINE.md](CHROMIUM_COMPAT_BASELINE.md)** —— 软件模块化、
+  窗口 API 与 Chromium 兼容层的阶段 1 能力基线和 ABI 约定。
+- **[REPOSITORY_SPLIT_BOUNDARIES.md](REPOSITORY_SPLIT_BOUNDARIES.md)** —— 内核、
+  GUI 与应用的拆仓边界、no-GUI 构建矩阵和独立性规则。
+- **[HIVE_DESKTOP_API.md](HIVE_DESKTOP_API.md)** —— HIVE 桌面工具包、交互约定
+  与应用迁移说明。
 
 ## 重新生成 PDF
 

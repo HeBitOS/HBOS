@@ -33,8 +33,7 @@
 #include "user/hax_app.h"
 #include "vfs.h"
 #include "version.h"
-#include "gui/gui_canvas.h"
-#include "gui/winsrv.h"
+#include "api/gui_service.h"
 
 #define SYSCALL_EXEC_MAX_SIZE 65536
 
@@ -978,82 +977,75 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         // GUI 窗体画布 (77-83)
         // ============================================================
         case HBOS_SYS_GUI_INFO:
-            return (uint64_t)gui_app_info((int *)f->a0, (int *)f->a1);
+            return (uint64_t)gui_service_canvas_info((int *)f->a0, (int *)f->a1);
 
         case HBOS_SYS_GUI_CLEAR:
-            gui_app_clear((uint32_t)f->a0);
+            gui_service_canvas_clear((uint32_t)f->a0);
             return 0;
 
         case HBOS_SYS_GUI_RECT:
-            gui_app_rect((int)f->a0, (int)f->a1, (int)f->a2,
-                         (int)f->a3, (uint32_t)f->a4);
+            gui_service_canvas_rect((int)f->a0, (int)f->a1, (int)f->a2,
+                                    (int)f->a3, (uint32_t)f->a4);
             return 0;
 
         case HBOS_SYS_GUI_TEXT:
-            gui_app_text((int)f->a0, (int)f->a1, (const char *)f->a2,
-                         (uint32_t)f->a3, (int)f->a4);
+            gui_service_canvas_text((int)f->a0, (int)f->a1, (const char *)f->a2,
+                                    (uint32_t)f->a3, (int)f->a4);
             return 0;
 
         case HBOS_SYS_GUI_PRESENT:
-            gui_app_present();
+            gui_service_canvas_present();
             return 0;
 
         case HBOS_SYS_GUI_POLLKEY:
-            return (uint64_t)(long)gui_app_pollkey();
+            return (uint64_t)(long)gui_service_canvas_pollkey();
 
         case HBOS_SYS_GUI_POLLMOUSE:
-            return (uint64_t)(long)gui_app_pollmouse((int *)f->a0, (int *)f->a1);
+            return (uint64_t)(long)gui_service_canvas_pollmouse((int *)f->a0,
+                                                               (int *)f->a1);
 
         // ============================================================
         // 并发窗口服务 (84-91)
         // ============================================================
         case HBOS_SYS_WIN_OPEN: {
             uint32_t tid = task_current() ? task_current()->id : 0;
-            return (uint64_t)(long)winsrv_create(tid, (const char *)f->a0,
-                                                 (int)f->a1, (int)f->a2);
+            return (uint64_t)(long)gui_service_window_open(
+                tid, (const char *)f->a0, (int)f->a1, (int)f->a2);
         }
         case HBOS_SYS_WIN_INFO: {
             uint32_t tid = task_current() ? task_current()->id : 0;
-            winsrv_window_t *win = winsrv_for_task(tid);
-            if (!win || win->want_close) return 0;
-            int *wp = (int *)f->a0, *hp = (int *)f->a1;
-            if (wp) *wp = win->w;
-            if (hp) *hp = win->h;
-            return 1;
+            return (uint64_t)(long)gui_service_window_info(
+                tid, (int *)f->a0, (int *)f->a1);
         }
         case HBOS_SYS_WIN_CLEAR: {
             uint32_t tid = task_current() ? task_current()->id : 0;
-            winsrv_clear(winsrv_for_task(tid), (uint32_t)f->a0);
+            gui_service_window_clear(tid, (uint32_t)f->a0);
             return 0;
         }
         case HBOS_SYS_WIN_FILL: {
             uint32_t tid = task_current() ? task_current()->id : 0;
-            winsrv_fill(winsrv_for_task(tid), (int)f->a0, (int)f->a1,
-                        (int)f->a2, (int)f->a3, (uint32_t)f->a4);
+            gui_service_window_fill(tid, (int)f->a0, (int)f->a1,
+                                    (int)f->a2, (int)f->a3, (uint32_t)f->a4);
             return 0;
         }
         case HBOS_SYS_WIN_TEXT: {
             uint32_t tid = task_current() ? task_current()->id : 0;
-            winsrv_text(winsrv_for_task(tid), (int)f->a0, (int)f->a1,
-                        (const char *)f->a2, (uint32_t)f->a3);
+            gui_service_window_text(tid, (int)f->a0, (int)f->a1,
+                                    (const char *)f->a2, (uint32_t)f->a3);
             return 0;
         }
-        case HBOS_SYS_WIN_PRESENT:
-            /* 抢占式调度下合成器会自行刷新；让出以更快显示一帧 */
-            task_yield();
+        case HBOS_SYS_WIN_PRESENT: {
+            uint32_t tid = task_current() ? task_current()->id : 0;
+            gui_service_window_present(tid);
             return 0;
+        }
         case HBOS_SYS_WIN_POLL: {
             uint32_t tid = task_current() ? task_current()->id : 0;
-            winsrv_window_t *win = winsrv_for_task(tid);
-            winsrv_event_t ev;
-            if (!win || !winsrv_pop_event(win, &ev)) return 0;
-            int *out = (int *)f->a0;   /* [type,a,b,c] */
-            if (out) { out[0] = ev.type; out[1] = ev.a; out[2] = ev.b; out[3] = ev.c; }
-            return (uint64_t)(long)ev.type;
+            return (uint64_t)(long)gui_service_window_poll(tid, (int *)f->a0);
         }
         case HBOS_SYS_WIN_CLOSE: {
             uint32_t tid = task_current() ? task_current()->id : 0;
-            winsrv_close_for_task(tid);
+            gui_service_window_close(tid);
             return 0;
         }
 

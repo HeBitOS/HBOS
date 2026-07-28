@@ -18,6 +18,7 @@ static const char *cmd_cn(const char *name) {
     if (strcmp(name, "list") == 0) return "列出所有命令";
     if (strcmp(name, "reboot") == 0) return "重启系统";
     if (strcmp(name, "poweroff") == 0) return "关闭系统";
+    if (strcmp(name, "startup") == 0) return "设置以后开机默认启动模式（图形桌面/命令行），记住后不再询问";
     if (strcmp(name, "shutdown") == 0) return "关机别名";
     if (strcmp(name, "credits") == 0) return "显示致谢";
     if (strcmp(name, "echo") == 0) return "输出文本";
@@ -30,9 +31,10 @@ static const char *cmd_cn(const char *name) {
     if (strcmp(name, "search") == 0) return "搜索命令历史";
     if (strcmp(name, "diskmgr") == 0) return "显示磁盘占用和分区信息";
     if (strcmp(name, "disk") == 0) return "磁盘查看器别名";
-    if (strcmp(name, "install") == 0) return "显示安装向导或准备 HBFS 分区";
+    if (strcmp(name, "install") == 0) return "显示安装向导或准备 FAT32 分区";
     if (strcmp(name, "setup") == 0) return "安装向导别名";
-    if (strcmp(name, "gui") == 0) return "启动图形文件和磁盘控制面板";
+    if (strcmp(name, "hive") == 0 || strcmp(name, "gui") == 0)
+        return "启动 HIVE 图形桌面";
     if (strcmp(name, "startx") == 0) return "图形控制面板别名";
     return NULL;
 }
@@ -94,11 +96,17 @@ static const char *cmd_detail(const char *name) {
         "  Send a signal to a task by PID.\n"
         "  Default signal is 15 (SIGTERM).\n"
         "  Example: kill 3  kill 5 9\n";
-    if (strcmp(name, "gui") == 0) return
-        "  Start the graphical desktop environment.\n"
+    if (strcmp(name, "hive") == 0 || strcmp(name, "gui") == 0) return
+        "  Start the HIVE desktop environment.\n"
         "  Press ESC or Q to exit back to shell.\n"
         "  Mouse and keyboard supported.\n"
-        "  Example: gui\n";
+        "  Example: hive  (gui/startx remain compatible aliases)\n";
+    if (strcmp(name, "startup") == 0) return
+        "  Set the default boot mode remembered across reboots.\n"
+        "  The very first boot asks once (GUI or Shell) and saves the\n"
+        "  answer to disk; every later boot reuses it without asking.\n"
+        "  Use this command (or the GUI Settings app) to change it later.\n"
+        "  Example: startup hive   startup shell   startup tui\n";
     if (strcmp(name, "writefile") == 0) return
         "  Write text to a file (creates or overwrites).\n"
         "  Example: writefile test.txt hello world\n";

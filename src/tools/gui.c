@@ -34,13 +34,14 @@
  * 打开对应查看器前写入要打开的文件路径 */
 void app_imgview_set_path(gui_state_t *st, const char *path);
 void app_hexview_set_path(gui_state_t *st, const char *path);
-#include "../gui/rtc_tz.h"
+#include "../rtc_tz.h"
 #include "../shell/shell.h"
 #include "tool.h"
 #include "cc.h"
 #include "python.h"
 
 extern void task_yield(void);
+extern uint64_t pit_get_ticks(void);
 extern int hbos_gcc_run_file_capture(const char *path, char *out, uint32_t out_cap);
 extern const char *hbos_gcc_last_error(void);
 extern int hbos_gcc_last_error_line(void);
@@ -1225,7 +1226,7 @@ static uint8_t bcd_to_bin(uint8_t v) {
     return (uint8_t)((v & 0x0f) + ((v >> 4) * 10));
 }
 
-uint8_t cmos_read(uint8_t reg) {
+static uint8_t cmos_read(uint8_t reg) {
     outb(0x70, reg);
     return inb(0x71);
 }
@@ -2281,18 +2282,26 @@ static void note_cursor_vertical(gui_state_t *st, int dir) {
     }
 }
 
-static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
+static void draw_notes_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
     note_load(st);
     int list_w = 150;
     int edit_x = tx + list_w + 18;
     int edit_w = win_w - list_w - 86;
     if (edit_w < 260) edit_w = 260;
+    /* 文件列表框和编辑框的底边跟着 win_h 走（之前固定 222/174，窗口拉高
+     * 也不会多显示内容/多留编辑空间）。win_h - 138 在默认窗口高度 430 下
+     * 正好等于原来硬编码用的 292（ty+292 是两个框原来共同的底边），保证
+     * 默认尺寸下和改动前像素级一致，只有真正调整窗口大小时才会变化。 */
+    int content_bottom_off = win_h - 138;
+    if (content_bottom_off < 200) content_bottom_off = 200;
+    int list_h = content_bottom_off - 70;
+    int edit_h = content_bottom_off - 118;
     text(tx, ty, "记事本", rgb(124, 220, 154), 1);
     text(tx, ty + 40, "选择左侧文件后编辑", rgb(148, 162, 174), 1);
     char line[96];
 
-    vgradient(tx, ty + 70, list_w, 222, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, ty + 70, list_w, 222, rgb(46, 66, 84));
+    vgradient(tx, ty + 70, list_w, list_h, rgb(22, 30, 40), rgb(14, 20, 28));
+    border(tx, ty + 70, list_w, list_h, rgb(46, 66, 84));
     rect(tx, ty + 70, list_w, 1, rgb(58, 86, 110));
     text(tx + 12, ty + 82, "文件", rgb(194, 226, 242), 1);
     rect(tx + 12, ty + 100, list_w - 24, 1, rgb(50, 72, 92));
@@ -2340,10 +2349,10 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     text_clipped(edit_x, ty + 50, edit_x + edit_w,
                  "方向键移动  Ctrl+S 保存  Ctrl+A 全选",
                  rgb(120, 150, 168), 1);
-    vgradient(edit_x, ty + 118, edit_w, 174, rgb(8, 14, 22), rgb(2, 6, 12));
+    vgradient(edit_x, ty + 118, edit_w, edit_h, rgb(8, 14, 22), rgb(2, 6, 12));
     rect(edit_x, ty + 118, edit_w, 1, rgb(28, 56, 36));
-    rect(edit_x, ty + 291, edit_w, 1, rgb(8, 14, 22));
-    border(edit_x, ty + 118, edit_w, 174, rgb(85, 180, 120));
+    rect(edit_x, ty + 118 + edit_h - 1, edit_w, 1, rgb(8, 14, 22));
+    border(edit_x, ty + 118, edit_w, edit_h, rgb(85, 180, 120));
     int x = edit_x + 8;
     int y = ty + 126;
     int cursor_x = x;
@@ -2353,7 +2362,7 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     if (st->note_sel_active) note_sel_range(st, &sel_start, &sel_end);
     utf8_state_t utf8;
     utf8_init(&utf8);
-    for (uint32_t i = 0; i < st->note_len && y < ty + 280; i++) {
+    for (uint32_t i = 0; i < st->note_len && y < ty + content_bottom_off - 12; i++) {
         if (i == st->note_cursor) {
             cursor_x = x;
             cursor_y = y;
@@ -2388,7 +2397,7 @@ static void draw_notes_app(int tx, int ty, int win_w, gui_state_t *st) {
     // 在光标实际位置绘制闪烁竖线光标（每 15 帧切一次显隐，跟控制台/网址栏一致）
     static uint32_t note_caret_ticks = 0;
     note_caret_ticks++;
-    if (cursor_y < ty + 280 && (note_caret_ticks / 15) % 2) {
+    if (cursor_y < ty + content_bottom_off - 12 && (note_caret_ticks / 15) % 2) {
         rect(cursor_x, cursor_y, 2, 14, rgb(124, 220, 154));
     }
 }
@@ -3480,15 +3489,18 @@ void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
  * <img> 现在真的抓取并渲染（PNG/BMP），不再只画 [图片] 占位。固定 4 个槽，
  * 每个一块静态 RGB 缓冲——kfree() 是空操作，不能每次换页堆分配。抓取/解码
  * 在页面加载后统一做（browser_fetch_images），渲染流里 BRK_IMG 块带一个
- * 槽位字节，绘制时命中就贴图、否则退回占位文字。JPEG 仍不支持（没有
- * Huffman/IDCT），遇到就走占位。 */
-#define BR_IMG_SLOTS 5
-#define BR_IMG_MAX_W 560
-#define BR_IMG_MAX_H 360
+ * 槽位字节，绘制时命中就贴图、否则退回占位文字。*/
+/* 每槽 260×200×3 ≈ 152KB；8 槽 ≈ 1.2MB，比原来 5×560×360×3≈2.9MB 省一半以上，
+ * 同时可以展示 4 行 ×2 列 = 8 张视频封面。URL 改写为 240w_180h，解码后
+ * 尺寸不超过 260×200 的上限。 */
+#define BR_IMG_SLOTS 8
+#define BR_IMG_MAX_W 260
+#define BR_IMG_MAX_H 200
+#define BR_IMG_FETCH_MAX 2 /* 每页最多实际拉两张；其余保留占位，避免串行 TLS/软件解码拖住 UI */
 static uint8_t g_br_img_rgb[BR_IMG_SLOTS][BR_IMG_MAX_W * BR_IMG_MAX_H * 3];
 static int g_br_img_w[BR_IMG_SLOTS];
 static int g_br_img_h[BR_IMG_SLOTS];
-static char g_br_img_src[BR_IMG_SLOTS][160];
+static char g_br_img_src[BR_IMG_SLOTS][256]; /* bilibili CDN URL 最长约140字符，留128余量 */
 static int g_br_img_count;
 
 /* 常见 HTML 实体解码成单个字符——共用给 browser_text_from_html（纯文本
@@ -3770,7 +3782,10 @@ typedef struct {
 
 #define CSS_RULE_MAX 96
 typedef struct {
-    char selector[32]; /* "tagname" 或 ".classname" */
+    /* 只保存选择器最右侧的简单复合项，例如 ".card .title:hover" 会规整为
+     * ".title"，"a.video-link" 原样保留。当前渲染器没有 DOM 树，无法判断
+     * 祖先/兄弟关系，但匹配最右项比把现代组合选择器整条丢掉更接近浏览器。 */
+    char selector[64];
     css_decl_t decl;
 } css_rule_t;
 static css_rule_t g_css_rules[CSS_RULE_MAX];
@@ -3788,7 +3803,7 @@ static int css_parse_color(const char *v, uint32_t *out) {
     if (*v == '#') {
         v++;
         int len = 0; while (v[len] && css_hex_digit(v[len]) >= 0) len++;
-        if (len == 6) {
+        if (len == 6 || len == 8) {
             uint32_t val = 0;
             for (int i = 0; i < 6; i++) val = (val << 4) | (uint32_t)css_hex_digit(v[i]);
             *out = val;
@@ -3800,6 +3815,21 @@ static int css_parse_color(const char *v, uint32_t *out) {
             return 1;
         }
         return 0;
+    }
+    /* alpha 目前只能忽略；framebuffer 合成器没有逐元素 alpha 层。 */
+    if ((strncmp(v, "rgb(", 4) == 0 || strncmp(v, "rgba(", 5) == 0)) {
+        const char *p = v + (v[3] == 'a' ? 5 : 4);
+        int comp[3] = {0, 0, 0};
+        for (int i = 0; i < 3; i++) {
+            while (*p == ' ') p++;
+            if (*p < '0' || *p > '9') return 0;
+            while (*p >= '0' && *p <= '9') comp[i] = comp[i] * 10 + (*p++ - '0');
+            if (comp[i] > 255) comp[i] = 255;
+            while (*p == ' ') p++;
+            if (i < 2) { if (*p != ',') return 0; p++; }
+        }
+        *out = ((uint32_t)comp[0] << 16) | ((uint32_t)comp[1] << 8) | (uint32_t)comp[2];
+        return 1;
     }
     static const struct { const char *name; uint32_t val; } named[] = {
         {"black", 0x000000}, {"white", 0xFFFFFF}, {"red", 0xFF3B30}, {"green", 0x34C759},
@@ -3820,6 +3850,102 @@ static int css_parse_color(const char *v, uint32_t *out) {
         }
     }
     return 0;
+}
+
+static int css_is_ident(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '_';
+}
+
+static int css_ci_span_eq(const char *a, uint32_t alen, const char *b, uint32_t blen) {
+    if (alen != blen) return 0;
+    for (uint32_t i = 0; i < alen; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return 0;
+    }
+    return 1;
+}
+
+/* HBOS 暂时没有完整 DOM，因此组合选择器只能取最右侧简单项。这里仍处理
+ * tag.class、多个 class、#id 和 :pseudo/[attr] 后缀，让真实站点的规则不再
+ * 因为一个空格或 :hover 就全部失效。 */
+static uint32_t css_normalize_selector(const char *src, uint32_t len, char *out, uint32_t cap) {
+    while (len && (src[len - 1] == ' ' || src[len - 1] == '\n' ||
+                   src[len - 1] == '\r' || src[len - 1] == '\t')) len--;
+    uint32_t start = 0;
+    int bracket = 0, paren = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        char c = src[i];
+        if (c == '[') bracket++;
+        else if (c == ']' && bracket) bracket--;
+        else if (c == '(') paren++;
+        else if (c == ')' && paren) paren--;
+        else if (!bracket && !paren && (c == ' ' || c == '\t' || c == '\n' ||
+                                         c == '\r' || c == '>' || c == '+' || c == '~')) {
+            while (i + 1 < len && (src[i + 1] == ' ' || src[i + 1] == '\t' ||
+                                   src[i + 1] == '\n' || src[i + 1] == '\r' ||
+                                   src[i + 1] == '>' || src[i + 1] == '+' || src[i + 1] == '~')) i++;
+            start = i + 1;
+        }
+    }
+    uint32_t end = len;
+    bracket = paren = 0;
+    for (uint32_t i = start; i < len; i++) {
+        char c = src[i];
+        if (c == '[' && !paren) { end = i; break; }
+        if (c == ':' && !bracket && !paren) { end = i; break; }
+        if (c == '[') bracket++;
+        else if (c == ']' && bracket) bracket--;
+        else if (c == '(') paren++;
+        else if (c == ')' && paren) paren--;
+    }
+    while (start < end && (src[start] == ' ' || src[start] == '\t')) start++;
+    uint32_t n = end - start;
+    if (!n || n + 1 > cap) return 0;
+    memcpy(out, src + start, n);
+    out[n] = 0;
+    return n;
+}
+
+static int css_token_list_has(const char *list, const char *name, uint32_t name_len) {
+    if (!list || !list[0]) return 0;
+    const char *p = list;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        uint32_t n = 0;
+        while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\n' && p[n] != '\r') n++;
+        if (css_ci_span_eq(p, n, name, name_len)) return 1;
+        p += n;
+    }
+    return 0;
+}
+
+static int css_simple_selector_matches(const char *sel,
+                                       const char *tag_name, int tag_name_len,
+                                       const char *class_val, const char *id_val) {
+    const char *p = sel;
+    if (*p != '.' && *p != '#') {
+        uint32_t n = 0;
+        while (css_is_ident(p[n])) n++;
+        if (n && !css_ci_span_eq(tag_name, (uint32_t)tag_name_len, p, n)) return 0;
+        p += n;
+    }
+    while (*p) {
+        char kind = *p++;
+        if (kind != '.' && kind != '#') return 0;
+        uint32_t n = 0;
+        while (css_is_ident(p[n])) n++;
+        if (!n) return 0;
+        if (kind == '.') {
+            if (!css_token_list_has(class_val, p, n)) return 0;
+        } else {
+            if (!id_val || !css_ci_span_eq(id_val, (uint32_t)strlen(id_val), p, n)) return 0;
+        }
+        p += n;
+    }
+    return 1;
 }
 
 /* 解析一条 "prop:value" 声明，命中的属性写进 *d（没命中的属性名直接
@@ -3933,19 +4059,21 @@ static void css_parse_stylesheet(const char *css, uint32_t len) {
         while (i < len && css[i] != '}') i++;
         uint32_t body_len = i - body_start;
         if (i < len) i++; /* 跳过 '}' */
-        if (sel_len == 0 || sel_len >= sizeof(g_css_rules[0].selector)) continue;
-        /* 只处理单一简单选择器（不支持逗号并列/组合选择器），多个用逗号
-         * 分隔的选择器分别当独立规则处理一遍相同声明。 */
+        if (sel_len == 0) continue;
+        /* 逗号分组先拆再判断每一项长度；之前用整组总长度提前拒绝，三个很短
+         * 的选择器放在一起也经常超过 31 字节而整组失效。 */
         uint32_t part_start = sel_start;
         for (uint32_t k = sel_start; k <= sel_end && g_css_rule_count < CSS_RULE_MAX; k++) {
             if (k == sel_end || css[k] == ',') {
                 uint32_t ps = part_start, pe = k;
                 while (ps < pe && css[ps] == ' ') ps++;
                 while (pe > ps && css[pe - 1] == ' ') pe--;
-                uint32_t plen = pe - ps;
-                if (plen > 0 && plen < sizeof(g_css_rules[0].selector)) {
+                char normalized[sizeof(g_css_rules[0].selector)];
+                uint32_t plen = css_normalize_selector(css + ps, pe - ps,
+                                                        normalized, sizeof(normalized));
+                if (plen > 0) {
                     css_rule_t *r = &g_css_rules[g_css_rule_count++];
-                    memcpy(r->selector, css + ps, plen);
+                    memcpy(r->selector, normalized, plen);
                     r->selector[plen] = 0;
                     css_parse_decls(&r->decl, css + body_start, body_len);
                 }
@@ -3958,27 +4086,14 @@ static void css_parse_stylesheet(const char *css, uint32_t len) {
 /* 给定标签名 + class 属性值，把匹配到的样式表规则和内联 style 合并成
  * 一份声明（内联优先级最高，最后应用）。 */
 static void css_resolve_for_tag(const char *tag_name, int tag_name_len,
-                                 const char *class_val, const char *inline_style,
+                                 const char *class_val, const char *id_val,
+                                 const char *inline_style,
                                  css_decl_t *out) {
     memset(out, 0, sizeof(*out));
     for (int i = 0; i < g_css_rule_count; i++) {
         css_rule_t *r = &g_css_rules[i];
-        int match = 0;
-        if (r->selector[0] == '.') {
-            if (class_val && class_val[0]) {
-                /* class 属性可能是空格分隔的多个 class，逐个比较 */
-                const char *p = class_val;
-                uint32_t sel_len = (uint32_t)strlen(r->selector + 1);
-                while (*p) {
-                    while (*p == ' ') p++;
-                    uint32_t cl = 0; while (p[cl] && p[cl] != ' ') cl++;
-                    if (cl == sel_len && tag_ci_eq(p, (int)cl, r->selector + 1)) { match = 1; break; }
-                    p += cl;
-                }
-            }
-        } else {
-            match = tag_ci_eq(tag_name, tag_name_len, r->selector);
-        }
+        int match = css_simple_selector_matches(r->selector, tag_name, tag_name_len,
+                                                class_val, id_val);
         if (!match) continue;
         if (r->decl.has_color) { out->color = r->decl.color; out->has_color = 1; }
         if (r->decl.has_bold) { out->bold = r->decl.bold; out->has_bold = 1; }
@@ -4049,12 +4164,31 @@ static void br_emit_meta(char *out, uint32_t cap, uint32_t *pos, int link_idx, c
 static char g_browser_page_title[BROWSER_TITLE_CAP];
 static uint32_t g_browser_title_len;
 
+/* OpenGraph meta 标签：bilibili 视频页几乎是纯 CSR，<body> 正文很少；
+ * 但 <head> 里有完整的 og:title/og:description/og:image——把它们提取出来
+ * 作为页面首个区块输出，视频页就不再是空白了。 */
+#define BR_OG_CAP 256
+static char g_br_og_title[BR_OG_CAP];
+static char g_br_og_desc[BR_OG_CAP];
+static char g_br_og_image[BR_OG_CAP]; /* URL，交给 browser_fetch_images 的槽 0 */
+static int  g_br_og_has_image;        /* og:image 是否已登记进图片槽 */
+
 /* 外链样式表：<link rel="stylesheet"> 同步抓取并喂给 css_parse_stylesheet。
  * 每页最多 2 张、单张 ≤64KB——真实站点样式表动辄几百 KB，且大部分是
  * 这个渲染器表达不了的布局规则，抓前两张把颜色/字重这类能用的捞出来
  * 就是收益的大头。 */
 static void browser_fetch_stylesheet(gui_state_t *st, const char *href);
 static int g_br_css_fetches;
+
+static const char *browser_skipped_tag_close(const char *name, int len) {
+    static const char *const tags[] = {
+        "svg", "noscript", "template", "select", "iframe", "canvas", "video", "audio"
+    };
+    for (uint32_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++) {
+        if (tag_ci_eq(name, len, tags[i])) return tags[i];
+    }
+    return 0;
+}
 
 /* 子资源（样式表/图片）抓取预算：页面加载是同步的，受限网络里每个打不通
  * 的 CDN 域名要吃满 DNS+TCP 超时（各约 2 秒），6 个子资源就能把 GUI 冻住
@@ -4066,6 +4200,11 @@ static char g_br_dns_host[BR_SUB_HOSTS][96];
 static uint32_t g_br_dns_ip[BR_SUB_HOSTS];
 static int g_br_dns_n;
 static int g_br_sub_fails;
+static uint64_t g_br_sub_deadline;
+
+static int br_sub_budget_expired(void) {
+    return (int64_t)(pit_get_ticks() - g_br_sub_deadline) >= 0;
+}
 
 static int br_sub_resolve(const char *host, uint32_t *ip, int *cached) {
     if (cached) *cached = 0;
@@ -4136,9 +4275,16 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     g_br_css_fetches = 0;
     g_br_dns_n = 0;
     g_br_sub_fails = 0;
+    /* CSS/图片是可降级内容，整页最多给 15 秒。主体已经抓到后不能因为某个
+     * CDN 不回 TLS record 而永远停在“加载中”。PIT 固定 100Hz。 */
+    g_br_sub_deadline = pit_get_ticks() + 1500;
 
     g_browser_page_title[0] = 0;
     g_browser_title_len = 0;
+    g_br_og_title[0] = 0;
+    g_br_og_desc[0] = 0;
+    g_br_og_image[0] = 0;
+    g_br_og_has_image = 0;
 
 #define BREMIT(c) do { if (pos + 1 < cap) out[pos++] = (char)(c); } while (0)
 /* 收行：只要当前行有内容（前缀已写出，或有 pending 的行内运行分隔符）
@@ -4172,13 +4318,47 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 }
             }
             if (in_style_block && style_buf_len + 1 < sizeof(style_buf)) style_buf[style_buf_len++] = c;
-            if (in_title_block && g_browser_title_len + 1 < sizeof(g_browser_page_title) &&
-                c != '\r' && c != '\n')
-                g_browser_page_title[g_browser_title_len++] = (c == '\t') ? ' ' : c;
+            if (in_title_block) {
+                /* 标题栏同样要过滤字体没有字形的码点（颜文字/假名等），
+                 * 否则标题栏上一堆 '?'（"(゜-゜)つロ" 这种）——逻辑和正文
+                 * 解析那份一致，见上面 gui_font_lookup 那段注释。 */
+                if ((uint8_t)c >= 0xE0 && (uint8_t)c == (uint8_t)html[i]) {
+                    uint8_t b0 = (uint8_t)c;
+                    uint32_t n = (b0 >= 0xF0) ? 4 : 3;
+                    uint32_t cp = b0 & (uint32_t)((n == 4) ? 0x07 : 0x0F);
+                    int valid = 1;
+                    for (uint32_t k = 1; k < n; k++) {
+                        uint8_t bk = (uint8_t)html[i + k];
+                        if ((bk & 0xC0) != 0x80) { valid = 0; break; }
+                        cp = (cp << 6) | (uint32_t)(bk & 0x3F);
+                    }
+                    gui_glyph_t title_gtmp;
+                    if (valid && !gui_font_lookup(cp, &title_gtmp)) {
+                        i += n - 1;
+                        continue;
+                    }
+                }
+                if (g_browser_title_len + 1 < sizeof(g_browser_page_title) && c != '\r' && c != '\n')
+                    g_browser_page_title[g_browser_title_len++] = (c == '\t') ? ' ' : c;
+            }
             continue;
         }
 
         if (c == '<') {
+            /* HTML 注释 <!--...--> 及 Vue SSR 分隔注释 <!--[--><!--]--> ——
+             * 直接跳到 --> 结束符，不输出任何内容。 */
+            if (html[i + 1] == '!' && html[i + 2] == '-' && html[i + 3] == '-') {
+                i += 4;
+                while (html[i] && !(html[i] == '-' && html[i + 1] == '-' && html[i + 2] == '>'))
+                    i++;
+                if (html[i]) i += 2; /* 停在 '>' 上，外层 for 的 i++ 正好跳过它 */
+                continue;
+            }
+            /* <!DOCTYPE ...> 和其他 <!xxx> 声明：跳到 > */
+            if (html[i + 1] == '!') {
+                while (html[i] && html[i] != '>') i++;
+                continue;
+            }
             int closing = (html[i + 1] == '/');
             uint32_t tag_start = i + 1 + (closing ? 1 : 0);
             uint32_t j = tag_start;
@@ -4213,12 +4393,52 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 i = j;
                 continue;
             }
+            /* <svg>：内联矢量图——全是 path/polygon 数据，没有可渲染的文本。
+             * <noscript>：JS 降级 fallback——我们没有 JS 引擎，内容往往是
+             * "请开启 JavaScript" 或 Vue 空壳，渲染出来只增加噪音。
+             * <template>：Vue 3 模板元素，SSR 渲染时残留空壳。
+             * <select>/<option>：下拉框，其文本会混入正文。
+             * <iframe>/<canvas>/<video>/<audio>：无法渲染的媒体/嵌入元素。
+             * 以上都像 script/style 一样整体跳过。 */
+            const char *skipped_close = closing ? 0 : browser_skipped_tag_close(nm, nl);
+            if (skipped_close) {
+                BRFLUSH();
+                skip_mode = 1; in_style_block = 0;
+                skip_close = skipped_close;
+                i = j;
+                continue;
+            }
             if (!closing && tag_ci_eq(nm, nl, "link")) {
                 char relv[24], hrefv[160];
                 if (br_attr_value(html + attr_start, attr_len, "rel", relv, sizeof(relv)) &&
                     tag_ci_eq(relv, (int)strlen(relv), "stylesheet") &&
                     br_attr_value(html + attr_start, attr_len, "href", hrefv, sizeof(hrefv)))
                     browser_fetch_stylesheet(st, hrefv);
+                i = j;
+                continue;
+            }
+            /* <meta property="og:title/description/image" content="...">
+             * bilibili 视频页 <body> 基本是 Vue 空壳，但 <head> 有完整 og: 标签。
+             * 提取后在页面最前插入一个"视频卡片"，视频页不再空白。
+             * 同时处理 <meta name="description"> 作为 og:description 的回退。 */
+            if (!closing && tag_ci_eq(nm, nl, "meta")) {
+                char prop[48], cont[BR_OG_CAP];
+                int has_cont = br_attr_value(html + attr_start, attr_len, "content", cont, sizeof(cont));
+                if (has_cont && cont[0]) {
+                    if (br_attr_value(html + attr_start, attr_len, "property", prop, sizeof(prop))) {
+                        if (tag_ci_eq(prop, (int)strlen(prop), "og:title") && !g_br_og_title[0])
+                            strncpy(g_br_og_title, cont, BR_OG_CAP - 1);
+                        else if (tag_ci_eq(prop, (int)strlen(prop), "og:description") && !g_br_og_desc[0])
+                            strncpy(g_br_og_desc, cont, BR_OG_CAP - 1);
+                        else if (tag_ci_eq(prop, (int)strlen(prop), "og:image") && !g_br_og_image[0])
+                            strncpy(g_br_og_image, cont, BR_OG_CAP - 1);
+                    }
+                    /* name="description" 作为 og:description 回退 */
+                    if (!g_br_og_desc[0] &&
+                        br_attr_value(html + attr_start, attr_len, "name", prop, sizeof(prop)) &&
+                        tag_ci_eq(prop, (int)strlen(prop), "description"))
+                        strncpy(g_br_og_desc, cont, BR_OG_CAP - 1);
+                }
                 i = j;
                 continue;
             }
@@ -4260,7 +4480,8 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                     uint32_t sl0 = (uint32_t)strlen(src);
                     if ((sl0 >= 4 && (tag_ci_eq(src + sl0 - 4, 4, ".svg") ||
                                       tag_ci_eq(src + sl0 - 4, 4, ".gif"))) ||
-                        (sl0 >= 5 && tag_ci_eq(src + sl0 - 5, 5, ".webp")) ||
+                        (sl0 >= 5 && (tag_ci_eq(src + sl0 - 5, 5, ".webp") ||
+                                      tag_ci_eq(src + sl0 - 5, 5, ".avif"))) ||
                         strncmp(src, "data:", 5) == 0)
                         has_src = 0;
                 }
@@ -4376,11 +4597,13 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                     new_style = st_type;
                     do_push = 1;
                     char class_val[64]; class_val[0] = 0;
+                    char id_val[64]; id_val[0] = 0;
                     char style_val[128]; style_val[0] = 0;
                     br_attr_value(html + attr_start, attr_len, "class", class_val, sizeof(class_val));
+                    br_attr_value(html + attr_start, attr_len, "id", id_val, sizeof(id_val));
                     br_attr_value(html + attr_start, attr_len, "style", style_val, sizeof(style_val));
                     css_decl_t resolved;
-                    css_resolve_for_tag(nm, nl, class_val, style_val, &resolved);
+                    css_resolve_for_tag(nm, nl, class_val, id_val, style_val, &resolved);
                     /* 行内标签继承外层样式：<h1>里的<em>保持大字号/加粗，
                      * <p style="color:red">里的<b>保持红色——行内元素现在
                      * 和外层文字排在同一行，字号/颜色突变会非常扎眼。
@@ -4478,9 +4701,12 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
          * 标记，正文里混进原始控制字节会让解码端错位。 */
         if ((unsigned char)ch < 0x20 && ch != '\n' && ch != '\t') continue;
         /* 字体没有的符号类码点整段跳过：私有区图标字（大站图标字体全在
-         * 这）、emoji、零宽字符、变体选择符、杂项符号——不过滤的话每个都
-         * 画成 '?'（百度热榜每行开头的 "?" 就是这么来的）。只在字节确实
-         * 来自原文（不是实体解码产物，那些都是 ASCII）时才做序列判断。 */
+         * 这）、emoji、零宽字符、变体选择符、杂项符号、日文假名等——不过滤
+         * 的话每个都画成 '?'（百度热榜每行开头的 "?"、B 站标题里的颜文字
+         * "(゜-゜)つロ" 都是这么来的）。原先是手工维护的码点区间黑名单，
+         * 挂一漏万；现在直接问字体有没有这个字形，字体是唯一真相源，新站点
+         * 用到黑名单没覆盖的区间不用再补规则。只在字节确实来自原文（不是
+         * 实体解码产物，那些都是 ASCII）时才做序列判断。 */
         if ((uint8_t)ch >= 0xE0 && (uint8_t)ch == (uint8_t)html[i]) {
             uint8_t b0 = (uint8_t)ch;
             uint32_t n = (b0 >= 0xF0) ? 4 : 3;
@@ -4491,10 +4717,8 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 if ((bk & 0xC0) != 0x80) { valid = 0; break; }
                 cp = (cp << 6) | (uint32_t)(bk & 0x3F);
             }
-            if (valid && ((cp >= 0xE000 && cp <= 0xF8FF) || cp >= 0x1F000 ||
-                          (cp >= 0xFE00 && cp <= 0xFE0F) ||
-                          (cp >= 0x200B && cp <= 0x200D) || cp == 0xFEFF ||
-                          (cp >= 0x2600 && cp <= 0x27BF))) {
+            gui_glyph_t br_gtmp;
+            if (valid && !gui_font_lookup(cp, &br_gtmp)) {
                 i += n - 1;
                 continue;
             }
@@ -4676,7 +4900,8 @@ static int br_http_location(const char *buf, char *out, uint32_t cap) {
 }
 
 static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
-    if (g_br_css_fetches >= 2 || g_br_sub_fails >= 4) return;
+    if (g_br_css_fetches >= 2 || g_br_sub_fails >= 4 || br_sub_budget_expired()) return;
+    br_status(st, "正在加载网页样式");
     static char cssbuf[64 * 1024];
     char url[192];
     if (browser_resolve_href(st, href, url, sizeof(url)) < 0) return;
@@ -4685,9 +4910,11 @@ static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
     uint32_t ip = 0; int cached = 0;
     if (br_sub_resolve(host, &ip, &cached) < 0) { if (!cached) g_br_sub_fails++; return; }
     uint32_t len = 0;
-    int ok = https ? tls_https_get(host, ip, port, path, cssbuf, sizeof(cssbuf), &len)
+    int ok = https ? tls_https_get_with_idle_limit(host, ip, port, path,
+                                                    cssbuf, sizeof(cssbuf), &len, 12)
                    : net_http_request("GET", host, ip, port, path, cssbuf, sizeof(cssbuf), &len);
     if (ok < 0) { g_br_sub_fails++; return; }
+    if (br_sub_budget_expired()) return;
     g_br_css_fetches++;
     const char *body = http_body_ptr(cssbuf);
     uint32_t body_off = (uint32_t)(body - cssbuf);
@@ -4695,14 +4922,14 @@ static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
     css_parse_stylesheet(body, len - body_off);
 }
 
-/* 图床变换后缀改写（B 站 hdslb 等）：真实站点的图片 URL 普遍长这样
- *   xxx.jpg@672w_378h_1c_!web-home-common-cover.webp?mirror=1
- * '@' 后面是图床的实时变换参数。把它整个换成 "480w_360h"（等比缩放进
- * 480x360 框），一石三鸟：尺寸落进我们的解码上限、砍掉 .webp/.avif 格式
- * 后缀（图床按源扩展名回退到 baseline JPEG/PNG）、去掉无用的追踪 query。
- * 没有 ".jpg@/.png@" 模式的 URL 原样不动。 */
+/* 图床变换后缀改写（B 站 hdslb 等）：
+ * 1. 有 '@' 参数的 URL（如 xxx.jpg@672w_378h...webp）→ 把 '@' 后整段换成 "240w_180h"
+ * 2. bilibili CDN 直链（i0/i1/i2.hdslb.com，无 '@'）→ 在 URL 末尾追加 "@240w_180h"
+ *    确保 og:image 等绝对路径图片也走图床缩放，不拉全尺寸原图把解码缓冲打爆。
+ * 其他 URL 原样不动。 */
 static void br_img_url_rewrite(char *url, uint32_t cap) {
     uint32_t n = (uint32_t)strlen(url);
+    /* 情形1：有图床转换参数 */
     for (uint32_t i = 4; i + 1 < n; i++) {
         if (url[i] != '@') continue;
         int is_img_ext =
@@ -4710,11 +4937,23 @@ static void br_img_url_rewrite(char *url, uint32_t cap) {
             (i >= 4 && tag_ci_eq(url + i - 4, 4, ".png")) ||
             (i >= 5 && tag_ci_eq(url + i - 5, 5, ".jpeg"));
         if (!is_img_ext) continue;
-        const char *spec = "480w_360h";
+        const char *spec = "240w_180h";
         uint32_t p = i + 1;
         for (const char *q = spec; *q && p + 1 < cap; q++) url[p++] = *q;
         url[p] = 0;
         return;
+    }
+    /* 情形2：bilibili CDN 直链，末尾是 .jpg/.png，没有 '@' — 追加缩放参数 */
+    int is_bili_cdn = (strstr(url, "hdslb.com/") != 0) ||
+                      (strstr(url, "bilibili.com/bfs/") != 0);
+    if (!is_bili_cdn) return;
+    int ends_jpg = (n >= 4 && tag_ci_eq(url + n - 4, 4, ".jpg")) ||
+                   (n >= 5 && tag_ci_eq(url + n - 5, 5, ".jpeg"));
+    int ends_png = (n >= 4 && tag_ci_eq(url + n - 4, 4, ".png"));
+    if ((ends_jpg || ends_png) && n + 10 < cap) {
+        const char *spec = "@240w_180h";
+        for (const char *q = spec; *q; q++) url[n++] = *q;
+        url[n] = 0;
     }
 }
 
@@ -4723,10 +4962,11 @@ static void br_img_url_rewrite(char *url, uint32_t cap) {
  * 等不支持的就把该槽宽高留 0，绘制端画占位。 */
 static void browser_fetch_images(gui_state_t *st) {
     static uint8_t imgresp[BROWSER_FETCH_CAP];
-    for (int s = 0; s < g_br_img_count && s < BR_IMG_SLOTS; s++) {
+    for (int s = 0; s < g_br_img_count && s < BR_IMG_FETCH_MAX; s++) {
         g_br_img_w[s] = 0; g_br_img_h[s] = 0;
-        if (g_br_sub_fails >= 4) continue; /* 预算耗尽：余下图片直接占位 */
-        char url[192];
+        if (g_br_sub_fails >= BR_IMG_SLOTS || br_sub_budget_expired()) continue;
+        br_status(st, "正在加载网页图片");
+        char url[256];
         if (browser_resolve_href(st, g_br_img_src[s], url, sizeof(url)) < 0) continue;
         br_img_url_rewrite(url, sizeof(url));
         int https = 0; char host[96]; const char *path = "/"; uint16_t port = 80;
@@ -4734,15 +4974,21 @@ static void browser_fetch_images(gui_state_t *st) {
         uint32_t ip = 0; int cached = 0;
         if (br_sub_resolve(host, &ip, &cached) < 0) { if (!cached) g_br_sub_fails++; continue; }
         uint32_t len = 0;
-        int ok = https ? tls_https_get(host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len)
+        int ok = https ? tls_https_get_with_idle_limit(host, ip, port, path,
+                                                        (char *)imgresp, sizeof(imgresp), &len, 12)
                        : net_http_request("GET", host, ip, port, path, (char *)imgresp, sizeof(imgresp), &len);
         if (ok < 0) { g_br_sub_fails++; continue; }
+        if (br_sub_budget_expired()) continue;
         const char *body = http_body_ptr((char *)imgresp);
         uint32_t body_off = (uint32_t)((const uint8_t *)body - imgresp);
         if (body_off >= len) continue;
         uint32_t blen = len - body_off;
+        /* 大图即使最终像素尺寸合规，软件 JPEG/PNG 解码也可能长时间占用协作式
+         * 调度器。CDN 缩略图正常远小于 256KB，超过就降级为占位。 */
+        if (blen > 256 * 1024) continue;
         const uint8_t *b = (const uint8_t *)body;
         int w = 0, h = 0, dok;
+        br_status(st, "正在解码网页图片");
         if (blen >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G')
             dok = png_decode(b, blen, g_br_img_rgb[s], sizeof(g_br_img_rgb[s]),
                              BR_IMG_MAX_W, BR_IMG_MAX_H, &w, &h);
@@ -4825,7 +5071,49 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     const char *body = http_body_ptr(response);
     browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
     browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
-    browser_fetch_images(st); /* 渲染登记了图片 src，这里逐张抓取解码 */
+    /* og 卡片：视频页（和其他 CSR 页面）body 几乎是空的，但 <head> 里有
+     * og:title/og:description/og:image。若解析后正文很少，就把 og 信息作为
+     * "视频卡片"插到渲染缓冲最前——用 memmove 挪出头部空间，写入一个
+     * H2（标题）+ P（描述）+ 可选 IMG 块。 */
+    if (g_br_og_title[0] && st->browser_render_len < 800) {
+        static char og_card[512];
+        uint32_t cp = 0;
+#define OGBYTE(c) do { if (cp + 1 < sizeof(og_card)) og_card[cp++] = (char)(c); } while (0)
+#define OGSTR(s)  do { for (const char *_p = (s); *_p; _p++) OGBYTE(*_p); } while (0)
+        /* og:image → 先占一个图片槽（如果还有空槽且 og:image URL 有效） */
+        if (g_br_og_image[0] && g_br_img_count < BR_IMG_SLOTS && !g_br_og_has_image) {
+            int s = g_br_img_count++;
+            uint32_t sl = (uint32_t)strlen(g_br_og_image);
+            if (sl >= sizeof(g_br_img_src[0])) sl = sizeof(g_br_img_src[0]) - 1;
+            memcpy(g_br_img_src[s], g_br_og_image, sl);
+            g_br_img_src[s][sl] = 0;
+            g_br_og_has_image = 1;
+            /* 插入一个 BRK_IMG 块（槽 0x10|s） */
+            OGBYTE(BRK_IMG); OGBYTE((char)(0x10 | (s + 1))); OGBYTE('\n');
+        }
+        /* H2 = 视频标题 */
+        OGBYTE(BRK_H2);
+        OGSTR(g_br_og_title);
+        OGBYTE('\n');
+        /* P = 描述（若有） */
+        if (g_br_og_desc[0]) {
+            OGBYTE(BRK_P);
+            OGSTR(g_br_og_desc);
+            OGBYTE('\n');
+        }
+        OGBYTE(BRK_HR); OGBYTE('\n');
+#undef OGBYTE
+#undef OGSTR
+        og_card[cp] = 0;
+        /* 把 og_card 插到 browser_render 最前面 */
+        uint32_t rem = st->browser_render_len;
+        if (cp + rem + 1 <= BROWSER_PAGE_CAP) {
+            memmove(st->browser_render + cp, st->browser_render, rem + 1);
+            memcpy(st->browser_render, og_card, cp);
+            st->browser_render_len += cp;
+        }
+    }
+    browser_fetch_images(st); /* 渲染登记了图片 src（含 og:image 占的槽），逐张抓取解码 */
     st->browser_scroll = 0;
     if (strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
         br_status(st, "浏览器加载完成");
@@ -4843,8 +5131,20 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     }
 }
 
+/* browser_load_internal 的后台任务包装。task_create 的入口必须是
+ * void (*)(void*)，这里把 gui_state_t* 通过 arg 传入。加载完成后
+ * 清 browser_loading 标志——协作式调度不存在写-写竞争。 */
+static void browser_fetch_bg(void *arg) {
+    gui_state_t *st = (gui_state_t *)arg;
+    browser_load_internal(st, st->browser_push_hist);
+    st->browser_loading = 0;
+}
+
 static void browser_load(gui_state_t *st) {
-    browser_load_internal(st, 1);
+    if (st->browser_loading) return; /* 上一次加载还没结束，忽略本次请求 */
+    st->browser_loading = 1;
+    st->browser_push_hist = 1;
+    st->browser_load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
 }
 
 /* 解析 <a href> 目标：绝对 URL（含 scheme）原样用；"/xxx" 相对当前页面
@@ -4907,21 +5207,27 @@ static void browser_navigate(gui_state_t *st, const char *url) {
 }
 
 static void browser_go_back(gui_state_t *st) {
+    if (st->browser_loading) return;
     if (st->browser_hist_pos <= 0) { st->status = "没有更早的页面"; return; }
     st->browser_hist_pos--;
     strncpy(st->browser_url, st->browser_hist[st->browser_hist_pos], BROWSER_URL_CAP - 1);
     st->browser_url[BROWSER_URL_CAP - 1] = 0;
     st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
-    browser_load_internal(st, 0);
+    st->browser_loading = 1;
+    st->browser_push_hist = 0;
+    st->browser_load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
 }
 
 static void browser_go_forward(gui_state_t *st) {
+    if (st->browser_loading) return;
     if (st->browser_hist_pos + 1 >= st->browser_hist_count) { st->status = "没有更新的页面"; return; }
     st->browser_hist_pos++;
     strncpy(st->browser_url, st->browser_hist[st->browser_hist_pos], BROWSER_URL_CAP - 1);
     st->browser_url[BROWSER_URL_CAP - 1] = 0;
     st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
-    browser_load_internal(st, 0);
+    st->browser_loading = 1;
+    st->browser_push_hist = 0;
+    st->browser_load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
 }
 
 static void browser_save_page(gui_state_t *st) {
@@ -5365,11 +5671,46 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
         if (type == BRK_CODE && i < len && (unsigned char)buf[i] == BRK_CODE)
             for (int r = 0; r < nrun; r++) runs[r].bs.gap_after = 0;
         if (type == BRK_IMG) {
-            /* 首字节是 0x10|slot；有解码好的图就贴图，否则退回占位文字。 */
+            /* 首字节是 0x10|slot；有解码好的图就贴图，否则退回占位文字。
+             * 2列布局：如果紧随其后还有一个 BRK_IMG 块，把两张图并排渲染
+             * （各占约半列宽），让 bilibili 视频卡片看起来像网格而非竖列。 */
             int slot = (runs[0].len > 0) ? ((unsigned char)buf[runs[0].start] & 0x0f) : 0;
             uint32_t alt_start = runs[0].start + (runs[0].len > 0 ? 1 : 0);
             uint32_t alt_len = (runs[0].len > 0) ? runs[0].len - 1 : 0;
-            if (slot >= 1 && slot <= BR_IMG_SLOTS && g_br_img_w[slot - 1] > 0) {
+
+            /* 提前看下一块是否也是 BRK_IMG（peek ahead） */
+            int slot2 = 0;
+            uint32_t next_blk = i; /* i 现在指向 '\n' 后的下一块起始 */
+            if (next_blk < len && (unsigned char)buf[next_blk] == BRK_IMG) {
+                /* 解析下一块的 slot */
+                uint32_t ni = next_blk + 1;
+                /* 跳过 meta 字节（br_read_style 会消耗1或多字节，但 IMG 块只有 0x10|slot） */
+                if (ni < len) slot2 = (unsigned char)buf[ni] & 0x0f;
+            }
+
+            int has_img1 = (slot >= 1 && slot <= BR_IMG_SLOTS && g_br_img_w[slot - 1] > 0);
+            int has_img2 = (slot2 >= 1 && slot2 <= BR_IMG_SLOTS && g_br_img_w[slot2 - 1] > 0);
+
+            if (has_img1 && has_img2) {
+                /* 并排：各占 (w-12)/2 宽，中间留 4px 间距 */
+                int col_w = (w - 12) / 2;
+                int iw1 = g_br_img_w[slot - 1],  ih1 = g_br_img_h[slot - 1];
+                int iw2 = g_br_img_w[slot2 - 1], ih2 = g_br_img_h[slot2 - 1];
+                int row_h = ih1 > ih2 ? ih1 : ih2; /* 行高取两图中较高者 */
+                int img_rows = (row_h + rh - 1) / rh;
+                if (row_unit >= scroll && drawn_rows < max_lines) {
+                    /* clip_w/clip_h 是裁切区域的宽高，不是右边缘坐标 */
+                    gui_blit_rgb888(x + 4,         cy, g_br_img_rgb[slot - 1],  iw1, ih1, x,             y, col_w, h);
+                    gui_blit_rgb888(x + col_w + 8, cy, g_br_img_rgb[slot2 - 1], iw2, ih2, x + col_w + 8, y, col_w, h);
+                    cy += row_h;
+                    drawn_rows += img_rows;
+                }
+                row_unit += img_rows + 1;
+                /* 跳过第二个 BRK_IMG 块（把 i 推到它末尾的 '\n' 之后） */
+                i = next_blk + 1; /* 指向第二块的 slot 字节 */
+                while (i < len && buf[i] != '\n') i++;
+                if (i < len) i++; /* 跳过 '\n' */
+            } else if (has_img1) {
                 int iw = g_br_img_w[slot - 1], ih = g_br_img_h[slot - 1];
                 int img_rows = (ih + rh - 1) / rh;
                 if (row_unit >= scroll && drawn_rows < max_lines) {
@@ -5379,7 +5720,7 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
                 }
                 row_unit += img_rows;
                 if (row_unit >= scroll && drawn_rows < max_lines) { cy += rh; drawn_rows++; }
-                row_unit++; /* 图后留一行 */
+                row_unit++;
             } else {
                 browser_style_t ph;
                 browser_style_get(BRK_IMG, &ph);
@@ -5488,7 +5829,25 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     int can_fwd  = st->browser_hist_pos + 1 < st->browser_hist_count;
     br_icon_arrow(tx + BR_BACK_CX, ty + BR_BTN_CY, -1, can_back ? icon_col : icon_dis);
     br_icon_arrow(tx + BR_FWD_CX, ty + BR_BTN_CY, 1, can_fwd ? icon_col : icon_dis);
-    br_icon_reload(tx + BR_RELOAD_CX, ty + BR_BTN_CY, icon_col, tool_bg);
+    /* 加载中时旋转动画替代重载图标，用8帧弧段表示旋转进度 */
+    if (st->browser_loading) {
+        static uint32_t spin_tick = 0;
+        spin_tick++;
+        int frame = (int)(spin_tick / 4) % 8;
+        int cx = tx + BR_RELOAD_CX, cy = ty + BR_BTN_CY;
+        /* 8个点均匀分布在圆周上，亮度递减 */
+        for (int k = 0; k < 8; k++) {
+            int angle_k = (k + frame) % 8; /* 相对亮度：angle_k==7最亮 */
+            int brightness = 60 + angle_k * 24;
+            uint32_t col = rgb(brightness, brightness, brightness);
+            /* 用整数近似 sin/cos：8方向 */
+            static const int dx8[8] = {0, 5, 7, 5, 0, -5, -7, -5};
+            static const int dy8[8] = {-7, -5, 0, 5, 7, 5, 0, -5};
+            rect(cx + dx8[k]/2 - 1, cy + dy8[k]/2 - 1, 2, 2, col);
+        }
+    } else {
+        br_icon_reload(tx + BR_RELOAD_CX, ty + BR_BTN_CY, icon_col, tool_bg);
+    }
     /* 右侧 ⋮ 菜单点（装饰） */
     for (int i = 0; i < 3; i++)
         rect(wx + ww - 18, ty + BR_TAB_H + BR_TOOL_H / 2 - 5 + i * 4, 2, 2, icon_col);
@@ -5631,7 +5990,7 @@ static void draw_panel_window(int tx, int ty, int win_w, int win_h, int w, int h
 
 static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state_t *st, int mode) {
     if (gui_app_draw(st, mode, tx, ty, win_w, win_h)) return;
-    if (mode == GUI_APP_NOTES) draw_notes_app(tx, ty, win_w, st);
+    if (mode == GUI_APP_NOTES) draw_notes_app(tx, ty, win_w, win_h, st);
     else if (mode == GUI_APP_UWC) draw_uwc_app(tx, ty, st);
     else if (mode == GUI_APP_SNAKE) draw_snake_app(tx, ty, st);
     else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, win_h, st);
@@ -6641,14 +7000,18 @@ static int hit_note_editor(int w, int h, gui_state_t *st, int mx, int my, uint32
 
     int win_x, win_y, win_w, win_h;
     gui_window_metrics(st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    (void)win_h;
     int tx = win_x + 30;
     int ty = win_y + 42;
     int list_w = 150;
     int edit_x = tx + list_w + 18;
     int edit_w = win_w - list_w - 86;
     if (edit_w < 260) edit_w = 260;
-    if (mx < edit_x || mx >= edit_x + edit_w || my < ty + 118 || my >= ty + 291)
+    /* 和 draw_notes_app 里的 content_bottom_off 用同一个公式：编辑框底边
+     * 跟着窗口高度变化，命中测试必须跟渲染算的是同一条边界，否则窗口
+     * 拉高之后点击位置和光标显示的地方会对不上。 */
+    int content_bottom_off = win_h - 138;
+    if (content_bottom_off < 200) content_bottom_off = 200;
+    if (mx < edit_x || mx >= edit_x + edit_w || my < ty + 118 || my >= ty + content_bottom_off - 1)
         return 0;
 
     int x = edit_x + 8;
@@ -6656,7 +7019,7 @@ static int hit_note_editor(int w, int h, gui_state_t *st, int mx, int my, uint32
     utf8_state_t utf8;
     utf8_init(&utf8);
     uint32_t i;
-    for (i = 0; i < st->note_len && y < ty + 280; i++) {
+    for (i = 0; i < st->note_len && y < ty + content_bottom_off - 12; i++) {
         int row_top = y, row_bot = y + 18;
         if (st->note_buf[i] == '\n') {
             if (my >= row_top && my < row_bot) { if (off) *off = i; return 1; }
@@ -7799,7 +8162,7 @@ static void draw_splash_window(int w, int h, int ticks, int light) {
     fill_round_rect(bx, by, 48, 48, 8, accent, RR_ALL);
     draw_hbos_logo(bx + 12, by + 12, 24, rgb(255, 255, 255));
 
-    text(sx + 82, sy + title_h + 22, "HBOS 图形桌面", tcol, 1);
+    text(sx + 82, sy + title_h + 22, "HIVE 桌面环境", tcol, 1);
     text(sx + 82, sy + title_h + 44, "64 位 x86_64 · BIOS / UEFI 双启动", scol, 1);
     text(sx + 82, sy + title_h + 64, "并发多窗口 · 协作式多任务", scol, 1);
 
@@ -7848,9 +8211,6 @@ static void draw_toast(int w, int h, gui_state_t *st) {
 }
 
 static void cmd_gui(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-
     fb_info_t fb;
     if (fb_get_info(&fb) < 0) {
         console_puts("gui: 需要 framebuffer 模式\n");
@@ -7897,6 +8257,8 @@ static void cmd_gui(int argc, char **argv) {
     int drag_pending = 0;
     int appwin_drag = -1;        /* 正在拖动的应用窗口 id（winsrv） */
     int appwin_drag_dx = 0, appwin_drag_dy = 0;
+    int appwin_mouse_capture = -1; /* 内容区按下后持续接收移动与松开 */
+    int appwin_mouse_hover = -1;   /* 上次收到悬停事件的应用窗口 */
     int resizing_window = -1;
     int resize_edge = WM_EDGE_NONE;
     int resize_orig_x = 0, resize_orig_y = 0, resize_orig_w = 0, resize_orig_h = 0;
@@ -7935,7 +8297,7 @@ static void cmd_gui(int argc, char **argv) {
     st.console_line_count = 0;
     st.console_cursor = 0;
     st.console_history_idx = -1;
-    console_append_history(&st, "Welcome to HBOS Cyber Console!");
+    console_append_history(&st, "Welcome to the HIVE Console!");
     console_append_history(&st, "Type 'help' to view available commands.");
     wm_set_panel_title(PANEL_FILES, "文件管理器");
     wm_set_panel_title(PANEL_DISK, "磁盘管理器");
@@ -7968,6 +8330,18 @@ static void cmd_gui(int argc, char **argv) {
         gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
     } else {
         st.status = "图形缓冲分配失败";
+    }
+
+    /* gui <url>：跳过桌面直接打开浏览器并加载，方便脚本化验证（截图/
+     * 自动化测试），不影响正常无参数启动。 */
+    if (argc > 1 && argv[1][0]) {
+        if (gui_open_window(&st, WM_WIN_APP, GUI_APP_BROWSER, 0) >= 0) {
+            browser_init(&st);
+            strncpy(st.browser_url, argv[1], BROWSER_URL_CAP - 1);
+            st.browser_url[BROWSER_URL_CAP - 1] = 0;
+            st.browser_url_cursor = (uint32_t)strlen(st.browser_url);
+            browser_load(&st);
+        }
     }
 
     st.splash_ticks = 90;
@@ -8027,6 +8401,15 @@ static void cmd_gui(int argc, char **argv) {
         /* F5: force a full desktop repaint (manual refresh). */
         if (key == KB_KEY_F5) {
             st.status = "桌面已刷新";
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
+        /* F9: force-maximize the active window. Debug/testing aid — lets
+         * scripted QEMU tests (monitor `sendkey f9`) toggle maximize
+         * without relying on flaky QMP mouse double-click coordinates. */
+        if (key == KB_KEY_F9) {
+            if (st.wm.active_window >= 0) wm_toggle_maximize(&st.wm, st.wm.active_window);
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
@@ -8153,6 +8536,44 @@ static void cmd_gui(int argc, char **argv) {
             }
 
             if (st.splash_ticks > 0) goto skip_input;
+
+            /* HIVE 窗口鼠标语义：除了按下，还发送移动、拖动和松开。按下后由
+             * 内容窗口捕获指针，即使移出窗口也能收到松开，控件才不会卡在
+             * pressed 状态。离开窗口时用 (-1,-1) 通知旧悬停目标。 */
+            int appwin_left_pressed = left_down && !(last_buttons & 1);
+            if (!appwin_left_pressed) {
+                int target = -1;
+                winsrv_window_t *target_win = 0;
+                if (appwin_mouse_capture >= 0) {
+                    target_win = winsrv_get(appwin_mouse_capture);
+                    if (target_win) target = appwin_mouse_capture;
+                    else appwin_mouse_capture = -1;
+                }
+                if (target < 0) {
+                    for (int i = WINSRV_MAX - 1; i >= 0; i--) {
+                        winsrv_window_t *candidate = winsrv_get(i);
+                        if (!candidate) continue;
+                        if (mx >= candidate->x && mx < candidate->x + candidate->w &&
+                            my >= candidate->y && my < candidate->y + candidate->h) {
+                            target = i;
+                            target_win = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (appwin_mouse_hover >= 0 && appwin_mouse_hover != target) {
+                    winsrv_window_t *old_hover = winsrv_get(appwin_mouse_hover);
+                    if (old_hover)
+                        winsrv_push_event(old_hover, WINEV_MOUSE, -1, -1, st.buttons);
+                }
+                if (target_win) {
+                    winsrv_push_event(target_win, WINEV_MOUSE,
+                                      mx - target_win->x, my - target_win->y,
+                                      st.buttons);
+                }
+                appwin_mouse_hover = target;
+                if (!left_down) appwin_mouse_capture = -1;
+            }
 
             /* 亮度滑杆拖动：鼠标持续按住时跟随水平位置更新 */
             if (brightness_dragging) {
@@ -8389,6 +8810,8 @@ static void cmd_gui(int argc, char **argv) {
                         appwin_hit = 1;
                     } else if (mx >= win->x && mx < win->x + win->w &&
                                my >= win->y && my < win->y + win->h) { /* 内容→鼠标事件 */
+                        appwin_mouse_capture = i;
+                        appwin_mouse_hover = i;
                         winsrv_push_event(win, WINEV_MOUSE,
                                           mx - win->x, my - win->y, st.buttons);
                         appwin_hit = 1;
@@ -8847,21 +9270,34 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         frame_tick++;
+        /* 后台浏览器加载：任务结束后触发一帧重绘（让新内容显示出来） */
+        if (st.browser_loading) {
+            const task_t *bt = task_get_by_id(st.browser_load_tid);
+            if (!bt || bt->state == TASK_TERMINATED) {
+                if (st.browser_loading) st.browser_loading = 0; /* 防止 task_create 失败时的 loading */
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            } else {
+                /* 加载中：每帧刷新旋转动画，然后让出 CPU */
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            }
+        }
         task_yield();
-        usleep(15000); // Throttle GUI loop to ~60 FPS to prevent 100% CPU busy-looping
     }
 
     gui_set_surface(0, 0, 0, 0);
     if (surface_phys) pmm_free_blocks(surface_phys, surface_pages);
     mouse_shutdown();
     console_reset_terminal();
-    console_puts("gui: 已返回 shell\n");
+    console_puts("HIVE: 已返回 shell\n");
 }
 
 void tool_gui_init(void) {
     static const command_t cmds[] = {
-        {"gui", CMD_GROUP_GRAPHICS, "Start graphical control panel", "gui", cmd_gui},
-        {"startx", CMD_GROUP_GRAPHICS, "Start graphical control panel", "startx", cmd_gui},
+        {"hive", CMD_GROUP_GRAPHICS, "Start HIVE desktop", "hive", cmd_gui},
+        {"gui", CMD_GROUP_GRAPHICS, "Start HIVE desktop", "gui", cmd_gui},
+        {"startx", CMD_GROUP_GRAPHICS, "Start HIVE desktop", "startx", cmd_gui},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

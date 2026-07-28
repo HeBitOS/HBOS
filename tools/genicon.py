@@ -25,7 +25,7 @@ import os
 import struct
 import sys
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 TILE = 64          # baked tile size
 SS = 4             # supersample factor for anti-aliasing
@@ -33,6 +33,7 @@ BIG = TILE * SS
 RAD = 14 * SS      # rounded-corner radius on the big canvas
 
 WHITE = (255, 255, 255, 255)
+GUI_FONT_PATH = "fonts/HarmonyOS_Sans_SC_Regular.ttf"  # only the "Ctrl" glyph needs real text
 
 # Icon ids — MUST match the ICON_* enum in src/tools/gui.c (same order).
 # (name, background RGB, glyph-drawing function name)
@@ -136,6 +137,68 @@ def g_clock(d):
     d.line([cx, cy, cx + 12 * SS, cy], fill=WHITE, width=4 * SS)  # minute hand right
 
 
+def g_shortcuts(d):
+    """Keyboard-key glyph for the Shortcuts app (per user-supplied reference):
+    light-blue key face with a gray border, bold 'Ctrl' label + underline, and
+    a dark-blue keycap-bottom strip. Unlike the other glyphs this one needs
+    real colors (not just WHITE on the shared bg), since the key face itself
+    carries most of the color contrast in the reference image."""
+    key_x0, key_y0 = 21 * SS, 15 * SS
+    key_x1, key_y1 = 43 * SS, 47 * SS
+    border_w = 3 * SS
+
+    light_blue = (0, 174, 219, 255)
+    gray = (140, 140, 140, 255)
+    dark_blue = (52, 73, 209, 255)
+    black = (10, 10, 10, 255)
+
+    d.rectangle([key_x0, key_y0, key_x1, key_y1], fill=light_blue,
+                outline=gray, width=border_w)
+
+    strip_h = 6 * SS
+    d.rectangle([key_x0 + border_w, key_y1 - strip_h, key_x1 - border_w, key_y1 - border_w // 2],
+                fill=dark_blue)
+
+    font = ImageFont.truetype(GUI_FONT_PATH, 9 * SS)
+    label = "Ctrl"
+    stroke = SS // 2
+    bbox = d.textbbox((0, 0), label, font=font, stroke_width=stroke)
+    tw = bbox[2] - bbox[0]
+    tx = key_x0 + ((key_x1 - key_x0) - tw) // 2 - bbox[0]
+    ty = key_y0 + 5 * SS
+    d.text((tx, ty), label, font=font, fill=black, stroke_width=stroke, stroke_fill=black)
+
+    uy = ty + (bbox[3] - bbox[1]) + 5 * SS
+    d.line([key_x0 + 5 * SS, uy, key_x1 - 5 * SS, uy], fill=black, width=SS)
+
+
+def g_folder_row(d):
+    """Self-contained two-tone folder glyph (orange tab + yellow body, black
+    outline, transparent canvas — no shared rounded-square backdrop) per
+    user-supplied reference. Used for directory rows in the File Manager's
+    file list/detail panes, blitted directly at row size instead of the flat
+    color-rect placeholder."""
+    bw = 4 * SS
+    black = (20, 20, 20, 255)
+    yellow = (255, 202, 40, 255)
+    orange = (243, 146, 44, 255)
+
+    body_o = [6 * SS, 19 * SS, 58 * SS, 55 * SS]
+    tab_o  = [6 * SS, 10 * SS, 32 * SS, 23 * SS]
+
+    d.rounded_rectangle(body_o, radius=6 * SS, fill=black)
+    d.rounded_rectangle(tab_o, radius=5 * SS, fill=black)
+    d.rectangle([6 * SS, 15 * SS, 32 * SS, 23 * SS], fill=black)
+
+    body_i = [body_o[0] + bw, body_o[1] + bw, body_o[2] - bw, body_o[3] - bw]
+    d.rounded_rectangle(body_i, radius=4 * SS, fill=yellow)
+
+    seam_y = body_o[1] + bw
+    tab_i = [tab_o[0] + bw, tab_o[1] + bw, tab_o[2] - bw, seam_y - 2 * SS]
+    d.rounded_rectangle(tab_i, radius=3 * SS, fill=orange)
+    d.rectangle([tab_i[0], seam_y - 2 * SS, tab_i[2], seam_y], fill=orange)
+
+
 # Order defines the integer id used by the kernel.
 ICONS = [
     ("files",   (245, 196, 60),  g_folder),
@@ -150,13 +213,16 @@ ICONS = [
     ("code",    (142, 68, 173),  g_code),
     ("term",    (45, 52, 64),    g_term),
     ("clock",   (231, 76, 60),   g_clock),
+    ("shortcuts", (39, 174, 96), g_shortcuts),
+    ("folder_row", None, g_folder_row),
 ]
 
 
 def render_icon(color, glyph):
     img = Image.new("RGBA", (BIG, BIG), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    bg(d, color)
+    if color is not None:
+        bg(d, color)
     glyph(d)
     return img.resize((TILE, TILE), Image.LANCZOS)
 

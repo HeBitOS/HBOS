@@ -2,8 +2,16 @@ CC = gcc
 AS = nasm
 LD = ld
 
-BUILD_DIR = build
+BUILD_DIR ?= build
 SRC_DIR = src
+APP_DIR ?= app
+
+# 可拆分构建开关：
+#   HBOS_ENABLE_GUI=0   不链接桌面、窗口管理器和 GUI 内置应用
+#   HBOS_BUNDLE_APPS=0  不链接注册式应用，并生成空 HAX 清单
+HBOS_ENABLE_GUI ?= 1
+HBOS_BUNDLE_APPS ?= 1
+NOGUI_BUILD_DIR ?= build-nogui
 
 # ── 版本命名规则 ────────────────────────────────────────────────
 #   完整版本号:  v<MAJOR>.<MINOR>-beta<BETA>-pre<PRE>   例: v0.1-beta4-pre4
@@ -127,9 +135,10 @@ QEMU_IMG ?= qemu-img
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
          -O2 -Wall -Wextra -MMD -MP \
-         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_DIR)/gui -I$(SRC_DIR)/user
+         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_DIR)/gui -I$(SRC_DIR)/user \
+         -DHBOS_ENABLE_GUI=$(HBOS_ENABLE_GUI) -DHBOS_BUNDLE_APPS=$(HBOS_BUNDLE_APPS)
 
-ASFLAGS = -f elf64
+ASFLAGS = -f elf64 -DHBOS_BUILD_DIR='"$(BUILD_DIR)"'
 LDFLAGS_BIOS = -m elf_x86_64 -static -Bsymbolic -nostdlib -T linker_bios.ld
 
 QEMU = /usr/bin/qemu-system-x86_64
@@ -151,8 +160,13 @@ GUI_WALL_BIN = $(BUILD_DIR)/gui_wall.bin
 # Flat anti-aliased GUI icons. Designs live in tools/genicon.py.
 GUI_ICON_BIN = $(BUILD_DIR)/gui_icons.bin
 
-# 所有 C 源文件
+# 注册式内建应用与 .hax 应用使用同一总开关。关闭时内核仍保留应用加载 ABI，
+# 但不反向依赖任何具体应用实现。
+ifeq ($(HBOS_BUNDLE_APPS),1)
 APP_SRCS = $(wildcard $(SRC_DIR)/apps/*.c)
+else
+APP_SRCS =
+endif
 
 C_SRCS = \
 	$(SRC_DIR)/kernel.c \
@@ -188,9 +202,6 @@ C_SRCS = \
 	$(SRC_DIR)/tty.c \
 	$(SRC_DIR)/graphics/graphics.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
-	$(SRC_DIR)/graphics/gui_font.c \
-	$(SRC_DIR)/graphics/gui_wall.c \
-	$(SRC_DIR)/graphics/gui_icons.c \
 	$(SRC_DIR)/input/mouse.c \
 	$(SRC_DIR)/shell/shell.c \
 	$(SRC_DIR)/core/task.c \
@@ -198,6 +209,7 @@ C_SRCS = \
 	$(SRC_DIR)/lib/string.c \
 	$(SRC_DIR)/crypto/sha256.c \
 	$(SRC_DIR)/crypto/x25519.c \
+	$(SRC_DIR)/crypto/p256.c \
 	$(SRC_DIR)/crypto/chacha20_poly1305.c \
 	$(SRC_DIR)/crypto/aes_gcm.c \
 	$(SRC_DIR)/user/app_runtime.c \
@@ -213,19 +225,27 @@ C_SRCS = \
 	$(SRC_DIR)/tools/ata.c \
 	$(SRC_DIR)/tools/disk.c \
 	$(SRC_DIR)/tools/net.c \
-	$(SRC_DIR)/tools/gui.c \
 	$(SRC_DIR)/tools/editor.c \
 	$(SRC_DIR)/tools/cc.c \
 	$(SRC_DIR)/tools/python.c \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/tools/tcc_runtime_seed.c \
 	$(SRC_DIR)/tools/audio.c \
+	$(SRC_DIR)/rtc_tz.c \
+	$(APP_SRCS)
+
+GUI_C_SRCS = \
+	$(SRC_DIR)/gpu.c \
+	$(SRC_DIR)/graphics/gui_font.c \
+	$(SRC_DIR)/graphics/gui_wall.c \
+	$(SRC_DIR)/graphics/gui_icons.c \
+	$(SRC_DIR)/tools/gui.c \
+	$(SRC_DIR)/gui/service.c \
 	$(SRC_DIR)/gui/wm.c \
 	$(SRC_DIR)/gui/winsrv.c \
 	$(SRC_DIR)/gui/compositor.c \
 	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gui/gui_dirty.c \
-	$(SRC_DIR)/gui/rtc_tz.c \
 	$(SRC_DIR)/gui/gui_apps.c \
 	$(SRC_DIR)/gui/apps/app_calc.c \
 	$(SRC_DIR)/gui/apps/app_clock.c \
@@ -234,9 +254,13 @@ C_SRCS = \
 	$(SRC_DIR)/gui/apps/app_taskmgr.c \
 	$(SRC_DIR)/gui/apps/app_shortcuts.c \
 	$(SRC_DIR)/gui/apps/app_imgview.c \
-	$(SRC_DIR)/gui/apps/app_hexview.c \
-	$(SRC_DIR)/gpu.c \
-	$(APP_SRCS)
+	$(SRC_DIR)/gui/apps/app_hexview.c
+
+ifeq ($(HBOS_ENABLE_GUI),1)
+C_SRCS += $(GUI_C_SRCS)
+else
+C_SRCS += $(SRC_DIR)/gui/nogui.c
+endif
 
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
@@ -252,29 +276,40 @@ ASM_SRCS = \
 	$(SRC_DIR)/core/task_switch.asm \
 	$(SRC_DIR)/core/interrupt_asm.asm \
 	$(SRC_DIR)/graphics/cjk_glyph.asm \
-	$(SRC_DIR)/graphics/gui_glyph.asm \
-	$(SRC_DIR)/graphics/gui_wallimg.asm \
-	$(SRC_DIR)/graphics/gui_iconsimg.asm \
 	$(SRC_DIR)/user/tcc_runtime_blob.asm \
 	$(SRC_DIR)/user/tcc_headers_blob.asm \
 	$(SRC_DIR)/smp_trampoline.asm
+
+ifeq ($(HBOS_ENABLE_GUI),1)
+ASM_SRCS += \
+	$(SRC_DIR)/graphics/gui_glyph.asm \
+	$(SRC_DIR)/graphics/gui_wallimg.asm \
+	$(SRC_DIR)/graphics/gui_iconsimg.asm
+endif
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 # ── HAX 应用：./app/*.c 自动编译为 .hax 并打包进内核 ───────────────────
 # “只要 app 里有编译产物，就加入系统”：扫描 app/ 下的源码与预编译 .hax，
 # 由 genhax.py 读取各自的 .haxmeta 段，生成清单与二进制 blob 嵌入内核。
-HAX_APP_SRCS = $(wildcard app/*.c)
-HAX_APP_BINS = $(HAX_APP_SRCS:app/%.c=$(BUILD_DIR)/app/%.hax)
-HAX_PREBUILT = $(wildcard app/*.hax)
+ifeq ($(HBOS_BUNDLE_APPS),1)
+HAX_APP_SRCS = $(wildcard $(APP_DIR)/*.c)
+HAX_APP_BINS = $(HAX_APP_SRCS:$(APP_DIR)/%.c=$(BUILD_DIR)/app/%.hax)
+HAX_PREBUILT = $(wildcard $(APP_DIR)/*.hax)
 HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax $(BUSYBOX_HAX)
+else
+HAX_APP_SRCS =
+HAX_APP_BINS =
+HAX_PREBUILT =
+HAX_ALL_BINS =
+endif
 HAX_BLOB     = $(BUILD_DIR)/hax_blob.bin
 HAX_MANIFEST = $(BUILD_DIR)/hax_manifest.c
 HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke chromium-baseline hive-test nogui nogui-bios nogui-uefi nogui-smoke core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
 
 all: iso
 
@@ -285,6 +320,11 @@ help:
 	@echo "  make run-uefi   Boot UEFI hard disk image in QEMU"
 	@echo "  make release    Build ISOs plus VMware/VirtualBox disk images"
 	@echo "  make smoke      Build release and boot-test BIOS/UEFI ISO/HDD/VMDK"
+	@echo "  make chromium-baseline  Check module/API compatibility baseline"
+	@echo "  make hive-test  Run HIVE widget event/layout unit tests"
+	@echo "  make nogui      Build BIOS/UEFI without desktop GUI or bundled apps"
+	@echo "  make nogui-smoke  Boot-test no-GUI BIOS and UEFI ISOs"
+	@echo "  make core-only  Build HIVE-capable core without registered/HAX apps"
 	@echo "  make clean      Clean build files"
 	@echo ""
 	@echo "Individual artifacts:"
@@ -343,7 +383,7 @@ $(BUILD_DIR)/core/%.o: $(SRC_DIR)/core/%.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR) $(FONT_BIN) $(GUI_FONT_BIN) $(GUI_WALL_BIN) $(GUI_ICON_BIN)
+$(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -511,6 +551,36 @@ release: $(ISO_BIOS) $(ISO_UEFI) $(VMWARE_BIOS_VMDK) $(VMWARE_UEFI_VMDK) $(VBOX_
 
 smoke:
 	bash scripts/smoke.sh
+
+chromium-baseline:
+	bash scripts/check_chromium_baseline.sh
+
+hive-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Iapp/include -Isrc/user \
+		scripts/test_hive_ui.c -o $(BUILD_DIR)/test_hive_ui
+	$(BUILD_DIR)/test_hive_ui
+	@echo "✓ HIVE UI 1.1 event/layout tests"
+
+nogui:
+	@$(MAKE) --no-print-directory BUILD_DIR=$(NOGUI_BUILD_DIR) \
+		HBOS_ENABLE_GUI=0 HBOS_BUNDLE_APPS=0 iso
+	@echo "✓ no-GUI BIOS: $(NOGUI_BUILD_DIR)/hbos-bios.iso"
+	@echo "✓ no-GUI UEFI: $(NOGUI_BUILD_DIR)/hbos-uefi.iso"
+
+nogui-bios:
+	@$(MAKE) --no-print-directory BUILD_DIR=$(NOGUI_BUILD_DIR) \
+		HBOS_ENABLE_GUI=0 HBOS_BUNDLE_APPS=0 bios-iso
+
+nogui-uefi:
+	@$(MAKE) --no-print-directory BUILD_DIR=$(NOGUI_BUILD_DIR) \
+		HBOS_ENABLE_GUI=0 HBOS_BUNDLE_APPS=0 uefi-iso
+
+nogui-smoke:
+	bash scripts/smoke_nogui.sh
+
+core-only:
+	@$(MAKE) --no-print-directory BUILD_DIR=build-core \
+		HBOS_ENABLE_GUI=1 HBOS_BUNDLE_APPS=0 iso
 
 run-hdd: run-hdd-bios
 
@@ -695,9 +765,9 @@ user-progs-clean:
 # ── HAX 应用构建（./app/*.c -> build/app/*.hax -> blob + manifest） ──
 # 每个 app 源码用 HAX 运行时（= 用户态 libc + crt0）链接成标准 ELF64，
 # 扩展名 .hax。SDK 头在 app/include。
-HAX_CFLAGS = $(USER_CFLAGS) -Iapp/include
+HAX_CFLAGS = $(USER_CFLAGS) -I$(APP_DIR)/include
 
-$(BUILD_DIR)/app/%.hax: app/%.c $(USER_LIBC_OBJS) | $(BUILD_DIR)
+$(BUILD_DIR)/app/%.hax: $(APP_DIR)/%.c $(wildcard $(APP_DIR)/include/*.h) $(USER_LIBC_OBJS) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(HAX_CFLAGS) $< -o $(BUILD_DIR)/app/$*.o
 	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/app/$*.o -o $@

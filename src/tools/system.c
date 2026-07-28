@@ -41,6 +41,41 @@ static void cmd_poweroff(int argc, char **argv) {
     while(1) __asm__ volatile("cli; hlt");
 }
 
+// 设置以后每次开机默认走哪条路（图形桌面 / 命令行），持久化在磁盘上
+// （见 shell_get/set_startup_pref，src/shell/shell.c）。第一次开机时选一次
+// 就会记住，之后不再弹出选择提示；这个命令是"事后改主意"用的，HIVE 设置里
+// 的开关调用的是同一对函数，保持两处行为一致。
+static void cmd_startup(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("Usage: startup hive|gui|shell|tui\n");
+        PUTS_CN("用法：startup hive|gui|shell|tui —— 设置以后开机默认启动的模式\n");
+        return;
+    }
+    int mode;
+    if (strcmp(argv[1], "hive") == 0 || strcmp(argv[1], "gui") == 0) {
+#if HBOS_ENABLE_GUI
+        mode = 'g';
+#else
+        console_puts("startup: 当前 no-GUI 构建不包含图形桌面。\n");
+        return;
+#endif
+    } else if (strcmp(argv[1], "shell") == 0 || strcmp(argv[1], "tui") == 0) {
+        mode = 't';
+    } else {
+        console_puts("Usage: startup hive|gui|shell|tui\n");
+        return;
+    }
+    if (shell_set_startup_pref(mode) == 0) {
+        if (mode == 'g') {
+            console_puts("\x1b[32m已设置：以后开机默认启动 HIVE 桌面。\x1b[0m\n");
+        } else {
+            console_puts("\x1b[32m已设置：以后开机默认启动命令行 Shell。\x1b[0m\n");
+        }
+    } else {
+        console_puts("\x1b[31m设置失败：当前没有可持久化的磁盘（纯 ramfs 无法跨重启保存）。\x1b[0m\n");
+    }
+}
+
 static void cmd_credits(int argc, char **argv) {
     (void)argc; (void)argv;
     console_puts("\n\x1b[33mHBOS Credits\x1b[0m\n");
@@ -96,7 +131,7 @@ static void cmd_version(int argc, char **argv) {
     console_puts("\x1b[33m========================================\x1b[0m\n\n");
     console_puts("64-bit x86_64 Long Mode OS\n");
     console_puts("Boot: BIOS Multiboot2 / UEFI Limine\n");
-    console_puts("Files: ramfs + HBFS disk backend\n");
+    console_puts("Files: ramfs + FAT32 disk backend (legacy HBFS/ext2 still mountable)\n");
 }
 
 static void cmd_about(int argc, char **argv) {
@@ -549,6 +584,7 @@ void tool_system_init(void) {
         {"mousediag",CMD_GROUP_SYSTEM, "Diagnose mouse input", "mousediag", cmd_mousediag},
         {"reboot",  CMD_GROUP_SYSTEM, "Reboot the system",  "reboot",  cmd_reboot},
         {"poweroff",CMD_GROUP_SYSTEM, "Power off the system","poweroff",cmd_poweroff},
+        {"startup", CMD_GROUP_SYSTEM, "Set default boot mode (hive/shell/tui)", "startup hive|shell|tui", cmd_startup},
         {"shutdown",CMD_GROUP_SYSTEM, "Power off (alias)",   "shutdown",cmd_poweroff},
         {"credits", CMD_GROUP_SYSTEM, "Show credits",        "credits", cmd_credits},
         {"echo",    CMD_GROUP_SYSTEM, "Print text",          "echo <text>", cmd_echo},

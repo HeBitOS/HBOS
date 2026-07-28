@@ -188,6 +188,16 @@ void winsrv_text(winsrv_window_t *win, int x, int y, const char *s, uint32_t col
 
 void winsrv_push_event(winsrv_window_t *win, int type, int a, int b, int c) {
     if (!win) return;
+    /* 连续移动只保留最新坐标，但按钮状态变化必须保留。这样拖动/悬停不会
+     * 填满 32 项队列，也不会因丢失 release 让控件永久停在 pressed。 */
+    if (type == WINEV_MOUSE && win->ev_head != win->ev_tail) {
+        int last = (win->ev_tail + WINSRV_EVQ - 1) % WINSRV_EVQ;
+        if (win->evq[last].type == WINEV_MOUSE && win->evq[last].c == c) {
+            win->evq[last].a = a;
+            win->evq[last].b = b;
+            return;
+        }
+    }
     int nt = (win->ev_tail + 1) % WINSRV_EVQ;
     if (nt == win->ev_head) return;   /* 满则丢弃最旧之外的新事件 */
     win->evq[win->ev_tail].type = type;

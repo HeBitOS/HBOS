@@ -8,8 +8,10 @@
 #include "tls.h"
 #include "net.h"
 #include "string.h"
+#include "core/cpu.h"
 #include "crypto/sha256.h"
 #include "crypto/x25519.h"
+#include "crypto/p256.h"
 #include "crypto/chacha20_poly1305.h"
 #include "crypto/aes_gcm.h"
 
@@ -58,6 +60,8 @@ typedef struct {
     uint64_t client_app_seq;          /**< 客户端应用数据序列号 */
     uint64_t server_app_seq;          /**< 服务端应用数据序列号 */
     int app_keys_ready;               /**< 应用密钥是否已就绪标志 */
+    uint32_t read_idle_limit;          /**< tcp_read_exact 连续空轮询上限 */
+    uint64_t read_deadline;            /**< 0=不限；非关键子资源的 PIT 绝对截止 tick */
     uint16_t cipher_suite;            /**< 协商到的密码套件（TLS_AES_128_GCM_SHA256 或
                                         *   TLS_CHACHA20_POLY1305_SHA256），决定后续所有
                                         *   记录加解密走 AES-128-GCM 还是 ChaCha20-Poly1305，
@@ -231,10 +235,11 @@ static void tls_nonce(const uint8_t iv[12], uint64_t seq, uint8_t nonce[12]) {
  * @return 0 成功，-1 失败
  */
 static int build_client_hello(const char *host, const uint8_t public_key[32],
+                              const uint8_t p256_pub[64],
                               uint8_t *record, uint32_t cap, uint32_t *record_len,
                               const uint8_t **hs, uint32_t *hs_len) {
     if (!host || !record || cap < 256 || !record_len || !hs || !hs_len) return -1;
-    uint8_t body[512];
+    uint8_t body[640];
     uint32_t n = 0;
 
     body[n++] = 0x03; body[n++] = 0x03;
@@ -280,17 +285,29 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
     body[n++] = 0x03; body[n++] = 0x04;
     body[n++] = 0x03; body[n++] = 0x03;
 
+    /* supported_groups：x25519 优先，secp256r1(P-256) 兜底——很多服务器
+     * （尤其国内 CDN，如 baidu）不支持 x25519，只报它会握手失败。 */
+    int with_p256 = p256_pub != 0;
     put_u16(body + n, 0x000a); n += 2;
-    put_u16(body + n, 4); n += 2;
-    put_u16(body + n, 2); n += 2;
+    put_u16(body + n, with_p256 ? 6 : 4); n += 2;
+    put_u16(body + n, with_p256 ? 4 : 2); n += 2;
     put_u16(body + n, 0x001d); n += 2;
+    if (with_p256) { put_u16(body + n, 0x0017); n += 2; }
 
+    /* key_share：同时放 x25519(32B) 和 secp256r1(0x04||X||Y, 65B) 两份，
+     * 服务器按它选的组取对应那份；1.2 走 ServerKeyExchange 时忽略本扩展。 */
     put_u16(body + n, 0x0033); n += 2;
-    put_u16(body + n, 38); n += 2;
-    put_u16(body + n, 36); n += 2;
+    put_u16(body + n, (uint16_t)(2 + 36 + (with_p256 ? 69 : 0))); n += 2;
+    put_u16(body + n, (uint16_t)(36 + (with_p256 ? 69 : 0))); n += 2;
     put_u16(body + n, 0x001d); n += 2;
     put_u16(body + n, 32); n += 2;
     memcpy(body + n, public_key, 32); n += 32;
+    if (with_p256) {
+        put_u16(body + n, 0x0017); n += 2;
+        put_u16(body + n, 65); n += 2;
+        body[n++] = 0x04;                      /* 未压缩点 */
+        memcpy(body + n, p256_pub, 64); n += 64;
+    }
 
     put_u16(body + n, 0x000d); n += 2;
     put_u16(body + n, 14); n += 2;
@@ -336,9 +353,10 @@ static int build_client_hello(const char *host, const uint8_t public_key[32],
  * @param peer_key  输出服务端 X25519 公钥（32 字节）
  * @return 0 成功，-1 失败
  */
-static int parse_server_hello(const uint8_t *hs, uint32_t len, uint8_t peer_key[32],
+static int parse_server_hello(const uint8_t *hs, uint32_t len, uint8_t peer_key[64],
                               uint16_t *out_cipher_suite, int *out_is13,
-                              uint8_t server_random[32], uint32_t *out_msg_end) {
+                              uint8_t server_random[32], uint32_t *out_msg_end,
+                              int *out_group) {
     if (!hs || len < 42 || hs[0] != TLS_HANDSHAKE_SERVER_HELLO) return -1;
     uint32_t hs_len = get_u24(hs + 1);
     if (hs_len + 4 > len) return -1;
@@ -367,9 +385,18 @@ static int parse_server_hello(const uint8_t *hs, uint32_t len, uint8_t peer_key[
                 if (p + elen > ext_end) return -1;
                 if (type == 0x002b && elen >= 2 && get_u16(p) == 0x0304) {
                     saw_tls13 = 1;
-                } else if (type == 0x0033 && elen >= 36 && get_u16(p) == 0x001d && get_u16(p + 2) == 32) {
-                    memcpy(peer_key, p + 4, 32);
-                    saw_key = 1;
+                } else if (type == 0x0033 && elen >= 4) {
+                    uint16_t grp = get_u16(p);
+                    uint16_t klen = get_u16(p + 2);
+                    if (grp == 0x001d && klen == 32 && elen >= 36) {
+                        memcpy(peer_key, p + 4, 32);
+                        *out_group = 0x001d;
+                        saw_key = 1;
+                    } else if (grp == 0x0017 && klen == 65 && elen >= 69 && p[4] == 0x04) {
+                        memcpy(peer_key, p + 5, 64);
+                        *out_group = 0x0017;
+                        saw_key = 1;
+                    }
                 }
                 p += elen;
             }
@@ -468,7 +495,11 @@ static int derive_app_keys(tls_ctx_t *ctx, const uint8_t handshake_secret[32]) {
  */
 static int tcp_read_exact(tls_ctx_t *ctx, uint8_t *buf, uint32_t need) {
     uint32_t got = 0;
-    for (int idle = 0; got < need && idle < 400;) {
+    uint32_t idle = 0;
+    uint32_t idle_limit = ctx->read_idle_limit ? ctx->read_idle_limit : 400;
+    for (; got < need && idle < idle_limit;) {
+        if (ctx->read_deadline &&
+            (int64_t)(pit_get_ticks() - ctx->read_deadline) >= 0) return -1;
         uint32_t n = 0;
         if (net_tcp_recv(&ctx->tcp, buf + got, need - got, &n, 4) < 0) return -1;
         if (n == 0) idle++;
@@ -551,7 +582,10 @@ static int build_http_get(const char *host, const char *path, uint8_t *out, uint
     uint32_t n = 0;
     const char *a = "GET ";
     const char *b = " HTTP/1.0\r\nHost: ";
-    const char *c = "\r\nConnection: close\r\nUser-Agent: HBOS/0.1\r\n\r\n";
+    const char *c = "\r\nConnection: close\r\nAccept-Encoding: identity\r\n"
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36\r\n\r\n";
     for (const char *p = a; *p && n < cap; p++) out[n++] = (uint8_t)*p;
     for (const char *p = path; *p && n < cap; p++) out[n++] = (uint8_t)*p;
     for (const char *p = b; *p && n < cap; p++) out[n++] = (uint8_t)*p;
@@ -648,11 +682,12 @@ static int tls12_open(tls12_keys_t *k, uint8_t type, const uint8_t *rec, uint32_
  * transcript 进来时已含 ClientHello + ServerHello。 */
 static int tls12_run(tls_ctx_t *ctx, const char *host, const char *path,
                      const uint8_t client_random[32], const uint8_t server_random[32],
-                     const uint8_t private_key[32],
+                     const uint8_t private_key[32], const uint8_t p256_priv[32],
                      uint8_t *hsbuf, uint32_t hsbuf_cap, uint32_t hsbuf_len,
                      uint8_t *record, uint32_t record_cap, uint8_t *plain,
                      char *out, uint32_t out_cap, uint32_t *out_len) {
-    uint8_t server_pub[32];
+    uint8_t server_pub[64];
+    int server_group = 0x001d;
     int saw_ske = 0, saw_done = 0;
     uint8_t rtype;
     uint32_t rlen = 0;
@@ -668,15 +703,30 @@ static int tls12_run(tls_ctx_t *ctx, const char *host, const char *path,
             if (htype == 0x0b) {
                 /* Certificate：不验证（没有 X.509），只进 transcript */
             } else if (htype == 0x0c) {
-                /* ServerKeyExchange：curve_type(3) + named_curve(0x001d) +
-                 * pubkey_len(32) + pubkey；签名部分跳过（同证书，不验证） */
-                if (hlen < 36 || body[0] != 3 || get_u16(body + 1) != 0x001d || body[3] != 32) {
+                /* ServerKeyExchange：curve_type(3) + named_curve + pubkey_len
+                 * + pubkey；签名部分跳过（同证书，不验证）。支持 x25519
+                 * (0x001d, 32B) 和 secp256r1 (0x0017, 0x04||X||Y=65B)。 */
+                if (hlen < 4 || body[0] != 3) {
                     set_error("tls12 bad server key exchange");
                     net_tcp_close(&ctx->tcp);
                     return TLS_STATUS_ERROR;
                 }
-                memcpy(server_pub, body + 4, 32);
-                saw_ske = 1;
+                {
+                    int grp = get_u16(body + 1);
+                    int plen = body[3];
+                    if (grp == 0x001d && plen == 32 && hlen >= 36) {
+                        memcpy(server_pub, body + 4, 32);
+                        server_group = 0x001d;
+                    } else if (grp == 0x0017 && plen == 65 && hlen >= 69 && body[4] == 0x04) {
+                        memcpy(server_pub, body + 5, 64);
+                        server_group = 0x0017;
+                    } else {
+                        set_error("tls12 unsupported curve");
+                        net_tcp_close(&ctx->tcp);
+                        return TLS_STATUS_ERROR;
+                    }
+                    saw_ske = 1;
+                }
             } else if (htype == 0x0d) {
                 set_error("tls12 client cert required");
                 net_tcp_close(&ctx->tcp);
@@ -722,33 +772,46 @@ static int tls12_run(tls_ctx_t *ctx, const char *host, const char *path,
         return TLS_STATUS_ERROR;
     }
 
-    /* ClientKeyExchange（明文记录） */
-    uint8_t public_key[32];
-    x25519_public_key(public_key, private_key);
-    uint8_t cke[4 + 33];
+    /* ClientKeyExchange（明文记录）：点长度随曲线变（x25519=32，P-256=65）。 */
+    uint8_t cli_pub[65];
+    int cli_pub_len;
+    uint8_t premaster[32];
+    if (server_group == 0x0017) {
+        cli_pub[0] = 0x04;
+        p256_public_key(cli_pub + 1, p256_priv);
+        cli_pub_len = 65;
+        if (p256_ecdh(premaster, p256_priv, server_pub) < 0) {
+            set_error("tls12 p256 ecdh failed");
+            net_tcp_close(&ctx->tcp);
+            return TLS_STATUS_ERROR;
+        }
+    } else {
+        x25519_public_key(cli_pub, private_key);
+        cli_pub_len = 32;
+        x25519_shared_secret(premaster, private_key, server_pub);
+    }
+    uint8_t cke[4 + 1 + 65];
     cke[0] = 0x10;
-    put_u24(cke + 1, 33);
-    cke[4] = 32;
-    memcpy(cke + 5, public_key, 32);
-    uint8_t cke_rec[5 + sizeof(cke)];
+    put_u24(cke + 1, 1 + cli_pub_len);
+    cke[4] = (uint8_t)cli_pub_len;
+    memcpy(cke + 5, cli_pub, cli_pub_len);
+    uint32_t cke_len = 5 + (uint32_t)cli_pub_len;
+    uint8_t cke_rec[5 + 4 + 1 + 65];
     cke_rec[0] = TLS_RECORD_HANDSHAKE;
     cke_rec[1] = 0x03; cke_rec[2] = 0x03;
-    put_u16(cke_rec + 3, sizeof(cke));
-    memcpy(cke_rec + 5, cke, sizeof(cke));
-    if (net_tcp_send(&ctx->tcp, cke_rec, sizeof(cke_rec)) < 0) {
+    put_u16(cke_rec + 3, (uint16_t)cke_len);
+    memcpy(cke_rec + 5, cke, cke_len);
+    if (net_tcp_send(&ctx->tcp, cke_rec, 5 + cke_len) < 0) {
         set_error(net_last_error());
         net_tcp_close(&ctx->tcp);
         return TLS_STATUS_ERROR;
     }
-    sha256_update(&ctx->transcript, cke, sizeof(cke));
+    sha256_update(&ctx->transcript, cke, cke_len);
 
-    /* premaster = x25519 共享密钥 → master → key_block */
-    uint8_t premaster[32];
-    x25519_shared_secret(premaster, private_key, server_pub);
     uint8_t zero[32];
     memset(zero, 0, sizeof(zero));
     if (memcmp(premaster, zero, 32) == 0) {
-        set_error("tls12 x25519 failed");
+        set_error("tls12 ecdhe failed");
         net_tcp_close(&ctx->tcp);
         return TLS_STATUS_ERROR;
     }
@@ -837,7 +900,7 @@ static int tls12_run(tls_ctx_t *ctx, const char *host, const char *path,
     }
 
     /* HTTP GET + 响应 */
-    uint8_t req[512];
+    uint8_t req[1024];
     uint32_t req_len = 0;
     if (build_http_get(host, path, req, sizeof(req), &req_len) < 0 ||
         tls12_send(ctx, &keys, TLS_RECORD_APPLICATION, req, req_len) < 0) {
@@ -872,8 +935,9 @@ static int tls12_run(tls_ctx_t *ctx, const char *host, const char *path,
     return TLS_STATUS_OK;
 }
 
-int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path,
-                  char *out, uint32_t out_cap, uint32_t *out_len) {
+int tls_https_get_with_idle_limit(const char *host, uint32_t ip, uint16_t port,
+                                  const char *path, char *out, uint32_t out_cap,
+                                  uint32_t *out_len, uint32_t idle_limit) {
     if (out && out_cap) out[0] = 0;
     if (out_len) *out_len = 0;
     if (!host || !path || !out || out_cap == 0 || !out_len) {
@@ -883,6 +947,11 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
 
     tls_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.read_idle_limit = idle_limit ? idle_limit : 1;
+    /* 小 idle_limit 只用于可丢弃的网页子资源：同时施加 5 秒硬截止，并
+     * 只报 x25519，避免每张缩略图都做一次昂贵的 P-256 标量乘法。 */
+    int fast_subresource = idle_limit < 400;
+    if (fast_subresource) ctx.read_deadline = pit_get_ticks() + 500;
     sha256_init(&ctx.transcript);
 
     uint8_t private_key[32];
@@ -893,11 +962,26 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
     private_key[31] |= 64;
     x25519_public_key(public_key, private_key);
 
-    uint8_t hello[768];
+    /* 第二条 ECDHE 曲线 P-256：私钥取 32 字节随机并钳到 [1,n-1] 附近
+     * （最高位清零避免超出阶太多；p256_ecdh 会校验点，标量非零即可用）。 */
+    uint8_t p256_priv[32];
+    uint8_t p256_pub[64];
+    tls_random(p256_priv, sizeof(p256_priv));
+    p256_priv[0] &= 0x7f;
+    if (!(p256_priv[0] | p256_priv[31])) p256_priv[31] = 1;
+    if (!fast_subresource) p256_public_key(p256_pub, p256_priv);
+
+    if (ctx.read_deadline && (int64_t)(pit_get_ticks() - ctx.read_deadline) >= 0) {
+        set_error("tls subresource timeout");
+        return TLS_STATUS_ERROR;
+    }
+
+    uint8_t hello[896];
     uint32_t hello_len = 0;
     const uint8_t *client_hs = 0;
     uint32_t client_hs_len = 0;
-    if (build_client_hello(host, public_key, hello, sizeof(hello), &hello_len, &client_hs, &client_hs_len) < 0) {
+    if (build_client_hello(host, public_key, fast_subresource ? 0 : p256_pub,
+                           hello, sizeof(hello), &hello_len, &client_hs, &client_hs_len) < 0) {
         set_error("tls clienthello build failed");
         return TLS_STATUS_ERROR;
     }
@@ -941,10 +1025,12 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
         return TLS_STATUS_ERROR;
     }
     int is_tls13 = 0;
+    int sh_group = 0;
     uint8_t server_random[32];
+    uint8_t peer_share[64];
     uint32_t sh_msg_end = 0;
-    if (parse_server_hello(record, rlen, public_key, &ctx.cipher_suite,
-                           &is_tls13, server_random, &sh_msg_end) < 0) {
+    if (parse_server_hello(record, rlen, peer_share, &ctx.cipher_suite,
+                           &is_tls13, server_random, &sh_msg_end, &sh_group) < 0) {
         set_error("tls serverhello parse failed");
         net_tcp_close(&ctx.tcp);
         return TLS_STATUS_ERROR;
@@ -959,16 +1045,24 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
         uint32_t leftover = (rlen > sh_msg_end) ? rlen - sh_msg_end : 0;
         if (leftover) memmove(hsbuf, record + sh_msg_end, leftover);
         return tls12_run(&ctx, host, path, client_random, server_random,
-                         private_key, hsbuf, sizeof(hsbuf), leftover,
+                         private_key, p256_priv, hsbuf, sizeof(hsbuf), leftover,
                          record, sizeof(record), plain, out, out_cap, out_len);
     }
 
     uint8_t shared_secret[32];
-    x25519_shared_secret(shared_secret, private_key, public_key);
+    if (sh_group == 0x0017) {
+        if (p256_ecdh(shared_secret, p256_priv, peer_share) < 0) {
+            set_error("tls p256 ecdh failed");
+            net_tcp_close(&ctx.tcp);
+            return TLS_STATUS_ERROR;
+        }
+    } else {
+        x25519_shared_secret(shared_secret, private_key, peer_share);
+    }
     uint8_t zero[32];
     memset(zero, 0, sizeof(zero));
     if (memcmp(shared_secret, zero, sizeof(shared_secret)) == 0) {
-        set_error("tls x25519 failed");
+        set_error("tls ecdhe failed");
         net_tcp_close(&ctx.tcp);
         return TLS_STATUS_ERROR;
     }
@@ -1072,7 +1166,7 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
     }
     sha256_update(&ctx.transcript, finished, sizeof(finished));
 
-    uint8_t req[512];
+    uint8_t req[1024];
     uint32_t req_len = 0;
     if (build_http_get(host, path, req, sizeof(req), &req_len) < 0 ||
         send_encrypted_record(&ctx, 1, TLS_RECORD_APPLICATION, req, req_len) < 0) {
@@ -1110,4 +1204,10 @@ int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path
     }
     set_error("ok");
     return TLS_STATUS_OK;
+}
+
+int tls_https_get(const char *host, uint32_t ip, uint16_t port, const char *path,
+                  char *out, uint32_t out_cap, uint32_t *out_len) {
+    return tls_https_get_with_idle_limit(host, ip, port, path, out, out_cap,
+                                         out_len, 400);
 }

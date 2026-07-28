@@ -97,7 +97,7 @@ int net_ping(uint32_t ip, uint32_t timeout_ms);
 int net_dns_resolve(const char *name, uint32_t *out_ip);
 
 /** @brief 通过 NTP 协议向服务器（域名或点分 IP）同步时间，写入
- *  g_rtc_ntp_correction_sec（见 gui/rtc_tz.h）。0 成功，-1 失败。 */
+ *  g_rtc_ntp_correction_sec（见 rtc_tz.h）。0 成功，-1 失败。 */
 int net_ntp_sync(const char *server);
 
 /** @brief 发起 TCP 三次握手，建立到指定 IP:port 的连接 */

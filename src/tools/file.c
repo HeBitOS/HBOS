@@ -2,6 +2,7 @@
 #include "../fcntl.h"
 #include "../fs.h"
 #include "../graphics/graphics.h"
+#include "../rtc.h"
 #include "../selftest.h"
 #include "../string.h"
 #include "../sys/stat.h"
@@ -618,9 +619,13 @@ static void cmd_tail(int argc, char **argv) {
 static void cmd_guess(int argc, char **argv) {
     (void)argc; (void)argv;
     /* Simple LCG random using RTC or counter */
-    extern uint8_t cmos_read(uint8_t reg);
-    uint32_t seed = (uint32_t)cmos_read(0x00) | ((uint32_t)cmos_read(0x02) << 8) |
-                    ((uint32_t)cmos_read(0x04) << 16);
+    rtc_time_t now;
+    uint32_t seed = 0x48424F53u;
+    if (rtc_read_time(&now) == 0) {
+        seed ^= (uint32_t)now.second;
+        seed ^= (uint32_t)now.minute << 8;
+        seed ^= (uint32_t)now.hour << 16;
+    }
     seed = seed * 1103515245 + 12345;
     int target = (int)((seed >> 16) % 100) + 1;
 

@@ -1,6 +1,8 @@
 .vscode/
 .kilo/
 build/
+build-nogui/
+build-core/
 .claude/
 .roo/
 .claudecode.md

@@ -22,6 +22,8 @@ enum {
     ICON_CODE,
     ICON_TERM,
     ICON_CLOCK,
+    ICON_SHORTCUTS,
+    ICON_FOLDER_ROW,
     ICON_COUNT
 };
 

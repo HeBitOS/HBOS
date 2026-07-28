@@ -9,7 +9,7 @@
 #include "core/vmm.h"
 #include "core/heap.h"
 #include "core/task.h"
-#include "gui/rtc_tz.h"
+#include "rtc_tz.h"
 
 /** @brief PCI 设备类型：网络控制器 */
 #define PCI_CLASS_NETWORK      0x02
@@ -1729,10 +1729,13 @@ int net_http_request(const char *method, const char *host, uint32_t ip, uint16_t
         set_error("bad http request");
         return -1;
     }
-    char req[512];
+    char req[1024];
     uint32_t n = 0;
     const char *b = " HTTP/1.0\r\nHost: ";
-    const char *c = "\r\nConnection: close\r\nUser-Agent: HBOS/0.1\r\n\r\n";
+    const char *c = "\r\nConnection: close\r\nAccept-Encoding: identity\r\n"
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36\r\n\r\n";
     for (const char *p = method; *p && n < sizeof(req); p++) req[n++] = *p;
     if (n < sizeof(req)) req[n++] = ' ';
     for (const char *p = path; *p && n < sizeof(req); p++) req[n++] = *p;
