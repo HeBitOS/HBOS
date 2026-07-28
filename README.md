@@ -1,454 +1,246 @@
-   # HBOS - He Bit OS
+# HBOS
 
-> 当前版本：v0.1 beta3
-> 
-> 64-bit 高分辨率图形命令行操作系统，支持多阶段 AI 协同开发
+> He Bit OS — 面向 x86_64 的轻量实验操作系统
 
-![截图](./photo/v0.1beta3.png "v0.1 beta3截图")
+当前版本：`v0.1-beta5-pre5` · 支持 BIOS / UEFI · 正在积极开发
 
-## 项目目标
+![HBOS 桌面截图](photo/v0.1beta3.png)
 
-HBOS 的目标是在尽量低廉、低配置的电脑上做出足够好的实际体验。开发时优先轻量、稳定、可用，先把小方向打磨顺手，再推进大方向；避免为了“看起来高级”引入过多无用代码、复杂依赖或消耗低配机器资源的设计。
+_截图来自 beta3；beta5 的 HIVE 界面仍在持续迭代。_
 
-## v0.1 beta4 更新
+HBOS 从引导、内核、驱动、文件系统、网络栈到桌面环境均以“小而可用”为目标。
+项目优先照顾低配置设备和清晰的模块边界；构建完成后直接运行在裸机或虚拟机，
+不依赖 Linux 或其他宿主操作系统提供运行时。
 
-64-bit 高分辨率图形命令行操作系统。beta4 是自 beta3 以来最大的一次更新：全新图形桌面、真实的 C 编译器与动态链接、BusyBox 命令行工具集、网络协议栈打通，以及大量真机兼容性修复。
+> [!WARNING]
+> HBOS 仍处于早期开发阶段，不适合保存重要数据或用于生产环境。UEFI 启动时
+> 需要关闭 Secure Boot；真机支持取决于具体硬件。
 
-### ✨ 亮点
+## 项目概览
 
-- **全新图形桌面**：窗口管理器（缩放/拖拽/吸附/最大化最小化动画）、Windows 11 风格居中任务栏、可搜索开始菜单、HarmonyOS Sans SC 抗锯齿字体、扁平矢量图标
-- **11 个内置桌面应用**：文件管理器、任务管理器（新）、计算器（long long + 科学计数法）、代码工作台、控制台终端（真实 shell）、浏览器、记事本、时钟、贪吃蛇、设置、文件统计
-- **TinyCC (TCC) C 编译器移植**：系统内可直接编译运行 C 程序，支持 `#include` 头文件解析
-- **真实动态链接**：`dlopen`/`dlsym`/`dlclose`，支持运行时加载共享库
-- **BusyBox 移植**：16 个真实 coreutils 命令（`ls cat cp mv rm mkdir touch which whoami wc head dirname basename true false echo pwd`）
-- **网络协议栈**：DHCP/ARP/ICMP/DNS/TCP/HTTP，Intel E1000 网卡驱动，`socket()` 用户态 API
-- **真机兼容性**：修复真实硬件上的显示卡顿、USB 鼠标识别失败、PS/2 鼠标初始化问题
+| 领域 | 当前能力 |
+|---|---|
+| 启动 | x86_64 长模式、Multiboot2 BIOS、UEFI、ISO 与硬盘镜像 |
+| 内核 | 物理/虚拟内存、任务调度、系统调用、ELF/HAX 用户程序、动态链接 |
+| 终端 | framebuffer/VGA 输出、ANSI 颜色、UTF-8/CJK、Shell 与命令历史 |
+| 桌面 | [HIVE](https://github.com/HeBitOS/HIVE) 桌面、窗口管理、合成器、应用启动器 |
+| 应用 | TinyCC、BusyBox applets、文件管理器、终端、编辑器、计算器、浏览器等 |
+| 存储 | ramfs、FAT32、HBFS、AHCI 优先并回退 ATA PIO |
+| 网络 | E1000、DHCP、ARP、ICMP、DNS、TCP、HTTP/HTTPS、用户态 socket API |
+| 输入 | PS/2 键鼠、USB xHCI HID 键盘与鼠标基础路径 |
 
----
-
-### 图形桌面
-
-- 全新窗口管理器：任意方向拖拽缩放（带专属光标）、贴边吸附预览、最大化/最小化动画、窗口切换器（F6）
-- Windows 11 风格居中任务栏：日历弹窗、亮度滑杆、"是否显示秒数"开关
-- 开始菜单重做：居中弹出、图标网格、支持拼音/英文关键词搜索过滤，键入即可启动应用
-- **F1 一键呼出开始菜单**（原来只能鼠标点击任务栏图标）——纯键盘即可到达任意应用
-- HarmonyOS Sans SC 抗锯齿比例字体，F2/F3 运行时切换字号；代码编辑器与终端使用等宽点阵字体保证对齐
-- 扁平矢量图标图集（文件管理器、磁盘、计算器、贪吃蛇、浏览器等均有专属图标）
-- PS/2 鼠标从"卡顿加速曲线"改为线性 1:1 映射，真机与虚拟机手感一致；修复 IRQ12/IRQ2 级联未解除屏蔽导致真实鼠标失灵的问题
-- 新增应用：
-  - **任务管理器**：查看运行中任务的 PID/名称/状态/父 PID，可结束任务，显示物理内存占用条
-  - **计算器**：数据类型升级为 `long long`（原为 `int`，溢出上限约 21 亿），溢出后自动切换科学计数法显示（`D.DDDDDDDDe+NN`），历史记录同步支持
-  - **文件管理器**：显示区域跟随窗口缩放/最大化动态放大，不再被裁死在固定像素高度
-  - 设置、时钟、控制台终端（跑真实 shell）
-- 修复一批窗口/绘制越界问题：任务管理器与计算器内容曾画出窗口边界，文件管理器列表框固定高度导致最后几行叠在状态栏上
-
-### 应用生态
-
-- **TinyCC (TCC)** 编译器移植：`tcc file.c -o out` 系统内原生编译运行，修复了 `#include` 头文件解析、`-shared` 动态库输出等问题
-- **动态链接**：新增 `dlopen`/`dlsym`/`dlclose` 系统调用，接入内核 ELF 加载器，支持运行时加载 `.so` 共享库并调用其中符号
-- **.hax 应用格式**：自动发现 `./app` 下的用户程序，提供 SDK（`hax.h`），TUI/GUI 双模式支持
-- **BusyBox / coreutils 移植**（16 个）：`ls`（`-l/-a/-R/-d`）`cat cp mv rm mkdir touch which whoami wc head dirname basename true false echo pwd`，均为独立 `.hax` 程序，与 shell 内置命令共存
-- `make ask` 新增交互式应用选择：可逐个选择是否将 `app/` 下的用户程序打进 ISO
-
-### 网络
-
-- Intel E1000 网卡驱动完整实现（MMIO、收发环、中断轮询）
-- 协议栈：DHCP 自动配置、ARP、ICMP ping、DNS 解析、TCP（单连接）、HTTP GET（`wget`）
-- 用户态 `socket()`/`connect()`/`send()`/`recv()` API，经真实互联网连接测试可用
-- 修复 `send()` 系统调用返回值错误（原样返回内部状态码而非发送字节数，导致所有用户程序都误以为"发送了 0 字节"）
-- 无 DNS 服务器时自动回退到 `8.8.8.8`
-
-### 底层修复
-
-- 任务切换时正确保存/恢复 FPU/XMM 寄存器状态（此前浮点/SSE 状态在任务间会互相污染）
-- 修复 `HBOS_SYS_GETDENTS` 系统调用返回整个文件系统而非当前打开目录的严重 bug
-- 修复用户态 `struct stat` 与内核 `struct stat` 内存布局不一致（`nlink_t` 宽度不匹配），导致跨越户态边界的 `stat()`/`fstat()` 返回垃圾大小/时间戳
-- 修复 `printf("%d"/"%u"/"%x")` 在 TCC 编译的程序中截断负数/大数的问题（可变参数按错误宽度读取，`-7` 曾被打印成 `4294967289`）
-- 真机图形卡顿修复：显存映射从写回（write-back）改为写合并（write-combining），解决真实硬件上画面每 5~6 秒才刷新一次的问题
-- USB HID 鼠标识别修复：兼容未声明 boot-protocol 的真实鼠标（此前仅 QEMU 模拟鼠标能被识别）
-- 用户态 hax 应用输入回显修复：此前运行 hax 应用时键盘输入不会显示在屏幕上
-
-### 已知限制
-
-- RTL8139、VirtIO-net 网卡驱动已检测但未实现，仅 Intel E1000 路径完整可用
-- TCP 协议栈单一时刻仅正确追踪一个连接的收发序列号，尚非真正的并发多路复用
-- `dlopen` 加载的共享库暂不能回调宿主程序自身定义的符号（TCC 默认不生成完整符号表，强制生成会触发另一个未解决的函数指针崩溃问题，已在代码中详细记录）
-
----
-
-**升级方式**：直接使用新构建的 `build/hbos-bios.iso` / `build/hbos-uefi.iso`，或 `make release` 生成 VMware/VirtualBox 镜像。无持久化用户数据需要迁移（ramfs 为主，HBFS 磁盘数据不受影响）。
-
-## v0.1 beta3 更新
-
-- ✅ 鼠标指针重新设计：换成简洁的缺口箭头造型（原来的样式容易被认成"丑陋的 Ubuntu 光标"），并为窗口四个方向的缩放新增专属光标（水平/垂直/两条对角线）
-- ✅ 鼠标移动速度整体提升，采用三段式加速曲线，短距离/长距离手感更平滑
-- ✅ 新增快捷键：F5 手动刷新桌面、F6 切换窗口（原 Tab）、记事本/代码编辑器支持 Ctrl+A 全选
-- ✅ 开始菜单去除阴影；用户头像图标重绘为圆形头像造型
-- ✅ 任务栏时钟修复：桌面静置无输入时不再卡住不走；秒级刷新只重绘任务栏窄条而非整屏，避免周期性卡顿
-- ✅ 任务栏设置新增"是否显示秒数"开关
-- ✅ 任务栏新增亮度开关：点击弹出滑杆，可拖动调节屏幕亮度（软件模拟，无真实背光）
-- ✅ 时间校准：任务栏时钟与时钟应用改为显示本地时间（此前直接显示硬件 RTC 的 UTC 时间，慢 8 小时）
-- ✅ GUI 字体新增 24px 大号字号，可在设置或 F2/F3 中切换；修复默认字号被错误地选中大号的问题
-- ✅ 浏览器网址输入框新增闪烁插入光标
-- ✅ 任务栏新增日历功能：点击日期弹出当月月历
-- ✅ 修复 shell 逐字符输出卡顿：字符回显不再每次都重绘整个屏幕，只刷新变化的那一行
-- ✅ 修复欢迎/启动窗口点击无法关闭、并阻塞应用启动的问题（根因是头文件改动后部分目标文件未随之重新编译，导致运行时内存错位）；构建系统新增头文件依赖追踪（`-MMD -MP`），避免此类问题再次发生
-- ✅ 修复 VMware 等虚拟机中 BIOS 模式 ISO 无法启动的问题（缺少 grub-pc-bin 依赖 + 构建脚本吞掉了报错信息，导致"构建成功"但引导记录是空壳）
-
-## v0.1 beta2 更新
-
-- ✅ 默认构建产物收敛为 BIOS/UEFI 双 ISO：`build/hbos-bios.iso` 与 `build/hbos-uefi.iso`
-- ✅ UEFI 启动链路改进，支持生成面向虚拟机使用的 GPT/ESP 安装盘镜像
-- ✅ 新增 HBFS 磁盘文件系统路径，支持从 MBR/GPT 分区挂载
-- ✅ POSIX/ramfs 文件工作流完善：`open/read/write/lseek/stat/unlink` 等接口可用于 shell 与用户应用
-- ✅ Shell 增加文件、应用、ATA、磁盘管理相关命令
-- ✅ 新增启动自测，POSIX/ramfs 通过时输出 `[SELFTEST] POSIX/ramfs: PASS`
-- ✅ 新增 ACPI poweroff 路径，`poweroff`/`shutdown` 优先走 ACPI，失败后回退到虚拟机端口
-- ✅ 修复 CJK 滚动错位与滚动时光标残影问题
-- ✅ GUI 代码工作台增强鼠标保存/运行/打开、运行输出和错误行提示，保持轻量可用
-- ✅ GUI/代码工作台统一 Shell 输入路径，适配 PS/2 与 USB HID 键盘的 Ctrl+S/R/O、Home/End、PgUp/PgDn、Delete 等常用快捷键
-- ✅ 新增 `drivers` 命令，便于真机上快速查看输入、USB、块设备、文件系统与网卡驱动状态
-
-## v0.1 beta1 更新
-
-- ✅ 内核启动横幅与 `version` 命令显示更新为 `beta1`
-- ✅ 支持构建时 TTF → HZK16 点阵字体生成，并内嵌 CJK 字库
-- ✅ 支持 UTF-8 中文/CJK 字符输出，应用程序可直接通过控制台 API 输出中文
-- ✅ Shell 基础命令拆分到 `src/tools/`，按 System/Debug/History/Help 模块化注册
-- ✅ PS/2 键盘支持方向键、Home/End、PgUp/PgDn、小键盘与 NumLock 状态切换
-- ✅ 支持 PgUp/PgDn 浏览终端历史上下文
-- ✅ 初步加入协作式多任务框架和任务上下文切换
-
-## 功能特性
-
-- ✅ 64 位长模式 (x86_64) — 启动页表覆盖 0-4GB
-- ✅ BIOS/Multiboot2 + UEFI 双启动
-- ✅ VGA 文本模式 + 高分辨率图形终端 (flanterm) 双输出
-- ✅ ANSI→VGA 颜色转换 (VGA 16 色，支持高亮)
-- ✅ PS/2 键盘驱动 (Shift/CapsLock/NumLock/方向键/Home/End/PgUp/PgDn/小键盘)
-- ✅ USB xHCI/HID 键盘基础路径，按配置描述符识别 boot keyboard/mouse 接口
-- ✅ 交互式 Help 模式 (类似 Python `help()`)
-- ✅ 命令分组管理 (系统/文件/图形/调试/用户)，基础命令已模块化到 `src/tools/`
-- ✅ 命令历史 / 搜索 / 上下键回滚 / PgUp-PgDn 上下文浏览
-- ✅ UTF-8 中文/CJK 字符显示（构建时 TTF → HZK16 点阵）
-- ✅ `hive`（兼容 `gui` / `startx`）HIVE 桌面环境，包含窗口管理、应用启动器和系统工具
-- ✅ HIVE 用户态窗口工具包（布局、标签、按钮、文本框、复选框、列表、进度条、滑杆）
-- ✅ no-GUI 独立构建：不链接桌面、窗口管理器、GUI 资源或内嵌应用
-- ✅ 初步协作式多任务框架
-- ✅ 多阶段 AI 开发文档体系
-- ✅ 应用程序 API (硬件抽象层)
+HBOS 也提供不包含桌面和图形应用的 no-GUI 构建，可单独验证内核、Shell、
+文件系统、网络和用户态程序。
 
 ## 快速开始
 
-### 依赖
-```bash
-sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools qemu-system-x86 qemu-utils ovmf python3 python3-pil
-```
+### 1. 安装构建依赖
 
-Windows 推荐使用 WSL 构建。先安装 Ubuntu WSL，然后在 WSL 内安装依赖：
+Ubuntu / Debian：
 
 ```bash
 sudo apt update
-sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools qemu-utils python3 python3-pil
+sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin \
+  xorriso mtools dosfstools qemu-system-x86 qemu-utils ovmf \
+  python3 python3-pil
 ```
 
-### 构建与运行
-```bash
-make           # 构建 BIOS/UEFI 双 ISO
-make release   # 构建发布产物：ISO + VMware VMDK + VirtualBox VDI
-make run       # QEMU BIOS 硬盘启动
-make run-uefi  # QEMU UEFI 硬盘启动
-make smoke     # 构建并自动验证 BIOS/UEFI ISO/HDD/VMDK 启动
-make nogui     # 构建不含桌面和应用的 BIOS/UEFI 双 ISO
-make nogui-smoke # 验证 no-GUI 组件边界及 BIOS/UEFI 启动
-make core-only # 构建 GUI 核心但不打包注册式/HAX 应用
-```
+Windows 推荐使用 WSL2 + Ubuntu。仓库也提供
+`scripts/build-windows.ps1` 和 `scripts/build-windows.cmd` 作为入口。
 
-GUI 和应用可分开构建。应用源码位于外部仓库时，可使用
-`make APP_DIR=/path/to/apps hax-apps`；内核、GUI runtime 与应用之间的正式依赖
-边界见 [`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md)。
-HIVE API、交互约定和迁移状态见
-[`docs/HIVE_DESKTOP_API.md`](docs/HIVE_DESKTOP_API.md)；独立开发仓库为
-[`HeBitOS/HIVE`](https://github.com/HeBitOS/HIVE)。
-
-### 真机优先级
-
-HBOS 优先保证低成本 x86_64 机器上的基础可用性：先让启动、输入、磁盘、文件系统、GUI 和调试信息稳定，再扩展更复杂的桌面体验。当前真机建议优先尝试 BIOS/UEFI ISO 启动；输入路径覆盖 PS/2 键盘与 USB xHCI HID boot keyboard，存储优先 AHCI、回退 ATA PIO，网络以 Intel E1000 路径为主。进入系统后可运行：
+### 2. 构建
 
 ```bash
-drivers
-status
-gui
+git clone https://github.com/HeBitOS/HBOS.git
+cd HBOS
+make
 ```
 
-`drivers` 用于确认键盘、USB、块设备、文件系统和网卡是否被识别。未识别的硬件先按该命令输出定位到具体驱动层，不盲目堆 GUI 功能。
-
-Windows PowerShell / CMD 中也可以直接调用：
-
-```powershell
-.\scripts\build-windows.ps1 -Clean
-```
-
-或：
-
-```cmd
-scripts\build-windows.cmd -Clean
-```
-
-构建产物仍在：
+默认生成：
 
 - `build/hbos-bios.iso`
 - `build/hbos-uefi.iso`
-- `build/hbos_vmware_bios.vmdk`（`make release` / `make vmware-bios`）
-- `build/hbos_vmware_uefi.vmdk`（`make release` / `make vmware-uefi`）
-- `build/hbos_virtualbox_bios.vdi`（`make release` / `make vbox-bios`）
-- `build/hbos_virtualbox_uefi.vdi`（`make release` / `make vbox-uefi`）
 
-### 虚拟机使用
+常用构建目标：
 
-VMware Workstation/Player 25H2：
+| 命令 | 作用 |
+|---|---|
+| `make` | 构建 BIOS 与 UEFI ISO |
+| `make run` | 在 QEMU 中启动 BIOS 硬盘镜像 |
+| `make run-uefi` | 在 QEMU 中启动 UEFI 硬盘镜像 |
+| `make release` | 生成 ISO、VMware VMDK 和 VirtualBox VDI |
+| `make smoke` | 构建并启动验证全部发布格式 |
+| `make nogui` | 构建不含 HIVE 和内嵌应用的 BIOS/UEFI ISO |
+| `make nogui-smoke` | 验证 no-GUI 的组件边界与启动 |
+| `make core-only` | 构建 HIVE-capable 核心，但不打包应用 |
+| `make hive-test` | 运行 HIVE 控件与事件测试 |
+| `make chromium-baseline` | 检查 Chromium 兼容层阶段基线 |
 
-- BIOS 固件：光盘启动使用 `build/hbos-bios.iso`，硬盘启动使用 `build/hbos_vmware_bios.vmdk`
-- UEFI 固件：关闭 `Secure Boot`，光盘启动使用 `build/hbos-uefi.iso`，硬盘启动使用 `build/hbos_vmware_uefi.vmdk`
-- 推荐内存 `512 MiB` 或更高
+运行 `make help` 可以查看完整目标列表。
 
-VirtualBox：
+### 3. 启动
 
-- BIOS 固件：不要勾选 `Enable EFI`，光盘启动使用 `build/hbos-bios.iso`，硬盘启动使用 `build/hbos_virtualbox_bios.vdi`
-- UEFI 固件：勾选 `Enable EFI`，关闭 Secure Boot 相关选项，光盘启动使用 `build/hbos-uefi.iso`，硬盘启动使用 `build/hbos_virtualbox_uefi.vdi`
+QEMU 可直接使用上面的 `make run` / `make run-uefi`。虚拟机建议至少分配
+`512 MiB` 内存：
 
-## 项目结构
+- VMware BIOS：挂载 `build/hbos-bios.iso`
+- VMware UEFI：关闭 Secure Boot，挂载 `build/hbos-uefi.iso`
+- VirtualBox BIOS：关闭 EFI，挂载 `build/hbos-bios.iso`
+- VirtualBox UEFI：启用 EFI、关闭 Secure Boot，挂载 `build/hbos-uefi.iso`
 
+进入系统后可先运行：
+
+```text
+drivers
+status
+hive
 ```
-hbosv2/
+
+`drivers` 用于确认输入设备、USB、块设备、文件系统和网卡是否被识别；
+`hive` 启动图形桌面，`gui` 与 `startx` 保留为兼容别名。
+
+## HIVE 桌面环境
+
+[HIVE（HBOS Interface & Visual Environment）](https://github.com/HeBitOS/HIVE)
+是 HBOS 的独立桌面项目，包含窗口管理器、合成器、桌面 Shell、用户态控件库
+和应用 SDK。
+
+当前 HIVE Toolkit 1.1 提供：
+
+- Label、Button、Textbox、Checkbox、List、Progress、Slider；
+- 行布局、网格布局与窗口尺寸变化后的重新排布；
+- 鼠标悬停、按下、拖动、松开和窗口外释放捕获；
+- Tab 焦点、Enter/Space、方向键、Home/End、PageUp/PageDown；
+- 集中式主题配置和 UTF-8 安全的已有文本导航/删除。
+
+HBOS 暂时保留 HIVE runtime 的集成副本，以确保完整版本和 no-GUI 版本都能
+持续构建。拆仓边界与迁移顺序见
+[`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md)。
+
+## 应用开发
+
+HAX（HBOS Application eXecutable）是 HBOS 的用户应用格式。应用本质上是带
+`.haxmeta` 元数据的 ELF64 用户态程序，可作为 TUI、GUI 或两者兼容的应用。
+
+最小 TUI 应用：
+
+```c
+#include <hax.h>
+
+HAX_APP("hello", "Hello from HBOS", HAX_KIND_TUI);
+
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    hax_println("Hello, HBOS!");
+    return 0;
+}
+```
+
+把源码保存到 `app/hello.c` 后运行 `make`，构建系统会自动生成并打包
+`hello.hax`。应用也可以放在独立仓库：
+
+```bash
+make APP_DIR=/path/to/apps hax-apps
+```
+
+图形应用优先包含 `<hive.h>`，只依赖公开的 HAX/HIVE SDK，不直接访问
+framebuffer、窗口管理器或桌面私有状态。
+
+完整开发资料：
+
+- [HBOS HAX 应用开发手册（PDF）](HBOS_HAX_API.pdf)
+- [HAX API HTML 源文档](docs/HBOS_HAX_API.html)
+- [HIVE 桌面与控件 API](docs/HIVE_DESKTOP_API.md)
+
+## 模块化构建
+
+HBOS、HIVE 与应用遵循以下依赖方向：
+
+```text
+应用 → HAX / HIVE SDK
+HIVE → HBOS Kernel UAPI / gui_service
+HBOS Core → 不依赖具体 GUI 或应用
+```
+
+| 变体 | 命令 | HIVE | 内嵌应用 |
+|---|---|---:|---:|
+| 完整系统 | `make` | 是 | 是 |
+| no-GUI | `make nogui` | 否 | 否 |
+| GUI 核心 | `make core-only` | 是 | 否 |
+| 外部应用 | `make APP_DIR=/path/to/apps hax-apps` | 仅 SDK | 单独产物 |
+
+构建开关包括 `HBOS_ENABLE_GUI=0|1`、`HBOS_BUNDLE_APPS=0|1`、
+`APP_DIR=/path` 和 `BUILD_DIR=/path`。
+
+## 硬件支持
+
+| 硬件 | 状态 | 说明 |
+|---|---:|---|
+| x86_64 CPU | 可用 | 需要长模式 |
+| BIOS / UEFI | 可用 | UEFI 不支持 Secure Boot |
+| PS/2 键盘、鼠标 | 可用 | 建议真机优先测试 |
+| USB xHCI HID | 基础可用 | 键盘、鼠标兼容性仍在扩展 |
+| AHCI SATA | 可用 | 优先块设备后端 |
+| ATA PIO | 可用 | AHCI 不可用时回退 |
+| Intel E1000 | 可用 | 当前主要网络路径 |
+| RTL8139 / VirtIO-net | 仅检测 | 数据收发尚未实现 |
+| AC97 | 基础可用 | 依设备和虚拟机配置而定 |
+
+发现真机问题时，请附上 `drivers`、`status` 和串口日志，并注明 CPU、主板、
+存储控制器、网卡及启动方式。
+
+## 仓库结构
+
+```text
+HBOS/
+├── app/                HAX 应用与公开 SDK 头文件
+├── docs/               API、模块边界与兼容性文档
+├── scripts/            构建、启动和 smoke test 脚本
 ├── src/
-│   ├── boot.asm              # Multiboot2 引导 + 4GB 页表
-│   ├── kernel.c               # 内核入口（极简，仅调用各子系统初始化）
-│   ├── graphics/
-│   │   ├── graphics.h         # 图形子系统 API
-│   │   ├── graphics.c         # flanterm + VGA 回退 + ANSI→VGA 颜色 + CJK 渲染
-│   │   ├── font_cjk.c/.h      # CJK 字库查找与 UTF-8 辅助
-│   │   └── cjk_glyph.asm      # 内嵌 build/font_cjk.bin
-│   ├── shell/
-│   │   ├── shell.h            # Shell/命令系统 API
-│   │   └── shell.c            # 历史 + 键盘驱动 + 行编辑 + 命令注册
-│   ├── tools/                 # Shell 基础命令模块
-│   │   ├── help.c             # help 命令
-│   │   ├── system.c           # reboot/poweroff/echo/version/clear/credits
-│   │   ├── debug.c            # status 等调试命令
-│   │   ├── file.c             # ls/cat/touch/rm/writefile/appendfile
-│   │   ├── disk.c             # diskmgr/install/setup 磁盘管理与安装
-│   │   ├── gui.c              # gui/startx 图形文件和磁盘控制面板
-│   │   └── history.c          # history/clearhistory/search
-│   ├── input/
-│   │   └── mouse.c/.h         # PS/2 鼠标轮询驱动
-│   ├── core/                  # 内核核心框架
-│   │   ├── task.c/.h          # 协作式多任务调度
-│   │   └── task_switch.asm    # x86_64 上下文切换
-│   ├── api/
-│   │   └── hal.h              # 硬件抽象层 — 应用程序开发入口
-│   ├── fb.c / flanterm.c      # flanterm 高分辨率终端渲染引擎
-│   └── fs.c                   # ramfs + HBFS 磁盘文件系统
-├── docs/                      # 8 个子目录的完整 AI 开发文档
-├── Makefile                   # 构建系统
-└── linker_bios.ld             # 链接脚本
+│   ├── api/            内核与可选组件的公开契约
+│   ├── core/           任务、内存和中断核心
+│   ├── crypto/         TLS 使用的密码学实现
+│   ├── graphics/       终端、字体与 GUI 图形资源
+│   ├── gui/            HIVE runtime 集成副本
+│   ├── input/          键盘与鼠标输入
+│   ├── shell/          Shell 和命令注册
+│   ├── tools/          系统、文件、网络和图形命令
+│   └── user/           用户态运行时、libc 和程序加载
+├── third_party/        移植的第三方组件
+├── Makefile            构建入口
+└── version.mk          版本号来源
 ```
 
-## Shell 命令
+## 文档与路线图
 
-| 命令 | 分组 | 说明 |
-|------|------|------|
-| `help` | System | 交互式帮助模式（Python 风格） |
-| `help <cmd>` | System | 显示单条命令帮助 |
-| `clear` | System | 清屏 |
-| `version` | System | 版本信息（0.1 beta2） |
-| `echo <text>` | System | 输出文本 |
-| `reboot` | System | 重启系统 |
-| `poweroff` / `shutdown` | System | 关机 |
-| `credits` | System | 致谢 |
-| `status` | Debug | 系统状态 |
-| `history` | System | 命令历史 |
-| `clearhistory` | System | 清除历史 |
-| `search <term>` | System | 搜索历史 |
-| `ls` | File | 列出文件 |
-| `cat <file>` | File | 输出文件内容 |
-| `touch <file>` | File | 创建空文件 |
-| `rm <file>` | File | 删除文件 |
-| `writefile <file> <text...>` | File | 覆盖写入文本 |
-| `appendfile <file> <text...>` | File | 追加写入文本 |
-| `diskmgr` / `disk` | File | 查看磁盘、分区和 HBFS 占用 |
-| `install` / `setup` | System | 显示安装向导 |
-| `install auto` | System | 自动准备 HBFS 持久化存储 |
-| `hive` / `gui` / `startx` | Graphics | 启动 HIVE 桌面环境 |
-## 应用程序开发 API
+| 文档 | 内容 |
+|---|---|
+| [`docs/README.md`](docs/README.md) | 文档索引与 PDF 生成方式 |
+| [`docs/HIVE_DESKTOP_API.md`](docs/HIVE_DESKTOP_API.md) | HIVE 控件、事件和应用迁移 |
+| [`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md) | 内核、GUI、应用拆仓边界 |
+| [`docs/CHROMIUM_COMPAT_BASELINE.md`](docs/CHROMIUM_COMPAT_BASELINE.md) | Chromium 兼容工作的阶段 1 基线 |
+| [`CHROMIUM_COMPAT_ROADMAP.md`](CHROMIUM_COMPAT_ROADMAP.md) | Chromium 平台兼容层十阶段计划 |
 
-### 示例程序
+Chromium 目前尚未移植；路线图描述的是兼容层建设计划，而不是已经可运行的
+Chromium 浏览器。
 
-```c
-/* myapp.c — HBOS 应用程序示例 */
-#include "api/hal.h"
+## 当前限制
 
-static void my_handler(int argc, char **argv) {
-    console_puts("Hello from my app!\n");
-    console_set_fg(0x00FF00);
-    console_puts("This is green text\n");
-    console_set_fg(0xFFFFFF);
-}
+- 项目 ABI、文件格式和桌面接口仍可能在 beta 阶段变化。
+- 真机驱动覆盖有限，QEMU E1000 + AHCI 是最稳定的验证组合。
+- 自研网络栈和浏览器仍以基础兼容性为主，不能替代成熟浏览器。
+- HIVE runtime 正从内核链接代码迁移为独立用户态服务。
+- 不提供 Secure Boot、权限隔离和生产级安全保证。
 
-void app_main(void) {
-    app_register_command("myapp", "My first HBOS app", my_handler);
-}
-```
+## 版本简史
 
-### API 参考
+- `beta5 pre5`：HIVE 1.1、no-GUI 构建边界、浏览器/TLS 兼容性和模块化路线。
+- `beta4`：新桌面、TinyCC、动态链接、BusyBox、网络栈和真机输入修复。
+- `beta3`：桌面交互、任务栏、日历、字体、终端刷新与虚拟机启动改进。
+- `beta2`：BIOS/UEFI 双 ISO、文件工作流、HBFS、系统自测与磁盘工具。
+- `beta1`：CJK 输出、模块化 Shell、PS/2 输入和早期任务框架。
 
-| 函数 | 类别 | 说明 |
-|------|------|------|
-| `console_puts(str)` | 控制台 | 输出字符串（自动计算长度） |
-| `console_write(str, len)` | 控制台 | 输出指定长度的字符串 |
-| `console_putchar(c)` | 控制台 | 输出单字符（自动刷新缓冲区） |
-| `console_flush()` | 控制台 | 强制刷新输出缓冲区 |
-| `console_clear()` | 控制台 | 清除屏幕 |
-| `console_set_fg(color)` | 控制台 | 设置前景色 (24-bit RGB) |
-| `console_set_bg(color)` | 控制台 | 设置背景色 (24-bit RGB) |
-| `console_get_size(&cols, &rows)` | 控制台 | 获取终端字符尺寸 |
-| `console_is_initialized()` | 控制台 | 检查终端是否就绪 |
-| `kb_get_key()` | 键盘 | 阻塞式按键读取 |
-| `sys_reboot()` | 系统 | 重启系统 |
-| `sys_poweroff()` | 系统 | 关闭系统 |
-| `sys_udelay(us)` | 系统 | 微秒级忙等延时 |
-| `sys_mdelay(ms)` | 系统 | 毫秒级忙等延时 |
-| `app_register_command(name, desc, handler)` | 命令 | 注册 Shell 命令 |
+## License
 
-### 编译应用程序
-
-```makefile
-# 在 Makefile 的 C_SRCS 中添加
-C_SRCS += apps/myapp.c
-```
-
-## 技术架构
-
-### 启动流程
-
-```
-BIOS → GRUB (Multiboot2) → boot.asm (32-bit)
-  ├── CPUID 长模式检测
-  ├── 4 级页表 (P4 + P3 + 4×P2 = 6 页，4GB 2MB 大页映射)
-  ├── PAE → EFER.LME → CR0.PG
-  └── LGDT → 64-bit long_mode
-      └── call kmain(mbi)
-```
-
-### 图形双模式与 CJK 输出
-
-```
-console_puts(str)
-  ├── ASCII / ANSI → flanterm_write() → 高分辨率帧缓冲
-  ├── UTF-8 CJK    → UTF-8 解码 → HZK16 字形查找 → 像素级绘制
-  └── VGA fallback → vga_putc_fallback() → ANSI SGR → VGA 颜色属性
-```
-
-### 页表布局 (4GB)
-
-| 页表 | 映射 |
-|------|------|
-| p2_0 | 0GB - 1GB |
-| p2_1 | 1GB - 2GB |
-| p2_2 | 2GB - 3GB |
-| p2_3 | 3GB - 4GB |
-
-## 多阶段计划
-
-| Phase | 名称 | 状态 |
-|-------|------|------|
-| 0 | 引导系统 | ✅ |
-| 1 | 内核核心 | ✅ 初步任务框架 |
-| 2 | 图形系统 | ✅ CJK/Framebuffer/VGA |
-| 3 | Shell | ✅ 模块化命令/行编辑/历史 |
-| 4 | 设备驱动 | ✅ PS/2 键盘；ATA 待完善 |
-| 5 | 文件系统 | ⬜ |
-| 6 | 内存管理 | ⬜ |
-| 7 | 进程管理 | ✅ 协作式多任务雏形 |
-
-## 许可证
-
-GPL-3.0
-    ├── Hybrid ISO: 同时包含 BIOS 和 UEFI 部分
-    └── EFI ISO: (未来支持) 仅包含 UEFI 部分
-```
-
-### VGA 颜色表
-
-| 编号 | 颜色 | 编号 | 颜色 |
-|------|------|------|------|
-| 0 | 黑 | 8 | 深灰 |
-| 1 | 蓝 | 9 | 亮蓝 |
-| 2 | 绿 | 10 | 亮绿 |
-| 3 | 青 | 11 | 亮青 |
-| 4 | 红 | 12 | 亮红 |
-| 5 | 紫 | 13 | 亮紫 |
-| 6 | 棕 | 14 | 黄 |
-| 7 | 浅灰 | 15 | 白 |
-
-
-
-
-## 应用程序开发 API
-
-### 示例程序
-
-```c
-/* myapp.c — HBOS 应用程序示例 */
-#include "api/hal.h"
-
-static void my_handler(int argc, char **argv) {
-    console_puts("Hello from my app!\n");
-    console_set_fg(0x00FF00);
-    console_puts("This is green text\n");
-    console_set_fg(0xFFFFFF);
-}
-
-void app_main(void) {
-    app_register_command("myapp", "My first HBOS app", my_handler);
-}
-```
-
-### API 参考
-
-| 函数 | 类别 | 说明 |
-|------|------|------|
-| `console_puts(str)` | 控制台 | 输出字符串 (自动计算长度) |
-| `console_write(str, len)` | 控制台 | 输出指定长度的字符串 |
-| `console_putchar(c)` | 控制台 | 输出单字符 (自动刷新缓冲区) |
-| `console_flush()` | 控制台 | 强制刷新输出缓冲区 |
-| `console_clear()` | 控制台 | 清除屏幕 |
-| `console_set_fg(color)` | 控制台 | 设置前景色 (24-bit RGB) |
-| `console_set_bg(color)` | 控制台 | 设置背景色 (24-bit RGB) |
-| `console_get_size(&cols, &rows)` | 控制台 | 获取终端字符尺寸 |
-| `console_is_initialized()` | 控制台 | 检查终端是否就绪 |
-| `kb_get_key()` | 键盘 | 阻塞式按键读取 |
-| `sys_reboot()` | 系统 | 重启系统 |
-| `sys_poweroff()` | 系统 | 关闭系统 |
-| `sys_udelay(us)` | 系统 | 微秒级忙等延时 |
-| `sys_mdelay(ms)` | 系统 | 毫秒级忙等延时 |
-| `app_register_command(name, desc, handler)` | 命令 | 注册 Shell 命令 |
-
-特殊键码：`KB_UP` `KB_DOWN` `KB_LEFT` `KB_RIGHT` `KB_ESC`
-
-## 多阶段开发计划
-
-| Phase | 名称 | 状态 | 说明 |
-|-------|------|------|------|
-| Phase 0 | 引导系统 (BOOT) | ✅ | Multiboot2, 4GB 页表, 长模式 |
-| Phase 1 | 内核核心 (CORE) | ⬜ | GDT/IDT, CPU 检测, 中断 |
-| Phase 2 | 图形系统 (GRAPHICS) | ✅ | flanterm + VGA 颜色回退 + CJK 渲染 |
-| Phase 3 | Shell 命令系统 (SHELL) | ✅ | 模块化命令, help, 分组, 历史, 行编辑 |
-| Phase 4 | 设备驱动 (DRIVERS) | ✅/⬜ | PS/2 键盘、PCI、ATA/AHCI、串口已具备基础能力 |
-| Phase 5 | 文件系统 (FILESYSTEM) | ✅/⬜ | POSIX fd、ramfs、HBFS、VFS、安装器已接入 |
-| Phase 6 | 内存管理 (MEMORY) | ✅/⬜ | PMM、VMM、Heap 已接入，仍需继续增强 |
-| Phase 7 | 进程管理 (PROCESS) | ✅/⬜ | 协作式任务调度与 syscall ABI 已加入 |
-
-## 许可证
-
-GPL-3.0 license
+HBOS 使用 [GNU General Public License v3.0](LICENSE) 发布。
