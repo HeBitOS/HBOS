@@ -55,6 +55,8 @@ GUI  → Kernel UAPI / gui_service ABI
 | no-GUI | `make nogui` | 否 | 否 | `build-nogui/` |
 | no-GUI BIOS | `make nogui-bios` | 否 | 否 | `build-nogui/hbos-bios.iso` |
 | no-GUI UEFI | `make nogui-uefi` | 否 | 否 | `build-nogui/hbos-uefi.iso` |
+| 运行 no-GUI BIOS | `make run-nogui` | 否 | 否 | QEMU |
+| 运行 no-GUI UEFI | `make run-nogui-uefi` | 否 | 否 | QEMU + OVMF |
 | GUI 核心、无应用 | `make core-only` | 是 | 否 | `build-core/` |
 | 外部应用目录 | `make APP_DIR=/path/to/apps hax-apps` | 不适用 | 单独产物 | `build/app/` |
 

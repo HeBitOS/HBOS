@@ -71,6 +71,8 @@ make
 | `make release` | 生成 ISO、VMware VMDK 和 VirtualBox VDI |
 | `make smoke` | 构建并启动验证全部发布格式 |
 | `make nogui` | 构建不含 HIVE 和内嵌应用的 BIOS/UEFI ISO |
+| `make run-nogui` | 构建并在 QEMU 中启动 no-GUI BIOS 版 |
+| `make run-nogui-uefi` | 构建并在 QEMU 中启动 no-GUI UEFI 版 |
 | `make nogui-smoke` | 验证 no-GUI 的组件边界与启动 |
 | `make core-only` | 构建 HIVE-capable 核心，但不打包应用 |
 | `make hive-test` | 运行 HIVE 控件与事件测试 |

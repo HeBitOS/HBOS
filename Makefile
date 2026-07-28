@@ -309,7 +309,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke chromium-baseline hive-test nogui nogui-bios nogui-uefi nogui-smoke core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke chromium-baseline hive-test nogui nogui-bios nogui-uefi nogui-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
 
 all: iso
 
@@ -323,6 +323,8 @@ help:
 	@echo "  make chromium-baseline  Check module/API compatibility baseline"
 	@echo "  make hive-test  Run HIVE widget event/layout unit tests"
 	@echo "  make nogui      Build BIOS/UEFI without desktop GUI or bundled apps"
+	@echo "  make run-nogui  Build and boot the no-GUI BIOS ISO in QEMU"
+	@echo "  make run-nogui-uefi  Build and boot the no-GUI UEFI ISO in QEMU"
 	@echo "  make nogui-smoke  Boot-test no-GUI BIOS and UEFI ISOs"
 	@echo "  make core-only  Build HIVE-capable core without registered/HAX apps"
 	@echo "  make clean      Clean build files"
@@ -588,6 +590,23 @@ run-hdd: run-hdd-bios
 # drops continuous motion under Wayland, which made the mouse look "dead").
 # Override on the command line if needed, e.g.  make run DISPLAY_OPT='-display gtk'
 DISPLAY_OPT ?= -display sdl
+
+run-nogui: run-nogui-bios
+
+run-nogui-bios: nogui-bios
+	$(QEMU_ENV) $(QEMU) -m 512M \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
+		-cdrom $(NOGUI_BUILD_DIR)/hbos-bios.iso -boot d \
+		-serial stdio -vga std -monitor none $(DISPLAY_OPT)
+
+run-nogui-uefi: nogui-uefi
+	@cp $(OVMF_VARS) $(NOGUI_BUILD_DIR)/OVMF_VARS_NOGUI.fd
+	$(QEMU_ENV) $(QEMU) -machine q35 -m 512M \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(NOGUI_BUILD_DIR)/OVMF_VARS_NOGUI.fd \
+		-netdev user,id=net0 -device e1000,netdev=net0 \
+		-cdrom $(NOGUI_BUILD_DIR)/hbos-uefi.iso -boot d \
+		-serial stdio -vga std -monitor none $(DISPLAY_OPT) -no-reboot
 
 run-hdd-bios: $(INSTALL_IMG_BIOS)
 	$(QEMU_ENV) $(QEMU) -m 512M \
