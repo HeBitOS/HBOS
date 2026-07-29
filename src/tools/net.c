@@ -108,6 +108,8 @@ static void cmd_netinfo(int argc, char **argv) {
     print_uint64(dev->rx_bytes);
     console_puts(" dropped=");
     print_uint64(dev->rx_dropped);
+    console_puts(" errors=");
+    print_uint64(dev->rx_errors);
     console_putchar('\n');
     console_puts("  tx: packets=");
     print_uint64(dev->tx_packets);
@@ -115,6 +117,11 @@ static void cmd_netinfo(int argc, char **argv) {
     print_uint64(dev->tx_bytes);
     console_puts(" errors=");
     print_uint64(dev->tx_errors);
+    console_puts(" timeouts=");
+    print_uint64(dev->tx_timeouts);
+    console_putchar('\n');
+    console_puts("  driver resets=");
+    print_uint64(dev->driver_resets);
     console_putchar('\n');
     if (dev->dhcp_ok) {
         console_puts("  ip: "); print_ip(dev->ip);

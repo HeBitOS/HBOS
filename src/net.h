@@ -51,7 +51,10 @@ typedef struct {
     uint64_t rx_bytes;             /**< 已接收字节数 */
     uint64_t tx_bytes;             /**< 已发送字节数 */
     uint64_t rx_dropped;           /**< 接收丢包计数 */
+    uint64_t rx_errors;            /**< 接收硬件/帧错误计数 */
     uint64_t tx_errors;            /**< 发送错误计数 */
+    uint64_t tx_timeouts;          /**< 发送队列超时计数 */
+    uint64_t driver_resets;        /**< 驱动执行的硬件恢复次数 */
 
     /* ── Driver vtable ────────────────────────────────── */
     int (*send)(const void *frame, uint16_t len);   /**< 发送以太网帧 */

@@ -6,6 +6,7 @@
 #include "net.h"
 #include "pci.h"
 #include "string.h"
+#include "core/cpu.h"
 #include "core/vmm.h"
 #include "core/heap.h"
 #include "core/task.h"
@@ -452,13 +453,26 @@ static int e1000_poll(packet_cb_t cb, void *arg, uint32_t spins) {
 }
 
 static int pcnet_poll(packet_cb_t cb, void *arg, uint32_t spins);
+static int rtl8139_poll(packet_cb_t cb, void *arg, uint32_t spins);
 
 static int net_poll(packet_cb_t cb, void *arg, uint32_t spins) {
     switch (primary.driver) {
     case NET_DRIVER_E1000:  return e1000_poll(cb, arg, spins);
+    case NET_DRIVER_RTL8139: return rtl8139_poll(cb, arg, spins);
     case NET_DRIVER_PCNET:  return pcnet_poll(cb, arg, spins);
     default: return -1;
     }
+}
+
+/** PIT 固定以 100 Hz 初始化；将毫秒超时转换为不会提前结束的 tick 截止点。 */
+static uint64_t net_deadline_after_ms(uint32_t timeout_ms) {
+    uint64_t ticks = ((uint64_t)timeout_ms + 9U) / 10U;
+    if (!ticks) ticks = 1;
+    return pit_get_ticks() + ticks;
+}
+
+static int net_before_deadline(uint64_t deadline) {
+    return (int64_t)(pit_get_ticks() - deadline) < 0;
 }
 
 /**
@@ -657,8 +671,14 @@ static int arp_resolve(uint32_t ip, uint8_t mac[6]) {
     if (neigh_lookup(ip, mac) == 0) return 0;
     arp_wait_t w;
     w.ip = ip; w.found = 0;
-    send_arp(1, ip, 0);
-    for (int i = 0; i < 4 && !w.found; i++) net_poll(arp_cb, &w, 80000);
+    for (int attempt = 0; attempt < 3 && !w.found; attempt++) {
+        if (send_arp(1, ip, 0) < 0) break;
+        uint64_t deadline = net_deadline_after_ms(500);
+        while (!w.found && net_before_deadline(deadline)) {
+            net_poll(arp_cb, &w, 4096);
+            task_yield();
+        }
+    }
     if (!w.found) {
         set_error("arp timeout");
         return -1;
@@ -719,6 +739,267 @@ static void e1000_init_hw(const pci_device_t *pdev) {
 }
 
 /* ================================================================
+ * Realtek RTL8139 driver — Linux 8139too-compatible polling path
+ * ================================================================ */
+
+#define RTL8139_RX_RING_SIZE 8192U
+#define RTL8139_RX_ALLOC_SIZE (RTL8139_RX_RING_SIZE + 16U + PKT_SIZE)
+#define RTL8139_TX_SLOTS 4U
+
+#define RTL_MAC0       0x00
+#define RTL_TX_STATUS0 0x10
+#define RTL_TX_ADDR0   0x20
+#define RTL_RX_BUF     0x30
+#define RTL_CHIP_CMD   0x37
+#define RTL_RX_BUF_PTR 0x38
+#define RTL_INTR_MASK  0x3C
+#define RTL_INTR_STAT  0x3E
+#define RTL_TX_CONFIG  0x40
+#define RTL_RX_CONFIG  0x44
+#define RTL_CONFIG1    0x52
+#define RTL_MEDIA_STAT 0x58
+
+#define RTL_CMD_RESET  0x10
+#define RTL_CMD_RX_EN  0x08
+#define RTL_CMD_TX_EN  0x04
+#define RTL_RX_EMPTY   0x01
+
+#define RTL_RX_OK      0x0001
+#define RTL_RX_BAD_ALIGN 0x0002
+#define RTL_RX_CRC_ERR 0x0004
+#define RTL_RX_TOO_LONG 0x0008
+#define RTL_RX_RUNT    0x0010
+#define RTL_RX_BAD_SYMBOL 0x0020
+#define RTL_RX_ERROR_MASK (RTL_RX_BAD_ALIGN | RTL_RX_CRC_ERR | \
+                           RTL_RX_TOO_LONG | RTL_RX_RUNT | RTL_RX_BAD_SYMBOL)
+
+#define RTL_TX_HOST_OWNS 0x00002000U
+#define RTL_TX_OK        0x00008000U
+#define RTL_TX_OUT_OF_WINDOW 0x20000000U
+#define RTL_TX_ABORTED   0x40000000U
+#define RTL_TX_CARRIER_LOST 0x80000000U
+#define RTL_TX_ERROR_MASK (RTL_TX_OUT_OF_WINDOW | RTL_TX_ABORTED | \
+                           RTL_TX_CARRIER_LOST)
+
+#define RTL_ISR_RX_OK       0x0001
+#define RTL_ISR_RX_ERR      0x0002
+#define RTL_ISR_TX_ERR      0x0008
+#define RTL_ISR_RX_OVERFLOW 0x0010
+#define RTL_ISR_RX_FIFO_OVER 0x0040
+
+static uint16_t rtl8139_iobase;
+static uint32_t rtl8139_rx_offset;
+static uint8_t rtl8139_tx_slot;
+static uint8_t rtl8139_rx_ring[RTL8139_RX_ALLOC_SIZE]
+    __attribute__((aligned(16)));
+static uint8_t rtl8139_tx_buf[RTL8139_TX_SLOTS][PKT_SIZE]
+    __attribute__((aligned(16)));
+
+static inline uint8_t rtl_in8(uint16_t reg) {
+    uint8_t value;
+    __asm__ volatile("inb %1, %0" : "=a"(value)
+                     : "Nd"((uint16_t)(rtl8139_iobase + reg)));
+    return value;
+}
+
+static inline uint16_t rtl_in16(uint16_t reg) {
+    uint16_t value;
+    __asm__ volatile("inw %1, %0" : "=a"(value)
+                     : "Nd"((uint16_t)(rtl8139_iobase + reg)));
+    return value;
+}
+
+static inline uint32_t rtl_in32(uint16_t reg) {
+    uint32_t value;
+    __asm__ volatile("inl %1, %0" : "=a"(value)
+                     : "Nd"((uint16_t)(rtl8139_iobase + reg)));
+    return value;
+}
+
+static inline void rtl_out8(uint16_t reg, uint8_t value) {
+    __asm__ volatile("outb %0, %1" : : "a"(value),
+                     "Nd"((uint16_t)(rtl8139_iobase + reg)));
+}
+
+static inline void rtl_out16(uint16_t reg, uint16_t value) {
+    __asm__ volatile("outw %0, %1" : : "a"(value),
+                     "Nd"((uint16_t)(rtl8139_iobase + reg)));
+}
+
+static inline void rtl_out32(uint16_t reg, uint32_t value) {
+    __asm__ volatile("outl %0, %1" : : "a"(value),
+                     "Nd"((uint16_t)(rtl8139_iobase + reg)));
+}
+
+/* 8139too uses a read-back after important writes to flush posted I/O. */
+static inline void rtl_out8_flush(uint16_t reg, uint8_t value) {
+    rtl_out8(reg, value);
+    (void)rtl_in8(reg);
+}
+
+static int rtl8139_link_up(void) {
+    return (rtl_in8(RTL_MEDIA_STAT) & 0x04U) == 0;
+}
+
+static int rtl8139_reset(void) {
+    rtl_out8_flush(RTL_CHIP_CMD, RTL_CMD_RESET);
+    for (uint32_t i = 0; i < 2000000U; i++) {
+        if (!(rtl_in8(RTL_CHIP_CMD) & RTL_CMD_RESET)) break;
+        if (i + 1U == 2000000U) {
+            set_error("rtl8139 reset timeout");
+            return -1;
+        }
+        __asm__ volatile("pause");
+    }
+
+    memset(rtl8139_rx_ring, 0, sizeof(rtl8139_rx_ring));
+    memset(rtl8139_tx_buf, 0, sizeof(rtl8139_tx_buf));
+    rtl8139_rx_offset = 0;
+    rtl8139_tx_slot = 0;
+
+    rtl_out32(RTL_RX_BUF, (uint32_t)(uintptr_t)rtl8139_rx_ring);
+    for (uint32_t i = 0; i < RTL8139_TX_SLOTS; i++) {
+        rtl_out32((uint16_t)(RTL_TX_ADDR0 + i * 4U),
+                  (uint32_t)(uintptr_t)rtl8139_tx_buf[i]);
+    }
+
+    /* HBOS polls, so keep IRQs masked and acknowledge stale status. */
+    rtl_out16(RTL_INTR_MASK, 0);
+    rtl_out16(RTL_INTR_STAT, 0xFFFFU);
+    rtl_out8_flush(RTL_CHIP_CMD, RTL_CMD_RX_EN | RTL_CMD_TX_EN);
+
+    /*
+     * 8 KiB ring, WRAP, 1024-byte DMA burst, no promiscuous mode:
+     * accept own unicast, multicast and broadcast frames.
+     */
+    rtl_out32(RTL_RX_CONFIG, (7U << 13) | (6U << 8) |
+                              (1U << 7) | 0x0EU);
+    rtl_out32(RTL_TX_CONFIG, (3U << 24) | (6U << 8));
+    __sync_synchronize();
+    primary.link_ready = rtl8139_link_up();
+    return 0;
+}
+
+static int rtl8139_init_hw(const pci_device_t *pdev) {
+    if (!primary.bar0_io || !primary.bar0_base ||
+        primary.bar0_base > 0xFFFFU) {
+        set_error("rtl8139 requires I/O BAR0");
+        return -1;
+    }
+    rtl8139_iobase = (uint16_t)primary.bar0_base;
+
+    uint32_t cmd = pci_read32(pdev->bus, pdev->slot, pdev->func, 0x04);
+    pci_write32(pdev->bus, pdev->slot, pdev->func, 0x04, cmd | 0x0005U);
+    rtl_out8(RTL_CONFIG1, 0);
+
+    if (rtl8139_reset() < 0) return -1;
+    for (int i = 0; i < 6; i++) primary.mac[i] = rtl_in8(RTL_MAC0 + i);
+    primary.mac_valid = (primary.mac[0] | primary.mac[1] | primary.mac[2] |
+                         primary.mac[3] | primary.mac[4] | primary.mac[5]) != 0;
+    if (!primary.mac_valid) {
+        set_error("rtl8139 invalid MAC");
+        primary.link_ready = false;
+        return -1;
+    }
+    last_error = "ok";
+    return 0;
+}
+
+static int rtl8139_recover(const char *reason) {
+    primary.driver_resets++;
+    if (rtl8139_reset() < 0) return -1;
+    set_error(reason);
+    return 0;
+}
+
+static int rtl8139_send(const void *frame, uint16_t len) {
+    if (!frame || len > PKT_SIZE || len < sizeof(eth_hdr_t)) {
+        primary.tx_errors++;
+        set_error("rtl8139 invalid frame");
+        return -1;
+    }
+    primary.link_ready = rtl8139_link_up();
+    if (!primary.link_ready) {
+        primary.tx_errors++;
+        set_error("rtl8139 link down");
+        return -1;
+    }
+
+    uint8_t slot = rtl8139_tx_slot;
+    uint16_t status_reg = (uint16_t)(RTL_TX_STATUS0 + slot * 4U);
+    uint32_t status = rtl_in32(status_reg);
+    uint32_t wait;
+    for (wait = 0; !(status & RTL_TX_HOST_OWNS) && wait < 2000000U; wait++) {
+        status = rtl_in32(status_reg);
+        __asm__ volatile("pause");
+    }
+    if (!(status & RTL_TX_HOST_OWNS)) {
+        primary.tx_errors++;
+        primary.tx_timeouts++;
+        (void)rtl8139_recover("rtl8139 tx timeout");
+        return -1;
+    }
+    if (status & RTL_TX_ERROR_MASK) {
+        primary.tx_errors++;
+        (void)rtl8139_recover("rtl8139 tx error");
+        return -1;
+    }
+
+    uint16_t wire_len = len < 60U ? 60U : len;
+    memcpy(rtl8139_tx_buf[slot], frame, len);
+    if (wire_len > len) memset(rtl8139_tx_buf[slot] + len, 0, wire_len - len);
+    __sync_synchronize();
+    rtl_out32(status_reg, wire_len);
+    rtl8139_tx_slot = (uint8_t)((slot + 1U) % RTL8139_TX_SLOTS);
+    primary.tx_packets++;
+    primary.tx_bytes += wire_len;
+    last_error = "ok";
+    return 0;
+}
+
+static int rtl8139_poll(packet_cb_t cb, void *arg, uint32_t spins) {
+    primary.link_ready = rtl8139_link_up();
+    if (!primary.link_ready) return -1;
+
+    for (uint32_t s = 0; s < spins; s++) {
+        uint16_t isr = rtl_in16(RTL_INTR_STAT);
+        if (isr) rtl_out16(RTL_INTR_STAT, isr);
+        if (isr & (RTL_ISR_RX_ERR | RTL_ISR_RX_OVERFLOW |
+                   RTL_ISR_RX_FIFO_OVER)) {
+            primary.rx_errors++;
+            primary.rx_dropped++;
+            (void)rtl8139_recover("rtl8139 rx overflow");
+            return 0;
+        }
+        if (isr & RTL_ISR_TX_ERR) primary.tx_errors++;
+        if (rtl_in8(RTL_CHIP_CMD) & RTL_RX_EMPTY) continue;
+
+        uint8_t *packet = rtl8139_rx_ring + rtl8139_rx_offset;
+        uint16_t status = *(volatile uint16_t *)packet;
+        uint16_t rx_len = *(volatile uint16_t *)(packet + 2);
+        if (!(status & RTL_RX_OK) || (status & RTL_RX_ERROR_MASK) ||
+            rx_len < sizeof(eth_hdr_t) + 4U || rx_len > PKT_SIZE + 4U) {
+            primary.rx_errors++;
+            primary.rx_dropped++;
+            (void)rtl8139_recover("rtl8139 bad rx frame");
+            return 0;
+        }
+
+        uint16_t frame_len = (uint16_t)(rx_len - 4U); /* strip Ethernet CRC */
+        primary.rx_packets++;
+        primary.rx_bytes += frame_len;
+        int ret = cb ? cb(packet + 4, frame_len, arg) : 0;
+
+        rtl8139_rx_offset = (rtl8139_rx_offset + rx_len + 4U + 3U) & ~3U;
+        rtl8139_rx_offset %= RTL8139_RX_RING_SIZE;
+        rtl_out16(RTL_RX_BUF_PTR,
+                  (uint16_t)(rtl8139_rx_offset - 16U));
+        if (ret) return ret;
+    }
+    return 0;
+}
+
+/* ================================================================
  * AMD PCnet-PCI II (Am79C970A) driver — I/O port based
  * ================================================================ */
 
@@ -756,23 +1037,24 @@ static void pcnet_write_bcr(uint16_t reg, uint16_t val) {
 
 #pragma pack(push, 1)
 typedef struct {
-    uint32_t base;      /* buffer physical address (16-byte aligned) */
-    int16_t  length;     /* negative=dev owns, positive=host owns */
-    uint16_t status;     /* TX: 0x0200=STP 0x0100=ENP 0x8000=OWN */
-    uint32_t msg_len;    /* reserved / message length */
-    uint32_t reserved;   /* Padding to 16 bytes */
+    volatile uint32_t base;      /* buffer physical address (16-byte aligned) */
+    volatile int16_t  length;    /* negative=dev owns, positive=host owns */
+    volatile uint16_t status;    /* TX: 0x0200=STP 0x0100=ENP 0x8000=OWN */
+    volatile uint32_t msg_len;   /* reserved / message length */
+    volatile uint32_t reserved;  /* Padding to 16 bytes */
 } pcnet_desc_t;
 #pragma pack(pop)
 
 #pragma pack(push, 1)
 typedef struct {
     uint16_t mode;       /* 0x0000 */
-    uint16_t reserved1;
+    uint8_t  rlen;       /* log2(RX descriptors) in bits 7:4 */
+    uint8_t  tlen;       /* log2(TX descriptors) in bits 7:4 */
     uint8_t  padr[6];    /* MAC address */
-    uint16_t reserved2;
+    uint16_t reserved;
     uint8_t  ladrf[8];   /* logical address filter */
-    uint32_t rx_ring;    /* RX descriptor ring physical addr (RLEN in bits 31:28) */
-    uint32_t tx_ring;    /* TX descriptor ring physical addr (TLEN in bits 31:28) */
+    uint32_t rx_ring;    /* RX descriptor ring physical address */
+    uint32_t tx_ring;    /* TX descriptor ring physical address */
 } pcnet_init_block_t;
 #pragma pack(pop)
 
@@ -781,18 +1063,6 @@ static pcnet_desc_t *pcnet_rx_desc;
 static uint8_t *pcnet_tx_buf[PCNET_TX_COUNT];
 static uint8_t *pcnet_rx_buf[PCNET_RX_COUNT];
 static uint16_t pcnet_tx_tail;
-
-static void print_hex(uint32_t val) {
-    extern void console_puts(const char *s);
-    char buf[9];
-    buf[8] = '\0';
-    for (int i = 7; i >= 0; i--) {
-        uint8_t d = val & 0xF;
-        buf[i] = d < 10 ? '0' + d : 'A' + d - 10;
-        val >>= 4;
-    }
-    console_puts(buf);
-}
 
 static int pcnet_init_hw(pci_device_t *dev) {
     pcnet_iobase = primary.bar0_base; /* I/O bar, clear flags */
@@ -814,8 +1084,10 @@ static int pcnet_init_hw(pci_device_t *dev) {
     /* Set SWSTYLE to 2 (PCnet-PCI 32-bit style), which also sets SSIZE32 to 1 */
     pcnet_write_bcr(20, 0x0102);
 
-    /* Enable Full Duplex in BCR9 */
-    pcnet_write_bcr(9, pcnet_read_bcr(9) | 0x0001);
+    /* Match pcnet32 defaults: auto-select media, full duplex and auto padding. */
+    pcnet_write_bcr(2, pcnet_read_bcr(2) | 0x0002);
+    pcnet_write_bcr(9, pcnet_read_bcr(9) | 0x0003);
+    pcnet_write_csr(4, 0x0915);
 
     /* Check if stop bit is set */
     uint16_t csr0 = pcnet_read_csr(0);
@@ -872,30 +1144,11 @@ static int pcnet_init_hw(pci_device_t *dev) {
     ib = (pcnet_init_block_t *)(uintptr_t)ib_phys;
     memset(ib, 0, sizeof(*ib));
     ib->mode = 0x0000;
-    ib->reserved1 = 0;
-    ib->reserved2 = 0;
+    ib->rlen = 4U << 4; /* 2^4 = 16 descriptors */
+    ib->tlen = 3U << 4; /* 2^3 = 8 descriptors */
     memcpy(ib->padr, primary.mac, 6);
-    ib->rx_ring = (4U << 28) | ((uint32_t)rx_phys & 0x0FFFFFFF);
-    ib->tx_ring = (3U << 28) | ((uint32_t)tx_phys & 0x0FFFFFFF);
-
-    extern void console_puts(const char *s);
-    console_puts("[PCNET] rx_phys: 0x");
-    print_hex((uint32_t)rx_phys);
-    console_puts(" tx_phys: 0x");
-    print_hex((uint32_t)tx_phys);
-    console_puts(" ib_phys: 0x");
-    print_hex((uint32_t)ib_phys);
-    console_puts("\n");
-    console_puts("[PCNET] rx_ring: 0x");
-    print_hex(ib->rx_ring);
-    console_puts(" tx_ring: 0x");
-    print_hex(ib->tx_ring);
-    console_puts("\n");
-    console_puts("[PCNET] BCR20: 0x");
-    print_hex(pcnet_read_bcr(20));
-    console_puts(" BCR9: 0x");
-    print_hex(pcnet_read_bcr(9));
-    console_puts("\n");
+    ib->rx_ring = (uint32_t)rx_phys;
+    ib->tx_ring = (uint32_t)tx_phys;
 
     /* Write InitBlock address and issue INIT */
     uint32_t ib_addr = (uint32_t)(uintptr_t)ib;
@@ -922,6 +1175,11 @@ static int pcnet_send(const void *frame, uint16_t len) {
         primary.tx_errors++;
         return -1;
     }
+    if (!(pcnet_read_csr(0) & 0x0010)) {
+        primary.tx_errors++;
+        set_error("pcnet tx engine stopped");
+        return -1;
+    }
     uint16_t idx = pcnet_tx_tail;
     /* Wait for device to finish with this descriptor */
     if (pcnet_tx_desc[idx].status & 0x8000) {
@@ -930,10 +1188,28 @@ static int pcnet_send(const void *frame, uint16_t len) {
     }
     memcpy(pcnet_tx_buf[idx], frame, len);
     pcnet_tx_desc[idx].length = (int16_t)(-(int32_t)len);
+    pcnet_tx_desc[idx].msg_len = 0;
+    pcnet_tx_desc[idx].reserved = 0;
+    __sync_synchronize();
     pcnet_tx_desc[idx].status = 0x8300;    /* OWN | STP | ENP */
+    __sync_synchronize();
     pcnet_tx_tail = (uint16_t)((idx + 1) % PCNET_TX_COUNT);
     /* Demand transmit (WITHOUT IENA) */
-    pcnet_write_csr(0, (pcnet_read_csr(0) & ~0x0040) | 0x0008);
+    pcnet_write_csr(0, 0x0008);
+    for (uint32_t wait = 0; pcnet_tx_desc[idx].status & 0x8000; wait++) {
+        if (wait >= 2000000U) {
+            primary.tx_errors++;
+            primary.tx_timeouts++;
+            set_error("pcnet tx timeout");
+            return -1;
+        }
+        __asm__ volatile("pause");
+    }
+    if (pcnet_tx_desc[idx].status & 0x4000) {
+        primary.tx_errors++;
+        set_error("pcnet tx error");
+        return -1;
+    }
     primary.tx_packets++;
     primary.tx_bytes += len;
     return 0;
@@ -945,18 +1221,23 @@ static int pcnet_poll(packet_cb_t cb, void *arg, uint32_t spins) {
         for (int i = 0; i < PCNET_RX_COUNT; i++) {
             pcnet_desc_t *d = &pcnet_rx_desc[i];
             if (d->status & 0x8000) continue;  /* device still owns */
+            uint16_t status = d->status;
             uint16_t rlen = (uint16_t)(d->msg_len & 0xFFF);
-            if (rlen >= sizeof(eth_hdr_t) && rlen <= PCNET_BUF_SIZE && cb) {
+            int ret = 0;
+            if (!(status & 0x4000) && (status & 0x0300) == 0x0300 &&
+                rlen >= sizeof(eth_hdr_t) + 4U && rlen <= PCNET_BUF_SIZE) {
+                rlen = (uint16_t)(rlen - 4U); /* strip Ethernet CRC */
                 primary.rx_packets++;
                 primary.rx_bytes += rlen;
-                int ret = cb(pcnet_rx_buf[i], rlen, arg);
-                if (ret) return ret;
+                if (cb) ret = cb(pcnet_rx_buf[i], rlen, arg);
             } else {
+                primary.rx_errors++;
                 primary.rx_dropped++;
             }
             /* Return descriptor to device */
             d->length = (int16_t)(-(int32_t)PCNET_BUF_SIZE);
             d->status = 0x8000;
+            if (ret) return ret;
         }
     }
     return 0;
@@ -984,9 +1265,12 @@ void net_init(void) {
     if (primary.driver == NET_DRIVER_E1000) {
         primary.send = e1000_send;
         e1000_init_hw(&dev);
+    } else if (primary.driver == NET_DRIVER_RTL8139) {
+        primary.send = rtl8139_send;
+        if (rtl8139_init_hw(&dev) < 0) primary.send = 0;
     } else if (primary.driver == NET_DRIVER_PCNET) {
         primary.send = pcnet_send;
-        pcnet_init_hw(&dev);
+        if (pcnet_init_hw(&dev) < 0) primary.send = 0;
     } else {
         set_error("no driver for this NIC");
         return;
@@ -1094,16 +1378,28 @@ int net_dhcp(void) {
     uint32_t xid = 0x48424F53U;
     dhcp_wait_t w;
     memset(&w, 0, sizeof(w)); w.xid = xid;
-    send_dhcp(1, xid, 0, 0);
-    for (int i = 0; i < 6 && !w.found; i++) net_poll(dhcp_cb, &w, 80000);
+    for (int attempt = 0; attempt < 3 && !w.found; attempt++) {
+        if (send_dhcp(1, xid, 0, 0) < 0) break;
+        uint64_t deadline = net_deadline_after_ms(1000);
+        while (!w.found && net_before_deadline(deadline)) {
+            net_poll(dhcp_cb, &w, 4096);
+            task_yield();
+        }
+    }
     if (!w.found || w.type != 2) {
         set_error("dhcp discover timeout");
         return -1;
     }
     uint32_t offer = w.yiaddr, server = w.server;
     memset(&w, 0, sizeof(w)); w.xid = xid;
-    send_dhcp(3, xid, offer, server);
-    for (int i = 0; i < 6 && !w.found; i++) net_poll(dhcp_cb, &w, 80000);
+    for (int attempt = 0; attempt < 3 && !w.found; attempt++) {
+        if (send_dhcp(3, xid, offer, server) < 0) break;
+        uint64_t deadline = net_deadline_after_ms(1000);
+        while (!w.found && net_before_deadline(deadline)) {
+            net_poll(dhcp_cb, &w, 4096);
+            task_yield();
+        }
+    }
     if (!w.found || w.type != 5) {
         set_error("dhcp request timeout");
         return -1;
@@ -1171,11 +1467,10 @@ static int ping_cb(const uint8_t *pkt, uint16_t len, void *arg) {
 /**
  * @brief 向指定 IP 发送 ICMP Echo Request 并等待 Echo Reply
  * @param ip 目标 IP 地址（网络字节序）
- * @param timeout_ms 超时时间（毫秒，当前未使用）
+ * @param timeout_ms 超时时间（毫秒）
  * @return 0 成功，-1 超时或网络未配置
  */
 int net_ping(uint32_t ip, uint32_t timeout_ms) {
-    (void)timeout_ms;
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
     uint8_t mac[6];
     uint32_t next_hop;
@@ -1189,8 +1484,12 @@ int net_ping(uint32_t ip, uint32_t timeout_ms) {
     for (int i = 8; i < 32; i++) icmp[i] = (uint8_t)i;
     *(uint16_t *)(icmp + 2) = checksum(icmp, sizeof(icmp));
     ping_wait_t w = {0x4842, 0};
-    send_ip(mac, ip, IP_PROTO_ICMP, icmp, sizeof(icmp));
-    for (int i = 0; i < 8 && !w.ok; i++) net_poll(ping_cb, &w, 80000);
+    if (send_ip(mac, ip, IP_PROTO_ICMP, icmp, sizeof(icmp)) < 0) return -1;
+    uint64_t deadline = net_deadline_after_ms(timeout_ms ? timeout_ms : 1000U);
+    while (!w.ok && net_before_deadline(deadline)) {
+        net_poll(ping_cb, &w, 4096);
+        task_yield();
+    }
     if (!w.ok) {
         set_error("icmp timeout");
         return -1;
@@ -1313,8 +1612,13 @@ int net_dns_resolve(const char *name, uint32_t *out_ip) {
         if (next_port < 49152) next_port = 49152;
         uint16_t sport = next_port++;
         dns_wait_t w = {id, 0, 0};
-        send_udp_raw(mac, primary.ip, dns_server, sport, DNS_PORT, msg, (uint16_t)len);
-        for (int i = 0; i < 8 && !w.found; i++) net_poll(dns_cb, &w, 80000);
+        if (send_udp_raw(mac, primary.ip, dns_server, sport, DNS_PORT,
+                         msg, (uint16_t)len) < 0) break;
+        uint64_t deadline = net_deadline_after_ms(1000);
+        while (!w.found && net_before_deadline(deadline)) {
+            net_poll(dns_cb, &w, 4096);
+            task_yield();
+        }
         if (w.found) {
             *out_ip = w.ip;
             return 0;
@@ -1382,8 +1686,13 @@ int net_ntp_sync(const char *server) {
         if (next_port < 49152) next_port = 49152;
         uint16_t sport = next_port++;
         ntp_wait_t w = {sport, 0, 0};
-        send_udp_raw(mac, primary.ip, ntp_server, sport, NTP_PORT, req, sizeof(req));
-        for (int i = 0; i < 8 && !w.found; i++) net_poll(ntp_cb, &w, 80000);
+        if (send_udp_raw(mac, primary.ip, ntp_server, sport, NTP_PORT,
+                         req, sizeof(req)) < 0) break;
+        uint64_t deadline = net_deadline_after_ms(1000);
+        while (!w.found && net_before_deadline(deadline)) {
+            net_poll(ntp_cb, &w, 4096);
+            task_yield();
+        }
         if (w.found) {
             int64_t cmos_epoch = rtc_tz_cmos_epoch_now();
             g_rtc_ntp_correction_sec = (long long)w.unix_sec - cmos_epoch;
@@ -1524,7 +1833,11 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
     w.sport = conn->sport;
     for (int attempt = 0; attempt < 3 && !w.synack && !w.rst; attempt++) {
         send_tcp(conn->mac, ip, conn->sport, port, conn->seq, 0, 0x02, 0, 0);
-        for (int i = 0; i < 8 && !w.synack && !w.rst; i++) { net_poll(tcp_cb, &w, 80000); task_yield(); }
+        uint64_t deadline = net_deadline_after_ms(1000);
+        while (!w.synack && !w.rst && net_before_deadline(deadline)) {
+            net_poll(tcp_cb, &w, 4096);
+            task_yield();
+        }
     }
     if (!w.synack || w.rst) {
         set_error(w.rst ? "tcp reset" : "tcp connect timeout");
@@ -1563,8 +1876,9 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
         if (send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
                      conn->seq, conn->ack, 0x18, data, (uint16_t)len) < 0)
             return -1;
-        for (int i = 0; i < 8 && !w.rst; i++) {
-            net_poll(tcp_cb, &w, 80000);
+        uint64_t deadline = net_deadline_after_ms(1000);
+        while (!w.rst && net_before_deadline(deadline)) {
+            net_poll(tcp_cb, &w, 4096);
             task_yield();
             if (w.acked) {
                 conn->seq += len;

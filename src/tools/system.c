@@ -372,6 +372,12 @@ static void cmd_drivers(int argc, char **argv) {
         console_puts("\n");
         console_puts("  link: "); print_ready(dev->link_ready); console_puts("\n");
         console_puts("  dhcp: "); print_ready(dev->dhcp_ok); console_puts("\n");
+        console_puts("  packets: rx "); print_uint64(dev->rx_packets);
+        console_puts(", tx "); print_uint64(dev->tx_packets);
+        console_puts(", dropped "); print_uint64(dev->rx_dropped); console_puts("\n");
+        console_puts("  recovery: "); print_uint64(dev->driver_resets);
+        console_puts(" resets, "); print_uint64(dev->tx_timeouts);
+        console_puts(" tx timeouts\n");
         if (dev->dhcp_ok) {
             char ip[16];
             net_ipv4_to_str(dev->ip, ip);
