@@ -51,7 +51,7 @@
   <div style="height:4.5cm;"></div>
   <div style="background:#14a6e0; color:#fff; padding:22px 18px; font-size:11pt; font-weight:600;">
     HBOS APPLICATION DEVELOPER GUIDE<br>
-    <span style="font-size:9.5pt; font-weight:400;">2026/07/28 &nbsp;·&nbsp; VERSION 1.5 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; SDK rev.6（HAX ABI + HIVE 1.2）</span>
+    <span style="font-size:9.5pt; font-weight:400;">2026/07/29 &nbsp;·&nbsp; VERSION 1.6 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; SDK rev.7（HAX ABI + HIVE 1.3）</span>
   </div>
 </div>
 
@@ -95,7 +95,7 @@
   <div class="s">4.4 ls —— 列出目录内容</div>
   <div class="s">4.5 GUI 全屏画布（文档示例）</div>
   <div class="s">4.6 HIVE 并发窗口（文档示例）</div>
-  <div class="s">4.7 HIVE 1.2 控件（文档示例）</div>
+  <div class="s">4.7 HIVE 1.3 控件（文档示例）</div>
   <div class="c">附录 A — 底层 POSIX 系统调用速查</div>
   <div class="c">附录 B — hax_meta_t 二进制布局</div>
   <div class="c">附录 C — 常见构建错误排查</div>
@@ -409,7 +409,7 @@ hax_win_close();</pre>
 窗口的事件队列。应用退出后窗口自动回收。最多 8 个并发窗口，单窗口最大 900×640。窗口应用应从
 <b>开始菜单</b>或在 GUI 终端用 <code>run</code> 启动（均为非阻塞）。鼠标按下后由内容窗口捕获，
 移动和松开事件会继续投递；连续移动事件自动合并，防止事件队列被填满。</div>
-<p><b>HIVE 1.2 / 窗口 ABI v2：</b>应用可用 <code>hive_window_query</code> 查询能力，
+<p><b>HIVE 1.3 / 窗口 ABI v2：</b>应用可用 <code>hive_window_query</code> 查询能力，
 通过 <code>hive_window_create</code> 创建多个带显式代数句柄的窗口，并独立设置标题、几何和
 普通/最小化/最大化状态。<code>hive_window_draw</code> 支持批量 Clear、Fill、Text 与 ARGB
 位图上传，<code>hive_window_present_rect</code> 支持脏矩形提交；事件扩展为 Move、Resize、
@@ -422,9 +422,10 @@ Focus 与 State。旧 <code>hive_window_open</code> 单窗口接口保持兼容�
 <code>#include &lt;hive.h&gt;</code>；旧 <code>hax_ui_*</code> 名称继续兼容。</p>
 <table>
 <tr><th>控件</th><th>创建函数</th><th>交互</th></tr>
+<tr><td>面板</td><td><code>hive_ui_add_panel</code></td><td>父子控件树、相对坐标、级联状态</td></tr>
 <tr><td>标签</td><td><code>hive_ui_add_label</code></td><td>只读或动态文本</td></tr>
 <tr><td>按钮</td><td><code>hive_ui_add_button</code></td><td>松开触发、Enter、Space → CLICK</td></tr>
-<tr><td>文本框</td><td><code>hive_ui_add_textbox</code></td><td>输入、UTF-8 安全删除、左右/Home/End、Enter</td></tr>
+<tr><td>文本框</td><td><code>hive_ui_add_textbox</code></td><td>输入、UTF-8 选区、鼠标拖选、Shift+左右、Ctrl+A</td></tr>
 <tr><td>复选框</td><td><code>hive_ui_add_checkbox</code></td><td>点击或 Space 切换 → CHANGE</td></tr>
 <tr><td>列表</td><td><code>hive_ui_add_list</code></td><td>点击、上下键、PageUp/PageDown → SELECT</td></tr>
 <tr><td>进度条</td><td><code>hive_ui_add_progress</code></td><td><code>hive_ui_set_value</code> 更新</td></tr>
@@ -434,7 +435,7 @@ Focus 与 State。旧 <code>hive_window_open</code> 单窗口接口保持兼容�
 <tr><td>图片</td><td><code>hive_ui_add_image</code></td><td>上传 0xAARRGGBB 位图</td></tr>
 <tr><td>画布</td><td><code>hive_ui_add_canvas</code></td><td>应用回调自定义绘制</td></tr>
 </table>
-<p>当前 <code>HIVE_API_MAJOR=1</code>、<code>HIVE_API_MINOR=2</code>。单个 UI 最多
+<p>当前 <code>HIVE_API_MAJOR=1</code>、<code>HIVE_API_MINOR=3</code>。单个 UI 最多
 48 个控件，不使用动态内存；状态完全属于应用自己的 <code>hive_ui_t</code>。
 主题统一提供普通、悬停、按下、禁用、选择和焦点环颜色。</p>
 <table>
@@ -446,6 +447,10 @@ Focus 与 State。旧 <code>hive_window_open</code> 单窗口接口保持兼容�
 <tr><td><code>hive_ui_draw(ui)</code></td><td>绘制全部可见控件和交互状态</td></tr>
 <tr><td><code>hive_ui_set_enabled / set_visible</code></td><td>启用、禁用、显示或隐藏控件</td></tr>
 <tr><td><code>hive_ui_set_text / set_value / get_value</code></td><td>更新或读取控件内容</td></tr>
+<tr><td><code>hive_ui_set_parent / parent</code></td><td>建立或查询 Panel 父子关系，子控件使用相对坐标</td></tr>
+<tr><td><code>hive_ui_set_rect / get_rect / remove</code></td><td>更新相对位置、读取窗口坐标或删除整棵子树</td></tr>
+<tr><td><code>hive_textbox_select / select_all</code></td><td>按 UTF-8 码点边界设置或全选文本</td></tr>
+<tr><td><code>hive_textbox_selection / copy_selection</code></td><td>查询选区范围或复制为 NUL 结尾 UTF-8 文本</td></tr>
 </table>
 <pre>#include &lt;hive.h&gt;
 HIVE_APP("hello-ui", "最小 HIVE 应用");
@@ -468,8 +473,9 @@ while (hive_window_active(&amp;w, &amp;h)) {
     hive_yield();
 }
 done: hive_window_close();</pre>
-<div class="warn">HIVE 1.2 能按 UTF-8 码点移动和删除已有文本，但窗口键盘事件目前仍只
-直接产生可打印 ASCII；完整中文输入法、剪贴板、文本选择和无障碍语义将在后续版本追加。</div>
+<div class="warn">HIVE 1.3 能按 UTF-8 码点移动、鼠标/键盘选择、替换和删除已有文本；
+窗口键盘事件目前仍只直接产生可打印 ASCII，完整中文输入法、系统剪贴板和无障碍语义
+将在后续版本追加。</div>
 </div>
 
 <!-- ── 第 3 章 ── -->
@@ -727,7 +733,7 @@ done:
     return 0;
 }</pre>
 
-<h2>4.7 HIVE 1.2 控件（文档示例）</h2>
+<h2>4.7 HIVE 1.3 控件（文档示例）</h2>
 <p>以下片段覆盖首批控件、悬停/按下反馈、
 滑杆拖动、控件联动、动态文本和响应式网格。布局代码不硬编码每个控件的绝对宽度：</p>
 <pre>hive_layout_t layout;

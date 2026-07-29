@@ -564,7 +564,7 @@ hive-test: | $(BUILD_DIR)
 		scripts/test_hive_winsrv.c src/gui/winsrv.c \
 		-o $(BUILD_DIR)/test_hive_winsrv
 	$(BUILD_DIR)/test_hive_winsrv
-	@echo "✓ HIVE UI 1.2 event/layout/widget tests"
+	@echo "✓ HIVE UI 1.3 event/layout/widget tests"
 
 nogui:
 	@$(MAKE) --no-print-directory BUILD_DIR=$(NOGUI_BUILD_DIR) \

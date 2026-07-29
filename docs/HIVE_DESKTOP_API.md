@@ -1,7 +1,7 @@
 # HIVE 桌面与应用 API
 
 > HIVE：HBOS Interface & Visual Environment
-> 当前工具包版本：1.2
+> 当前工具包版本：1.3
 > 首选头文件：`app/include/hive.h`
 
 ## 分层
@@ -54,22 +54,25 @@ done:
 }
 ```
 
-## 1.2 能力
+## 1.3 能力
 
-- 控件：Label、Button、Textbox、Checkbox、List、Progress、Slider、
+- 控件：Panel、Label、Button、Textbox、Checkbox、List、Progress、Slider、
   Scrollbar、Menu、Image 和自定义 Canvas。
+- 控件树：Panel 可拥有嵌套子控件；子控件使用相对坐标，父级隐藏/禁用会级联
+  到整棵子树，删除 Panel 会安全移除其全部后代并修正焦点索引。
 - 布局：内边距、纵向行布局、等分网格，窗口尺寸变化时可重新排布。
 - 输入：悬停、按下、拖动、松开、窗口外释放捕获、Tab 焦点、Enter/Space、
   方向键、Home/End、PageUp/PageDown。
-- 文本：已有 UTF-8 内容按码点移动和删除；当前键盘事件仍只直接输入 ASCII，
-  完整输入法协议后续增加。
+- 文本：已有 UTF-8 内容按码点移动、选择和删除；支持鼠标拖选、Shift+左右键、
+  Ctrl+A、选区替换以及通过 `hive_textbox_copy_selection()` 读取选区。当前键盘
+  事件仍只直接输入 ASCII，完整输入法与系统剪贴板协议后续增加。
 - 主题：普通、悬停、按下、禁用、选择和焦点环颜色均集中在
   `hive_theme_t`。
 - 独立性：UI 状态由应用自己的 `hive_ui_t` 持有，不访问桌面或内核私有状态。
 
 ## 显式窗口 API
 
-HIVE 1.2 保留 `hive_window_open()` 等单窗口兼容接口，并新增带不透明句柄的
+HIVE 1.3 保留 `hive_window_open()` 等单窗口兼容接口，并提供带不透明句柄的
 显式接口：
 
 ```c
@@ -99,6 +102,40 @@ hive_window_present_rect(first, &dirty);
 - 批量 Clear/Fill/Text/ARGB 绘制和可选脏矩形提交。
 - 事件队列满时合并连续鼠标移动，并保证按键状态变化和关闭事件能够入队。
 - no-GUI 构建保留系统调用编号；能力查询返回零能力，其余 v2 操作明确失败。
+
+## 文本框选区 API
+
+文本框的光标与选区端点都是 UTF-8 字节偏移，但 API 会把端点钳制到码点边界：
+
+```c
+hive_widget_t *textbox = hive_ui_widget(&ui, TEXTBOX_ID);
+hive_textbox_select_all(textbox);
+
+char selected[128];
+int bytes = hive_textbox_copy_selection(textbox, selected, sizeof(selected));
+if (bytes > 0) {
+    /* selected 是 NUL 结尾的 UTF-8 文本 */
+}
+hive_textbox_clear_selection(textbox);
+```
+
+## 控件树 API
+
+Panel 必须先于其子控件创建，以保证父级先绘制。`hive_ui_set_parent()` 会保持
+控件当前的屏幕位置，随后该控件的 `rect` 改为相对父 Panel 的坐标。可用
+`hive_ui_set_rect()` 设置新的相对位置，并通过 `hive_ui_get_rect()` 读取最终
+窗口坐标：
+
+```c
+hive_ui_add_panel(&ui, PANEL_ID, hive_rect(20, 20, 320, 180));
+hive_ui_add_button(&ui, SAVE_ID, hive_rect(40, 60, 100, 32), "保存");
+hive_ui_set_parent(&ui, SAVE_ID, PANEL_ID);
+hive_ui_set_rect(&ui, SAVE_ID, hive_rect(16, 20, 100, 32));
+
+/* 隐藏/禁用 Panel 会同步作用于后代；删除时整棵子树一起移除。 */
+hive_ui_set_enabled(&ui, PANEL_ID, 0);
+hive_ui_remove(&ui, PANEL_ID);
+```
 
 ## 交互约定
 

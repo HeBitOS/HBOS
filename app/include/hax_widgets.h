@@ -11,7 +11,7 @@
 #include <hax.h>
 
 #define HAX_UI_ABI_MAJOR 1u
-#define HAX_UI_ABI_MINOR 2u
+#define HAX_UI_ABI_MINOR 3u
 #define HAX_UI_MAX_WIDGETS 48
 
 /* 与 src/gui/gui_state.h 的公开窗口按键值保持一致。 */
@@ -25,6 +25,10 @@
 #define HAX_KEY_END       1008
 #define HAX_KEY_PGUP      1009
 #define HAX_KEY_PGDOWN    1010
+#define HAX_KEY_SHIFT_UP    1011
+#define HAX_KEY_SHIFT_DOWN  1012
+#define HAX_KEY_SHIFT_LEFT  1013
+#define HAX_KEY_SHIFT_RIGHT 1014
 
 typedef HI32 hax_widget_id_t;
 
@@ -53,7 +57,8 @@ typedef enum {
     HAX_WIDGET_SCROLLBAR,
     HAX_WIDGET_MENU,
     HAX_WIDGET_IMAGE,
-    HAX_WIDGET_CANVAS
+    HAX_WIDGET_CANVAS,
+    HAX_WIDGET_PANEL
 } hax_widget_type_t;
 
 enum {
@@ -108,11 +113,14 @@ struct hax_widget {
     HU32 flags;
     hax_ui_rect_t rect;
     const char *text;
+    HI32 parent_index;   /* -1 为根控件；子控件 rect 相对父控件内容区。 */
 
-    /* TEXTBOX：buffer/cap/cursor 由应用提供并由控件维护。 */
+    /* TEXTBOX：buffer/cap/cursor 由应用提供并由控件维护。
+     * selection_anchor 为 UTF-8 字节偏移，-1 表示无选区；cursor 为活动端。 */
     char *buffer;
     HI32 buffer_cap;
     HI32 cursor;
+    HI32 selection_anchor;
 
     /* CHECKBOX/PROGRESS 使用 value；PROGRESS 额外使用 min/max。 */
     HI32 value;
@@ -271,6 +279,7 @@ static inline hax_widget_t *hax_ui_add_widget(hax_ui_t *ui, hax_widget_id_t id,
     w->rect = rect;
     w->text = text ? text : "";
     w->selected = -1;
+    w->parent_index = -1;
     return w;
 }
 
@@ -278,6 +287,12 @@ static inline hax_widget_t *hax_ui_add_label(hax_ui_t *ui, hax_widget_id_t id,
                                               hax_ui_rect_t rect,
                                               const char *text) {
     return hax_ui_add_widget(ui, id, HAX_WIDGET_LABEL, rect, text,
+                             HAX_WIDGET_ENABLED);
+}
+
+static inline hax_widget_t *hax_ui_add_panel(hax_ui_t *ui, hax_widget_id_t id,
+                                              hax_ui_rect_t rect) {
+    return hax_ui_add_widget(ui, id, HAX_WIDGET_PANEL, rect, "",
                              HAX_WIDGET_ENABLED);
 }
 
@@ -301,6 +316,7 @@ static inline hax_widget_t *hax_ui_add_textbox(hax_ui_t *ui, hax_widget_id_t id,
     w->buffer_cap = buffer_cap;
     buffer[buffer_cap - 1] = 0;
     w->cursor = (HI32)strlen(buffer);
+    w->selection_anchor = -1;
     return w;
 }
 
@@ -417,6 +433,152 @@ static inline hax_widget_t *hax_ui_add_canvas(
     return w;
 }
 
+static inline hax_ui_rect_t hax_ui_widget_rect_at(const hax_ui_t *ui,
+                                                   HI32 index) {
+    if (!ui || index < 0 || index >= ui->widget_count)
+        return hax_ui_rect(0, 0, 0, 0);
+    hax_ui_rect_t rect = ui->widgets[index].rect;
+    HI32 parent = ui->widgets[index].parent_index;
+    for (HI32 depth = 0; parent >= 0 && depth < HAX_UI_MAX_WIDGETS; depth++) {
+        if (parent >= ui->widget_count) break;
+        rect.x += ui->widgets[parent].rect.x;
+        rect.y += ui->widgets[parent].rect.y;
+        parent = ui->widgets[parent].parent_index;
+    }
+    return rect;
+}
+
+static inline int hax_ui_in_subtree(const hax_ui_t *ui, HI32 index,
+                                     HI32 ancestor) {
+    if (!ui || index < 0 || index >= ui->widget_count ||
+        ancestor < 0 || ancestor >= ui->widget_count)
+        return 0;
+    for (HI32 depth = 0; index >= 0 && depth < HAX_UI_MAX_WIDGETS; depth++) {
+        if (index == ancestor) return 1;
+        index = ui->widgets[index].parent_index;
+    }
+    return 0;
+}
+
+static inline int hax_ui_effective_visible(const hax_ui_t *ui, HI32 index) {
+    if (!ui || index < 0 || index >= ui->widget_count) return 0;
+    for (HI32 depth = 0; index >= 0 && depth < HAX_UI_MAX_WIDGETS; depth++) {
+        if (!(ui->widgets[index].flags & HAX_WIDGET_VISIBLE)) return 0;
+        index = ui->widgets[index].parent_index;
+    }
+    return index < 0;
+}
+
+static inline int hax_ui_effective_enabled(const hax_ui_t *ui, HI32 index) {
+    if (!ui || index < 0 || index >= ui->widget_count) return 0;
+    for (HI32 depth = 0; index >= 0 && depth < HAX_UI_MAX_WIDGETS; depth++) {
+        if (!(ui->widgets[index].flags & HAX_WIDGET_ENABLED)) return 0;
+        index = ui->widgets[index].parent_index;
+    }
+    return index < 0;
+}
+
+static inline int hax_ui_set_parent(hax_ui_t *ui, hax_widget_id_t child_id,
+                                     hax_widget_id_t parent_id) {
+    hax_widget_t *child = hax_ui_widget(ui, child_id);
+    hax_widget_t *parent = parent_id > 0 ? hax_ui_widget(ui, parent_id) : NULL;
+    if (!child || (parent_id > 0 && !parent) || child == parent) return 0;
+    HI32 child_index = (HI32)(child - ui->widgets);
+    HI32 parent_index = parent ? (HI32)(parent - ui->widgets) : -1;
+    if (parent && parent->type != HAX_WIDGET_PANEL) return 0;
+    /* 父控件必须先创建，保证扁平数组的绘制顺序天然是父后代顺序。 */
+    if (parent && parent_index > child_index) return 0;
+    if (parent && hax_ui_in_subtree(ui, parent_index, child_index)) return 0;
+
+    hax_ui_rect_t absolute = hax_ui_widget_rect_at(ui, child_index);
+    child->parent_index = parent_index;
+    if (parent) {
+        hax_ui_rect_t parent_rect = hax_ui_widget_rect_at(ui, parent_index);
+        child->rect.x = absolute.x - parent_rect.x;
+        child->rect.y = absolute.y - parent_rect.y;
+    } else {
+        child->rect.x = absolute.x;
+        child->rect.y = absolute.y;
+    }
+    if (!hax_ui_effective_visible(ui, child_index) ||
+        !hax_ui_effective_enabled(ui, child_index)) {
+        if (hax_ui_in_subtree(ui, ui->focus_index, child_index))
+            ui->focus_index = -1;
+        if (hax_ui_in_subtree(ui, ui->hover_index, child_index))
+            ui->hover_index = -1;
+        if (hax_ui_in_subtree(ui, ui->pressed_index, child_index))
+            ui->pressed_index = -1;
+    }
+    return 1;
+}
+
+static inline hax_widget_id_t hax_ui_parent(const hax_ui_t *ui,
+                                             hax_widget_id_t child_id) {
+    const hax_widget_t *child = hax_ui_widget_const(ui, child_id);
+    if (!child || child->parent_index < 0 ||
+        child->parent_index >= ui->widget_count)
+        return 0;
+    return ui->widgets[child->parent_index].id;
+}
+
+static inline int hax_ui_set_rect(hax_ui_t *ui, hax_widget_id_t id,
+                                   hax_ui_rect_t rect) {
+    hax_widget_t *w = hax_ui_widget(ui, id);
+    if (!w || rect.w <= 0 || rect.h <= 0) return 0;
+    w->rect = rect;
+    return 1;
+}
+
+static inline int hax_ui_get_rect(const hax_ui_t *ui, hax_widget_id_t id,
+                                   hax_ui_rect_t *rect) {
+    const hax_widget_t *w = hax_ui_widget_const(ui, id);
+    if (!w || !rect) return 0;
+    *rect = hax_ui_widget_rect_at(ui, (HI32)(w - ui->widgets));
+    return 1;
+}
+
+static inline HI32 hax_ui_remove_widget(hax_ui_t *ui, hax_widget_id_t id) {
+    hax_widget_t *root = hax_ui_widget(ui, id);
+    if (!root) return 0;
+    HI32 root_index = (HI32)(root - ui->widgets);
+    HI32 old_count = ui->widget_count;
+    HI32 map[HAX_UI_MAX_WIDGETS];
+    HI32 drop[HAX_UI_MAX_WIDGETS];
+    HI32 removed = 0;
+    for (HI32 i = 0; i < old_count; i++) {
+        map[i] = -1;
+        drop[i] = hax_ui_in_subtree(ui, i, root_index);
+    }
+    for (HI32 old = 0, next = 0; old < old_count; old++) {
+        if (drop[old]) {
+            removed++;
+            continue;
+        }
+        map[old] = next;
+        if (next != old) ui->widgets[next] = ui->widgets[old];
+        next++;
+    }
+    HI32 new_count = old_count - removed;
+    for (HI32 i = 0; i < new_count; i++) {
+        HI32 parent = ui->widgets[i].parent_index;
+        ui->widgets[i].parent_index =
+            (parent >= 0 && parent < old_count) ? map[parent] : -1;
+    }
+    ui->focus_index = (ui->focus_index >= 0 &&
+                       ui->focus_index < old_count)
+                          ? map[ui->focus_index] : -1;
+    ui->hover_index = (ui->hover_index >= 0 &&
+                       ui->hover_index < old_count)
+                          ? map[ui->hover_index] : -1;
+    ui->pressed_index = (ui->pressed_index >= 0 &&
+                         ui->pressed_index < old_count)
+                            ? map[ui->pressed_index] : -1;
+    memset(ui->widgets + new_count, 0,
+           (size_t)removed * sizeof(ui->widgets[0]));
+    ui->widget_count = new_count;
+    return removed;
+}
+
 static inline int hax_ui_set_enabled(hax_ui_t *ui, hax_widget_id_t id, int enabled) {
     hax_widget_t *w = hax_ui_widget(ui, id);
     if (!w) return 0;
@@ -424,9 +586,9 @@ static inline int hax_ui_set_enabled(hax_ui_t *ui, hax_widget_id_t id, int enabl
     else w->flags &= ~HAX_WIDGET_ENABLED;
     if (!enabled) {
         HI32 index = (HI32)(w - ui->widgets);
-        if (ui->focus_index == index) ui->focus_index = -1;
-        if (ui->hover_index == index) ui->hover_index = -1;
-        if (ui->pressed_index == index) ui->pressed_index = -1;
+        if (hax_ui_in_subtree(ui, ui->focus_index, index)) ui->focus_index = -1;
+        if (hax_ui_in_subtree(ui, ui->hover_index, index)) ui->hover_index = -1;
+        if (hax_ui_in_subtree(ui, ui->pressed_index, index)) ui->pressed_index = -1;
     }
     return 1;
 }
@@ -438,9 +600,9 @@ static inline int hax_ui_set_visible(hax_ui_t *ui, hax_widget_id_t id, int visib
     else w->flags &= ~HAX_WIDGET_VISIBLE;
     if (!visible) {
         HI32 index = (HI32)(w - ui->widgets);
-        if (ui->focus_index == index) ui->focus_index = -1;
-        if (ui->hover_index == index) ui->hover_index = -1;
-        if (ui->pressed_index == index) ui->pressed_index = -1;
+        if (hax_ui_in_subtree(ui, ui->focus_index, index)) ui->focus_index = -1;
+        if (hax_ui_in_subtree(ui, ui->hover_index, index)) ui->hover_index = -1;
+        if (hax_ui_in_subtree(ui, ui->pressed_index, index)) ui->pressed_index = -1;
     }
     return 1;
 }
@@ -500,12 +662,19 @@ static inline int hax_ui_focusable(const hax_widget_t *w) {
            (w->flags & HAX_WIDGET_ENABLED) && (w->flags & HAX_WIDGET_FOCUSABLE);
 }
 
+static inline int hax_ui_focusable_at(const hax_ui_t *ui, HI32 index) {
+    return ui && index >= 0 && index < ui->widget_count &&
+           (ui->widgets[index].flags & HAX_WIDGET_FOCUSABLE) &&
+           hax_ui_effective_visible(ui, index) &&
+           hax_ui_effective_enabled(ui, index);
+}
+
 static inline void hax_ui_focus_next(hax_ui_t *ui) {
     if (!ui || ui->widget_count <= 0) return;
     HI32 start = ui->focus_index;
     for (HI32 n = 1; n <= ui->widget_count; n++) {
         HI32 i = (start + n) % ui->widget_count;
-        if (hax_ui_focusable(&ui->widgets[i])) {
+        if (hax_ui_focusable_at(ui, i)) {
             ui->focus_index = i;
             return;
         }
@@ -518,7 +687,7 @@ static inline void hax_ui_focus_prev(hax_ui_t *ui) {
     HI32 start = ui->focus_index < 0 ? 0 : ui->focus_index;
     for (HI32 n = 1; n <= ui->widget_count; n++) {
         HI32 i = (start - n + ui->widget_count * 2) % ui->widget_count;
-        if (hax_ui_focusable(&ui->widgets[i])) {
+        if (hax_ui_focusable_at(ui, i)) {
             ui->focus_index = i;
             return;
         }
@@ -549,6 +718,99 @@ static inline HI32 hax_ui_utf8_count(const char *text, HI32 begin, HI32 end) {
     return count;
 }
 
+static inline HI32 hax_ui_utf8_boundary(const char *text, HI32 len, HI32 offset) {
+    if (!text || len < 0) return 0;
+    if (offset < 0) offset = 0;
+    if (offset > len) offset = len;
+    while (offset > 0 && offset < len &&
+           (((HU8)text[offset] & 0xC0u) == 0x80u))
+        offset--;
+    return offset;
+}
+
+static inline int hax_ui_textbox_selection(const hax_widget_t *w,
+                                            HI32 *begin, HI32 *end) {
+    if (!w || w->type != HAX_WIDGET_TEXTBOX || !w->buffer ||
+        w->selection_anchor < 0 || w->selection_anchor == w->cursor)
+        return 0;
+    HI32 len = (HI32)strlen(w->buffer);
+    HI32 anchor = hax_ui_utf8_boundary(w->buffer, len, w->selection_anchor);
+    HI32 cursor = hax_ui_utf8_boundary(w->buffer, len, w->cursor);
+    if (begin) *begin = anchor < cursor ? anchor : cursor;
+    if (end) *end = anchor < cursor ? cursor : anchor;
+    return 1;
+}
+
+static inline void hax_ui_textbox_clear_selection(hax_widget_t *w) {
+    if (w && w->type == HAX_WIDGET_TEXTBOX) w->selection_anchor = -1;
+}
+
+static inline int hax_ui_textbox_select(hax_widget_t *w, HI32 begin, HI32 end) {
+    if (!w || w->type != HAX_WIDGET_TEXTBOX || !w->buffer) return 0;
+    HI32 len = (HI32)strlen(w->buffer);
+    begin = hax_ui_utf8_boundary(w->buffer, len, begin);
+    end = hax_ui_utf8_boundary(w->buffer, len, end);
+    w->selection_anchor = begin == end ? -1 : begin;
+    w->cursor = end;
+    return 1;
+}
+
+static inline int hax_ui_textbox_select_all(hax_widget_t *w) {
+    if (!w || w->type != HAX_WIDGET_TEXTBOX || !w->buffer) return 0;
+    return hax_ui_textbox_select(w, 0, (HI32)strlen(w->buffer));
+}
+
+static inline HI32 hax_ui_textbox_copy_selection(const hax_widget_t *w,
+                                                  char *out, HI32 out_cap) {
+    HI32 begin, end;
+    if (!out || out_cap < 1) return -1;
+    out[0] = 0;
+    if (!hax_ui_textbox_selection(w, &begin, &end)) return 0;
+    HI32 bytes = end - begin;
+    if (bytes >= out_cap) {
+        bytes = out_cap - 1;
+        bytes = hax_ui_utf8_boundary(w->buffer + begin, end - begin, bytes);
+    }
+    memcpy(out, w->buffer + begin, (size_t)bytes);
+    out[bytes] = 0;
+    return bytes;
+}
+
+static inline int hax_ui_textbox_delete_selection(hax_widget_t *w,
+                                                   hax_ui_event_t *out) {
+    HI32 begin, end;
+    if (!hax_ui_textbox_selection(w, &begin, &end)) return 0;
+    HI32 len = (HI32)strlen(w->buffer);
+    memmove(w->buffer + begin, w->buffer + end, (size_t)(len - end + 1));
+    w->cursor = begin;
+    w->selection_anchor = -1;
+    hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, len - (end - begin));
+    return 1;
+}
+
+static inline HI32 hax_ui_textbox_visible_start(const hax_widget_t *w) {
+    if (!w || !w->buffer) return 0;
+    HI32 len = (HI32)strlen(w->buffer);
+    HI32 cursor = hax_ui_utf8_boundary(w->buffer, len, w->cursor);
+    HI32 visible_chars = (w->rect.w - 14) / 8;
+    if (visible_chars < 1) visible_chars = 1;
+    HI32 start = 0;
+    while (hax_ui_utf8_count(w->buffer, start, cursor) > visible_chars - 1)
+        start = hax_ui_utf8_next(w->buffer, len, start);
+    return start;
+}
+
+static inline HI32 hax_ui_textbox_offset_at(const hax_widget_t *w, HI32 x) {
+    if (!w || !w->buffer) return 0;
+    HI32 len = (HI32)strlen(w->buffer);
+    HI32 offset = hax_ui_textbox_visible_start(w);
+    HI32 column = (x - (w->rect.x + 6) + 4) / 8;
+    if (column < 0) column = 0;
+    while (column-- > 0 && offset < len)
+        offset = hax_ui_utf8_next(w->buffer, len, offset);
+    return offset;
+}
+
 static inline int hax_ui_textbox_key(hax_widget_t *w, HI32 key,
                                       hax_ui_event_t *out) {
     if (!w || !w->buffer || w->buffer_cap < 1) return 0;
@@ -556,24 +818,48 @@ static inline int hax_ui_textbox_key(hax_widget_t *w, HI32 key,
     if (w->cursor < 0) w->cursor = 0;
     if (w->cursor > len) w->cursor = len;
 
+    if (key == 1) {
+        hax_ui_textbox_select_all(w);
+        return 1;
+    }
+    if (key == HAX_KEY_SHIFT_LEFT || key == HAX_KEY_SHIFT_RIGHT) {
+        if (w->selection_anchor < 0) w->selection_anchor = w->cursor;
+        if (key == HAX_KEY_SHIFT_LEFT)
+            w->cursor = hax_ui_utf8_prev(w->buffer, w->cursor);
+        else
+            w->cursor = hax_ui_utf8_next(w->buffer, len, w->cursor);
+        if (w->cursor == w->selection_anchor) w->selection_anchor = -1;
+        return 1;
+    }
+    HI32 select_begin, select_end;
+    int had_selection =
+        hax_ui_textbox_selection(w, &select_begin, &select_end);
     if (key == HAX_KEY_LEFT) {
-        w->cursor = hax_ui_utf8_prev(w->buffer, w->cursor);
+        w->cursor = had_selection ? select_begin :
+                    hax_ui_utf8_prev(w->buffer, w->cursor);
+        w->selection_anchor = -1;
         return 1;
     }
     if (key == HAX_KEY_RIGHT) {
-        w->cursor = hax_ui_utf8_next(w->buffer, len, w->cursor);
+        w->cursor = had_selection ? select_end :
+                    hax_ui_utf8_next(w->buffer, len, w->cursor);
+        w->selection_anchor = -1;
         return 1;
     }
     if (key == HAX_KEY_HOME) {
         w->cursor = 0;
+        w->selection_anchor = -1;
         return 1;
     }
     if (key == HAX_KEY_END) {
         w->cursor = len;
+        w->selection_anchor = -1;
         return 1;
     }
     if (key == HAX_KEY_BACKSPACE || key == '\b') {
-        if (w->cursor > 0) {
+        if (had_selection) {
+            hax_ui_textbox_delete_selection(w, out);
+        } else if (w->cursor > 0) {
             HI32 prev = hax_ui_utf8_prev(w->buffer, w->cursor);
             memmove(w->buffer + prev, w->buffer + w->cursor,
                     (size_t)(len - w->cursor + 1));
@@ -583,7 +869,9 @@ static inline int hax_ui_textbox_key(hax_widget_t *w, HI32 key,
         return 1;
     }
     if (key == HAX_KEY_DELETE) {
-        if (w->cursor < len) {
+        if (had_selection) {
+            hax_ui_textbox_delete_selection(w, out);
+        } else if (w->cursor < len) {
             HI32 next = hax_ui_utf8_next(w->buffer, len, w->cursor);
             memmove(w->buffer + w->cursor, w->buffer + next,
                     (size_t)(len - next + 1));
@@ -592,10 +880,16 @@ static inline int hax_ui_textbox_key(hax_widget_t *w, HI32 key,
         return 1;
     }
     if (key == '\n' || key == '\r') {
+        w->selection_anchor = -1;
         hax_ui_emit(out, HAX_UI_EVENT_SUBMIT, w->id, len);
         return 1;
     }
-    if (key >= 32 && key < 127 && len + 1 < w->buffer_cap) {
+    if (key >= 32 && key < 127) {
+        if (had_selection) {
+            hax_ui_textbox_delete_selection(w, NULL);
+            len = (HI32)strlen(w->buffer);
+        }
+        if (len + 1 >= w->buffer_cap) return 1;
         memmove(w->buffer + w->cursor + 1, w->buffer + w->cursor,
                 (size_t)(len - w->cursor + 1));
         w->buffer[w->cursor++] = (char)key;
@@ -608,8 +902,9 @@ static inline int hax_ui_textbox_key(hax_widget_t *w, HI32 key,
 static inline HI32 hax_ui_hit_index(const hax_ui_t *ui, HI32 x, HI32 y) {
     if (!ui) return -1;
     for (HI32 i = ui->widget_count - 1; i >= 0; i--) {
-        const hax_widget_t *w = &ui->widgets[i];
-        if ((w->flags & HAX_WIDGET_VISIBLE) && hax_ui_contains(&w->rect, x, y))
+        hax_ui_rect_t rect = hax_ui_widget_rect_at(ui, i);
+        if (hax_ui_effective_visible(ui, i) &&
+            hax_ui_contains(&rect, x, y))
             return i;
     }
     return -1;
@@ -652,8 +947,9 @@ static inline HI32 hax_ui_scrollbar_value_at(const hax_widget_t *w,
     return value;
 }
 
-static inline int hax_ui_activate(hax_widget_t *w, HI32 mouse_y,
-                                   hax_ui_event_t *out) {
+static inline int hax_ui_activate(hax_widget_t *w,
+                                   const hax_ui_rect_t *absolute_rect,
+                                   HI32 mouse_y, hax_ui_event_t *out) {
     if (!hax_ui_focusable(w)) return 0;
     if (w->type == HAX_WIDGET_BUTTON) {
         hax_ui_emit(out, HAX_UI_EVENT_CLICK, w->id, 0);
@@ -661,7 +957,8 @@ static inline int hax_ui_activate(hax_widget_t *w, HI32 mouse_y,
         w->value = !w->value;
         hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, w->value);
     } else if (w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_MENU) {
-        HI32 row = (mouse_y - w->rect.y - 4) / 20;
+        HI32 top = absolute_rect ? absolute_rect->y : w->rect.y;
+        HI32 row = (mouse_y - top - 4) / 20;
         if (row >= 0 && row < w->item_count) {
             w->selected = row;
             hax_ui_emit(out, HAX_UI_EVENT_SELECT, w->id, row);
@@ -690,33 +987,45 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
         HI32 hit = hax_ui_hit_index(ui, ev4[1], ev4[2]);
         int left = (ev4[3] & 1) != 0;
         int was_left = (ui->mouse_buttons & 1) != 0;
+        int consumed_capture = ui->pressed_index >= 0;
         ui->hover_index = hit;
 
         if (left && !was_left) {
             ui->pressed_index =
-                (hit >= 0 && hax_ui_focusable(&ui->widgets[hit])) ? hit : -1;
+                (hit >= 0 && hax_ui_focusable_at(ui, hit)) ? hit : -1;
             if (ui->pressed_index >= 0) {
                 hax_widget_t *w = &ui->widgets[ui->pressed_index];
+                hax_widget_t view = *w;
+                view.rect = hax_ui_widget_rect_at(ui, ui->pressed_index);
                 ui->focus_index = ui->pressed_index;
                 if (w->type == HAX_WIDGET_SLIDER ||
                     w->type == HAX_WIDGET_SCROLLBAR) {
-                    HI32 value = hax_ui_scrollbar_value_at(w, ev4[1], ev4[2]);
+                    HI32 value = hax_ui_scrollbar_value_at(&view, ev4[1], ev4[2]);
                     if (value != w->value) {
                         w->value = value;
                         hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, value);
                     }
+                } else if (w->type == HAX_WIDGET_TEXTBOX) {
+                    w->cursor = hax_ui_textbox_offset_at(&view, ev4[1]);
+                    w->selection_anchor = w->cursor;
+                    hax_ui_emit(out, HAX_UI_EVENT_FOCUS, w->id, 0);
                 } else {
                     hax_ui_emit(out, HAX_UI_EVENT_FOCUS, w->id, 0);
                 }
             }
-        } else if (left && ui->pressed_index >= 0 &&
-                   (ui->widgets[ui->pressed_index].type == HAX_WIDGET_SLIDER ||
-                    ui->widgets[ui->pressed_index].type == HAX_WIDGET_SCROLLBAR)) {
+        } else if (left && ui->pressed_index >= 0) {
             hax_widget_t *w = &ui->widgets[ui->pressed_index];
-            HI32 value = hax_ui_scrollbar_value_at(w, ev4[1], ev4[2]);
-            if (value != w->value) {
-                w->value = value;
-                hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, value);
+            hax_widget_t view = *w;
+            view.rect = hax_ui_widget_rect_at(ui, ui->pressed_index);
+            if (w->type == HAX_WIDGET_SLIDER ||
+                w->type == HAX_WIDGET_SCROLLBAR) {
+                HI32 value = hax_ui_scrollbar_value_at(&view, ev4[1], ev4[2]);
+                if (value != w->value) {
+                    w->value = value;
+                    hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, value);
+                }
+            } else if (w->type == HAX_WIDGET_TEXTBOX) {
+                w->cursor = hax_ui_textbox_offset_at(&view, ev4[1]);
             }
         } else if (!left && was_left) {
             HI32 pressed = ui->pressed_index;
@@ -724,11 +1033,17 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
             if (pressed >= 0 && pressed == hit &&
                 ui->widgets[pressed].type != HAX_WIDGET_SLIDER &&
                 ui->widgets[pressed].type != HAX_WIDGET_SCROLLBAR) {
-                hax_ui_activate(&ui->widgets[pressed], ev4[2], out);
+                hax_ui_rect_t rect = hax_ui_widget_rect_at(ui, pressed);
+                hax_ui_activate(&ui->widgets[pressed], &rect, ev4[2], out);
             }
+            if (pressed >= 0 &&
+                ui->widgets[pressed].type == HAX_WIDGET_TEXTBOX &&
+                ui->widgets[pressed].selection_anchor ==
+                    ui->widgets[pressed].cursor)
+                ui->widgets[pressed].selection_anchor = -1;
         }
         ui->mouse_buttons = ev4[3];
-        return hit >= 0 || ui->pressed_index >= 0;
+        return hit >= 0 || consumed_capture || ui->pressed_index >= 0;
     }
 
     if (ev4[0] == HAX_EV_KEY) {
@@ -742,7 +1057,7 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
         }
         if (ui->focus_index < 0 || ui->focus_index >= ui->widget_count) return 0;
         hax_widget_t *w = &ui->widgets[ui->focus_index];
-        if (!hax_ui_focusable(w)) return 0;
+        if (!hax_ui_focusable_at(ui, ui->focus_index)) return 0;
         if (w->type == HAX_WIDGET_TEXTBOX) return hax_ui_textbox_key(w, key, out);
         if ((key == '\n' || key == '\r' || key == ' ') &&
             w->type == HAX_WIDGET_BUTTON) {
@@ -839,17 +1154,24 @@ static inline void hax_ui_draw_frame(hax_ui_rect_t r, HCOLOR color) {
 static inline void hax_ui_draw(const hax_ui_t *ui) {
     if (!ui) return;
     for (HI32 i = 0; i < ui->widget_count; i++) {
-        const hax_widget_t *w = &ui->widgets[i];
-        if (!(w->flags & HAX_WIDGET_VISIBLE)) continue;
-        HCOLOR fg = (w->flags & HAX_WIDGET_ENABLED) ? ui->theme.text : ui->theme.disabled;
+        if (!hax_ui_effective_visible(ui, i)) continue;
+        hax_widget_t resolved = ui->widgets[i];
+        resolved.rect = hax_ui_widget_rect_at(ui, i);
+        const hax_widget_t *w = &resolved;
+        int enabled = hax_ui_effective_enabled(ui, i);
+        HCOLOR fg = enabled ? ui->theme.text : ui->theme.disabled;
         int focused = (ui->focus_index == i);
         int hovered = (ui->hover_index == i);
         int pressed = (ui->pressed_index == i);
 
-        if (w->type == HAX_WIDGET_LABEL) {
+        if (w->type == HAX_WIDGET_PANEL) {
+            hax_win_fill(w->rect.x, w->rect.y, w->rect.w, w->rect.h,
+                         ui->theme.panel_bg);
+            hax_ui_draw_frame(w->rect, ui->theme.border);
+        } else if (w->type == HAX_WIDGET_LABEL) {
             hax_win_text(w->rect.x, w->rect.y + 3, w->text, fg);
         } else if (w->type == HAX_WIDGET_BUTTON) {
-            HCOLOR bg = !(w->flags & HAX_WIDGET_ENABLED) ? ui->theme.disabled :
+            HCOLOR bg = !enabled ? ui->theme.disabled :
                         pressed ? ui->theme.pressed :
                         hovered ? ui->theme.hover : ui->theme.accent;
             hax_win_fill(w->rect.x, w->rect.y, w->rect.w, w->rect.h, bg);
@@ -860,30 +1182,48 @@ static inline void hax_ui_draw(const hax_ui_t *ui) {
             hax_win_fill(w->rect.x, w->rect.y, w->rect.w, w->rect.h, ui->theme.panel_bg);
             hax_ui_draw_frame(w->rect, focused ? ui->theme.focus_ring :
                               hovered ? ui->theme.hover : ui->theme.border);
-            const char *shown = w->buffer ? w->buffer : "";
-            char password[128];
-            if ((w->flags & HAX_WIDGET_PASSWORD) && w->buffer) {
-                HI32 chars = hax_ui_utf8_count(w->buffer, 0,
-                                               (HI32)strlen(w->buffer));
-                if (chars > (HI32)sizeof(password) - 1)
-                    chars = (HI32)sizeof(password) - 1;
-                for (HI32 p = 0; p < chars; p++) password[p] = '*';
-                password[chars] = 0;
-                shown = password;
-            }
-            HI32 len = (HI32)strlen(shown);
+            const char *buffer = w->buffer ? w->buffer : "";
+            HI32 len = (HI32)strlen(buffer);
             HI32 visible_chars = (w->rect.w - 14) / 8;
             if (visible_chars < 1) visible_chars = 1;
-            HI32 start = 0;
-            HI32 cursor = w->cursor;
-            if (cursor < 0) cursor = 0;
-            if (cursor > len) cursor = len;
-            while (hax_ui_utf8_count(shown, start, cursor) > visible_chars - 1)
-                start = hax_ui_utf8_next(shown, len, start);
-            shown += start;
-            hax_win_text(w->rect.x + 6, w->rect.y + (w->rect.h - 16) / 2, shown, fg);
+            HI32 cursor = hax_ui_utf8_boundary(buffer, len, w->cursor);
+            HI32 start = hax_ui_textbox_visible_start(w);
+            HI32 offset = start;
+            HI32 shown_len = 0;
+            HI32 shown_chars = 0;
+            char shown[512];
+            while (offset < len && shown_chars < visible_chars &&
+                   shown_len < (HI32)sizeof(shown) - 1) {
+                HI32 next = hax_ui_utf8_next(buffer, len, offset);
+                if (w->flags & HAX_WIDGET_PASSWORD) {
+                    shown[shown_len++] = '*';
+                } else {
+                    HI32 bytes = next - offset;
+                    if (shown_len + bytes >= (HI32)sizeof(shown)) break;
+                    memcpy(shown + shown_len, buffer + offset, (size_t)bytes);
+                    shown_len += bytes;
+                }
+                shown_chars++;
+                offset = next;
+            }
+            shown[shown_len] = 0;
+            HI32 select_begin, select_end;
+            if (hax_ui_textbox_selection(w, &select_begin, &select_end)) {
+                if (select_begin < start) select_begin = start;
+                if (select_end > offset) select_end = offset;
+                if (select_begin < select_end) {
+                    HI32 sx = w->rect.x + 6 +
+                              hax_ui_utf8_count(buffer, start, select_begin) * 8;
+                    HI32 sw = hax_ui_utf8_count(buffer, select_begin,
+                                                select_end) * 8;
+                    hax_win_fill(sx, w->rect.y + 4, sw, w->rect.h - 8,
+                                 ui->theme.selection);
+                }
+            }
+            hax_win_text(w->rect.x + 6, w->rect.y + (w->rect.h - 16) / 2,
+                         shown, fg);
             if (focused) {
-                HI32 before = hax_ui_utf8_count(w->buffer, start, cursor);
+                HI32 before = hax_ui_utf8_count(buffer, start, cursor);
                 HI32 cx = w->rect.x + 6 + before * 8;
                 if (cx > w->rect.x + w->rect.w - 3) cx = w->rect.x + w->rect.w - 3;
                 hax_win_fill(cx, w->rect.y + 5, 1, w->rect.h - 10, ui->theme.accent);

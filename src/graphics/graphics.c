@@ -45,6 +45,8 @@ static bool     g_backbuf_active = false;
 static uint32_t *g_real_fb = NULL;
 static uint64_t g_real_fb_pitch = 0;
 static uint64_t g_real_fb_width = 0, g_real_fb_height = 0;
+/* PgUp 历史预览期间，实时输出继续写离屏缓冲，但不得覆盖物理屏幕预览。 */
+static bool sb_active = false;
 
 /* 64 位成对复制 framebuffer 像素。源/目标同为 8 字节对齐关系时使用
  * movq；否则安全回退到 32 位。真实 framebuffer 写入保持 volatile。 */
@@ -75,7 +77,7 @@ static inline void console_blit_pixels(const volatile uint32_t *src,
 // through fb_put_pixel/fb_fill_rect, now redirected at the back-buffer
 // too — can flush itself to the screen; see draw_gui_frame().
 void console_present(void) {
-    if (!g_backbuf_active || !g_term) return;
+    if (!g_backbuf_active || !g_term || sb_active) return;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     uint64_t w = fc->width, h = fc->height;
     uint64_t src_pitch_px = fc->pitch / 4;
@@ -98,7 +100,7 @@ void console_present(void) {
 extern uint64_t g_flanterm_scroll_gen;
 
 static void console_present_rows(uint64_t row0, uint64_t row_count) {
-    if (!g_backbuf_active || !g_term) return;
+    if (!g_backbuf_active || !g_term || sb_active) return;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     uint64_t y0 = fc->offset_y + row0 * fc->glyph_height;
     uint64_t y1 = y0 + row_count * fc->glyph_height;
@@ -117,7 +119,7 @@ static void console_present_rows(uint64_t row0, uint64_t row_count) {
 /* 只提交一行中的字符单元范围。交互输入时通常仅覆盖“旧光标、字符、新光标”
  * 2~3 个单元，比复制整条像素扫描行更便宜。 */
 static void console_present_cells(uint64_t row, uint64_t cell0, uint64_t cell1) {
-    if (!g_backbuf_active || !g_term || row >= g_term->rows) return;
+    if (!g_backbuf_active || !g_term || sb_active || row >= g_term->rows) return;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     if (cell0 > cell1) {
         uint64_t tmp = cell0; cell0 = cell1; cell1 = tmp;
@@ -450,7 +452,6 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
 static char  scrollback[SCROLLBACK_LINES][MAX_LINE_LEN];
 static int   sb_head   = 0;    // next write position (circular)
 static int   sb_count  = 0;    // total saved lines
-static bool  sb_active = false; // in scrollback mode?
 static int   sb_offset = 0;    // offset from bottom (0 = live view)
 static int   sb_no_capture = 0; // disable capture during scrollback redraw
 
@@ -497,12 +498,12 @@ static void sb_capture_char(char c) {
 }
 
 // Redraw screen from scrollback using flanterm's own rendering
-static void sb_redraw(void) {
-    if (!g_term || !g_backbuf_active || !g_real_fb) return;
+static int sb_redraw(void) {
+    if (!g_term || !g_backbuf_active || !g_real_fb) return 0;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     uint64_t rows = g_term->rows;
     uint64_t cells = g_term->rows * g_term->cols;
-    if (cells > SCROLLBACK_GRID_CELLS) return;
+    if (cells > SCROLLBACK_GRID_CELLS) return 0;
 
     /*
      * 滚屏预览只画到真实 framebuffer。离屏 framebuffer 与 grid 在预览
@@ -548,6 +549,7 @@ static void sb_redraw(void) {
     *g_term = saved_term;
     g_backbuf_active = saved_backbuf;
     sb_no_capture = 0;
+    return 1;
 }
 
 void console_scroll_up(int lines) {
@@ -555,7 +557,11 @@ void console_scroll_up(int lines) {
     sb_active = true;
     sb_offset += lines;
     if (sb_offset > sb_count) sb_offset = sb_count;
-    sb_redraw();
+    if (!sb_redraw()) {
+        sb_offset = 0;
+        sb_active = false;
+        console_present();
+    }
 }
 
 void console_scroll_down(int lines) {
@@ -568,7 +574,11 @@ void console_scroll_down(int lines) {
         console_present();
         return;
     }
-    sb_redraw();
+    if (!sb_redraw()) {
+        sb_offset = 0;
+        sb_active = false;
+        console_present();
+    }
 }
 
 bool console_is_scrolled(void) { return sb_active; }
