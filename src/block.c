@@ -26,7 +26,8 @@ static uint32_t sectors = 0;
 int block_init(void) {
     /* Initialize xHCI early to support USB storage detection during mount */
     (void)xhci_init();
-    if (msc_init() > 0 && msc_get_block_count(0) > 0) {
+    if (msc_init() > 0 && msc_get_block_count(0) > 0 &&
+        msc_get_block_size(0) == BLOCK_SECTOR_SIZE) {
         backend = BLOCK_BACKEND_USB;
         sectors = msc_get_block_count(0);
         return 0;
@@ -59,9 +60,30 @@ int block_init(void) {
  * @return 0 成功，-1 失败
  */
 int block_read_sector(uint32_t lba, uint8_t *buffer) {
-    if (backend == BLOCK_BACKEND_USB) return msc_read_sector(0, lba, buffer, 1) >= 0 ? 0 : -1;
-    if (backend == BLOCK_BACKEND_AHCI) return ahci_read_sector(lba, buffer);
-    if (backend == BLOCK_BACKEND_ATA) return ata_read_sector(lba, buffer);
+    return block_read_sectors(lba, buffer, 1);
+}
+
+int block_read_sectors(uint32_t lba, uint8_t *buffer, uint32_t count) {
+    if (!buffer || !count || lba >= sectors || count > sectors - lba) return -1;
+    if (backend == BLOCK_BACKEND_USB) {
+        while (count) {
+            uint32_t chunk = count > MSC_MAX_TRANSFER_SECTORS
+                           ? MSC_MAX_TRANSFER_SECTORS : count;
+            if (msc_read_sector(0, lba, buffer, chunk) < 0) return -1;
+            lba += chunk;
+            buffer += chunk * BLOCK_SECTOR_SIZE;
+            count -= chunk;
+        }
+        return 0;
+    }
+    if (backend == BLOCK_BACKEND_AHCI)
+        return ahci_read_sectors(lba, buffer, count);
+    if (backend == BLOCK_BACKEND_ATA) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (ata_read_sector(lba + i, buffer + i * BLOCK_SECTOR_SIZE) < 0) return -1;
+        }
+        return 0;
+    }
     return -1;
 }
 
@@ -72,9 +94,30 @@ int block_read_sector(uint32_t lba, uint8_t *buffer) {
  * @return 0 成功，-1 失败
  */
 int block_write_sector(uint32_t lba, const uint8_t *buffer) {
-    if (backend == BLOCK_BACKEND_USB) return msc_write_sector(0, lba, buffer, 1) >= 0 ? 0 : -1;
-    if (backend == BLOCK_BACKEND_AHCI) return ahci_write_sector(lba, buffer);
-    if (backend == BLOCK_BACKEND_ATA) return ata_write_sector(lba, buffer);
+    return block_write_sectors(lba, buffer, 1);
+}
+
+int block_write_sectors(uint32_t lba, const uint8_t *buffer, uint32_t count) {
+    if (!buffer || !count || lba >= sectors || count > sectors - lba) return -1;
+    if (backend == BLOCK_BACKEND_USB) {
+        while (count) {
+            uint32_t chunk = count > MSC_MAX_TRANSFER_SECTORS
+                           ? MSC_MAX_TRANSFER_SECTORS : count;
+            if (msc_write_sector(0, lba, buffer, chunk) < 0) return -1;
+            lba += chunk;
+            buffer += chunk * BLOCK_SECTOR_SIZE;
+            count -= chunk;
+        }
+        return 0;
+    }
+    if (backend == BLOCK_BACKEND_AHCI)
+        return ahci_write_sectors(lba, buffer, count);
+    if (backend == BLOCK_BACKEND_ATA) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (ata_write_sector(lba + i, buffer + i * BLOCK_SECTOR_SIZE) < 0) return -1;
+        }
+        return 0;
+    }
     return -1;
 }
 

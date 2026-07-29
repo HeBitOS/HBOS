@@ -56,6 +56,8 @@ static filesystem_t fs;           /**< 全局文件系统实例 */
 static fs_backend_t fs_backend = FS_BACKEND_RAM; /**< 当前文件系统后端类型 */
 static uint8_t ramfs_storage[MAX_FILES][RAMFS_MAX_FILE_SIZE]; /**< ramfs 模式下的文件数据存储区 */
 static hbfs_entry_t hbfs_table[MAX_FILES]; /**< HBFS 文件表 */
+typedef char hbfs_table_size_must_match_disk_layout[
+    sizeof(hbfs_table) == HBFS_TABLE_SECTORS * BLOCK_SECTOR_SIZE ? 1 : -1];
 static uint32_t hbfs_start_lba = HBFS_DEFAULT_START_LBA; /**< HBFS 分区起始 LBA */
 static uint32_t hbfs_total_sectors = 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS; /**< HBFS 分区总扇区数 */
 static const char *fs_error = "ok"; /**< 最近一次错误描述 */
@@ -269,24 +271,14 @@ static uint32_t hbfs_file_lba(uint32_t slot, uint32_t sector) {
 
 /** 将内存中的文件表同步写入磁盘 */
 static int hbfs_sync_table(void) {
-    uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
     const uint8_t *table = (const uint8_t *)hbfs_table;
-    for (uint32_t s = 0; s < HBFS_TABLE_SECTORS; s++) {
-        memcpy(sector, table + s * BLOCK_SECTOR_SIZE, BLOCK_SECTOR_SIZE);
-        if (block_write_sector(hbfs_table_lba() + s, sector) < 0)
-            return -1;
-    }
-    return 0;
+    return block_write_sectors(hbfs_table_lba(), table, HBFS_TABLE_SECTORS);
 }
 
 /** 从磁盘加载文件表到内存 */
 static int hbfs_load_table(void) {
     uint8_t *table = (uint8_t *)hbfs_table;
-    for (uint32_t s = 0; s < HBFS_TABLE_SECTORS; s++) {
-        if (block_read_sector(hbfs_table_lba() + s, table + s * BLOCK_SECTOR_SIZE) < 0)
-            return -1;
-    }
-    return 0;
+    return block_read_sectors(hbfs_table_lba(), table, HBFS_TABLE_SECTORS);
 }
 
 /** 根据 HBFS 文件表重建内存中的文件结构 */

@@ -28,8 +28,14 @@ int block_init(void);
 /** 读取指定 LBA 的一个扇区 */
 int block_read_sector(uint32_t lba, uint8_t *buffer);
 
+/** 连续读取多个扇区；后端可将其合并为单条 DMA/SCSI 命令。 */
+int block_read_sectors(uint32_t lba, uint8_t *buffer, uint32_t count);
+
 /** 写入指定 LBA 的一个扇区 */
 int block_write_sector(uint32_t lba, const uint8_t *buffer);
+
+/** 连续写入多个扇区；后端可将其合并为单条 DMA/SCSI 命令。 */
+int block_write_sectors(uint32_t lba, const uint8_t *buffer, uint32_t count);
 
 /** 获取块设备的扇区总数 */
 uint32_t block_sector_count(void);

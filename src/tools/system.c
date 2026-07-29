@@ -1,5 +1,6 @@
 #include "../graphics/graphics.h"
 #include "../acpi.h"
+#include "../ahci.h"
 #include "../block.h"
 #include "../core/heap.h"
 #include "../core/pmm.h"
@@ -337,6 +338,20 @@ static void cmd_drivers(int argc, char **argv) {
     console_puts("\x1b[36mStorage:\x1b[0m\n");
     console_puts("  block backend: "); console_puts(block_backend_name()); console_puts("\n");
     console_puts("  sectors:       "); print_uint(block_sector_count()); console_puts("\n");
+    if (ahci_present()) {
+        ahci_stats_t ahci_stats;
+        ahci_get_stats(&ahci_stats);
+        console_puts("  AHCI model:    "); console_puts(ahci_model()); console_puts("\n");
+        console_puts("  AHCI commands: "); print_uint(ahci_stats.commands);
+        console_puts(" (read "); print_uint(ahci_stats.sectors_read);
+        console_puts(", write "); print_uint(ahci_stats.sectors_written);
+        console_puts(" sectors)\n");
+        console_puts("  AHCI recovery: "); print_uint(ahci_stats.retries);
+        console_puts(" retries, "); print_uint(ahci_stats.resets);
+        console_puts(" resets, "); print_uint(ahci_stats.timeouts);
+        console_puts(" timeouts\n");
+        console_puts("  AHCI status:   "); console_puts(ahci_last_error()); console_puts("\n");
+    }
     console_puts("  filesystem:    "); console_puts(fs_backend_name()); console_puts("\n\n");
 
     const net_device_t *dev = net_primary();

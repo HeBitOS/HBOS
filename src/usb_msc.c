@@ -105,10 +105,13 @@ int msc_init(void) {
                               ((cap_data.block_size << 8) & 0xFF0000) |
                               (cap_data.block_size << 24);
             if (dev->block_size == 0) dev->block_size = 512;
-            dev->block_count = (cap_data.lba >> 24) |
-                               ((cap_data.lba >> 8) & 0xFF00) |
-                               ((cap_data.lba << 8) & 0xFF0000) |
-                               (cap_data.lba << 24);
+            uint32_t last_lba = (cap_data.lba >> 24) |
+                                ((cap_data.lba >> 8) & 0xFF00) |
+                                ((cap_data.lba << 8) & 0xFF0000) |
+                                (cap_data.lba << 24);
+            /* READ CAPACITY(10) 返回最后一个 LBA，而不是块数量。 */
+            dev->block_count = last_lba == 0xFFFFFFFFU
+                             ? 0xFFFFFFFFU : last_lba + 1U;
         }
 
         msc_count++;
@@ -125,7 +128,8 @@ int msc_read_sector(int dev_idx, uint32_t lba, uint8_t *buf, uint32_t count) {
     if (dev_idx < 0 || dev_idx >= msc_count) return -1;
     msc_device_t *dev = &msc_devices[dev_idx];
     if (!dev->active) return -1;
-    if (!buf) return -1;
+    if (!buf || !count || count > MSC_MAX_TRANSFER_SECTORS ||
+        lba >= dev->block_count || count > dev->block_count - lba) return -1;
 
     uint32_t total = count * dev->block_size;
     uint8_t *cmd_buf = (uint8_t *)kmalloc(16);
@@ -161,7 +165,8 @@ int msc_write_sector(int dev_idx, uint32_t lba, const uint8_t *buf, uint32_t cou
     if (dev_idx < 0 || dev_idx >= msc_count) return -1;
     msc_device_t *dev = &msc_devices[dev_idx];
     if (!dev->active) return -1;
-    if (!buf) return -1;
+    if (!buf || !count || count > MSC_MAX_TRANSFER_SECTORS ||
+        lba >= dev->block_count || count > dev->block_count - lba) return -1;
 
     uint32_t total = count * dev->block_size;
     uint8_t *cmd_buf = (uint8_t *)kmalloc(16);

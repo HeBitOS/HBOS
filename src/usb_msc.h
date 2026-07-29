@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 #define MSC_MAX_DEVICES 4
+/** 控制单次 xHCI 传输和临时写缓冲区不超过 64 KiB。 */
+#define MSC_MAX_TRANSFER_SECTORS 128U
 
 #define MSC_CBW_SIGNATURE  0x43425355
 #define MSC_CSW_SIGNATURE  0x53425355

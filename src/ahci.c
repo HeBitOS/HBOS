@@ -9,6 +9,7 @@
 #include "ahci.h"
 #include "pci.h"
 #include "string.h"
+#include "core/cpu.h"
 #include "core/vmm.h"
 
 /** PCI 大容量存储设备类代码 */
@@ -30,6 +31,15 @@
 #define HBA_PxCMD_CR (1U << 15)
 /** 端口任务文件错误状态位 (PxIS.TFES) */
 #define HBA_PxIS_TFES (1U << 30)
+
+/** 命令/引擎等待的 PIT 超时（PIT 为 100 Hz）。 */
+#define AHCI_ENGINE_TIMEOUT_TICKS 100U
+#define AHCI_COMMAND_TIMEOUT_TICKS 200U
+#define AHCI_LINK_TIMEOUT_TICKS 200U
+/** 启动早期 IRQ 尚未打开时使用的有界自旋后备。 */
+#define AHCI_ENGINE_MAX_STALL_SPINS 10000000U
+#define AHCI_COMMAND_MAX_STALL_SPINS 20000000U
+#define AHCI_LINK_MAX_STALL_SPINS 20000000U
 
 /** SATA 设备签名：ATA 设备 */
 #define SATA_SIG_ATA 0x00000101U
@@ -168,6 +178,9 @@ static uint32_t sector_count;
 static char model[41];
 /** 初始化标志，防止重复初始化 */
 static int initialized;
+/** 驱动运行时计数及最近一次错误。 */
+static ahci_stats_t stats;
+static const char *last_error = "not initialized";
 
 /** 命令列表缓冲区，1KB 对齐 */
 static uint8_t cmd_list[1024] __attribute__((aligned(1024)));
@@ -185,6 +198,50 @@ static uint8_t identify_buf[512] __attribute__((aligned(2)));
  */
 static uint64_t ptr_phys(const void *p) {
     return (uint64_t)(uintptr_t)p;
+}
+
+/** 防止 MMIO 轮询占满执行流水线。 */
+static inline void cpu_relax(void) {
+    __asm__ volatile("pause");
+}
+
+/**
+ * PIT 在早期启动阶段还不会递增，因此同时保留自旋次数上限。
+ * 运行期优先由真实时钟截止时间结束等待。
+ */
+typedef struct {
+    uint64_t start;
+    uint64_t last_tick;
+    uint32_t stall_spins;
+} ahci_wait_t;
+
+static ahci_wait_t wait_begin(void) {
+    uint64_t now = pit_get_ticks();
+    ahci_wait_t wait = {now, now, 0};
+    return wait;
+}
+
+static int wait_expired(ahci_wait_t *wait, uint32_t ticks,
+                        uint32_t max_stall_spins) {
+    uint64_t now = pit_get_ticks();
+    if (now != wait->last_tick) {
+        wait->last_tick = now;
+        wait->stall_spins = 0;
+    } else {
+        wait->stall_spins++;
+    }
+    return now - wait->start >= ticks ||
+           wait->stall_spins >= max_stall_spins;
+}
+
+/** 保存出错瞬间的寄存器，供 drivers 命令诊断。 */
+static void snapshot_error(hba_port_t *p, const char *message) {
+    if (p) {
+        stats.last_is = p->is;
+        stats.last_tfd = p->tfd;
+        stats.last_serr = p->serr;
+    }
+    last_error = message;
 }
 
 /**
@@ -213,32 +270,49 @@ static int port_present(hba_port_t *p) {
  * @brief 停止端口的命令引擎和 FIS 接收引擎
  * @param p 端口寄存器指针
  */
-static void stop_cmd(hba_port_t *p) {
+static int stop_cmd(hba_port_t *p) {
+    ahci_wait_t wait = wait_begin();
     p->cmd &= ~HBA_PxCMD_ST;
-    p->cmd &= ~HBA_PxCMD_FRE;
-    for (uint32_t i = 0; i < 1000000; i++) {
-        if (!(p->cmd & (HBA_PxCMD_FR | HBA_PxCMD_CR))) break;
+    for (uint32_t i = 0; p->cmd & HBA_PxCMD_CR; i++) {
+        (void)i;
+        if (wait_expired(&wait, AHCI_ENGINE_TIMEOUT_TICKS,
+                         AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
+    wait = wait_begin();
+    p->cmd &= ~HBA_PxCMD_FRE;
+    for (uint32_t i = 0; p->cmd & HBA_PxCMD_FR; i++) {
+        (void)i;
+        if (wait_expired(&wait, AHCI_ENGINE_TIMEOUT_TICKS,
+                         AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
+    }
+    return 0;
 }
 
 /**
  * @brief 启动端口的 FIS 接收引擎和命令引擎
  * @param p 端口寄存器指针
  */
-static void start_cmd(hba_port_t *p) {
-    for (uint32_t i = 0; i < 1000000; i++) {
-        if (!(p->cmd & HBA_PxCMD_CR)) break;
+static int start_cmd(hba_port_t *p) {
+    ahci_wait_t wait = wait_begin();
+    for (uint32_t i = 0; p->cmd & HBA_PxCMD_CR; i++) {
+        (void)i;
+        if (wait_expired(&wait, AHCI_ENGINE_TIMEOUT_TICKS,
+                         AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
     p->cmd |= HBA_PxCMD_FRE;
     p->cmd |= HBA_PxCMD_ST;
+    return 0;
 }
 
 /**
  * @brief 重新初始化端口：停止引擎、清零缓冲区、设置基地址、重启引擎
  * @param p 端口寄存器指针
  */
-static void port_rebase(hba_port_t *p) {
-    stop_cmd(p);
+static int port_rebase(hba_port_t *p) {
+    if (stop_cmd(p) < 0) return -1;
     memset(cmd_list, 0, sizeof(cmd_list));
     memset(fis_area, 0, sizeof(fis_area));
     memset(&cmd_table, 0, sizeof(cmd_table));
@@ -251,7 +325,8 @@ static void port_rebase(hba_port_t *p) {
     p->fbu = (uint32_t)(fb >> 32);
     p->is = 0xFFFFFFFFU;
     p->serr = 0xFFFFFFFFU;
-    start_cmd(p);
+    __sync_synchronize();
+    return start_cmd(p);
 }
 
 /**
@@ -260,10 +335,52 @@ static void port_rebase(hba_port_t *p) {
  * @return 成功返回 0，超时返回 -1
  */
 static int wait_not_busy(hba_port_t *p) {
-    for (uint32_t i = 0; i < 1000000; i++) {
+    ahci_wait_t wait = wait_begin();
+    for (uint32_t i = 0; ; i++) {
+        (void)i;
         if (!(p->tfd & 0x88)) return 0; // BSY | DRQ
+        if (wait_expired(&wait, AHCI_COMMAND_TIMEOUT_TICKS,
+                         AHCI_COMMAND_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return -1;
+}
+
+/** 等待 SATA 链路回到 device present + active。 */
+static int wait_link_ready(hba_port_t *p) {
+    ahci_wait_t wait = wait_begin();
+    for (uint32_t i = 0; ; i++) {
+        (void)i;
+        uint32_t ssts = p->ssts;
+        if ((ssts & 0x0FU) == 3 && ((ssts >> 8) & 0x0FU) == 1) return 0;
+        if (wait_expired(&wait, AHCI_LINK_TIMEOUT_TICKS,
+                         AHCI_LINK_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
+    }
+}
+
+/**
+ * 将端口恢复到已知状态。顺序对应 libATA 的 freeze/clear/reset/revalidate
+ * 模型；设备重新识别由上层重试包装器执行。
+ */
+static int recover_port(hba_port_t *p) {
+    stats.resets++;
+    (void)stop_cmd(p);
+    p->is = 0xFFFFFFFFU;
+    p->serr = 0xFFFFFFFFU;
+
+    /* COMRESET: DET=1 保持至少一段有界延时，然后释放为 DET=0。 */
+    uint32_t sctl = p->sctl & ~0x0FU;
+    p->sctl = sctl | 1U;
+    for (uint32_t i = 0; i < 200000U; i++) cpu_relax();
+    p->sctl = sctl;
+
+    if (wait_link_ready(p) < 0 || port_rebase(p) < 0 ||
+        wait_not_busy(p) < 0) {
+        stats.reset_failures++;
+        snapshot_error(p, "port reset failed");
+        return -1;
+    }
+    return 0;
 }
 
 /**
@@ -274,13 +391,23 @@ static int wait_not_busy(hba_port_t *p) {
  * @param write   0 表示读，1 表示写
  * @return 成功返回 0，失败返回 -1
  */
-static int ahci_cmd(uint8_t command, uint32_t lba, uint8_t *buffer, int write) {
-    if (!active_port || !buffer) return -1;
+static int ahci_cmd_once(uint8_t command, uint32_t lba, uint8_t *buffer,
+                         uint32_t count, int write) {
+    if (!active_port || !buffer || !count ||
+        count > AHCI_MAX_SECTORS_PER_CMD) return -1;
     hba_port_t *p = active_port;
     hba_cmd_header_t *hdr = (hba_cmd_header_t *)cmd_list;
 
-    for (uint32_t i = 0; p->ci & 1; i++) {
-        if (i > 5000000) return -1;
+    ahci_wait_t wait = wait_begin();
+    for (uint32_t i = 0; p->ci & 1U; i++) {
+        (void)i;
+        if (wait_expired(&wait, AHCI_COMMAND_TIMEOUT_TICKS,
+                         AHCI_COMMAND_MAX_STALL_SPINS)) {
+            stats.timeouts++;
+            snapshot_error(p, "command slot busy");
+            return -1;
+        }
+        cpu_relax();
     }
 
     memset(cmd_list, 0, sizeof(cmd_list));
@@ -296,44 +423,60 @@ static int ahci_cmd(uint8_t command, uint32_t lba, uint8_t *buffer, int write) {
     uint64_t db = ptr_phys(buffer);
     cmd_table.prdt[0].dba = (uint32_t)db;
     cmd_table.prdt[0].dbau = (uint32_t)(db >> 32);
-    cmd_table.prdt[0].dbc = 512 - 1;
+    cmd_table.prdt[0].dbc = count * 512U - 1U;
     cmd_table.prdt[0].i = 1;
 
     fis_reg_h2d_t *fis = (fis_reg_h2d_t *)cmd_table.cfis;
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->c = 1;
     fis->command = command;
-    fis->lba0 = (uint8_t)(lba & 0xFF);
-    fis->lba1 = (uint8_t)((lba >> 8) & 0xFF);
-    fis->lba2 = (uint8_t)((lba >> 16) & 0xFF);
-    fis->device = 1 << 6;
-    fis->lba3 = (uint8_t)((lba >> 24) & 0xFF);
-    fis->lba4 = 0;
-    fis->lba5 = 0;
-    fis->countl = 1;
-    fis->counth = 0;
+    if (command != ATA_CMD_IDENTIFY) {
+        fis->lba0 = (uint8_t)(lba & 0xFF);
+        fis->lba1 = (uint8_t)((lba >> 8) & 0xFF);
+        fis->lba2 = (uint8_t)((lba >> 16) & 0xFF);
+        fis->device = 1 << 6;
+        fis->lba3 = (uint8_t)((lba >> 24) & 0xFF);
+        fis->lba4 = 0;
+        fis->lba5 = 0;
+        fis->countl = (uint8_t)count;
+        fis->counth = (uint8_t)(count >> 8);
+    }
 
     p->is = 0xFFFFFFFFU;
-    if (wait_not_busy(p) < 0) return -1;
-    p->ci = 1;
+    if (wait_not_busy(p) < 0) {
+        stats.timeouts++;
+        snapshot_error(p, "device busy timeout");
+        return -1;
+    }
+    __sync_synchronize();
+    stats.commands++;
+    p->ci = 1U;
 
-    for (uint32_t i = 0; i < 5000000; i++) {
-        if (!(p->ci & 1)) {
-            if (p->is & HBA_PxIS_TFES) return -1;
+    wait = wait_begin();
+    for (uint32_t i = 0; ; i++) {
+        (void)i;
+        uint32_t is = p->is;
+        if (is & HBA_PxIS_TFES) {
+            stats.task_file_errors++;
+            snapshot_error(p, "task file error");
+            return -1;
+        }
+        if (!(p->ci & 1U)) {
+            __sync_synchronize();
             return 0;
         }
+        if (wait_expired(&wait, AHCI_COMMAND_TIMEOUT_TICKS,
+                         AHCI_COMMAND_MAX_STALL_SPINS)) {
+            stats.timeouts++;
+            snapshot_error(p, "command timeout");
+            return -1;
+        }
+        cpu_relax();
     }
-    return -1;
 }
 
-/**
- * @brief 执行 ATA IDENTIFY DEVICE 命令，获取磁盘信息
- * @return 成功返回 0，失败返回 -1
- */
-static int ahci_identify(void) {
-    if (ahci_cmd(ATA_CMD_IDENTIFY, 0, identify_buf, 0) < 0) return -1;
+static void parse_identify(void) {
     uint16_t *id = (uint16_t *)identify_buf;
-
     for (int i = 0; i < 20; i++) {
         uint16_t w = id[27 + i];
         model[i * 2] = (char)(w >> 8);
@@ -341,7 +484,47 @@ static int ahci_identify(void) {
     }
     model[40] = '\0';
     for (int i = 39; i >= 0 && model[i] == ' '; i--) model[i] = '\0';
-    sector_count = ((uint32_t)id[61] << 16) | id[60];
+
+    uint64_t total = ((uint32_t)id[61] << 16) | id[60];
+    if (id[83] & (1U << 10)) {
+        uint64_t lba48 = (uint64_t)id[100] |
+                         ((uint64_t)id[101] << 16) |
+                         ((uint64_t)id[102] << 32) |
+                         ((uint64_t)id[103] << 48);
+        if (lba48) total = lba48;
+    }
+    sector_count = total > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)total;
+}
+
+/** 出错后复位端口、重新识别设备，并只重试一次原命令。 */
+static int ahci_cmd(uint8_t command, uint32_t lba, uint8_t *buffer,
+                    uint32_t count, int write) {
+    if (ahci_cmd_once(command, lba, buffer, count, write) == 0) {
+        last_error = "ok";
+        return 0;
+    }
+    if (recover_port(active_port) < 0) return -1;
+    stats.retries++;
+
+    if (command != ATA_CMD_IDENTIFY) {
+        if (ahci_cmd_once(ATA_CMD_IDENTIFY, 0, identify_buf, 1, 0) < 0) {
+            snapshot_error(active_port, "revalidation failed");
+            return -1;
+        }
+        parse_identify();
+    }
+    if (ahci_cmd_once(command, lba, buffer, count, write) < 0) return -1;
+    last_error = "ok";
+    return 0;
+}
+
+/**
+ * @brief 执行 ATA IDENTIFY DEVICE 命令，获取磁盘信息
+ * @return 成功返回 0，失败返回 -1
+ */
+static int ahci_identify(void) {
+    if (ahci_cmd(ATA_CMD_IDENTIFY, 0, identify_buf, 1, 0) < 0) return -1;
+    parse_identify();
     return sector_count ? 0 : -1;
 }
 
@@ -373,7 +556,11 @@ int ahci_init(void) {
         if (!port_present(p)) continue;
         active_port = p;
         active_port_index = i;
-        port_rebase(p);
+        if (port_rebase(p) < 0) {
+            snapshot_error(p, "engine start failed");
+            active_port = 0;
+            continue;
+        }
         if (ahci_identify() == 0) return 0;
         active_port = 0;
     }
@@ -388,8 +575,23 @@ int ahci_init(void) {
  * @return 成功返回 0，失败返回 -1
  */
 int ahci_read_sector(uint32_t lba, uint8_t *buffer) {
-    if (!active_port || !buffer || lba >= sector_count) return -1;
-    return ahci_cmd(ATA_CMD_READ_DMA_EXT, lba, buffer, 0);
+    return ahci_read_sectors(lba, buffer, 1);
+}
+
+int ahci_read_sectors(uint32_t lba, uint8_t *buffer, uint32_t count) {
+    if (!active_port || !buffer || !count ||
+        lba >= sector_count || count > sector_count - lba) return -1;
+    while (count) {
+        uint32_t chunk = count > AHCI_MAX_SECTORS_PER_CMD
+                       ? AHCI_MAX_SECTORS_PER_CMD : count;
+        if (ahci_cmd(ATA_CMD_READ_DMA_EXT, lba, buffer, chunk, 0) < 0) return -1;
+        stats.reads++;
+        stats.sectors_read += chunk;
+        lba += chunk;
+        buffer += chunk * 512U;
+        count -= chunk;
+    }
+    return 0;
 }
 
 /**
@@ -399,8 +601,24 @@ int ahci_read_sector(uint32_t lba, uint8_t *buffer) {
  * @return 成功返回 0，失败返回 -1
  */
 int ahci_write_sector(uint32_t lba, const uint8_t *buffer) {
-    if (!active_port || !buffer || lba >= sector_count) return -1;
-    return ahci_cmd(ATA_CMD_WRITE_DMA_EXT, lba, (uint8_t *)buffer, 1);
+    return ahci_write_sectors(lba, buffer, 1);
+}
+
+int ahci_write_sectors(uint32_t lba, const uint8_t *buffer, uint32_t count) {
+    if (!active_port || !buffer || !count ||
+        lba >= sector_count || count > sector_count - lba) return -1;
+    while (count) {
+        uint32_t chunk = count > AHCI_MAX_SECTORS_PER_CMD
+                       ? AHCI_MAX_SECTORS_PER_CMD : count;
+        if (ahci_cmd(ATA_CMD_WRITE_DMA_EXT, lba, (uint8_t *)buffer,
+                     chunk, 1) < 0) return -1;
+        stats.writes++;
+        stats.sectors_written += chunk;
+        lba += chunk;
+        buffer += chunk * 512U;
+        count -= chunk;
+    }
+    return 0;
 }
 
 /**
@@ -425,4 +643,12 @@ const char *ahci_model(void) {
  */
 int ahci_present(void) {
     return active_port != 0;
+}
+
+void ahci_get_stats(ahci_stats_t *out) {
+    if (out) *out = stats;
+}
+
+const char *ahci_last_error(void) {
+    return last_error;
 }
