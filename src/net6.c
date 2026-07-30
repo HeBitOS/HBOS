@@ -16,13 +16,22 @@
 
 #define ETH_TYPE_IPV6 0x86DDU
 
+uint32_t pit_get_frequency_hz(void) __attribute__((weak));
+
 static struct netif ipv6_netif;
 static int ipv6_initialized;
 static uint32_t random_state = 0x48505436U;
 
+static uint32_t net6_pit_frequency(void) {
+    if (pit_get_frequency_hz) {
+        uint32_t frequency = pit_get_frequency_hz();
+        if (frequency) return frequency;
+    }
+    return 100U;
+}
+
 static uint64_t net6_deadline_after_ms(uint32_t timeout_ms) {
-    uint32_t frequency = pit_get_frequency_hz();
-    if (!frequency) frequency = 100U;
+    uint32_t frequency = net6_pit_frequency();
     uint64_t ticks =
         ((uint64_t)timeout_ms * frequency + 999U) / 1000U;
     if (!ticks) ticks = 1;
@@ -34,9 +43,8 @@ static int net6_deadline_reached(uint64_t deadline) {
 }
 
 uint32_t sys_now(void) {
-    uint32_t frequency = pit_get_frequency_hz();
+    uint32_t frequency = net6_pit_frequency();
     uint64_t ticks = pit_get_ticks();
-    if (!frequency) return (uint32_t)ticks;
     return (uint32_t)((ticks * 1000ULL) / frequency);
 }
 

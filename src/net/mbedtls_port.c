@@ -13,7 +13,7 @@
 #include <stdarg.h>
 
 uint64_t pit_get_ticks(void);
-uint32_t pit_get_frequency_hz(void);
+uint32_t pit_get_frequency_hz(void) __attribute__((weak));
 
 void *hbos_mbedtls_calloc(size_t count, size_t size) {
     return kcalloc(count, size);
@@ -183,10 +183,11 @@ int64_t hbos_mbedtls_time(int64_t *result) {
 }
 
 mbedtls_ms_time_t mbedtls_ms_time(void) {
-    uint32_t frequency = pit_get_frequency_hz();
+    uint32_t frequency =
+        pit_get_frequency_hz ? pit_get_frequency_hz() : 100U;
+    if (!frequency) frequency = 100U;
     uint64_t ticks = pit_get_ticks();
-    return frequency ? (mbedtls_ms_time_t)((ticks * 1000ULL) / frequency)
-                     : (mbedtls_ms_time_t)ticks;
+    return (mbedtls_ms_time_t)((ticks * 1000ULL) / frequency);
 }
 
 void mbedtls_platform_zeroize(void *buffer, size_t length) {
