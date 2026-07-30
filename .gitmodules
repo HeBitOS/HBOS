@@ -1,0 +1,7 @@
+[submodule "limine-bin"]
+	path = limine-bin
+	url = https://github.com/limine-bootloader/limine.git
+	branch = v12.x
+[submodule "HPT"]
+	path = HPT
+	url = https://github.com/HeBitOS/HPT.git

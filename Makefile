@@ -585,7 +585,7 @@ nogui-smoke:
 
 core-only:
 	@$(MAKE) --no-print-directory BUILD_DIR=build-core \
-		HBOS_ENABLE_GUI=1 HBOS_BUNDLE_APPS=0 iso
+		HBOS_ENABLE_GUI=1 HBOS_BUNDLE_APPS=0 HBOS_KERNEL_ONLY=1 iso
 
 run-hdd: run-hdd-bios
 
@@ -860,6 +860,8 @@ endef
 $(foreach applet,$(BUSYBOX_APPLETS),$(eval $(call BUSYBOX_APPLET_RULE,$(applet))))
 
 BUSYBOX_HAX = $(BUSYBOX_APPLETS:%=$(BUILD_DIR)/app/%.hax)
+
+include mk/hpt.mk
 
 # 生成清单与 blob（grouped target：一次调用产出两者，GNU Make >= 4.3）
 $(HAX_BLOB) $(HAX_MANIFEST) &: $(HAX_ALL_BINS) tools/genhax.py | $(BUILD_DIR)
