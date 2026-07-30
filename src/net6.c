@@ -2,7 +2,6 @@
 
 #include "core/cpu.h"
 #include "core/task.h"
-#include "core/wait.h"
 #include "net.h"
 #include "string.h"
 
@@ -20,6 +19,19 @@
 static struct netif ipv6_netif;
 static int ipv6_initialized;
 static uint32_t random_state = 0x48505436U;
+
+static uint64_t net6_deadline_after_ms(uint32_t timeout_ms) {
+    uint32_t frequency = pit_get_frequency_hz();
+    if (!frequency) frequency = 100U;
+    uint64_t ticks =
+        ((uint64_t)timeout_ms * frequency + 999U) / 1000U;
+    if (!ticks) ticks = 1;
+    return pit_get_ticks() + ticks;
+}
+
+static int net6_deadline_reached(uint64_t deadline) {
+    return (int64_t)(pit_get_ticks() - deadline) >= 0;
+}
 
 uint32_t sys_now(void) {
     uint32_t frequency = pit_get_frequency_hz();
@@ -175,11 +187,11 @@ static int net6_source_ready(const ip6_addr_t *target) {
 
 static int net6_wait_for_source(const ip6_addr_t *target,
                                 uint32_t timeout_ms) {
-    uint64_t deadline = pit_deadline_after_ms(timeout_ms);
+    uint64_t deadline = net6_deadline_after_ms(timeout_ms);
     do {
         net6_poll();
         if (net6_source_ready(target)) return 0;
-    } while (!pit_deadline_reached(deadline));
+    } while (!net6_deadline_reached(deadline));
     return -1;
 }
 
@@ -205,9 +217,9 @@ static int net6_tcp_connect_parsed(const ip6_addr_t *parsed, uint16_t port,
         return -1;
     }
 
-    uint64_t deadline = pit_deadline_after_ms(timeout_ms);
+    uint64_t deadline = net6_deadline_after_ms(timeout_ms);
     while (!connection->connected && !connection->error &&
-           !pit_deadline_reached(deadline))
+           !net6_deadline_reached(deadline))
         net6_poll();
     if (!connection->connected) {
         net6_tcp_close(connection);
@@ -239,9 +251,9 @@ int net6_tcp_send(net6_tcp_conn_t *connection, const uint8_t *data,
     if (!connection || !connection->pcb || !data || !length) return -1;
     struct tcp_pcb *pcb = connection->pcb;
     uint32_t sent = 0;
-    uint64_t deadline = pit_deadline_after_ms(timeout_ms);
+    uint64_t deadline = net6_deadline_after_ms(timeout_ms);
     while (sent < length && !connection->error &&
-           !pit_deadline_reached(deadline)) {
+           !net6_deadline_reached(deadline)) {
         uint32_t chunk = length - sent;
         uint16_t available = tcp_sndbuf(pcb);
         if (chunk > available) chunk = available;
@@ -268,9 +280,9 @@ int net6_tcp_send(net6_tcp_conn_t *connection, const uint8_t *data,
 int net6_tcp_recv(net6_tcp_conn_t *connection, uint8_t *data,
                   uint32_t capacity, uint32_t timeout_ms) {
     if (!connection || !data || !capacity) return -1;
-    uint64_t deadline = pit_deadline_after_ms(timeout_ms);
+    uint64_t deadline = net6_deadline_after_ms(timeout_ms);
     while (!connection->rx_length && !connection->closed &&
-           !connection->error && !pit_deadline_reached(deadline))
+           !connection->error && !net6_deadline_reached(deadline))
         net6_poll();
     if (!connection->rx_length)
         return connection->closed ? 0 : -1;
