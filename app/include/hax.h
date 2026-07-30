@@ -34,6 +34,12 @@
 #include "libc/string.h"
 #include "libc/syscall.h"
 
+/* HTTPS transport ABI number. Keep the SDK buildable against older HBOS
+ * libc header snapshots; old kernels return ENOSYS at runtime. */
+#ifndef HBOS_SYS_HTTPS_GET
+#define HBOS_SYS_HTTPS_GET 98
+#endif
+
 /* ── 专有类型（参考 XJ380 风格，统一定宽整型与颜色类型） ───────────── */
 typedef int8_t   HI8;    /**< 8 位有符号整型 */
 typedef uint8_t  HU8;    /**< 8 位无符号整型 */
@@ -143,6 +149,19 @@ static inline long hax_write_file(const char *path, const void *buf, long len) {
     }
     __syscall1(HBOS_SYS_CLOSE, fd);
     return total;
+}
+
+/**
+ * Perform an HTTPS GET through the HBOS TLS service.
+ *
+ * The returned bytes contain the complete HTTP response (headers and body).
+ * Current HBOS TLS encrypts the transport but does not yet authenticate the
+ * peer's X.509 certificate chain.
+ */
+static inline long hax_https_get(const char *host, HU32 ipv4, HU16 port,
+                                 const char *path, void *out, HU32 out_cap) {
+    return __syscall6(HBOS_SYS_HTTPS_GET, (long)host, (long)ipv4,
+                      (long)port, (long)path, (long)out, (long)out_cap);
 }
 
 /* ── GUI 画布接口（仅 HAX_KIND_GUI / BOTH 应用，从图形桌面启动时可用） ──

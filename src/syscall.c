@@ -34,8 +34,10 @@
 #include "vfs.h"
 #include "version.h"
 #include "api/gui_service.h"
+#include "tls.h"
 
 #define SYSCALL_EXEC_MAX_SIZE 65536
+#define SYSCALL_HTTPS_MAX_SIZE (2u * 1024u * 1024u)
 
 /**
  * 将 POSIX 函数返回值转换为系统调用返回值
@@ -1101,6 +1103,21 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                                     (int)f->a2, (int)f->a3,
                                     (const uint32_t *)f->a4, (int)f->a5);
             return 0;
+        }
+
+        case HBOS_SYS_HTTPS_GET: {
+            const char *host = (const char *)f->a0;
+            const char *path = (const char *)f->a3;
+            char *out = (char *)f->a4;
+            uint32_t out_cap = (uint32_t)f->a5;
+            if (!host || !host[0] || !path || path[0] != '/' || !out ||
+                out_cap < 2 || out_cap > SYSCALL_HTTPS_MAX_SIZE)
+                return (uint64_t)(-EINVAL);
+            uint32_t out_len = 0;
+            int status = tls_https_get(
+                host, (uint32_t)f->a1, (uint16_t)f->a2, path,
+                out, out_cap, &out_len);
+            return status < 0 ? (uint64_t)(-EIO) : (uint64_t)out_len;
         }
 
         default:

@@ -153,6 +153,7 @@ enum {
     HBOS_SYS_HAX_EXISTS,
     HBOS_SYS_WIN2,
     HBOS_SYS_WIN_BLIT,
+    HBOS_SYS_HTTPS_GET,
 };
 
 long __syscall6(long nr, long a0, long a1, long a2, long a3, long a4, long a5);
