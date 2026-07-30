@@ -1,0 +1,53 @@
+#ifndef HBOS_PSA_CRYPTO_CONFIG_H
+#define HBOS_PSA_CRYPTO_CONFIG_H
+
+#define TF_PSA_CRYPTO_CONFIG_VERSION 0x01000000
+
+#define PSA_WANT_ALG_ECDH                       1
+#define PSA_WANT_ALG_ECDSA                      1
+#define PSA_WANT_ALG_GCM                        1
+#define PSA_WANT_ALG_RSA_PKCS1V15_SIGN          1
+#define PSA_WANT_ALG_RSA_PKCS1V15_CRYPT         1
+#define PSA_WANT_ALG_RSA_PSS                    1
+#define PSA_WANT_ALG_SHA_256                    1
+#define PSA_WANT_ALG_SHA_384                    1
+#define PSA_WANT_ALG_SHA_512                    1
+#define PSA_WANT_ALG_TLS12_PRF                  1
+#define PSA_WANT_ECC_SECP_R1_256                1
+#define PSA_WANT_KEY_TYPE_AES                   1
+#define PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY        1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_BASIC    1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_IMPORT   1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_GENERATE 1
+#define PSA_WANT_KEY_TYPE_RSA_PUBLIC_KEY        1
+#define PSA_WANT_KEY_TYPE_RSA_KEY_PAIR_BASIC    1
+
+#define MBEDTLS_PSA_CRYPTO_C
+#define MBEDTLS_ASN1_PARSE_C
+#define MBEDTLS_PK_C
+#define MBEDTLS_PK_PARSE_C
+#define MBEDTLS_BASE64_C
+#define MBEDTLS_PEM_PARSE_C
+
+#define MBEDTLS_PLATFORM_C
+#define MBEDTLS_PLATFORM_MEMORY
+#define MBEDTLS_PLATFORM_CALLOC_MACRO hbos_mbedtls_calloc
+#define MBEDTLS_PLATFORM_FREE_MACRO hbos_mbedtls_free
+#define MBEDTLS_PLATFORM_NO_STD_FUNCTIONS
+#define MBEDTLS_PLATFORM_SNPRINTF_MACRO hbos_mbedtls_snprintf
+
+#define MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG
+
+#define MBEDTLS_HAVE_TIME
+#define MBEDTLS_HAVE_TIME_DATE
+#define MBEDTLS_PLATFORM_TIME_TYPE_MACRO int64_t
+#define MBEDTLS_PLATFORM_TIME_MACRO hbos_mbedtls_time
+#define MBEDTLS_PLATFORM_GMTIME_R_ALT
+#define MBEDTLS_PLATFORM_MS_TIME_ALT
+#define MBEDTLS_PLATFORM_ZEROIZE_ALT
+
+#define MBEDTLS_MPI_MAX_SIZE 512
+#define MBEDTLS_ECP_WINDOW_SIZE 2
+#define MBEDTLS_ECP_FIXED_POINT_OPTIM 0
+
+#endif

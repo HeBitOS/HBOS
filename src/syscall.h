@@ -176,6 +176,7 @@ typedef enum {
     HBOS_SYS_WIN2,           /**< win2(operation,handle,data) -> 结果 */
     HBOS_SYS_WIN_BLIT,       /**< 兼容窗口 ARGB 上传 */
     HBOS_SYS_HTTPS_GET,      /**< https_get(host,ip,port,path,out,cap) */
+    HBOS_SYS_HTTPS_GET_V2,   /**< CA/X.509 verified DNS/IPv4/IPv6 HTTPS GET */
 
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;

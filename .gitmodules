@@ -5,3 +5,9 @@
 [submodule "HPT"]
 	path = HPT
 	url = https://github.com/HeBitOS/HPT.git
+[submodule "third_party/mbedtls"]
+	path = third_party/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
+[submodule "third_party/lwip"]
+	path = third_party/lwip
+	url = https://https.git.savannah.gnu.org/git/lwip.git

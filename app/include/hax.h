@@ -39,6 +39,9 @@
 #ifndef HBOS_SYS_HTTPS_GET
 #define HBOS_SYS_HTTPS_GET 98
 #endif
+#ifndef HBOS_SYS_HTTPS_GET_V2
+#define HBOS_SYS_HTTPS_GET_V2 99
+#endif
 
 /* ── 专有类型（参考 XJ380 风格，统一定宽整型与颜色类型） ───────────── */
 typedef int8_t   HI8;    /**< 8 位有符号整型 */
@@ -162,6 +165,37 @@ static inline long hax_https_get(const char *host, HU32 ipv4, HU16 port,
                                  const char *path, void *out, HU32 out_cap) {
     return __syscall6(HBOS_SYS_HTTPS_GET, (long)host, (long)ipv4,
                       (long)port, (long)path, (long)out, (long)out_cap);
+}
+
+typedef struct {
+    HU32 version;
+    HU32 flags;
+    const char *host;
+    const char *path;
+    const char *ca_pem;
+    char *output;
+    HU32 ca_pem_length;
+    HU32 output_capacity;
+    HU16 port;
+    HU16 reserved;
+} hax_https_request_v2_t;
+
+static inline long hax_https_get_v2(const char *host, HU16 port,
+                                    const char *path, const char *ca_pem,
+                                    HU32 ca_pem_length, void *out,
+                                    HU32 out_cap) {
+    hax_https_request_v2_t request;
+    request.version = 2;
+    request.flags = 0;
+    request.host = host;
+    request.path = path;
+    request.ca_pem = ca_pem;
+    request.output = (char *)out;
+    request.ca_pem_length = ca_pem_length;
+    request.output_capacity = out_cap;
+    request.port = port;
+    request.reserved = 0;
+    return __syscall1(HBOS_SYS_HTTPS_GET_V2, (long)&request);
 }
 
 /* ── GUI 画布接口（仅 HAX_KIND_GUI / BOTH 应用，从图形桌面启动时可用） ──

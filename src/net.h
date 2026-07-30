@@ -75,6 +75,10 @@ typedef struct {
     uint32_t rx_len;               /**< 接收缓冲区中未读取的数据长度 */
 } net_tcp_conn_t;
 
+/** Raw Ethernet frame callback used by protocol-stack adapters. */
+typedef int (*net_frame_callback_t)(const uint8_t *frame, uint16_t length,
+                                    void *context);
+
 /** @brief 初始化网络子系统，探测并配置网卡硬件 */
 void net_init(void);
 
@@ -86,6 +90,15 @@ const char *net_driver_name(net_driver_t driver);
 
 /** @brief 获取最近一次网络操作的错误描述字符串 */
 const char *net_last_error(void);
+
+/**
+ * Poll raw Ethernet frames through the active NIC driver.
+ *
+ * This is the hardware boundary used by the optional lwIP IPv6 adapter.
+ * The existing IPv4 stack continues to use its protocol-specific callbacks.
+ */
+int net_poll_frames(net_frame_callback_t callback, void *context,
+                    uint32_t spins);
 
 /** @brief 通过 DHCP 协议自动获取 IP 地址、子网掩码、网关和 DNS 配置 */
 int net_dhcp(void);

@@ -464,6 +464,12 @@ static int net_poll(packet_cb_t cb, void *arg, uint32_t spins) {
     }
 }
 
+int net_poll_frames(net_frame_callback_t callback, void *context,
+                    uint32_t spins) {
+    net_init();
+    return net_poll(callback, context, spins);
+}
+
 /** PIT 固定以 100 Hz 初始化；将毫秒超时转换为不会提前结束的 tick 截止点。 */
 static uint64_t net_deadline_after_ms(uint32_t timeout_ms) {
     uint64_t ticks = ((uint64_t)timeout_ms + 9U) / 10U;

@@ -35,6 +35,7 @@
 #include "version.h"
 #include "api/gui_service.h"
 #include "tls.h"
+#include "https.h"
 
 #define SYSCALL_EXEC_MAX_SIZE 65536
 #define SYSCALL_HTTPS_MAX_SIZE (2u * 1024u * 1024u)
@@ -1117,6 +1118,21 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             int status = tls_https_get(
                 host, (uint32_t)f->a1, (uint16_t)f->a2, path,
                 out, out_cap, &out_len);
+            return status < 0 ? (uint64_t)(-EIO) : (uint64_t)out_len;
+        }
+
+        case HBOS_SYS_HTTPS_GET_V2: {
+            const hbos_https_request_v2_t *request =
+                (const hbos_https_request_v2_t *)f->a0;
+            if (!request ||
+                request->version != HBOS_HTTPS_REQUEST_V2_VERSION ||
+                request->ca_pem_length == 0 ||
+                request->ca_pem_length > 128U * 1024U ||
+                request->output_capacity < 2 ||
+                request->output_capacity > SYSCALL_HTTPS_MAX_SIZE)
+                return (uint64_t)(-EINVAL);
+            uint32_t out_len = 0;
+            int status = secure_https_get(request, &out_len);
             return status < 0 ? (uint64_t)(-EIO) : (uint64_t)out_len;
         }
 
