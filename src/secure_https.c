@@ -50,6 +50,18 @@ static int transport_connect(secure_transport_t *transport,
         return status;
     }
 
+    uint8_t address6[16];
+    if (net_dns_resolve_ipv6(host, address6) == 0) {
+        transport->kind = SECURE_TRANSPORT_IPV6;
+        int status =
+            net6_tcp_connect_address(address6, port,
+                                     &transport->connection.ipv6, 10000);
+        if (status == 0) {
+            transport->active = 1;
+            return 0;
+        }
+    }
+
     uint32_t address = net_parse_ipv4(host);
     if (!address && net_dns_resolve(host, &address) < 0) return -1;
     transport->kind = SECURE_TRANSPORT_IPV4;

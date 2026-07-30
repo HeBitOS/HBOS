@@ -112,6 +112,9 @@ int net_ping(uint32_t ip, uint32_t timeout_ms);
 /** @brief 通过 DNS 协议解析域名为 IPv4 地址 */
 int net_dns_resolve(const char *name, uint32_t *out_ip);
 
+/** @brief 通过 DNS 协议解析域名的 AAAA 记录（16 字节网络序） */
+int net_dns_resolve_ipv6(const char *name, uint8_t out_address[16]);
+
 /** @brief 通过 NTP 协议向服务器（域名或点分 IP）同步时间，写入
  *  g_rtc_ntp_correction_sec（见 rtc_tz.h）。0 成功，-1 失败。 */
 int net_ntp_sync(const char *server);

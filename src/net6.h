@@ -23,6 +23,11 @@ int net6_init(void);
 int net6_tcp_connect(const char *address, uint16_t port,
                      net6_tcp_conn_t *connection, uint32_t timeout_ms);
 
+/** Connect to a 16-byte IPv6 address returned by a DNS AAAA query. */
+int net6_tcp_connect_address(const uint8_t address[16], uint16_t port,
+                             net6_tcp_conn_t *connection,
+                             uint32_t timeout_ms);
+
 /** Blocking-style transport operations used by the TLS BIO adapter. */
 int net6_tcp_send(net6_tcp_conn_t *connection, const uint8_t *data,
                   uint32_t length, uint32_t timeout_ms);

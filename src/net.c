@@ -1531,28 +1531,50 @@ static int dns_encode(const char *name, uint8_t *out, uint32_t cap) {
 }
 
 /** @brief DNS 解析等待上下文 */
-typedef struct { uint16_t id; uint32_t ip; int found; } dns_wait_t;
+typedef struct {
+    uint16_t id;
+    uint16_t sport;
+    uint16_t query_type;
+    uint32_t server;
+    uint8_t answer[16];
+    uint8_t answer_length;
+    int found;
+    int completed;
+} dns_wait_t;
 
 /**
- * @brief DNS 响应接收回调，解析 DNS 应答报文提取 A 记录对应的 IPv4 地址
+ * @brief DNS 响应接收回调，解析 DNS 应答报文提取 A 或 AAAA 记录
  * @param pkt 接收到的原始数据包
  * @param len 数据包长度
  * @param arg 指向 dns_wait_t 的指针
- * @return 1 成功解析到目标 A 记录，0 继续轮询
+ * @return 1 收到匹配的完整响应，0 继续轮询
  */
 static int dns_cb(const uint8_t *pkt, uint16_t len, void *arg) {
     dns_wait_t *w = arg;
-    if (len < 60) return 0;
+    if (len < sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) +
+              sizeof(udp_hdr_t) + 12U)
+        return 0;
     const eth_hdr_t *eth = (const eth_hdr_t *)pkt;
     if (ntohs(eth->type) != ETH_TYPE_IP) return 0;
     const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(pkt + sizeof(eth_hdr_t));
-    if (ip->proto != IP_PROTO_UDP || ip->dst != primary.ip) return 0;
-    const udp_hdr_t *udp = (const udp_hdr_t *)((const uint8_t *)ip + ((ip->ver_ihl & 0x0F) * 4));
+    uint16_t ip_header_length = (uint16_t)((ip->ver_ihl & 0x0F) * 4);
+    if (ip_header_length < sizeof(ipv4_hdr_t) ||
+        len < sizeof(eth_hdr_t) + ip_header_length + sizeof(udp_hdr_t) ||
+        ip->proto != IP_PROTO_UDP || ip->src != w->server ||
+        ip->dst != primary.ip)
+        return 0;
+    const udp_hdr_t *udp =
+        (const udp_hdr_t *)((const uint8_t *)ip + ip_header_length);
+    if (ntohs(udp->src) != DNS_PORT || ntohs(udp->dst) != w->sport)
+        return 0;
     const uint8_t *dns = (const uint8_t *)udp + sizeof(udp_hdr_t);
     uint16_t ulen = ntohs(udp->len);
-    if (ulen < sizeof(udp_hdr_t) + 12) return 0;
+    if (ulen < sizeof(udp_hdr_t) + 12 ||
+        sizeof(eth_hdr_t) + ip_header_length + ulen > len)
+        return 0;
     uint16_t dns_len = (uint16_t)(ulen - sizeof(udp_hdr_t));
     if (ntohs(*(const uint16_t *)dns) != w->id) return 0;
+    if ((dns[2] & 0x80U) == 0) return 0;
     uint16_t qd = ntohs(*(const uint16_t *)(dns + 4));
     uint16_t an = ntohs(*(const uint16_t *)(dns + 6));
     uint32_t pos = 12;
@@ -1566,16 +1588,84 @@ static int dns_cb(const uint8_t *pkt, uint16_t len, void *arg) {
         else { while (pos < dns_len && dns[pos]) pos += dns[pos] + 1; pos++; }
         if (pos + 10 > dns_len) return 0;
         uint16_t type = ntohs(*(const uint16_t *)(dns + pos)); pos += 2;
-        pos += 6;
+        uint16_t record_class =
+            ntohs(*(const uint16_t *)(dns + pos)); pos += 2;
+        pos += 4;
         uint16_t rdlen = ntohs(*(const uint16_t *)(dns + pos)); pos += 2;
-        if (type == 1 && rdlen == 4 && pos + 4 <= dns_len) {
-            memcpy(&w->ip, dns + pos, 4);
+        if (record_class == 1 && type == w->query_type &&
+            rdlen == w->answer_length && pos + rdlen <= dns_len) {
+            memcpy(w->answer, dns + pos, rdlen);
             w->found = 1;
+            w->completed = 1;
             return 1;
         }
+        if (pos + rdlen > dns_len) return 0;
         pos += rdlen;
     }
-    return 0;
+    w->completed = 1;
+    return 1;
+}
+
+static int net_dns_query(const char *name, uint16_t query_type,
+                         uint8_t *answer, uint8_t answer_length) {
+    if (!name || !answer ||
+        !((query_type == 1 && answer_length == 4) ||
+          (query_type == 28 && answer_length == 16))) {
+        set_error("bad dns query");
+        return -1;
+    }
+    if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
+    uint8_t mac[6];
+    /* 链路未提供 DNS（DHCP 未下发或静态配置留空）时，兜底用公共 DNS 8.8.8.8，
+     * 这样"网络未配置 DNS"也能解析域名，而不是直接报错。 */
+    uint32_t dns_server = primary.dns ? primary.dns : DNS_FALLBACK_SERVER;
+    uint32_t next_hop;
+    if (net_route_next_hop(dns_server, &next_hop) < 0) return -1;
+    if (arp_resolve(next_hop, mac) < 0) return -1;
+    uint8_t msg[300];
+    memset(msg, 0, sizeof(msg));
+    uint16_t id = (uint16_t)(0x4248U ^ (uint16_t)pit_get_ticks() ^
+                             next_port);
+    *(uint16_t *)(msg + 0) = htons(id);
+    *(uint16_t *)(msg + 2) = htons(0x0100);
+    *(uint16_t *)(msg + 4) = htons(1);
+    int qn = dns_encode(name, msg + 12, sizeof(msg) - 16);
+    if (qn < 0) {
+        set_error("bad dns name");
+        return -1;
+    }
+    uint32_t len = 12 + (uint32_t)qn;
+    *(uint16_t *)(msg + len) = htons(query_type); len += 2;
+    *(uint16_t *)(msg + len) = htons(1); len += 2;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (next_port < 49152) next_port = 49152;
+        uint16_t sport = next_port++;
+        dns_wait_t w;
+        memset(&w, 0, sizeof(w));
+        w.id = id;
+        w.sport = sport;
+        w.query_type = query_type;
+        w.server = dns_server;
+        w.answer_length = answer_length;
+        if (send_udp_raw(mac, primary.ip, dns_server, sport, DNS_PORT,
+                         msg, (uint16_t)len) < 0) break;
+        uint64_t deadline = net_deadline_after_ms(1000);
+        while (!w.completed && net_before_deadline(deadline)) {
+            net_poll(dns_cb, &w, 4096);
+            task_yield();
+        }
+        if (w.found) {
+            memcpy(answer, w.answer, answer_length);
+            return 0;
+        }
+        if (w.completed) {
+            set_error("dns record not found");
+            return -1;
+        }
+    }
+    set_error("dns timeout");
+    return -1;
 }
 
 /**
@@ -1590,48 +1680,15 @@ int net_dns_resolve(const char *name, uint32_t *out_ip) {
         return -1;
     }
     uint32_t literal = net_parse_ipv4(name);
-    if (literal) { *out_ip = literal; return 0; }
-    if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
-    uint8_t mac[6];
-    /* 链路未提供 DNS（DHCP 未下发或静态配置留空）时，兜底用公共 DNS 8.8.8.8，
-     * 这样"网络未配置 DNS"也能解析域名，而不是直接报错。 */
-    uint32_t dns_server = primary.dns ? primary.dns : DNS_FALLBACK_SERVER;
-    uint32_t next_hop;
-    if (net_route_next_hop(dns_server, &next_hop) < 0) return -1;
-    if (arp_resolve(next_hop, mac) < 0) return -1;
-    uint8_t msg[300];
-    memset(msg, 0, sizeof(msg));
-    uint16_t id = 0x4248;
-    *(uint16_t *)(msg + 0) = htons(id);
-    *(uint16_t *)(msg + 2) = htons(0x0100);
-    *(uint16_t *)(msg + 4) = htons(1);
-    int qn = dns_encode(name, msg + 12, sizeof(msg) - 16);
-    if (qn < 0) {
-        set_error("bad dns name");
-        return -1;
+    if (literal) {
+        *out_ip = literal;
+        return 0;
     }
-    uint32_t len = 12 + (uint32_t)qn;
-    *(uint16_t *)(msg + len) = htons(1); len += 2;
-    *(uint16_t *)(msg + len) = htons(1); len += 2;
+    return net_dns_query(name, 1, (uint8_t *)out_ip, 4);
+}
 
-    for (int attempt = 0; attempt < 3; attempt++) {
-        if (next_port < 49152) next_port = 49152;
-        uint16_t sport = next_port++;
-        dns_wait_t w = {id, 0, 0};
-        if (send_udp_raw(mac, primary.ip, dns_server, sport, DNS_PORT,
-                         msg, (uint16_t)len) < 0) break;
-        uint64_t deadline = net_deadline_after_ms(1000);
-        while (!w.found && net_before_deadline(deadline)) {
-            net_poll(dns_cb, &w, 4096);
-            task_yield();
-        }
-        if (w.found) {
-            *out_ip = w.ip;
-            return 0;
-        }
-    }
-    set_error("dns timeout");
-    return -1;
+int net_dns_resolve_ipv6(const char *name, uint8_t out_address[16]) {
+    return net_dns_query(name, 28, out_address, 16);
 }
 
 /** @brief NTP 服务端口号（RFC 5905） */

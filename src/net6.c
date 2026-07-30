@@ -183,15 +183,13 @@ static int net6_wait_for_source(const ip6_addr_t *target,
     return -1;
 }
 
-int net6_tcp_connect(const char *address, uint16_t port,
-                     net6_tcp_conn_t *connection, uint32_t timeout_ms) {
-    if (!address || !connection || !port || net6_init() < 0) return -1;
-
-    ip6_addr_t parsed;
-    if (!ip6addr_aton(address, &parsed)) return -1;
-    if (net6_wait_for_source(&parsed, timeout_ms) < 0) return -1;
+static int net6_tcp_connect_parsed(const ip6_addr_t *parsed, uint16_t port,
+                                   net6_tcp_conn_t *connection,
+                                   uint32_t timeout_ms) {
+    if (!parsed || !connection || !port || net6_init() < 0) return -1;
+    if (net6_wait_for_source(parsed, timeout_ms) < 0) return -1;
     ip_addr_t target;
-    ip_addr_copy_from_ip6(target, parsed);
+    ip_addr_copy_from_ip6(target, *parsed);
 
     memset(connection, 0, sizeof(*connection));
     struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
@@ -216,6 +214,24 @@ int net6_tcp_connect(const char *address, uint16_t port,
         return -1;
     }
     return 0;
+}
+
+int net6_tcp_connect(const char *address, uint16_t port,
+                     net6_tcp_conn_t *connection, uint32_t timeout_ms) {
+    if (!address) return -1;
+    ip6_addr_t parsed;
+    if (!ip6addr_aton(address, &parsed)) return -1;
+    return net6_tcp_connect_parsed(&parsed, port, connection, timeout_ms);
+}
+
+int net6_tcp_connect_address(const uint8_t address[16], uint16_t port,
+                             net6_tcp_conn_t *connection,
+                             uint32_t timeout_ms) {
+    if (!address) return -1;
+    ip6_addr_t parsed;
+    memcpy(parsed.addr, address, 16);
+    ip6_addr_clear_zone(&parsed);
+    return net6_tcp_connect_parsed(&parsed, port, connection, timeout_ms);
 }
 
 int net6_tcp_send(net6_tcp_conn_t *connection, const uint8_t *data,
