@@ -51,9 +51,16 @@ Windows 推荐使用 WSL2 + Ubuntu。仓库也提供
 ### 2. 构建
 
 ```bash
-git clone https://github.com/HeBitOS/HBOS.git
+git clone --recurse-submodules https://github.com/HeBitOS/HBOS.git
 cd HBOS
 make
+```
+
+如果已经使用普通 `git clone` 下载、发现 `limine-bin` 为空，请在 HBOS
+仓库目录中执行：
+
+```bash
+git submodule update --init --recursive
 ```
 
 默认生成：
@@ -104,20 +111,25 @@ hive
 ## HIVE 桌面环境
 
 [HIVE（HBOS Interface & Visual Environment）](https://github.com/HeBitOS/HIVE)
-是 HBOS 的独立桌面项目，包含窗口管理器、合成器、桌面 Shell、用户态控件库
-和应用 SDK。
+是 HBOS 的独立桌面项目，并以 `HIVE/` Git 子模块固定在 HBOS 仓库中。它包含
+窗口管理器、合成器、桌面 Shell、用户态控件库和应用 SDK；HIVE 内部还递归
+包含必需的 HPT 子模块。
 
-当前 HIVE Toolkit 1.2 提供：
+当前 HIVE Toolkit API 1.3 提供：
 
-- Label、Button、Textbox、Checkbox、List、Progress、Slider；
-- 行布局、网格布局与窗口尺寸变化后的重新排布；
+- Label、Button、Textbox、Checkbox、List、Progress、Slider、Scrollbar、
+  Menu、Image、Canvas、Panel；
+- 行布局、网格布局、控件树与窗口尺寸变化后的重新排布；
 - 鼠标悬停、按下、拖动、松开和窗口外释放捕获；
 - Tab 焦点、Enter/Space、方向键、Home/End、PageUp/PageDown；
-- 集中式主题配置和 UTF-8 安全的已有文本导航/删除。
+- 集中式主题配置、文本选区和 UTF-8 安全编辑。
 
 HBOS 暂时保留 HIVE runtime 的集成副本，以确保完整版本和 no-GUI 版本都能
 持续构建。拆仓边界与迁移顺序见
 [`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md)。
+使用 `git clone --recurse-submodules` 会同时取得 HIVE、HPT 和其他依赖。
+`make hive-sync` 默认同步仓库内的 `HIVE/`；若需要操作其他 HIVE 工作副本，
+可显式传入 `HIVE_REPO=/path/to/HIVE`。
 
 ## 应用开发
 

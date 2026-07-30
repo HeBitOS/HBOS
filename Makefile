@@ -5,6 +5,7 @@ LD = ld
 BUILD_DIR ?= build
 SRC_DIR = src
 APP_DIR ?= app
+HIVE_REPO ?= HIVE
 
 # 可拆分构建开关：
 #   HBOS_ENABLE_GUI=0   不链接桌面、窗口管理器和 GUI 内置应用

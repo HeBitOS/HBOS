@@ -11,3 +11,6 @@
 [submodule "third_party/lwip"]
 	path = third_party/lwip
 	url = https://https.git.savannah.gnu.org/git/lwip.git
+[submodule "HIVE"]
+	path = HIVE
+	url = https://github.com/HeBitOS/HIVE.git
