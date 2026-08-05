@@ -206,6 +206,8 @@ typedef struct {
 #define MSR_LSTAR  0xC0000082   /**< SYSCALL 64 位入口点 */
 #define MSR_CSTAR  0xC0000083   /**< SYSCALL 兼容模式入口点 */
 #define MSR_SFMASK 0xC0000084   /**< SYSCALL RFLAGS 掩码 */
+#define MSR_FS_BASE 0xC0000100  /**< x86-64 FS segment base (user TLS) */
+#define MSR_GS_BASE 0xC0000101  /**< x86-64 GS segment base */
 
 // ============================================================
 // EFER (Extended Feature Enable Register) 位定义
@@ -332,5 +334,9 @@ bool int_get_state(void);
 
 /** PIT (IRQ0) 中断计数，pit_init() 设的频率下累加；除以该频率即得开机秒数。 */
 uint64_t pit_get_ticks(void);
+/** PIT 当前实际频率；尚未初始化时返回 0。 */
+uint32_t pit_get_frequency_hz(void);
+/** 按当前 PIT 频率向上取整转换毫秒；尚未初始化或 ms=0 时返回 0。 */
+uint64_t pit_ticks_from_ms(uint32_t ms);
 
 #endif /* HBOS_CPU_H */

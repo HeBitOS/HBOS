@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 // ============================================================
-// Kernel Heap — simple free-list allocator
+// Kernel Heap — coalescing free-list allocator
 // ============================================================
 
 // Initialize kernel heap

@@ -56,7 +56,7 @@ void vmm_page_fault_handler(uint64_t cr2, uint64_t error_code);
 
 ```c
 void *kmalloc(size_t n);    // 128KB bump heap, 4KB 粒度扩展到 PMM
-void kfree(void *p);         // no-op (bump allocator 不回收)
+void kfree(void *p);         // 释放并与相邻空闲块合并
 void heap_init(void);        // 初始化堆
 #define HEAP_INITIAL_SIZE (128 * 1024)
 // 扩展: 调 pmm_alloc_page 追加 4KB 页

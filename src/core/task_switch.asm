@@ -102,8 +102,8 @@ task_enter_ring3:
     mov bx, 0x23
     mov ds, bx
     mov es, bx
-    mov fs, bx
-    mov gs, bx
+    ; Keep FS/GS selectors untouched.  Long-mode TLS uses FS.base from
+    ; IA32_FS_BASE, which task_switch_tls restored for this task.
 
     ; _start(argc, argv)
     mov rdi, [rax+16]

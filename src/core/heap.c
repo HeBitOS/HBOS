@@ -1,148 +1,220 @@
 /**
- * @file    heap.c
- * @brief   内核堆分配器 — 简单的 bump 分配器
+ * @file heap.c
+ * @brief 可回收、可合并的内核堆
  *
- * 使用 128KB 静态 BSS 池的简单 bump 分配器。
- * 不支持释放（kfree 是空操作），适合内核的简单分配模式。
- *
- * 每个分配块前面有一个 12 字节的头部:
- *   - magic:  魔数 0x48454150 ("HEAP")
- *   - size:   用户数据大小（不含头部）
- *   - free:   是否空闲（始终为 false，因为不支持释放）
- *
- * 对齐: 所有分配 16 字节对齐
+ * 使用静态 BSS 池和 first-fit free list。普通分配至少 16 字节对齐；释放
+ * 时合并相邻空闲块，避免 USB、文件和网络路径的短生命周期缓冲耗尽堆。
  */
 
-#include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "heap.h"
-#include "../graphics/graphics.h"
 
-// ============================================================
-// 常量定义
-// ============================================================
+#define HEAP_POOL_SIZE   (2U * 1024U * 1024U)
+#define HEAP_ALIGN       16U
+#define HEAP_MAGIC       0x48454150U
+#define HEAP_ALIGN_MAGIC 0x4842414C49474E31ULL
 
-#define HEAP_POOL_SIZE  (128 * 1024)   /**< 堆池大小: 128KB */
-#define HEAP_ALIGN      16             /**< 分配对齐: 16 字节 */
+typedef struct heap_block {
+    uint32_t magic;
+    uint32_t free;
+    size_t size;
+    struct heap_block *prev;
+    struct heap_block *next;
+} heap_block_t;
 
-// ============================================================
-// 数据结构
-// ============================================================
-
-/** 堆块头部（每个分配块之前） */
 typedef struct {
-    uint32_t magic;      /**< 魔数: 0x48454150 */
-    uint32_t size;       /**< 用户数据大小（不含头部） */
-    bool     free;       /**< 是否空闲（始终为 false） */
-} __attribute__((packed)) heap_hdr_t;
+    uint64_t magic;
+    void *base;
+} heap_align_prefix_t;
 
-#define HDR_SIZE sizeof(heap_hdr_t)    /**< 头部大小: 12 字节 */
-
-// ============================================================
-// 内部状态
-// ============================================================
-
-/** 堆池（BSS 段，64 字节缓存行对齐） */
 static uint8_t heap_pool[HEAP_POOL_SIZE] __attribute__((aligned(64)));
+static bool heap_ready;
+static heap_block_t *heap_head;
+static volatile uint32_t heap_lock;
 
-static bool    heap_ready = false;     /**< 堆是否已初始化 */
-static uint32_t heap_used = 0;         /**< 已使用的字节数（含头部） */
-
-// ============================================================
-// 辅助函数
-// ============================================================
-
-/** 向上对齐到 alignment 的倍数 */
-static size_t align_up(size_t size, size_t alignment) {
-    return (size + alignment - 1) & ~(alignment - 1);
+static size_t align_up(size_t value, size_t alignment) {
+    return (value + alignment - 1U) & ~(alignment - 1U);
 }
 
-// ============================================================
-// 公共 API
-// ============================================================
+static uint64_t heap_lock_irqsave(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    while (__sync_lock_test_and_set(&heap_lock, 1U))
+        __asm__ volatile("pause");
+    return flags;
+}
 
-/** 初始化堆（重置 bump 指针） */
+static void heap_unlock_irqrestore(uint64_t flags) {
+    __sync_lock_release(&heap_lock);
+    if (flags & (1ULL << 9))
+        __asm__ volatile("sti" ::: "memory");
+}
+
+static int pointer_in_pool(const void *ptr) {
+    uintptr_t value = (uintptr_t)ptr;
+    uintptr_t start = (uintptr_t)heap_pool;
+    return value >= start && value < start + HEAP_POOL_SIZE;
+}
+
+/**
+ * 普通分配的块头紧邻返回指针；扩展对齐分配在返回指针前放置 base 前缀。
+ */
+static heap_block_t *block_from_pointer(void *ptr) {
+    if (!ptr || !pointer_in_pool(ptr)) return NULL;
+
+    uintptr_t pool_start = (uintptr_t)heap_pool;
+    if ((uintptr_t)ptr >= pool_start + sizeof(heap_align_prefix_t)) {
+        heap_align_prefix_t *prefix =
+            (heap_align_prefix_t *)((uint8_t *)ptr - sizeof(*prefix));
+        if (prefix->magic == HEAP_ALIGN_MAGIC &&
+            pointer_in_pool(prefix->base)) {
+            heap_block_t *block = (heap_block_t *)prefix->base - 1;
+            if (pointer_in_pool(block) && block->magic == HEAP_MAGIC)
+                return block;
+        }
+    }
+
+    heap_block_t *block = (heap_block_t *)ptr - 1;
+    return pointer_in_pool(block) && block->magic == HEAP_MAGIC
+         ? block : NULL;
+}
+
+static void split_block(heap_block_t *block, size_t wanted) {
+    if (block->size < wanted + sizeof(heap_block_t) + HEAP_ALIGN) return;
+
+    heap_block_t *tail =
+        (heap_block_t *)((uint8_t *)(block + 1) + wanted);
+    tail->magic = HEAP_MAGIC;
+    tail->free = 1;
+    tail->size = block->size - wanted - sizeof(heap_block_t);
+    tail->prev = block;
+    tail->next = block->next;
+    if (tail->next) tail->next->prev = tail;
+    block->next = tail;
+    block->size = wanted;
+}
+
+static void merge_next(heap_block_t *block) {
+    heap_block_t *next = block->next;
+    if (!next || !next->free || next->magic != HEAP_MAGIC) return;
+
+    block->size += sizeof(heap_block_t) + next->size;
+    block->next = next->next;
+    if (block->next) block->next->prev = block;
+    next->magic = 0;
+}
+
 void heap_init(void) {
-    heap_used = 0;
+    heap_lock = 0;
+    heap_head = (heap_block_t *)heap_pool;
+    heap_head->magic = HEAP_MAGIC;
+    heap_head->free = 1;
+    heap_head->size = HEAP_POOL_SIZE - sizeof(heap_block_t);
+    heap_head->prev = NULL;
+    heap_head->next = NULL;
     heap_ready = true;
 }
 
-/**
- * 分配内存
- * @param size  请求的字节数
- * @return 指向已分配内存的指针，失败返回 NULL
- */
 void *kmalloc(size_t size) {
-    if (!heap_ready || size == 0) return NULL;
-
+    if (!heap_ready || !size) return NULL;
+    if (size > SIZE_MAX - (HEAP_ALIGN - 1U)) return NULL;
     size = align_up(size, HEAP_ALIGN);
-    size_t total = HDR_SIZE + size;
 
-    if (heap_used + total > HEAP_POOL_SIZE) return NULL;  // 内存耗尽
-
-    heap_hdr_t *hdr = (heap_hdr_t *)&heap_pool[heap_used];
-    hdr->magic = 0x48454150;  // "HEAP"
-    hdr->size  = (uint32_t)size;
-    hdr->free  = false;
-
-    void *ptr = (void *)((uint8_t *)hdr + HDR_SIZE);
-    heap_used += total;
-    return ptr;
-}
-
-/**
- * 分配并清零内存
- * @param num   元素数量
- * @param size  每个元素的大小
- * @return 指向已清零内存的指针
- */
-void *kcalloc(size_t num, size_t size) {
-    size_t total = num * size;
-    void *ptr = kmalloc(total);
-    if (ptr) {
-        uint8_t *p = (uint8_t *)ptr;
-        for (size_t i = 0; i < total; i++) p[i] = 0;
+    uint64_t flags = heap_lock_irqsave();
+    heap_block_t *block = heap_head;
+    while (block && (!block->free || block->size < size))
+        block = block->next;
+    if (!block) {
+        heap_unlock_irqrestore(flags);
+        return NULL;
     }
+
+    split_block(block, size);
+    block->free = 0;
+    void *ptr = block + 1;
+    heap_unlock_irqrestore(flags);
     return ptr;
 }
 
-/**
- * 释放内存（当前为空操作 — bump 分配器不支持释放）
- */
-void kfree(void *ptr) { (void)ptr; }
+void *kcalloc(size_t count, size_t size) {
+    if (size && count > SIZE_MAX / size) return NULL;
+    size_t total = count * size;
+    void *ptr = kmalloc(total);
+    if (!ptr) return NULL;
 
-/**
- * 重新分配内存
- * 如果新大小小于等于原大小，直接返回原指针。
- * 否则分配新块、复制数据、返回新指针（旧块不释放）。
- */
+    uint8_t *bytes = (uint8_t *)ptr;
+    for (size_t i = 0; i < total; i++) bytes[i] = 0;
+    return ptr;
+}
+
+void kfree(void *ptr) {
+    if (!ptr || !heap_ready) return;
+
+    uint64_t flags = heap_lock_irqsave();
+    heap_block_t *block = block_from_pointer(ptr);
+    if (!block || block->free) {
+        heap_unlock_irqrestore(flags);
+        return;
+    }
+
+    block->free = 1;
+    merge_next(block);
+    if (block->prev && block->prev->free) {
+        block = block->prev;
+        merge_next(block);
+    }
+    heap_unlock_irqrestore(flags);
+}
+
 void *krealloc(void *ptr, size_t new_size) {
     if (!ptr) return kmalloc(new_size);
-    if (new_size == 0) { kfree(ptr); return NULL; }
+    if (!new_size) {
+        kfree(ptr);
+        return NULL;
+    }
 
-    heap_hdr_t *hdr = (heap_hdr_t *)((uint8_t *)ptr - HDR_SIZE);
-    if (hdr->magic != 0x48454150) return NULL;
-    if (hdr->size >= new_size) return ptr;
+    uint64_t flags = heap_lock_irqsave();
+    heap_block_t *block = block_from_pointer(ptr);
+    if (!block || block->free) {
+        heap_unlock_irqrestore(flags);
+        return NULL;
+    }
+    size_t offset = (size_t)((uint8_t *)ptr - (uint8_t *)(block + 1));
+    size_t usable = block->size > offset ? block->size - offset : 0;
+    if (usable >= new_size) {
+        heap_unlock_irqrestore(flags);
+        return ptr;
+    }
+    heap_unlock_irqrestore(flags);
 
-    void *new_ptr = kmalloc(new_size);
-    if (!new_ptr) return NULL;
-
-    size_t copy = hdr->size < new_size ? hdr->size : new_size;
-    uint8_t *s = (uint8_t *)ptr;
-    uint8_t *d = (uint8_t *)new_ptr;
-    for (size_t i = 0; i < copy; i++) d[i] = s[i];
-    return new_ptr;
+    void *replacement = kmalloc(new_size);
+    if (!replacement) return NULL;
+    uint8_t *src = (uint8_t *)ptr;
+    uint8_t *dst = (uint8_t *)replacement;
+    for (size_t i = 0; i < usable; i++) dst[i] = src[i];
+    kfree(ptr);
+    return replacement;
 }
 
-void *kmalloc_aligned(size_t size, size_t align) {
-    if (!heap_ready || size == 0) return NULL;
+void *kmalloc_aligned(size_t size, size_t alignment) {
+    if (!heap_ready || !size) return NULL;
+    if (alignment < HEAP_ALIGN) alignment = HEAP_ALIGN;
+    if ((alignment & (alignment - 1U)) != 0) return NULL;
+    if (size > SIZE_MAX - alignment - sizeof(heap_align_prefix_t))
+        return NULL;
 
-    size_t aligned_size = align_up(size, align);
-    uint8_t *raw = (uint8_t *)kmalloc(aligned_size + align);
-    if (!raw) return NULL;
+    size_t total = size + alignment - 1U + sizeof(heap_align_prefix_t);
+    uint8_t *base = (uint8_t *)kmalloc(total);
+    if (!base) return NULL;
 
-    uint8_t *aligned = (uint8_t *)(((uintptr_t)raw + align - 1) & ~(uintptr_t)(align - 1));
-    return (void *)aligned;
+    uintptr_t candidate = (uintptr_t)base + sizeof(heap_align_prefix_t);
+    uint8_t *aligned = (uint8_t *)align_up(candidate, alignment);
+    heap_align_prefix_t *prefix =
+        (heap_align_prefix_t *)(aligned - sizeof(*prefix));
+    prefix->magic = HEAP_ALIGN_MAGIC;
+    prefix->base = base;
+    return aligned;
 }

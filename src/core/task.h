@@ -3,14 +3,46 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "../fd.h"
 #include "../signal.h"
 
 typedef struct vm_area {
     uint64_t start;
     uint64_t end;
+    uint32_t backing_type;
+    uint32_t backing_id;
     struct vm_area *next;
 } vm_area_t;
+
+typedef struct {
+    uint32_t refs;
+    vm_area_t *areas;
+    uint64_t pml4_phys;
+    uint64_t user_heap_start;
+    uint64_t user_brk;
+    uint64_t user_heap_limit;
+} task_mm_t;
+
+/*
+ * Versioned userspace request for the lightweight clone fast path.  Fixed
+ * width fields keep the ABI stable and let the kernel reject newer layouts
+ * instead of silently interpreting them incorrectly.
+ */
+#define HBOS_CLONE_REQUEST_VERSION 1U
+
+typedef struct {
+    uint32_t version;
+    uint32_t size;
+    uint64_t flags;
+    uint64_t entry;
+    uint64_t stack;
+    uint64_t argument;
+    uint64_t tls;
+    uint64_t parent_tid;
+    uint64_t child_tid;
+    uint64_t clear_child_tid;
+} hbos_clone_request_t;
 
 // ============================================================
 // Cooperative Multitasking / Threading Framework
@@ -18,7 +50,8 @@ typedef struct vm_area {
 
 #define TASK_NAME_MAX 32
 #define TASK_STACK_SIZE 8192
-#define MAX_TASKS 16
+#define MAX_TASKS 64
+#define PIT_DEFAULT_FREQUENCY_HZ 100U
 #define TASK_USER_HEAP_START 0x0000002000000000ULL
 #define TASK_USER_HEAP_SIZE  (64ULL * 1024 * 1024)
 
@@ -57,14 +90,14 @@ typedef struct task {
     // Link for round-robin list
     struct task *next;
 
-    fd_entry_t fds[POSIX_MAX_FDS];
+    fd_table_t *fd_table;
 
-    vm_area_t *vm_areas;
-
-    uint64_t pml4_phys;
-    uint64_t user_heap_start;
-    uint64_t user_brk;
-    uint64_t user_heap_limit;
+    task_mm_t *mm;
+    uint64_t fs_base;
+    uint32_t thread_group_id;
+    uint32_t *clear_child_tid;
+    void *robust_list_head;
+    size_t robust_list_length;
 
     void (*sig_handler[_NSIG])(int);
     sigset_t sig_pending;
@@ -118,9 +151,16 @@ int task_kill(uint32_t id, int sig);
 
 // Fork current task (clone with same context)
 int task_fork(void);
+int task_clone_user_thread(const hbos_clone_request_t *request);
+int task_set_robust_list(void *head, size_t length);
+int task_get_robust_list(int tid, void **head, size_t *length);
+int task_set_tid_address(uint32_t *address);
 
 // Get current task ID
 uint32_t task_get_id(void);
+uint32_t task_get_process_id(void);
+uint64_t task_get_fs_base(void);
+int task_set_fs_base(uint64_t base);
 
 // Get current task object
 task_t *task_current(void);
@@ -145,5 +185,8 @@ void task_schedule(void);
 void task_preempt_enable(void);
 void task_preempt_disable(void);
 void pit_init(uint32_t freq_hz);
+uint64_t pit_get_ticks(void);
+uint32_t pit_get_frequency_hz(void);
+uint64_t pit_ticks_from_ms(uint32_t ms);
 
 #endif /* HBOS_TASK_H */

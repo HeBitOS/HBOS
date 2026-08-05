@@ -19,6 +19,7 @@
 #include "shell/shell.h"
 #include "core/task.h"
 #include "core/cpu.h"
+#include "core/io.h"
 #include "core/pmm.h"
 #include "core/vmm.h"
 #include "core/heap.h"
@@ -38,36 +39,29 @@
 /** COM1 串口基地址 */
 #define SERIAL_PORT 0x3F8
 
-/** 向 I/O 端口写入一个字节 */
-static inline void outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
-/** 从 I/O 端口读取一个字节 */
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
 /**
  * 初始化 COM1 串口为 115200 波特率
  * 配置: 8N1, DLAB 设置除数锁存器, FIFO 启用
  */
 static void serial_init(void) {
-    outb(SERIAL_PORT + 1, 0x00);   // 禁用中断
-    outb(SERIAL_PORT + 3, 0x80);   // 启用 DLAB（除数锁存器访问）
-    outb(SERIAL_PORT + 0, 0x01);   // 除数低字节 = 1 → 115200 baud
-    outb(SERIAL_PORT + 1, 0x00);   // 除数高字节 = 0
-    outb(SERIAL_PORT + 3, 0x03);   // 8N1, 禁用 DLAB
-    outb(SERIAL_PORT + 2, 0xC7);   // 启用 FIFO, 14 字节触发
-    outb(SERIAL_PORT + 4, 0x0B);   // DTR+RTS+OUT2
+    io_out8(SERIAL_PORT + 1, 0x00);   // 禁用中断
+    io_out8(SERIAL_PORT + 3, 0x80);   // 启用 DLAB（除数锁存器访问）
+    io_out8(SERIAL_PORT + 0, 0x01);   // 除数低字节 = 1 → 115200 baud
+    io_out8(SERIAL_PORT + 1, 0x00);   // 除数高字节 = 0
+    io_out8(SERIAL_PORT + 3, 0x03);   // 8N1, 禁用 DLAB
+    io_out8(SERIAL_PORT + 2, 0xC7);   // 启用 FIFO, 14 字节触发
+    io_out8(SERIAL_PORT + 4, 0x0B);   // DTR+RTS+OUT2
 }
 
 /** 向串口发送一个字符（忙等待直到发送缓冲区为空） */
 static void serial_putc(char c) {
-    while (!(inb(SERIAL_PORT + 5) & 0x20));  // 等待 LSR 第 5 位（THR 空）
-    outb(SERIAL_PORT, c);
+    uint32_t spins = 100000U;
+    while (spins && !(io_in8(SERIAL_PORT + 5) & 0x20)) {
+        spins--;
+        cpu_relax();
+    }
+    if (io_in8(SERIAL_PORT + 5) & 0x20)
+        io_out8(SERIAL_PORT, (uint8_t)c);
 }
 
 /** 向串口发送一个以 NUL 结尾的字符串（\n 自动转为 \r\n） */
@@ -100,7 +94,7 @@ void kmain(void *mbi) {
     // PIC 重映射: IRQ0-15 → INT 32-47
     gdt_idt_init();
     fpu_enable();   // 打开 SSE/SSE2（tcc.hax 自身需要真正的硬件浮点，见 cpu.h）
-    pit_init(100);
+    pit_init(PIT_DEFAULT_FREQUENCY_HZ);
     acpi_init(mbi);  // ACPI 解析（用于关机支持的 S5 睡眠状态 + MADT CPU 检测）
     smp_init();     // SMP 多核初始化（启动 AP）
 
@@ -148,6 +142,10 @@ void kmain(void *mbi) {
 
     extern void tcc_runtime_seed_init(void);
     tcc_runtime_seed_init();
+
+    // 内置 HPT 软件仓库（/packages）：镜像自带的 HAX 应用，供 hpt 装卸
+    extern void hpt_repo_seed_init(void);
+    hpt_repo_seed_init();
 
     // ---- Phase 6: Shell ----
     // 注册所有内置命令（help, ls, cat, echo 等）

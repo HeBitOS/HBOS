@@ -108,6 +108,7 @@ isr_stub_table:
 ; ============================================================
 extern irq_handler
 extern syscall_dispatch_frame
+extern linux_syscall_dispatch_frame
 
 %macro IRQ 2
 global irq_stub_%1
@@ -244,6 +245,49 @@ syscall_int80_stub:
 
     mov rdi, rsp
     call syscall_dispatch_frame
+
+    mov [rsp], rax
+    pop rax
+    pop rdi
+    pop rsi
+    pop rdx
+    pop r10
+    pop r8
+    pop r9
+    iretq
+
+; Native x86-64 SYSCALL entry for unmodified Linux binaries.
+global linux_syscall_entry
+global linux_syscall_kernel_rsp
+global linux_syscall_user_rsp
+
+section .bss
+align 8
+linux_syscall_kernel_rsp: resq 1
+linux_syscall_user_rsp:   resq 1
+
+section .text
+linux_syscall_entry:
+    mov [rel linux_syscall_user_rsp], rsp
+    mov rsp, [rel linux_syscall_kernel_rsp]
+
+    ; Explicit iretq frame avoids SYSRET's fixed user GDT ordering.
+    push qword 0x23
+    push qword [rel linux_syscall_user_rsp]
+    push r11
+    push qword 0x1B
+    push rcx
+
+    push r9
+    push r8
+    push r10
+    push rdx
+    push rsi
+    push rdi
+    push rax
+
+    mov rdi, rsp
+    call linux_syscall_dispatch_frame
 
     mov [rsp], rax
     pop rax

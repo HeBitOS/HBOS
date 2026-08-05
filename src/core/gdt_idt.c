@@ -3,21 +3,9 @@
 #include <stddef.h>
 
 #include "cpu.h"
+#include "io.h"
 #include "../syscall.h"
 #include "../graphics/graphics.h"
-
-// ============================================================
-// Port I/O helpers (static — self-contained in this file)
-// ============================================================
-static inline void outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-static inline void io_wait(void) { outb(0x80, 0); }
 
 // ============================================================
 // Hex printing helpers (used by isr_handler)
@@ -139,6 +127,8 @@ void gdt_init(void) {
 
 void tss_set_stack(uint64_t rsp0) {
     g_tss[0].rsp0 = rsp0;
+    extern uint64_t linux_syscall_kernel_rsp;
+    linux_syscall_kernel_rsp = rsp0;
 }
 
 // ============================================================
@@ -160,6 +150,7 @@ static idt_entry_t idt_entries[256];
 extern uint64_t isr_stub_table[32];
 extern uint64_t irq_stub_table[16];
 extern void syscall_int80_stub(void);
+extern void linux_syscall_entry(void);
 
 static void idt_set_entry(int vec, uint64_t handler, uint8_t flags) {
     idt_entries[vec].offset_low  = (uint16_t)(handler & 0xFFFF);
@@ -173,25 +164,25 @@ static void idt_set_entry(int vec, uint64_t handler, uint8_t flags) {
 
 // Remap PIC IRQ0-15 → vectors 32-47
 static void pic_remap(void) {
-    uint8_t a1 = inb(PIC1_DATA);
-    uint8_t a2 = inb(PIC2_DATA);
+    uint8_t a1 = io_in8(PIC1_DATA);
+    uint8_t a2 = io_in8(PIC2_DATA);
 
-    outb(PIC1_CMD, ICW1_INIT | ICW1_ICW4); io_wait();
-    outb(PIC2_CMD, ICW1_INIT | ICW1_ICW4); io_wait();
-    outb(PIC1_DATA, IRQ_BASE);              io_wait(); // Master offset
-    outb(PIC2_DATA, IRQ_BASE + 8);          io_wait(); // Slave offset
-    outb(PIC1_DATA, 4);                     io_wait(); // Slave at IRQ2
-    outb(PIC2_DATA, 2);                     io_wait(); // Cascade identity
-    outb(PIC1_DATA, 0x01);                  io_wait(); // 8086 mode
-    outb(PIC2_DATA, 0x01);                  io_wait();
+    io_out8(PIC1_CMD, ICW1_INIT | ICW1_ICW4); io_delay();
+    io_out8(PIC2_CMD, ICW1_INIT | ICW1_ICW4); io_delay();
+    io_out8(PIC1_DATA, IRQ_BASE);              io_delay(); // Master offset
+    io_out8(PIC2_DATA, IRQ_BASE + 8);          io_delay(); // Slave offset
+    io_out8(PIC1_DATA, 4);                     io_delay(); // Slave at IRQ2
+    io_out8(PIC2_DATA, 2);                     io_delay(); // Cascade identity
+    io_out8(PIC1_DATA, 0x01);                  io_delay(); // 8086 mode
+    io_out8(PIC2_DATA, 0x01);                  io_delay();
 
-    outb(PIC1_DATA, a1); // Restore masks
-    outb(PIC2_DATA, a2);
+    io_out8(PIC1_DATA, a1); // Restore masks
+    io_out8(PIC2_DATA, a2);
 }
 
 static void pic_send_eoi(uint8_t irq) {
-    if (irq >= 8) outb(PIC2_CMD, 0x20);
-    outb(PIC1_CMD, 0x20);
+    if (irq >= 8) io_out8(PIC2_CMD, 0x20);
+    io_out8(PIC1_CMD, 0x20);
 }
 
 // ============================================================
@@ -329,14 +320,14 @@ void irq_handler(isr_regs_t *regs) {
     }
 
     if (irq == 1) {
-        if (inb(0x64) & 1) {
-            uint8_t st = inb(0x64);
+        if (io_in8(0x64) & 1) {
+            uint8_t st = io_in8(0x64);
             if (!(st & 0x20)) {
-                uint8_t sc = inb(0x60);
+                uint8_t sc = io_in8(0x60);
                 extern void kb_irq_enqueue_scancode(uint8_t sc);
                 kb_irq_enqueue_scancode(sc);
             } else {
-                uint8_t b = inb(0x60);
+                uint8_t b = io_in8(0x60);
                 extern void ps2_mouse_enqueue_byte(uint8_t b);
                 ps2_mouse_enqueue_byte(b);
             }
@@ -346,14 +337,14 @@ void irq_handler(isr_regs_t *regs) {
     }
 
     if (irq == 12) {
-        if (inb(0x64) & 1) {
-            uint8_t st = inb(0x64);
+        if (io_in8(0x64) & 1) {
+            uint8_t st = io_in8(0x64);
             if (st & 0x20) {
-                uint8_t b = inb(0x60);
+                uint8_t b = io_in8(0x60);
                 extern void ps2_mouse_enqueue_byte(uint8_t b);
                 ps2_mouse_enqueue_byte(b);
             } else {
-                uint8_t sc = inb(0x60);
+                uint8_t sc = io_in8(0x60);
                 extern void kb_irq_enqueue_scancode(uint8_t sc);
                 kb_irq_enqueue_scancode(sc);
             }
@@ -401,6 +392,14 @@ void gdt_idt_init(void) {
 
     idt_set_entry(HBOS_SYSCALL_VECTOR, (uint64_t)syscall_int80_stub,
                   IDT_PRESENT | IDT_DPL3 | IDT_TRAP_GATE);
+
+    /* Linux ELF binaries enter through the architectural SYSCALL path.
+     * The assembly return uses iretq, so STAR's user-selector half is not
+     * constrained by SYSRET's descriptor ordering. */
+    wrmsr(MSR_STAR, (uint64_t)SEL_KCODE << 32);
+    wrmsr(MSR_LSTAR, (uint64_t)(uintptr_t)linux_syscall_entry);
+    wrmsr(MSR_SFMASK, (1ULL << 8) | (1ULL << 9) | (1ULL << 10));
+    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_SCE);
 
     // Load IDT
     idt_ptr_t idt_ptr;

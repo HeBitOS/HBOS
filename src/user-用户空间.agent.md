@@ -127,3 +127,10 @@ dlfcn:   dlopen, dlsym
 | fork/exec | ❌ (协作式调度, 无 COW) |
 | mmap | ⚠️ 基础 |
 | 共享库 | ✅ .so 格式 |
+
+## Linux/KDE 兼容层
+
+`src/linux_compat.c` 复用原生任务 fd 表，实现固定容量、无守护进程的
+`poll/pipe2/eventfd/epoll/futex` 事件与同步底座；用户态
+`src/user/libc/linux.c` 提供常用 Linux x86-64 `SYS_*` 号码翻译。完整边界
+和 KDE 分阶段目标见 `docs/LINUX_KDE_COMPAT.md`。
