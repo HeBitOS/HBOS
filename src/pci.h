@@ -109,6 +109,13 @@ void pci_enumerate_all(pci_enumerate_cb_t cb, void *ctx);
 uint32_t pci_bar(uint8_t bus, uint8_t slot, uint8_t func, uint8_t bar_index);
 
 /**
+ * 解析 BAR 的地址并处理 64 位内存 BAR。I/O BAR 通过 is_io 返回类型。
+ * 不支持或无效的 BAR 返回 0。
+ */
+uint64_t pci_bar_address(uint8_t bus, uint8_t slot, uint8_t func,
+                         uint8_t bar_index, int *is_io);
+
+/**
  * @brief 启用 PCI 设备的内存空间访问和总线主控功能
  *
  * 在命令寄存器中置位 Memory Space 和 Bus Master 位。

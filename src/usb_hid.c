@@ -1,6 +1,7 @@
 #include "usb_hid.h"
 #include "xhci.h"
 #include "core/heap.h"
+#include "core/wait.h"
 #include "string.h"
 
 extern void console_puts(const char *s);
@@ -274,7 +275,6 @@ int usb_hid_init(void) {
 int usb_kbd_init(void) {
     if (usb_kbd_initialized) return 0;
     if (usb_hid_init() < 0) return -1;
-    (void)hid_init(); // Rescan xHCI slots
     for (int i = 0; i < hid_count; i++) {
         if (hid_devices[i].active && hid_devices[i].type == HID_KEYBOARD) {
             usb_kbd_index = i;
@@ -287,32 +287,21 @@ int usb_kbd_init(void) {
     return 0;
 }
 
-static inline uint64_t rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
-
 /** 从 USB 键盘读取一个字符，无输入返回 0 */
 int usb_kbd_getc(void) {
     if (!usb_kbd_initialized) {
-        static uint64_t last_init_try = 0;
-        uint64_t now = rdtsc();
-        // Retry initialization at most once every 2 seconds
-        if (now - last_init_try > 2000000000ULL) {
-            last_init_try = now;
+        static uint64_t retry_deadline;
+        if (pit_deadline_reached(retry_deadline)) {
+            retry_deadline = pit_deadline_after_ms(2000);
             (void)usb_kbd_init();
         }
         if (!usb_kbd_initialized) return 0;
     }
 
-    static uint64_t last_poll = 0;
-    uint64_t now = rdtsc();
+    static uint64_t poll_deadline;
     /* Throttle to 15ms interval to prevent pegging the CPU during polling */
-    if (now - last_poll < 15000000ULL) {
-        return 0;
-    }
-    last_poll = now;
+    if (!pit_deadline_reached(poll_deadline)) return 0;
+    poll_deadline = pit_deadline_after_ms(15);
 
     hid_kbd_report_t report;
     if (hid_get_keyboard_report(usb_kbd_index, &report) < 0) return 0;
@@ -348,7 +337,6 @@ int usb_kbd_ready(void) {
 int usb_mouse_init(void) {
     if (usb_mouse_initialized) return 0;
     if (usb_hid_init() < 0) return -1;
-    (void)hid_init(); // Rescan xHCI slots
     for (int i = 0; i < hid_count; i++) {
         if (hid_devices[i].active && hid_devices[i].type == HID_MOUSE) {
             usb_mouse_index = i;
@@ -363,24 +351,19 @@ int usb_mouse_init(void) {
 int usb_mouse_get_report(hid_mouse_report_t *report) {
     if (!usb_mouse_initialized || !report) {
         if (report) {
-            static uint64_t last_init_try = 0;
-            uint64_t now = rdtsc();
-            // Retry initialization at most once every 2 seconds
-            if (now - last_init_try > 2000000000ULL) {
-                last_init_try = now;
+            static uint64_t retry_deadline;
+            if (pit_deadline_reached(retry_deadline)) {
+                retry_deadline = pit_deadline_after_ms(2000);
                 (void)usb_mouse_init();
             }
         }
         if (!usb_mouse_initialized) return -1;
     }
 
-    static uint64_t last_poll = 0;
-    uint64_t now = rdtsc();
+    static uint64_t poll_deadline;
     /* Throttle to 10ms interval to prevent pegging the CPU during mouse polling */
-    if (now - last_poll < 10000000ULL) {
-        return -1;
-    }
-    last_poll = now;
+    if (!pit_deadline_reached(poll_deadline)) return -1;
+    poll_deadline = pit_deadline_after_ms(10);
 
     if (hid_get_mouse_report(usb_mouse_index, report) < 0) return -1;
     return 0;

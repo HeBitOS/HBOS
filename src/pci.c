@@ -7,31 +7,10 @@
  */
 
 #include "pci.h"
+#include "core/io.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8 /**< PCI 配置空间地址端口 */
 #define PCI_CONFIG_DATA    0xCFC /**< PCI 配置空间数据端口 */
-
-/**
- * @brief 向指定 I/O 端口写入 32 位值
- *
- * @param port I/O 端口号
- * @param val  待写入的 32 位值
- */
-static inline void outl(uint16_t port, uint32_t val) {
-    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
-}
-
-/**
- * @brief 从指定 I/O 端口读取 32 位值
- *
- * @param port I/O 端口号
- * @return 读取到的 32 位值
- */
-static inline uint32_t inl(uint16_t port) {
-    uint32_t ret;
-    __asm__ volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
 
 /**
  * @brief 构造 PCI 配置空间地址
@@ -63,8 +42,8 @@ static uint32_t pci_addr(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset
  * @return 读取到的 32 位值
  */
 uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    outl(PCI_CONFIG_ADDRESS, pci_addr(bus, slot, func, offset));
-    return inl(PCI_CONFIG_DATA);
+    io_out32(PCI_CONFIG_ADDRESS, pci_addr(bus, slot, func, offset));
+    return io_in32(PCI_CONFIG_DATA);
 }
 
 /**
@@ -77,8 +56,8 @@ uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
  * @param value  待写入的 32 位值
  */
 void pci_write32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value) {
-    outl(PCI_CONFIG_ADDRESS, pci_addr(bus, slot, func, offset));
-    outl(PCI_CONFIG_DATA, value);
+    io_out32(PCI_CONFIG_ADDRESS, pci_addr(bus, slot, func, offset));
+    io_out32(PCI_CONFIG_DATA, value);
 }
 
 /**
@@ -263,6 +242,29 @@ void pci_enumerate_all(pci_enumerate_cb_t cb, void *ctx) {
 uint32_t pci_bar(uint8_t bus, uint8_t slot, uint8_t func, uint8_t bar_index) {
     if (bar_index >= 6) return 0;
     return pci_read32(bus, slot, func, (uint8_t)(0x10 + bar_index * 4));
+}
+
+uint64_t pci_bar_address(uint8_t bus, uint8_t slot, uint8_t func,
+                         uint8_t bar_index, int *is_io) {
+    if (is_io) *is_io = 0;
+    if (bar_index >= 6) return 0;
+
+    uint32_t low = pci_bar(bus, slot, func, bar_index);
+    if (low & 1U) {
+        if (is_io) *is_io = 1;
+        return low & ~3ULL;
+    }
+
+    uint64_t address = low & ~0xFULL;
+    uint32_t type = (low >> 1) & 3U;
+    if (type == 2U) {
+        if (bar_index >= 5) return 0;
+        address |= (uint64_t)pci_bar(bus, slot, func, bar_index + 1) << 32;
+    } else if (type != 0U) {
+        /* 16 位/保留内存 BAR 不适用于 long-mode 驱动。 */
+        return 0;
+    }
+    return address;
 }
 
 /**

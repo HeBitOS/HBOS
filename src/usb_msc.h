@@ -32,8 +32,11 @@ typedef struct {
 
 typedef struct {
     int slot_id;
+    int interface_num;
     int ep_in;
     int ep_out;
+    uint16_t ep_in_max_packet;
+    uint16_t ep_out_max_packet;
     uint32_t tag;
     int active;
     uint32_t block_size;

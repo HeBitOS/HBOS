@@ -1,6 +1,8 @@
 #include "mouse.h"
 #include "../usb_hid.h"
 #include "../core/cpu.h"
+#include "../core/io.h"
+#include "../core/wait.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,6 +14,10 @@
 #define MOUSE_LEFT   0x01
 #define MOUSE_RIGHT  0x02
 #define MOUSE_MIDDLE 0x04
+
+#define PS2_IO_TIMEOUT_MS 100U
+#define PS2_RESET_TIMEOUT_MS 500U
+#define PS2_MAX_STALL_SPINS 500000U
 
 static int mouse_ready;
 static int mouse_backend;
@@ -28,44 +34,40 @@ enum {
     MOUSE_BACKEND_USB,
 };
 
-static inline void outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
 static int wait_write(void) {
-    for (uint32_t i = 0; i < 100000; i++) {
-        if (!(inb(PS2_STATUS) & 0x02)) return 0;
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
+        if (!(io_in8(PS2_STATUS) & 0x02)) return 0;
+        if (hw_deadline_expired_ms(&deadline, PS2_IO_TIMEOUT_MS,
+                                   PS2_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return -1;
 }
 
 static int wait_read(void) {
-    for (uint32_t i = 0; i < 100000; i++) {
-        if (inb(PS2_STATUS) & 0x01) return 0;
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
+        if (io_in8(PS2_STATUS) & 0x01) return 0;
+        if (hw_deadline_expired_ms(&deadline, PS2_IO_TIMEOUT_MS,
+                                   PS2_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return -1;
 }
 
 static void flush_output(void) {
-    for (uint32_t i = 0; i < 32 && (inb(PS2_STATUS) & 0x01); i++)
-        (void)inb(PS2_DATA);
+    for (uint32_t i = 0; i < 32 && (io_in8(PS2_STATUS) & 0x01); i++)
+        (void)io_in8(PS2_DATA);
 }
 
 static int write_cmd(uint8_t cmd) {
     if (wait_write() < 0) return -1;
-    outb(PS2_CMD, cmd);
+    io_out8(PS2_CMD, cmd);
     return 0;
 }
 
 static int write_data(uint8_t data) {
     if (wait_write() < 0) return -1;
-    outb(PS2_DATA, data);
+    io_out8(PS2_DATA, data);
     return 0;
 }
 
@@ -76,7 +78,7 @@ static int write_mouse(uint8_t data) {
 
 static int read_data(uint8_t *out) {
     if (!out || wait_read() < 0) return -1;
-    *out = inb(PS2_DATA);
+    *out = io_in8(PS2_DATA);
     return 0;
 }
 
@@ -84,6 +86,22 @@ static int read_ack(void) {
     uint8_t ack = 0;
     if (read_data(&ack) < 0) return -1;
     return ack == 0xFA ? 0 : -1;
+}
+
+static void restore_interrupt_state(bool was_enabled) {
+    if (was_enabled) int_enable();
+}
+
+static int wait_for_byte(uint8_t expected, uint32_t timeout_ms) {
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
+        if (io_in8(PS2_STATUS) & 0x01) {
+            if (io_in8(PS2_DATA) == expected) return 0;
+        }
+        if (hw_deadline_expired_ms(&deadline, timeout_ms,
+                                   PS2_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
+    }
 }
 
 static int ps2_mouse_init(void) {
@@ -94,6 +112,7 @@ static int ps2_mouse_init(void) {
 
     /* Disable interrupts — keyboard ISR would steal our command
      * responses from port 0x60, causing timeouts. */
+    bool interrupts_were_enabled = int_get_state();
     int_disable();
 
     /* Drain any stale bytes in the output buffer first. Otherwise the very
@@ -110,19 +129,19 @@ static int ps2_mouse_init(void) {
      * Also set bit 1 (enable IRQ12) so mouse data stays on its
      * own interrupt line — never routed to IRQ1 / keyboard ISR.
      */
-    if (write_cmd(0x20) < 0) { int_enable(); return -1; }
+    if (write_cmd(0x20) < 0) goto fail;
     {
         uint8_t cfg = 0;
-        if (read_data(&cfg) < 0) { int_enable(); return -1; }
+        if (read_data(&cfg) < 0) goto fail;
         uint8_t new_cfg = (cfg & (uint8_t)~0x30) | 0x03 | 0x40;
         if (new_cfg != cfg) {
-            if (write_cmd(0x60) < 0) { int_enable(); return -1; }
-            if (write_data(new_cfg) < 0) { int_enable(); return -1; }
+            if (write_cmd(0x60) < 0) goto fail;
+            if (write_data(new_cfg) < 0) goto fail;
         }
     }
 
     /* Now enable auxiliary port — clock is guaranteed on */
-    if (write_cmd(0xA8) < 0) { int_enable(); return -1; }
+    if (write_cmd(0xA8) < 0) goto fail;
     flush_output();
 
     /* IntelliMouse（滚轮）探测：标准魔法序列——连续把采样率设成
@@ -161,27 +180,22 @@ static int ps2_mouse_init(void) {
              * poll the 1-byte i8042 buffer fast enough for a real mouse's byte
              * stream, dropping bytes and desyncing packets (cursor freezes after
              * the first move). */
-            outb(0x21, (uint8_t)(inb(0x21) & ~0x04));  /* IRQ2 cascade   */
-            outb(0xA1, (uint8_t)(inb(0xA1) & ~0x10));  /* IRQ12 mouse    */
-            int_enable();
+            io_out8(0x21, (uint8_t)(io_in8(0x21) & ~0x04)); /* IRQ2 */
+            io_out8(0xA1, (uint8_t)(io_in8(0xA1) & ~0x10)); /* IRQ12 */
+            restore_interrupt_state(interrupts_were_enabled);
             return 0;
         }
         /* 0xF4 failed — reset mouse and retry */
         flush_output();
         if (write_mouse(0xFF) < 0) continue;
-        /* Wait for self-test pass (0xAA) */
-        for (int t = 0; t < 500000; t++) {
-            if (inb(PS2_STATUS) & 0x01) {
-                if (inb(PS2_DATA) == 0xAA) break;
-            }
-        }
+        /* ACK 后等待设备自检通过；忽略途中其它响应字节。 */
+        (void)wait_for_byte(0xAA, PS2_RESET_TIMEOUT_MS);
         /* Drain device ID byte */
-        for (int t = 0; t < 50000; t++) {
-            if (inb(PS2_STATUS) & 0x01) { (void)inb(PS2_DATA); break; }
-        }
+        if (wait_read() == 0) (void)io_in8(PS2_DATA);
     }
 
-    int_enable();
+fail:
+    restore_interrupt_state(interrupts_were_enabled);
     return -1;
 }
 
@@ -250,14 +264,15 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
             /* Fallback if no queued bytes (e.g. IRQ12 unavailable): poll the
              * physical port. With IRQ12 unmasked the ISR fills the queue and
              * this rarely runs. */
+            bool interrupts_were_enabled = int_get_state();
             int_disable();
-            if (inb(PS2_STATUS) & 0x01) {
-                uint8_t status = inb(PS2_STATUS);
+            if (io_in8(PS2_STATUS) & 0x01) {
+                uint8_t status = io_in8(PS2_STATUS);
                 if (status & 0x20) {
-                    b = inb(PS2_DATA);
+                    b = io_in8(PS2_DATA);
                 }
             }
-            int_enable();
+            restore_interrupt_state(interrupts_were_enabled);
         }
         if (b == 0 && queued < 0) break;
 

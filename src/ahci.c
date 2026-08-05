@@ -10,7 +10,9 @@
 #include "pci.h"
 #include "string.h"
 #include "core/cpu.h"
+#include "core/io.h"
 #include "core/vmm.h"
+#include "core/wait.h"
 
 /** PCI 大容量存储设备类代码 */
 #define AHCI_CLASS_MASS_STORAGE 0x01
@@ -32,10 +34,10 @@
 /** 端口任务文件错误状态位 (PxIS.TFES) */
 #define HBA_PxIS_TFES (1U << 30)
 
-/** 命令/引擎等待的 PIT 超时（PIT 为 100 Hz）。 */
-#define AHCI_ENGINE_TIMEOUT_TICKS 100U
-#define AHCI_COMMAND_TIMEOUT_TICKS 200U
-#define AHCI_LINK_TIMEOUT_TICKS 200U
+/** 命令/引擎等待的墙上时钟超时。 */
+#define AHCI_ENGINE_TIMEOUT_MS 1000U
+#define AHCI_COMMAND_TIMEOUT_MS 2000U
+#define AHCI_LINK_TIMEOUT_MS 2000U
 /** 启动早期 IRQ 尚未打开时使用的有界自旋后备。 */
 #define AHCI_ENGINE_MAX_STALL_SPINS 10000000U
 #define AHCI_COMMAND_MAX_STALL_SPINS 20000000U
@@ -200,40 +202,6 @@ static uint64_t ptr_phys(const void *p) {
     return (uint64_t)(uintptr_t)p;
 }
 
-/** 防止 MMIO 轮询占满执行流水线。 */
-static inline void cpu_relax(void) {
-    __asm__ volatile("pause");
-}
-
-/**
- * PIT 在早期启动阶段还不会递增，因此同时保留自旋次数上限。
- * 运行期优先由真实时钟截止时间结束等待。
- */
-typedef struct {
-    uint64_t start;
-    uint64_t last_tick;
-    uint32_t stall_spins;
-} ahci_wait_t;
-
-static ahci_wait_t wait_begin(void) {
-    uint64_t now = pit_get_ticks();
-    ahci_wait_t wait = {now, now, 0};
-    return wait;
-}
-
-static int wait_expired(ahci_wait_t *wait, uint32_t ticks,
-                        uint32_t max_stall_spins) {
-    uint64_t now = pit_get_ticks();
-    if (now != wait->last_tick) {
-        wait->last_tick = now;
-        wait->stall_spins = 0;
-    } else {
-        wait->stall_spins++;
-    }
-    return now - wait->start >= ticks ||
-           wait->stall_spins >= max_stall_spins;
-}
-
 /** 保存出错瞬间的寄存器，供 drivers 命令诊断。 */
 static void snapshot_error(hba_port_t *p, const char *message) {
     if (p) {
@@ -271,20 +239,20 @@ static int port_present(hba_port_t *p) {
  * @param p 端口寄存器指针
  */
 static int stop_cmd(hba_port_t *p) {
-    ahci_wait_t wait = wait_begin();
+    hw_deadline_t wait = hw_deadline_start();
     p->cmd &= ~HBA_PxCMD_ST;
     for (uint32_t i = 0; p->cmd & HBA_PxCMD_CR; i++) {
         (void)i;
-        if (wait_expired(&wait, AHCI_ENGINE_TIMEOUT_TICKS,
-                         AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
+        if (hw_deadline_expired_ms(&wait, AHCI_ENGINE_TIMEOUT_MS,
+                                   AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
         cpu_relax();
     }
-    wait = wait_begin();
+    wait = hw_deadline_start();
     p->cmd &= ~HBA_PxCMD_FRE;
     for (uint32_t i = 0; p->cmd & HBA_PxCMD_FR; i++) {
         (void)i;
-        if (wait_expired(&wait, AHCI_ENGINE_TIMEOUT_TICKS,
-                         AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
+        if (hw_deadline_expired_ms(&wait, AHCI_ENGINE_TIMEOUT_MS,
+                                   AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
         cpu_relax();
     }
     return 0;
@@ -295,11 +263,11 @@ static int stop_cmd(hba_port_t *p) {
  * @param p 端口寄存器指针
  */
 static int start_cmd(hba_port_t *p) {
-    ahci_wait_t wait = wait_begin();
+    hw_deadline_t wait = hw_deadline_start();
     for (uint32_t i = 0; p->cmd & HBA_PxCMD_CR; i++) {
         (void)i;
-        if (wait_expired(&wait, AHCI_ENGINE_TIMEOUT_TICKS,
-                         AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
+        if (hw_deadline_expired_ms(&wait, AHCI_ENGINE_TIMEOUT_MS,
+                                   AHCI_ENGINE_MAX_STALL_SPINS)) return -1;
         cpu_relax();
     }
     p->cmd |= HBA_PxCMD_FRE;
@@ -335,25 +303,25 @@ static int port_rebase(hba_port_t *p) {
  * @return 成功返回 0，超时返回 -1
  */
 static int wait_not_busy(hba_port_t *p) {
-    ahci_wait_t wait = wait_begin();
+    hw_deadline_t wait = hw_deadline_start();
     for (uint32_t i = 0; ; i++) {
         (void)i;
         if (!(p->tfd & 0x88)) return 0; // BSY | DRQ
-        if (wait_expired(&wait, AHCI_COMMAND_TIMEOUT_TICKS,
-                         AHCI_COMMAND_MAX_STALL_SPINS)) return -1;
+        if (hw_deadline_expired_ms(&wait, AHCI_COMMAND_TIMEOUT_MS,
+                                   AHCI_COMMAND_MAX_STALL_SPINS)) return -1;
         cpu_relax();
     }
 }
 
 /** 等待 SATA 链路回到 device present + active。 */
 static int wait_link_ready(hba_port_t *p) {
-    ahci_wait_t wait = wait_begin();
+    hw_deadline_t wait = hw_deadline_start();
     for (uint32_t i = 0; ; i++) {
         (void)i;
         uint32_t ssts = p->ssts;
         if ((ssts & 0x0FU) == 3 && ((ssts >> 8) & 0x0FU) == 1) return 0;
-        if (wait_expired(&wait, AHCI_LINK_TIMEOUT_TICKS,
-                         AHCI_LINK_MAX_STALL_SPINS)) return -1;
+        if (hw_deadline_expired_ms(&wait, AHCI_LINK_TIMEOUT_MS,
+                                   AHCI_LINK_MAX_STALL_SPINS)) return -1;
         cpu_relax();
     }
 }
@@ -398,11 +366,11 @@ static int ahci_cmd_once(uint8_t command, uint32_t lba, uint8_t *buffer,
     hba_port_t *p = active_port;
     hba_cmd_header_t *hdr = (hba_cmd_header_t *)cmd_list;
 
-    ahci_wait_t wait = wait_begin();
+    hw_deadline_t wait = hw_deadline_start();
     for (uint32_t i = 0; p->ci & 1U; i++) {
         (void)i;
-        if (wait_expired(&wait, AHCI_COMMAND_TIMEOUT_TICKS,
-                         AHCI_COMMAND_MAX_STALL_SPINS)) {
+        if (hw_deadline_expired_ms(&wait, AHCI_COMMAND_TIMEOUT_MS,
+                                   AHCI_COMMAND_MAX_STALL_SPINS)) {
             stats.timeouts++;
             snapshot_error(p, "command slot busy");
             return -1;
@@ -452,7 +420,7 @@ static int ahci_cmd_once(uint8_t command, uint32_t lba, uint8_t *buffer,
     stats.commands++;
     p->ci = 1U;
 
-    wait = wait_begin();
+    wait = hw_deadline_start();
     for (uint32_t i = 0; ; i++) {
         (void)i;
         uint32_t is = p->is;
@@ -465,8 +433,8 @@ static int ahci_cmd_once(uint8_t command, uint32_t lba, uint8_t *buffer,
             __sync_synchronize();
             return 0;
         }
-        if (wait_expired(&wait, AHCI_COMMAND_TIMEOUT_TICKS,
-                         AHCI_COMMAND_MAX_STALL_SPINS)) {
+        if (hw_deadline_expired_ms(&wait, AHCI_COMMAND_TIMEOUT_MS,
+                                   AHCI_COMMAND_MAX_STALL_SPINS)) {
             stats.timeouts++;
             snapshot_error(p, "command timeout");
             return -1;

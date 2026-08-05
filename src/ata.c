@@ -5,6 +5,8 @@
 
 #include "ata.h"
 #include "string.h"
+#include "core/io.h"
+#include "core/wait.h"
 
 #define ATA_ALT_STATUS 0x3F6     /**< 备用状态寄存器端口，读取不清除中断 */
 #define ATA_DEVICE_MASTER 0xE0   /**< 主盘选择标志，含LBA模式位（位6置1） */
@@ -14,47 +16,10 @@
 #define ATA_CMD_IDENTIFY      0xEC  /**< 设台识别命令 */
 #define ATA_CMD_CACHE_FLUSH   0xE7  /**< 刷新写缓存命令 */
 
+#define ATA_IO_TIMEOUT_MS 1000U
+#define ATA_MAX_STALL_SPINS 1000000U
+
 static ata_device_t primary;     /**< 主通道主盘设备信息 */
-
-/**
- * @brief 向指定I/O端口写入一个字节
- * @param port 端口号
- * @param val  要写入的字节值
- */
-static inline void outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
-/**
- * @brief 从指定I/O端口读取一个字节
- * @param port 端口号
- * @return 读取到的字节值
- */
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
-/**
- * @brief 向指定I/O端口写入一个字（16位）
- * @param port 端口号
- * @param val  要写入的字值
- */
-static inline void outw(uint16_t port, uint16_t val) {
-    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
-}
-
-/**
- * @brief 从指定I/O端口读取一个字（16位）
- * @param port 端口号
- * @return 读取到的字值
- */
-static inline uint16_t inw(uint16_t port) {
-    uint16_t ret;
-    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
 
 /**
  * @brief I/O延时等待，通过连续读取备用状态寄存器消耗约400ns
@@ -63,10 +28,10 @@ static inline uint16_t inw(uint16_t port) {
  * 是标准延时方式，每次读取约100ns。
  */
 static void ata_io_wait(void) {
-    (void)inb(ATA_ALT_STATUS);
-    (void)inb(ATA_ALT_STATUS);
-    (void)inb(ATA_ALT_STATUS);
-    (void)inb(ATA_ALT_STATUS);
+    (void)io_in8(ATA_ALT_STATUS);
+    (void)io_in8(ATA_ALT_STATUS);
+    (void)io_in8(ATA_ALT_STATUS);
+    (void)io_in8(ATA_ALT_STATUS);
 }
 
 /**
@@ -74,12 +39,15 @@ static void ata_io_wait(void) {
  * @return 状态寄存器值（就绪时返回），超时返回-1
  */
 int ata_wait(void) {
-    for (uint32_t i = 0; i < 1000000; i++) {
-        uint8_t st = inb(ATA_STATUS);
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
+        uint8_t st = io_in8(ATA_STATUS);
         if (!(st & ATA_STATUS_BSY))
             return st;
+        if (hw_deadline_expired_ms(&deadline, ATA_IO_TIMEOUT_MS,
+                                   ATA_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return -1;
 }
 
 /**
@@ -87,12 +55,15 @@ int ata_wait(void) {
  * @return 状态寄存器值（就绪时返回），出错或超时返回-1
  */
 static int ata_wait_drq(void) {
-    for (uint32_t i = 0; i < 1000000; i++) {
-        uint8_t st = inb(ATA_STATUS);
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
+        uint8_t st = io_in8(ATA_STATUS);
         if (st & ATA_STATUS_ERR) return -1;
         if (!(st & ATA_STATUS_BSY) && (st & ATA_STATUS_DRQ)) return st;
+        if (hw_deadline_expired_ms(&deadline, ATA_IO_TIMEOUT_MS,
+                                   ATA_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return -1;
 }
 
 /**
@@ -100,7 +71,8 @@ static int ata_wait_drq(void) {
  * @param lba LBA扇区地址
  */
 static void ata_select(uint32_t lba) {
-    outb(ATA_DRIVE_HEAD, (uint8_t)(ATA_DEVICE_MASTER | ((lba >> 24) & 0x0F)));
+    io_out8(ATA_DRIVE_HEAD,
+            (uint8_t)(ATA_DEVICE_MASTER | ((lba >> 24) & 0x0F)));
     ata_io_wait();
 }
 
@@ -116,22 +88,22 @@ int ata_identify(ata_device_t *out) {
     uint16_t id[256];
     memset(out, 0, sizeof(*out));
 
-    outb(ATA_DRIVE_HEAD, ATA_DEVICE_MASTER);
+    io_out8(ATA_DRIVE_HEAD, ATA_DEVICE_MASTER);
     ata_io_wait();
-    outb(ATA_SECTOR_COUNT, 0);
-    outb(ATA_LBA_LOW, 0);
-    outb(ATA_LBA_MID, 0);
-    outb(ATA_LBA_HIGH, 0);
-    outb(ATA_COMMAND, ATA_CMD_IDENTIFY);
+    io_out8(ATA_SECTOR_COUNT, 0);
+    io_out8(ATA_LBA_LOW, 0);
+    io_out8(ATA_LBA_MID, 0);
+    io_out8(ATA_LBA_HIGH, 0);
+    io_out8(ATA_COMMAND, ATA_CMD_IDENTIFY);
     ata_io_wait();
 
-    uint8_t st = inb(ATA_STATUS);
+    uint8_t st = io_in8(ATA_STATUS);
     if (st == 0) return -1;
     if (ata_wait() < 0) return -1;
-    if (inb(ATA_LBA_MID) != 0 || inb(ATA_LBA_HIGH) != 0) return -1;
+    if (io_in8(ATA_LBA_MID) != 0 || io_in8(ATA_LBA_HIGH) != 0) return -1;
     if (ata_wait_drq() < 0) return -1;
 
-    for (int i = 0; i < 256; i++) id[i] = inw(ATA_DATA);
+    for (int i = 0; i < 256; i++) id[i] = io_in16(ATA_DATA);
 
     for (int i = 0; i < 20; i++) {
         uint16_t w = id[27 + i];
@@ -178,15 +150,15 @@ int ata_read_sector(uint32_t lba, uint8_t *buffer) {
 
     if (ata_wait() < 0) return -1;
     ata_select(lba);
-    outb(ATA_SECTOR_COUNT, 1);
-    outb(ATA_LBA_LOW, (uint8_t)(lba & 0xFF));
-    outb(ATA_LBA_MID, (uint8_t)((lba >> 8) & 0xFF));
-    outb(ATA_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
-    outb(ATA_COMMAND, ATA_CMD_READ_SECTORS);
+    io_out8(ATA_SECTOR_COUNT, 1);
+    io_out8(ATA_LBA_LOW, (uint8_t)(lba & 0xFF));
+    io_out8(ATA_LBA_MID, (uint8_t)((lba >> 8) & 0xFF));
+    io_out8(ATA_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
+    io_out8(ATA_COMMAND, ATA_CMD_READ_SECTORS);
     if (ata_wait_drq() < 0) return -1;
 
     uint16_t *dst = (uint16_t *)buffer;
-    for (int i = 0; i < 256; i++) dst[i] = inw(ATA_DATA);
+    for (int i = 0; i < 256; i++) dst[i] = io_in16(ATA_DATA);
     return 0;
 }
 
@@ -205,15 +177,15 @@ int ata_write_sector(uint32_t lba, const uint8_t *buffer) {
 
     if (ata_wait() < 0) return -1;
     ata_select(lba);
-    outb(ATA_SECTOR_COUNT, 1);
-    outb(ATA_LBA_LOW, (uint8_t)(lba & 0xFF));
-    outb(ATA_LBA_MID, (uint8_t)((lba >> 8) & 0xFF));
-    outb(ATA_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
-    outb(ATA_COMMAND, ATA_CMD_WRITE_SECTORS);
+    io_out8(ATA_SECTOR_COUNT, 1);
+    io_out8(ATA_LBA_LOW, (uint8_t)(lba & 0xFF));
+    io_out8(ATA_LBA_MID, (uint8_t)((lba >> 8) & 0xFF));
+    io_out8(ATA_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
+    io_out8(ATA_COMMAND, ATA_CMD_WRITE_SECTORS);
     if (ata_wait_drq() < 0) return -1;
 
     const uint16_t *src = (const uint16_t *)buffer;
-    for (int i = 0; i < 256; i++) outw(ATA_DATA, src[i]);
-    outb(ATA_COMMAND, ATA_CMD_CACHE_FLUSH);
+    for (int i = 0; i < 256; i++) io_out16(ATA_DATA, src[i]);
+    io_out8(ATA_COMMAND, ATA_CMD_CACHE_FLUSH);
     return ata_wait() < 0 ? -1 : 0;
 }

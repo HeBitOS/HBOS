@@ -15,29 +15,11 @@
 #include "ac97.h"
 #include "pci.h"
 #include "core/heap.h"
+#include "core/io.h"
 #include "core/vmm.h"
 #include "core/task.h"
+#include "core/wait.h"
 #include "string.h"
-
-static inline void outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-static inline void outw(uint16_t port, uint16_t val) {
-    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
-}
-static inline void outl(uint16_t port, uint32_t val) {
-    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
-}
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-static inline uint16_t inw(uint16_t port) {
-    uint16_t ret;
-    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
 
 /* NABM (Native Audio Bus Master) 寄存器偏移——PCM OUT 通道 */
 #define NABM_PO_BDBAR 0x10 /**< u32: buffer descriptor list 物理基址 */
@@ -58,6 +40,10 @@ static inline uint16_t inw(uint16_t port) {
 
 #define AC97_BDL_ENTRIES   32
 #define AC97_MAX_SAMPLES_PER_ENTRY 0xFFFE /**< 每条描述符最多的 16 位采样点数 */
+#define AC97_RESET_TIMEOUT_MS 100U
+#define AC97_RESET_MAX_STALL_SPINS 100000U
+#define AC97_PLAYBACK_MARGIN_MS 2000U
+#define AC97_PLAYBACK_MAX_STALL_SPINS 20000000U
 
 typedef struct {
     uint32_t buffer_ptr;
@@ -98,19 +84,31 @@ int ac97_init(void) {
     g_nabm_base = nabm;
 
     /* codec 冷复位 + 音量设为最大（0x0000 = 0dB 衰减，未静音） */
-    outw(g_nam_base + NAM_RESET, 0);
-    outw(g_nam_base + NAM_MASTER_VOL, 0x0000);
-    outw(g_nam_base + NAM_PCM_VOL, 0x0000);
+    io_out16(g_nam_base + NAM_RESET, 0);
+    io_out16(g_nam_base + NAM_MASTER_VOL, 0x0000);
+    io_out16(g_nam_base + NAM_PCM_VOL, 0x0000);
 
     /* 复位 PCM OUT bus master 通道，等复位位自动清零 */
-    outb(g_nabm_base + NABM_PO_CR, PO_CR_RR);
-    for (int i = 0; i < 100000 && (inb(g_nabm_base + NABM_PO_CR) & PO_CR_RR); i++) {
-        __asm__ volatile ("pause");
+    io_out8(g_nabm_base + NABM_PO_CR, PO_CR_RR);
+    hw_deadline_t reset_deadline = hw_deadline_start();
+    while (io_in8(g_nabm_base + NABM_PO_CR) & PO_CR_RR) {
+        if (hw_deadline_expired_ms(&reset_deadline, AC97_RESET_TIMEOUT_MS,
+                                   AC97_RESET_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
 
-    g_bdl = (ac97_bdl_entry_t *)kmalloc_aligned(sizeof(ac97_bdl_entry_t) * AC97_BDL_ENTRIES, 8);
-    if (!g_bdl) return -1;
-    g_bdl_phys = vmm_virt_to_phys((uint64_t)(uintptr_t)g_bdl);
+    if (!g_bdl) {
+        g_bdl = (ac97_bdl_entry_t *)kmalloc_aligned(
+            sizeof(ac97_bdl_entry_t) * AC97_BDL_ENTRIES, 8);
+        if (!g_bdl) return -1;
+        g_bdl_phys = vmm_virt_to_phys((uint64_t)(uintptr_t)g_bdl);
+        if (g_bdl_phys > UINT32_MAX) {
+            kfree(g_bdl);
+            g_bdl = 0;
+            g_bdl_phys = 0;
+            return -1;
+        }
+    }
 
     g_present = 1;
     return 0;
@@ -131,7 +129,9 @@ int ac97_play_pcm16(const int16_t *samples, uint32_t frame_count, int channels) 
     int entry = 0;
     while (remaining > 0 && entry < AC97_BDL_ENTRIES) {
         uint32_t chunk = (remaining > AC97_MAX_SAMPLES_PER_ENTRY) ? AC97_MAX_SAMPLES_PER_ENTRY : (uint32_t)remaining;
-        g_bdl[entry].buffer_ptr = (uint32_t)vmm_virt_to_phys((uint64_t)(uintptr_t)cursor);
+        uint64_t buffer_phys = vmm_virt_to_phys((uint64_t)(uintptr_t)cursor);
+        if (buffer_phys > UINT32_MAX) return -1;
+        g_bdl[entry].buffer_ptr = (uint32_t)buffer_phys;
         g_bdl[entry].num_samples = (uint16_t)chunk;
         g_bdl[entry].flags = 0;
         cursor += chunk;
@@ -141,20 +141,29 @@ int ac97_play_pcm16(const int16_t *samples, uint32_t frame_count, int channels) 
     if (remaining > 0) return -1; /* 理论上不会到这里，容量已在上面检查过 */
 
     int last_entry = entry - 1;
-    outl(g_nabm_base + NABM_PO_BDBAR, (uint32_t)g_bdl_phys);
-    outb(g_nabm_base + NABM_PO_LVI, (uint8_t)last_entry);
-    outb(g_nabm_base + NABM_PO_CR, PO_CR_RPBM);
+    io_out32(g_nabm_base + NABM_PO_BDBAR, (uint32_t)g_bdl_phys);
+    io_out8(g_nabm_base + NABM_PO_LVI, (uint8_t)last_entry);
+    io_out8(g_nabm_base + NABM_PO_CR, PO_CR_RPBM);
 
     /* 阻塞等播放完成（PO_SR 的 DCH 位在 DMA 引擎追到 LVI 边界后置位）——
      * 用 task_yield() 而不是纯自旋，至少不会独占整个协作式调度器。这里
      * 没有做成后台任务：真正的后台/非阻塞播放需要一个独立任务 + 状态
      * 机制，超出这次"能放出声音来"这个目标的范围。 */
-    uint32_t guard = 0;
-    while (!(inw(g_nabm_base + NABM_PO_SR) & PO_SR_DCH)) {
+    uint64_t expected_ms = ((uint64_t)frame_count * 1000U + 47999U) / 48000U;
+    uint64_t timeout_ms64 = expected_ms + AC97_PLAYBACK_MARGIN_MS;
+    uint32_t timeout_ms = timeout_ms64 > UINT32_MAX
+                        ? UINT32_MAX : (uint32_t)timeout_ms64;
+    hw_deadline_t playback_deadline = hw_deadline_start();
+    int timed_out = 0;
+    while (!(io_in16(g_nabm_base + NABM_PO_SR) & PO_SR_DCH)) {
         task_yield();
-        if (++guard > 20000000U) break; /* 防止 codec 异常时永久挂起 */
+        if (hw_deadline_expired_ms(&playback_deadline, timeout_ms,
+                                   AC97_PLAYBACK_MAX_STALL_SPINS)) {
+            timed_out = 1;
+            break;
+        }
     }
-    outb(g_nabm_base + NABM_PO_CR, 0); /* 停止 bus master */
+    io_out8(g_nabm_base + NABM_PO_CR, 0); /* 停止 bus master */
 
-    return 0;
+    return timed_out ? -1 : 0;
 }

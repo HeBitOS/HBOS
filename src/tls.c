@@ -9,6 +9,7 @@
 #include "net.h"
 #include "string.h"
 #include "core/cpu.h"
+#include "core/wait.h"
 #include "crypto/sha256.h"
 #include "crypto/x25519.h"
 #include "crypto/p256.h"
@@ -951,7 +952,8 @@ int tls_https_get_with_idle_limit(const char *host, uint32_t ip, uint16_t port,
     /* 小 idle_limit 只用于可丢弃的网页子资源：同时施加 5 秒硬截止，并
      * 只报 x25519，避免每张缩略图都做一次昂贵的 P-256 标量乘法。 */
     int fast_subresource = idle_limit < 400;
-    if (fast_subresource) ctx.read_deadline = pit_get_ticks() + 500;
+    if (fast_subresource)
+        ctx.read_deadline = pit_deadline_after_ms(5000);
     sha256_init(&ctx.transcript);
 
     uint8_t private_key[32];

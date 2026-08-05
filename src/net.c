@@ -10,6 +10,7 @@
 #include "core/vmm.h"
 #include "core/heap.h"
 #include "core/task.h"
+#include "core/wait.h"
 #include "rtc_tz.h"
 
 /** @brief PCI 设备类型：网络控制器 */
@@ -470,15 +471,13 @@ int net_poll_frames(net_frame_callback_t callback, void *context,
     return net_poll(callback, context, spins);
 }
 
-/** PIT 固定以 100 Hz 初始化；将毫秒超时转换为不会提前结束的 tick 截止点。 */
+/** 按 PIT 当前实际频率把毫秒转换为不会提前结束的 tick 截止点。 */
 static uint64_t net_deadline_after_ms(uint32_t timeout_ms) {
-    uint64_t ticks = ((uint64_t)timeout_ms + 9U) / 10U;
-    if (!ticks) ticks = 1;
-    return pit_get_ticks() + ticks;
+    return pit_deadline_after_ms(timeout_ms);
 }
 
 static int net_before_deadline(uint64_t deadline) {
-    return (int64_t)(pit_get_ticks() - deadline) < 0;
+    return !pit_deadline_reached(deadline);
 }
 
 /**
@@ -1932,6 +1931,10 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
         w.peer = conn->peer;
         w.sport = conn->sport;
         w.want_ack = conn->seq + len;
+        /* 让 send 等待 ACK 期间顺带到达的对端数据包也能被 tcp_cb
+         * 按 seq == w->ack 匹配并收入 rx_buf，否则这批数据会被丢弃，
+         * 之后 recv 永远等不到。 */
+        w.ack = conn->ack;
         if (conn->rx_len < NET_TCP_RXBUF_SIZE) {
             w.out = (char *)conn->rx_buf + conn->rx_len;
             w.cap = NET_TCP_RXBUF_SIZE - conn->rx_len;
@@ -1944,6 +1947,13 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
             net_poll(tcp_cb, &w, 4096);
             task_yield();
             if (w.acked) {
+                /* ACK 与对端数据可能同时到达：数据已由 tcp_cb 写入
+                 * w.out（即 conn->rx_buf），必须先累加 rx_len，否则
+                 * 后续 recv 看不到这批数据直接返回 0；同时若本轮还
+                 * 收到数据，必须把 conn->ack 推进到下一个期待序列，
+                 * 否则后续数据包会因 seq 不匹配被 tcp_cb 丢弃。 */
+                if (w.len) conn->rx_len += w.len;
+                if (w.need_ack) conn->ack = w.ack;
                 conn->seq += len;
                 return 0;
             }
