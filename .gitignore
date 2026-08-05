@@ -12,3 +12,6 @@ build-core/
 
 fonts/HarmonyOS-Sans/
 tools/__pycache__/
+.diag/
+.reasonix/
+build-compat/
