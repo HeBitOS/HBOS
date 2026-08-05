@@ -189,7 +189,7 @@ void wm_minimize_window(wm_state_t *wm, int idx) {
         win->prev_w = win->w;
         win->prev_h = win->h;
     }
-    
+
     /* 瞬时最小化。 */
     win->anim_type = WM_ANIM_NONE;
     win->state = WM_STATE_MINIMIZED;
@@ -492,9 +492,9 @@ void wm_update_animations(wm_state_t *wm) {
     for (int i = 0; i < wm->window_count; i++) {
         wm_window_t *win = &wm->windows[i];
         if (!win->used || win->anim_type == WM_ANIM_NONE) continue;
-        
+
         win->anim_frame++;
-        
+
         if (win->anim_frame >= win->anim_total) {
             /* 动画完成 */
             win->anim_type = WM_ANIM_NONE;
@@ -505,7 +505,7 @@ void wm_update_animations(wm_state_t *wm) {
             int total = win->anim_total > 0 ? win->anim_total : 8;
             int frame = win->anim_frame;
             if (frame > total) frame = total;
-            
+
             int F = total - frame;
             /* eased_scaled ranges from 0 to 512, where 512 is 100% */
             int eased_scaled = 512 - ((F * F * F) * 512) / (total * total * total);
@@ -520,7 +520,7 @@ void wm_update_animations(wm_state_t *wm) {
                     /* 打开：缓动淡入 (40 -> 255) */
                     win->opacity = (uint8_t)(40 + (215 * eased_scaled) / 512);
                     break;
-                    
+
                 case WM_ANIM_MAXIMIZE:
                 case WM_ANIM_RESTORE:
                     /* 几何过渡在 wm_get_window_rect 里按 anim_frame 插值计算，

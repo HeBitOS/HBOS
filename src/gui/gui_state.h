@@ -24,9 +24,8 @@
 
 #define NOTE_EDIT_CAP 512
 #define BROWSER_URL_CAP 160
-/* 128KB——真实网页正文常见 50-200KB；固定静态数组而不是按 Content-Length
- * 堆分配，因为这个内核的 kfree() 是空操作（core/heap.c），每次换页都
- * 新分配一块会永久漏内存，和 M2 图片/十六进制查看器缓冲区同一个考虑。 */
+/* 128KB——真实网页正文常见 50-200KB；固定静态数组避免按 Content-Length
+ * 反复分配产生堆碎片，也让标签页内容在切换后继续存在。 */
 #define BROWSER_PAGE_CAP (128 * 1024)
 /* 网络抓取缓冲：512KB 覆盖 bilibili 等大站用真实 Chrome UA 返回的 SSR 页面
  * (200–350KB HTML + 响应头富余)。response[] 是 browser_load_internal 里的
@@ -126,6 +125,7 @@ typedef struct gui_state {
      * browser_page 保持纯文本供“保存网页”使用。 */
     char browser_render[BROWSER_PAGE_CAP];
     uint32_t browser_render_len;
+    uint64_t browser_required_caps; /* 当前文档声明/使用但后端尚未必具备的 Web 能力 */
     int browser_loaded;
     int browser_scroll;
     /* 每次渲染页面时 browser_render_from_html() 填好的链接 href 表，

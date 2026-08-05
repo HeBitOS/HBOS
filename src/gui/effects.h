@@ -16,7 +16,7 @@
 
 /**
  * @brief 创建ARGB颜色
- * 
+ *
  * @param a Alpha通道 (0-255)
  * @param r 红色通道 (0-255)
  * @param g 绿色通道 (0-255)
@@ -29,7 +29,7 @@ static inline uint32_t make_argb(uint8_t a, uint8_t r, uint8_t g, uint8_t b) {
 
 /**
  * @brief 混合两个颜色
- * 
+ *
  * @param fg 前景色 (ARGB)
  * @param bg 背景色 (ARGB)
  * @param alpha 混合因子 (0-255)
@@ -39,7 +39,7 @@ uint32_t color_blend(uint32_t fg, uint32_t bg, uint8_t alpha);
 
 /**
  * @brief 使颜色变暗
- * 
+ *
  * @param color 原始颜色 (ARGB)
  * @param factor 变暗因子 (0-255, 0=全黑, 255=不变)
  * @return 变暗后的颜色
@@ -48,7 +48,7 @@ uint32_t color_darken(uint32_t color, uint8_t factor);
 
 /**
  * @brief 使颜色变亮
- * 
+ *
  * @param color 原始颜色 (ARGB)
  * @param factor 变亮因子 (0-255, 0=不变, 255=全白)
  * @return 变亮后的颜色
@@ -61,7 +61,7 @@ uint32_t color_lighten(uint32_t color, uint8_t factor);
 
 /**
  * @brief 在缓冲区中绘制窗口阴影
- * 
+ *
  * @param buf 像素缓冲区
  * @param pitch 缓冲区每行像素数
  * @param screen_w 屏幕宽度
@@ -84,7 +84,7 @@ void draw_shadow(uint32_t *buf, uint64_t pitch,
 
 /**
  * @brief 检查点是否在圆角矩形内
- * 
+ *
  * @param px 点的X坐标
  * @param py 点的Y坐标
  * @param rx 矩形左上角X坐标
@@ -99,7 +99,7 @@ int point_in_rounded_rect(int px, int py, int rx, int ry,
 
 /**
  * @brief 绘制填充的圆角矩形
- * 
+ *
  * @param buf 像素缓冲区
  * @param pitch 缓冲区每行像素数
  * @param screen_w 屏幕宽度
@@ -122,7 +122,7 @@ void draw_rounded_rect(uint32_t *buf, uint64_t pitch,
 
 /**
  * @brief 绘制垂直渐变矩形
- * 
+ *
  * @param buf 像素缓冲区
  * @param pitch 缓冲区每行像素数
  * @param screen_w 屏幕宽度
@@ -141,7 +141,7 @@ void draw_gradient_vertical(uint32_t *buf, uint64_t pitch,
 
 /**
  * @brief 绘制水平渐变矩形
- * 
+ *
  * @param buf 像素缓冲区
  * @param pitch 缓冲区每行像素数
  * @param screen_w 屏幕宽度

@@ -118,6 +118,8 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     /* memory - use simple placeholder if no API */
     gui_text(x, y, "HBOS " HBOS_VERSION_TAG, gui_rgb(180, 200, 220), 1);
     y += 18;
+    gui_text(x, y, HIVE_VERSION_TAG, gui_rgb(160, 185, 205), 1);
+    y += 18;
     gui_text(x, y, "架构: x86_64 裸机内核", gui_rgb(140, 160, 180), 1);
     y += 18;
     gui_text(x, y, "引导: Limine BIOS", gui_rgb(140, 160, 180), 1);

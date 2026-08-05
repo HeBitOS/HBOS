@@ -112,26 +112,26 @@ void compositor_damage_rect(compositor_t *c, uint64_t x, uint64_t y,
     /* 尝试与已有脏区域合并，改进算法：减少碎片化 */
     for (int i = 0; i < c->dirty_count; i++) {
         compositor_dirty_t *d = &c->dirty[i];
-        
+
         /* 完全包含在现有区域中 */
         if (x >= d->x && y >= d->y &&
             x + w <= d->x + d->w && y + h <= d->y + d->h) {
             return;
         }
-        
+
         /* 检查重叠并合并 - 只在重叠面积较大时合并 */
         if (x <= d->x + d->w && x + w >= d->x &&
             y <= d->y + d->h && y + h >= d->y) {
-            
+
             /* 计算合并后的区域 */
             uint64_t nx = (x < d->x) ? x : d->x;
             uint64_t ny = (y < d->y) ? y : d->y;
             uint64_t nr = (x + w > d->x + d->w) ? (x + w) : (d->x + d->w);
             uint64_t nb = (y + h > d->y + d->h) ? (y + h) : (d->y + d->h);
-            
+
             uint64_t merged_area = (nr - nx) * (nb - ny);
             uint64_t original_area = d->w * d->h + w * h;
-            
+
             /* 只有当合并后面积增长不超过50%时才合并 */
             if (merged_area < original_area * 3 / 2) {
                 d->x = nx;
@@ -184,28 +184,28 @@ uint64_t compositor_get_height(compositor_t *c) {
 
 uint32_t compositor_blend(uint32_t src, uint32_t dst) {
     uint32_t src_a = (src >> 24) & 0xFF;
-    
+
     /* 完全不透明：直接返回源颜色 */
     if (src_a == 0xFF) return src;
-    
+
     /* 完全透明：直接返回目标颜色 */
     if (src_a == 0) return dst;
-    
+
     /* Alpha混合 */
     uint32_t src_r = (src >> 16) & 0xFF;
     uint32_t src_g = (src >> 8) & 0xFF;
     uint32_t src_b = src & 0xFF;
-    
+
     uint32_t dst_r = (dst >> 16) & 0xFF;
     uint32_t dst_g = (dst >> 8) & 0xFF;
     uint32_t dst_b = dst & 0xFF;
-    
+
     uint32_t inv_a = 255 - src_a;
-    
+
     uint32_t out_r = (src_r * src_a + dst_r * inv_a) / 255;
     uint32_t out_g = (src_g * src_a + dst_g * inv_a) / 255;
     uint32_t out_b = (src_b * src_a + dst_b * inv_a) / 255;
-    
+
     return 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
 }
 
@@ -216,15 +216,15 @@ uint32_t compositor_blend(uint32_t src, uint32_t dst) {
 void compositor_fill_rect_alpha(compositor_t *c, uint64_t x, uint64_t y,
                                 uint64_t w, uint64_t h, uint32_t color) {
     if (!c || !c->buf[0]) return;
-    
+
     /* 裁剪到缓冲区范围 */
     if (x >= c->width || y >= c->height) return;
     if (x + w > c->width) w = c->width - x;
     if (y + h > c->height) h = c->height - y;
-    
+
     uint32_t *buf = compositor_get_buf(c);
     uint32_t alpha = (color >> 24) & 0xFF;
-    
+
     /* 完全不透明：快速路径 */
     if (alpha == 0xFF) {
         for (uint64_t yy = 0; yy < h; yy++) {
@@ -242,7 +242,7 @@ void compositor_fill_rect_alpha(compositor_t *c, uint64_t x, uint64_t y,
             }
         }
     }
-    
+
     /* 标记脏区域 */
     compositor_damage_rect(c, x, y, w, h);
 }

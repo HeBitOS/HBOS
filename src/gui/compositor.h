@@ -127,7 +127,7 @@ uint64_t compositor_get_height(compositor_t *c);
  * @brief Alpha混合两个颜色
  *
  * 将源颜色按照alpha值混合到目标颜色上。
- * 
+ *
  * @param src 源颜色（ARGB格式）
  * @param dst 目标颜色（ARGB格式）
  * @return 混合后的颜色
@@ -136,7 +136,7 @@ uint32_t compositor_blend(uint32_t src, uint32_t dst);
 
 /**
  * @brief 在合成器缓冲区中绘制带alpha混合的矩形
- * 
+ *
  * @param c 合成器状态指针
  * @param x 左上角 X
  * @param y 左上角 Y
