@@ -91,8 +91,12 @@ need_pattern "src/syscall.h" "HBOS_SYS_WIN_OPEN" "kernel window syscall ABI is p
 need_pattern "src/user/libc/syscall.h" "HBOS_SYS_WIN_OPEN" "user window syscall ABI is present"
 need_pattern "src/gui/gui_app.h" "gui_app_module_t" "GUI module ABI v1 is present"
 need_pattern "src/core/task.c" "void task_schedule\\(void\\)" "preemptive scheduler entry is present"
-need_pattern "src/core/heap.c" "void kfree\\(void \\*ptr\\) \\{ \\(void\\)ptr; \\}" \
-    "known no-op kfree baseline is unchanged"
+need_pattern "src/core/heap.c" "void kfree\\(void \\*ptr\\)" \
+    "kernel heap exposes kfree"
+need_pattern "src/core/heap.c" "block->free = 1" \
+    "kernel heap releases blocks instead of retaining the phase-1 no-op"
+need_pattern "src/core/heap.c" "merge_next\\(block\\)" \
+    "kernel heap coalesces adjacent free blocks"
 
 HBOS_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$HBOS_TMP_DIR"' EXIT

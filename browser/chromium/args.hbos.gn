@@ -1,0 +1,23 @@
+# Final HBOS target. This intentionally becomes valid only after the pinned
+# Chromium tree has the target_os="hbos" and Ozone HBOS platform patches.
+target_os = "hbos"
+target_cpu = "x64"
+is_debug = false
+is_component_build = false
+is_official_build = false
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+use_remoteexec = false
+use_siso = false
+use_ozone = true
+ozone_auto_platforms = false
+ozone_platform = "hbos"
+ozone_platform_headless = false
+use_cups = false
+use_pulseaudio = false
+rtc_use_pipewire = false
+enable_remoting = false
+enable_widevine = false
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"

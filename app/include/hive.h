@@ -13,7 +13,10 @@
 #define HIVE_NAME "HIVE"
 #define HIVE_API_MAJOR HAX_UI_ABI_MAJOR
 #define HIVE_API_MINOR HAX_UI_ABI_MINOR
-#define HIVE_VERSION_STRING "1.3"
+#define HIVE_API_VERSION_STRING "1.3"
+#define HIVE_GUI_REVISION 3u
+#define HIVE_VERSION_STRING "0.1-beta5-gui.3"
+#define HIVE_VERSION_TAG "HIVE " HIVE_VERSION_STRING
 
 /** 声明一个由 HIVE 桌面异步启动的独立窗口应用。 */
 #define HIVE_APP(name, description) \

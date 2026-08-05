@@ -5,6 +5,7 @@
 #include "../block.h"
 #include "../core/pmm.h"
 #include "../core/task.h"
+#include "../core/wait.h"
 #include "../fcntl.h"
 #include "../fs.h"
 #include "../graphics/font_cjk.h"
@@ -19,6 +20,7 @@
 #include "../string.h"
 #include "../tls.h"
 #include "../unistd.h"
+#include "../elf.h"
 #include "../user/app.h"
 #include "../user/hax_app.h"
 #include "../version.h"
@@ -29,6 +31,7 @@
 #include "../gui/gui_dirty.h"
 #include "../gui/gui_draw.h"
 #include "../gui/gui_app.h"
+#include "../gui/browser_backend.h"
 
 /* app_imgview.c / app_hexview.c 各自路径 setter，供 gui_open_selected_file()
  * 打开对应查看器前写入要打开的文件路径 */
@@ -39,8 +42,6 @@ void app_hexview_set_path(gui_state_t *st, const char *path);
 #include "tool.h"
 #include "cc.h"
 
-extern void task_yield(void);
-extern uint64_t pit_get_ticks(void);
 extern int hbos_gcc_run_file_capture(const char *path, char *out, uint32_t out_cap);
 extern const char *hbos_gcc_last_error(void);
 extern int hbos_gcc_last_error_line(void);
@@ -3461,8 +3462,8 @@ void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
 
 /* ── 浏览器内联图片 ──
  * <img> 现在真的抓取并渲染（PNG/BMP），不再只画 [图片] 占位。固定 4 个槽，
- * 每个一块静态 RGB 缓冲——kfree() 是空操作，不能每次换页堆分配。抓取/解码
- * 在页面加载后统一做（browser_fetch_images），渲染流里 BRK_IMG 块带一个
+ * 每个一块静态 RGB 缓冲，避免换页时反复分配并减少堆碎片。抓取/解码在
+ * 页面加载后统一做（browser_fetch_images），渲染流里 BRK_IMG 块带一个
  * 槽位字节，绘制时命中就贴图、否则退回占位文字。*/
 /* 每槽 260×200×3 ≈ 152KB；8 槽 ≈ 1.2MB，比原来 5×560×360×3≈2.9MB 省一半以上，
  * 同时可以展示 4 行 ×2 列 = 8 张视频封面。URL 改写为 240w_180h，解码后
@@ -4250,8 +4251,8 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     g_br_dns_n = 0;
     g_br_sub_fails = 0;
     /* CSS/图片是可降级内容，整页最多给 15 秒。主体已经抓到后不能因为某个
-     * CDN 不回 TLS record 而永远停在“加载中”。PIT 固定 100Hz。 */
-    g_br_sub_deadline = pit_get_ticks() + 1500;
+     * CDN 不回 TLS record 而永远停在“加载中”。 */
+    g_br_sub_deadline = pit_deadline_after_ms(15000);
 
     g_browser_page_title[0] = 0;
     g_browser_title_len = 0;
@@ -4763,6 +4764,7 @@ static void browser_init(gui_state_t *st) {
     st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
     browser_set_plain(st, "输入网址后按 Enter 加载。当前 HTTPS 支持 TLS 1.3 + ChaCha20-Poly1305；部分网站会自动尝试 HTTP。");
     st->browser_scroll = 0;
+    st->browser_required_caps = HIVE_WEB_CAP_HTML_STATIC;
     st->browser_loaded = 1;
 }
 
@@ -5043,6 +5045,8 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
         st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
     }
     const char *body = http_body_ptr(response);
+    st->browser_required_caps =
+        hive_browser_detect_requirements(body, strlen(body));
     browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
     browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
     /* og 卡片：视频页（和其他 CSR 页面）body 几乎是空的，但 <head> 里有
@@ -5764,6 +5768,7 @@ static void br_icon_reload(int cx, int cy, uint32_t col, uint32_t bg) {
 
 static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
     browser_init(st);
+    const hive_browser_backend_t *browser_backend = hive_browser_lite_backend();
     int wx = tx - 29;            /* 窗口内区左边缘（win_x+1） */
     int ww = win_w - 2;          /* 窗口内区宽度 */
     if (ww < 340) ww = 340;
@@ -5796,6 +5801,9 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     /* 新建标签 +（纯装饰，和 Chrome 一样放在标签右侧） */
     rect(tab_x + tab_w + 12, ty + BR_TAB_H / 2, 11, 1, icon_dis);
     rect(tab_x + tab_w + 17, ty + BR_TAB_H / 2 - 5, 1, 11, icon_dis);
+    /* 明示当前渲染后端，避免把静态 SSR 摘要误认为 JavaScript/Vue 已运行。 */
+    text_clipped(wx + ww - 62, ty + 9, wx + ww - 26,
+                 browser_backend->name, rgb(150, 156, 166), 1);
 
     /* 工具栏 */
     rect(wx, ty + BR_TAB_H, ww, BR_TOOL_H, tool_bg);
@@ -5868,6 +5876,18 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
      * （加载中/出错文本都显示在那里，Chrome 底部状态气泡的等价物）。 */
     int page_h = win_h - 42 - (BR_TAB_H + BR_TOOL_H) - 32;
     if (page_h < 80) page_h = 80;
+    uint64_t missing_caps = st->browser_required_caps &
+                            ~browser_backend->capabilities;
+    if (missing_caps) {
+        uint64_t first = missing_caps & (~missing_caps + 1ULL);
+        rect(wx, page_y, ww, 26, rgb(255, 244, 204));
+        text(wx + 12, page_y + 5, "Lite 未执行页面能力:", rgb(112, 78, 12), 1);
+        text_clipped(wx + 160, page_y + 5, wx + ww - 12,
+                     hive_browser_capability_name(first), rgb(112, 78, 12), 1);
+        page_y += 26;
+        page_h -= 26;
+        if (page_h < 54) page_h = 54;
+    }
     int inner_h = page_h - 20;
     int total = 0, max_scroll = 0, visible_rows = 0;
     for (int pass = 0; pass < 2; pass++) {
@@ -7638,10 +7658,108 @@ static const hax_app_entry_t *gui_hax_at(int k) {
     return 0;
 }
 
+/* ── 磁盘 .hax 应用（hpt 安装到 /bin，GUI 类）───────────────
+ * hpt install 的 HIVE 应用落在 /bin/<name>.hax，不在 hax 表里；
+ * 开始菜单打开时扫描 /bin，把带 .haxmeta 且声明 GUI 类的应用列出来，
+ * 启动时用 elf64_load_and_spawn 直接加载（应用自身 hax_win_open
+ * 连接合成器）。 */
+#define GUI_DISK_APP_MAX 16
+static char disk_apps[GUI_DISK_APP_MAX][32];
+static int disk_app_count;
+static uint8_t disk_hax_buf[65536];
+
+static int disk_hax_kind(const uint8_t *data, size_t len,
+                         char *name_out, size_t name_cap) {
+    if (!data || len < 64 || memcmp(data, "\x7f" "ELF\x02\x01", 6) != 0)
+        return 0;
+    uint64_t shoff;
+    uint16_t shentsize, shentnum, shstrndx;
+    __builtin_memcpy(&shoff, data + 0x28, 8);
+    __builtin_memcpy(&shentsize, data + 0x3A, 2);
+    __builtin_memcpy(&shentnum, data + 0x3C, 2);
+    __builtin_memcpy(&shstrndx, data + 0x3E, 2);
+    if (shentsize < 64 || shstrndx >= shentnum ||
+        shoff + (uint64_t)shentsize * shentnum > len)
+        return 0;
+    const uint8_t *sh0 = data + shoff;
+    uint64_t shstr_off, shstr_size;
+    __builtin_memcpy(&shstr_off,
+                     sh0 + (uint64_t)shstrndx * shentsize + 0x18, 8);
+    __builtin_memcpy(&shstr_size,
+                     sh0 + (uint64_t)shstrndx * shentsize + 0x20, 8);
+    if (shstr_off + shstr_size > len) return 0;
+    for (uint16_t i = 0; i < shentnum; i++) {
+        const uint8_t *sh = sh0 + (uint64_t)i * shentsize;
+        uint32_t name_off;
+        __builtin_memcpy(&name_off, sh, 4);
+        if (name_off >= shstr_size) continue;
+        const char *secname = (const char *)(data + shstr_off + name_off);
+        if (strcmp(secname, ".haxmeta") != 0) continue;
+        uint64_t sec_off, sec_size;
+        __builtin_memcpy(&sec_off, sh + 0x18, 8);
+        __builtin_memcpy(&sec_size, sh + 0x20, 8);
+        if (sec_size < 104 || sec_off + sec_size > len) return 0;
+        const uint8_t *meta = data + sec_off;
+        uint32_t magic, kind;
+        __builtin_memcpy(&magic, meta, 4);
+        __builtin_memcpy(&kind, meta + 4, 4);
+        if (magic != 0x4D584148u || kind == 0) return 0;
+        if (name_out && name_cap) {
+            const char *nm = (const char *)(meta + 8);
+            size_t n = 0;
+            while (n + 1 < name_cap && nm[n] && n < 32) { name_out[n] = nm[n]; n++; }
+            name_out[n] = 0;
+        }
+        return (int)kind;
+    }
+    return 0;
+}
+
+static void gui_scan_disk_apps(void) {
+    disk_app_count = 0;
+    char full[256];
+    if (vfs_resolve_path("/", "/bin", full, sizeof(full)) < 0) return;
+    for (uint32_t i = 0; disk_app_count < GUI_DISK_APP_MAX; i++) {
+        char name[VFS_MAX_NAME];
+        uint32_t type;
+        if (vfs_readdir_at(full, i, name, &type) != 0) break;
+        if (type != VFS_NODE_FILE) continue;
+        size_t nl = strlen(name);
+        if (nl < 5 || name[nl - 4] != '.' || name[nl - 3] != 'h' ||
+            name[nl - 2] != 'a' || name[nl - 1] != 'x')
+            continue;
+        char path[96];
+        size_t pn = nl < 90 ? nl : 90;
+        memcpy(path, "/bin/", 5);
+        memcpy(path + 5, name, pn);
+        path[5 + pn] = 0;
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        size_t total = 0;
+        long rn;
+        while (total < sizeof(disk_hax_buf) &&
+               (rn = read(fd, disk_hax_buf + total,
+                          sizeof(disk_hax_buf) - total)) > 0)
+            total += (size_t)rn;
+        close(fd);
+        if (total == 0) continue;
+        char app_name[32] = {0};
+        int kind = disk_hax_kind(disk_hax_buf, total, app_name,
+                                 sizeof(app_name));
+        if (!(kind & HAX_KIND_GUI)) continue;
+        const char *use = app_name[0] ? app_name : name;
+        size_t un = strlen(use);
+        if (un >= 32) un = 31;
+        memcpy(disk_apps[disk_app_count], use, un);
+        disk_apps[disk_app_count][un] = 0;
+        disk_app_count++;
+    }
+}
+
 /* 启动器动态总高度：内置 13 项 + 追加的 .hax 行 */
-/* ── 开始菜单：统一应用条目（内置 + .hax）+ 搜索过滤 ──────────────
+/* ── 开始菜单：统一应用条目（内置 + .hax + 磁盘 hpt 应用）+ 搜索过滤 ─
  * 键盘是 ASCII，应用名是中文，故每个内置应用附带 ASCII/拼音关键词供搜索。 */
-enum { SM_K_PANEL = 0, SM_K_APP = 1, SM_K_HAX = 2 };
+enum { SM_K_PANEL = 0, SM_K_APP = 1, SM_K_HAX = 2, SM_K_DISK = 3 };
 typedef struct {
     const char *name; const char *kw; int kind; int mode; int icon;
 } sm_entry_t;
@@ -7664,16 +7782,27 @@ static const sm_entry_t sm_builtin[] = {
 };
 #define SM_BUILTIN_N ((int)(sizeof(sm_builtin) / sizeof(sm_builtin[0])))
 
-static int sm_total_entries(void) { return SM_BUILTIN_N + gui_hax_count(); }
+static int sm_total_entries(void) {
+    return SM_BUILTIN_N + gui_hax_count() + disk_app_count;
+}
 
 static int sm_entry_at(int idx, sm_entry_t *out) {
     if (idx < 0) return 0;
     if (idx < SM_BUILTIN_N) { *out = sm_builtin[idx]; return 1; }
-    const hax_app_entry_t *e = gui_hax_at(idx - SM_BUILTIN_N);
-    if (!e) return 0;
-    out->name = e->name; out->kw = e->name;
-    out->kind = SM_K_HAX; out->mode = idx - SM_BUILTIN_N; out->icon = ICON_APPS;
-    return 1;
+    int k = idx - SM_BUILTIN_N;
+    const hax_app_entry_t *e = gui_hax_at(k);
+    if (e) {
+        out->name = e->name; out->kw = e->name;
+        out->kind = SM_K_HAX; out->mode = k; out->icon = ICON_APPS;
+        return 1;
+    }
+    int d = k - gui_hax_count();
+    if (d >= 0 && d < disk_app_count) {
+        out->name = disk_apps[d]; out->kw = disk_apps[d];
+        out->kind = SM_K_DISK; out->mode = d; out->icon = ICON_APPS;
+        return 1;
+    }
+    return 0;
 }
 
 static char sm_lc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
@@ -7726,7 +7855,31 @@ static int sm_visible_count(const gui_state_t *st) {
 static void sm_launch(gui_state_t *st, const sm_entry_t *e) {
     if (e->kind == SM_K_PANEL) gui_open_panel_window(st, e->mode);
     else if (e->kind == SM_K_APP) gui_open_window(st, WM_WIN_APP, e->mode, 0);
-    else {
+    else if (e->kind == SM_K_DISK) {
+        /* hpt 安装到 /bin 的 GUI 应用：从磁盘加载并异步启动（非阻塞，
+         * 应用自身 hax_win_open 连接合成器，与 SM_K_HAX 的并发窗口应用
+         * 同一套非阻塞语义）。 */
+        char path[96];
+        size_t dn = strlen(disk_apps[e->mode]);
+        if (dn > 90) dn = 90;
+        memcpy(path, "/bin/", 5);
+        memcpy(path + 5, disk_apps[e->mode], dn);
+        path[5 + dn] = 0;
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) return;
+        size_t total = 0;
+        long rn;
+        while (total < sizeof(disk_hax_buf) &&
+               (rn = read(fd, disk_hax_buf + total,
+                          sizeof(disk_hax_buf) - total)) > 0)
+            total += (size_t)rn;
+        close(fd);
+        if (total == 0) return;
+        char *av[1]; av[0] = disk_apps[e->mode];
+        if (elf64_load_and_spawn(disk_hax_buf, total, av, 0, av[0]) >= 0)
+            gui_toast(st, "已启动 ", av[0]);
+        return;
+    } else {
         const hax_app_entry_t *he = gui_hax_at(e->mode);
         if (he) {
             char *av[1]; av[0] = (char *)he->name;
@@ -8354,6 +8507,7 @@ static void cmd_gui(int argc, char **argv) {
         if (key == KB_KEY_F1) {
             wm_toggle_start_menu(&st.wm);
             if (st.wm.start_menu_open) {
+                gui_scan_disk_apps();
                 st.wm.menu_h = gui_start_menu_h();
                 st.sm_search[0] = 0; st.sm_search_len = 0;
                 st.status = "开始菜单";
@@ -9044,7 +9198,18 @@ static void cmd_gui(int argc, char **argv) {
                                     last_title_click = frame_tick;
                                     st.status = "拖动窗口";
                                 }
-                            } else if (st.app_mode != GUI_APP_NONE) {
+                            } else {
+                                /* Client-area clicks participate in normal window
+                                 * activation too.  The old dispatch keyed only on
+                                 * st.app_mode, so it kept sending a click to the
+                                 * previously active app unless the user clicked a
+                                 * titlebar first.  Resolve the topmost window under
+                                 * the pointer before interpreting any client widget. */
+                                int content_idx = gui_window_at(&st, w, h, mx, my);
+                                if (content_idx >= 0 && content_idx != st.wm.active_window)
+                                    gui_focus_window(&st, content_idx);
+
+                                if (content_idx >= 0 && st.app_mode != GUI_APP_NONE) {
                                 int code_cmd = hit_code_command(w, h, &st, mx, my);
                                 if (code_cmd == CODE_CMD_GUI_RUN) {
                                     code_gui_run(&st, &fb);
@@ -9107,15 +9272,7 @@ static void cmd_gui(int argc, char **argv) {
                                         }
                                     }
                                 }
-                            } else {
-                                int dico = hit_desktop_icon(mx, my);
-                                if (dico >= 0) {
-                                    const desktop_icon_t *d = &g_desktop_icons[dico];
-                                    if (d->kind == WM_WIN_PANEL)
-                                        gui_open_panel_window(&st, d->mode);
-                                    else
-                                        gui_open_window(&st, WM_WIN_APP, d->mode, 0);
-                                } else {
+                                } else if (content_idx >= 0) {
                                     int action = hit_action(w, h, &st, mx, my);
                                     if (action >= FILE_ACTION_BASE) {
                                         if (action >= APP_ACTION_BASE) {
@@ -9134,6 +9291,20 @@ static void cmd_gui(int argc, char **argv) {
                                         }
                                     } else if (action >= 0) {
                                         handle_action(&st, action);
+                                    }
+                                } else {
+                                    /* No visible window owns this point: it is a
+                                     * desktop click even while another window is
+                                     * active.  This keeps exposed shortcuts usable
+                                     * and prevents clicks through an overlapping
+                                     * window. */
+                                    int dico = hit_desktop_icon(mx, my);
+                                    if (dico >= 0) {
+                                        const desktop_icon_t *d = &g_desktop_icons[dico];
+                                        if (d->kind == WM_WIN_PANEL)
+                                            gui_open_panel_window(&st, d->mode);
+                                        else
+                                            gui_open_window(&st, WM_WIN_APP, d->mode, 0);
                                     }
                                 }
                             }

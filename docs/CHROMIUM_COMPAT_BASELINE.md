@@ -30,6 +30,16 @@ HBOS 是 C99 编写的 x86_64 自研操作系统，使用 Make、GCC 和 NASM �
 这些数字是阶段 1 的观测值，不代表后续设计上限。自动检查脚本会持续报告这些
 指标；需要改变公开编号或 ABI 时，必须按本文的版本规则进行。
 
+> 后续进展：内核 heap 已从上述 128 KiB、不可释放的阶段 1 实现升级为 2 MiB
+> 可回收并合并空闲块的实现。基线检查现在防止它退回 no-op `kfree()`；表中的
+> 原始观测值仍保留，便于比较阶段间变化。
+
+> 2026-08-04 进展：任务上限已从基线的 16 提升至 64，每任务文件描述符从
+> 32 提升至 128；增加 futex wait/wake、bitset 变体、绝对超时与 robust-list
+> `OWNER_DIED` 清理，并用 ring3 Linux ABI 线程程序验证。动态加载器已加入
+> GNU hash 查找。以上是 G1 的已验证子集，不代表 `PT_INTERP`、完整动态 TLS、
+> `clone3`、signal/ucontext 或 Chromium 端口已经完成。
+
 ## 2. 软件模块化现状
 
 ### 已注册为独立模块
@@ -78,8 +88,8 @@ resize、挂起和恢复没有统一接口。
 | 进程 | 部分可用 | `fork/exec/wait/kill` | 无 COW，进程模型尚未做大型负载验证 |
 | 虚拟内存 | 部分可用 | `mmap/munmap/mprotect/brk` | 大地址空间、文件映射和并发压力验证 |
 | 共享内存 | 部分可用 | `shmget/shmat/shmdt/shmctl` | Chromium IPC 所需的句柄与权限模型 |
-| 同步原语 | 缺失 | x86_64 原子操作基础 | pthread、mutex、condvar、TLS、等待/唤醒 |
-| 内核动态内存 | 阻塞项 | `kmalloc/kcalloc/krealloc` | 仅 128 KiB 且不能释放 |
+| 同步原语 | 部分可用 | futex/bitset/robust-list、x86_64 原子操作、任务 TLS 基础 | 完整 pthread、mutex/condvar 语义与动态 TLS |
+| 内核动态内存 | 基础可用 | 2 MiB 可回收 heap、`kmalloc/kcalloc/krealloc/kfree` | 大型浏览器仍必须主要使用用户态虚拟内存，并补压力与 OOM 验证 |
 | 文件系统 | 部分可用 | VFS、ramfs、HBFS、ext2/fat32 读写路径 | 文件映射、锁、监听及长期一致性 |
 | 网络 | 部分可用 | IPv4、TCP、DNS、HTTP、socket、select | 完整非阻塞语义、IPv6、代理及压力验证 |
 | TLS | 部分可用 | 自有 TLS 1.3/HTTPS | 证书生态、算法覆盖和 Chromium 网络栈接口 |
@@ -88,7 +98,7 @@ resize、挂起和恢复没有统一接口。
 | 字体 | 部分可用 | CJK 位图和 GUI 字体图集 | 字体发现、fallback、整形和 Chromium 字体后端 |
 | 剪贴板/IME | 缺失 | 基础键盘输入 | 剪贴板、组合输入和输入法协议 |
 | Chromium 构建 | 缺失 | GCC/NASM/Make 工具链 | Clang、GN、Ninja、HBOS sysroot 和平台定义 |
-| Chromium 源码 | 未引入 | 无 | 固定上游版本、补丁管理和许可证清单 |
+| Chromium 源码 | 外置固定 | Linux Stable 151.0.7922.71、精确 revision、外置同步脚本 | HBOS 平台补丁、补丁管理和许可证清单 |
 
 ## 5. ABI 与版本约定
 

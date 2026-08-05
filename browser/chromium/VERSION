@@ -1,0 +1,5 @@
+channel=Stable
+version=151.0.7922.71
+revision=ef35003457e93c278f911a334b06e4a5f8967e06
+source=https://chromium.googlesource.com/chromium/src.git
+metadata=https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Linux&num=1

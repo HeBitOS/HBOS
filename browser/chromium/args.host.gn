@@ -1,0 +1,26 @@
+# Linux reference build. This validates the pinned engine independently of
+# the HBOS platform port and provides a known-good content_shell baseline.
+# Proprietary codecs (H.264/AAC) are enabled so real-world sites such as
+# Bilibili (H.264 primary streams) initialize their MSE player; the video
+# acceptance probe requires MediaSource.isTypeSupported('avc1...') == true.
+is_debug = false
+is_component_build = false
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+use_remoteexec = false
+use_siso = false
+is_official_build = false
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+enable_remoting = false
+enable_widevine = false
+use_cups = false
+use_pulseaudio = false
+rtc_use_pipewire = false
+use_ozone = true
+ozone_auto_platforms = false
+ozone_platform = "headless"
+ozone_platform_headless = true
+ozone_platform_x11 = false
+ozone_platform_wayland = false
