@@ -4,7 +4,7 @@ import time
 import os
 import sys
 
-WORKSPACE = "/media/data/hbosv2"
+WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ISO_PATH = f"{WORKSPACE}/build/hbos-bios.iso"
 USB_IMG_PATH = f"{WORKSPACE}/build/usb_disk.img"
 
@@ -41,43 +41,9 @@ def run_qemu_test():
         print("[TEST] Waiting 6 seconds for shell ready...")
         time.sleep(6)
         
-        # Check drivers status
-        print("[TEST] Sending 'drivers'...")
-        proc.stdin.write("drivers\n")
-        proc.stdin.flush()
+        # Shell input is keyboard-driven. This test verifies enumeration,
+        # endpoint configuration and READ CAPACITY from serial boot markers.
         time.sleep(2)
-        
-        # Check initial diskmgr status
-        print("[TEST] Sending 'diskmgr'...")
-        proc.stdin.write("diskmgr\n")
-        proc.stdin.flush()
-        time.sleep(2)
-        
-        # Install auto to partition and format USB drive
-        print("[TEST] Sending 'install auto'...")
-        proc.stdin.write("install auto\n")
-        proc.stdin.flush()
-        time.sleep(3)
-        
-        # Write file to persistent storage
-        print("[TEST] Writing file to persistent USB storage...")
-        proc.stdin.write("writefile /test_usb.txt Hello_from_USB_Storage_integrated_in_HBOS\n")
-        proc.stdin.flush()
-        time.sleep(1)
-        
-        # Read file back
-        print("[TEST] Reading file back from persistent USB storage...")
-        proc.stdin.write("cat /test_usb.txt\n")
-        proc.stdin.flush()
-        time.sleep(2)
-        
-        # Final status check
-        print("[TEST] Sending final 'diskmgr'...")
-        proc.stdin.write("diskmgr\n")
-        proc.stdin.flush()
-        time.sleep(2)
-        
-        # Power off
         proc.terminate()
         stdout, stderr = proc.communicate(timeout=5)
     except Exception as e:
@@ -91,8 +57,17 @@ def run_qemu_test():
     print(stdout)
     print("----------------------------------------")
     
-    # Temporarily print pass to inspect output
-    print("[DIAGNOSTIC DONE]")
+    required = [
+        "[XHCI] Device addressed successfully!",
+        "[MSC] storage ready:",
+        "blocks=131072 block_size=512",
+        "[KERN] Shell ready",
+    ]
+    missing = [marker for marker in required if marker not in stdout]
+    if missing:
+        print("[FAIL] Missing xHCI storage markers: " + ", ".join(missing))
+        sys.exit(1)
+    print("[SUCCESS] xHCI USB storage capacity detected!")
 
 if __name__ == "__main__":
     setup_usb_img()

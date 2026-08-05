@@ -4,7 +4,7 @@ import time
 import os
 import sys
 
-WORKSPACE = "/media/data/hbosv2"
+WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ISO_PATH = f"{WORKSPACE}/build/hbos-bios.iso"
 
 def run_qemu_test():
@@ -30,13 +30,9 @@ def run_qemu_test():
         print("[TEST] Waiting 6 seconds for shell ready...")
         time.sleep(6)
         
-        # Check drivers status
-        print("[TEST] Sending 'drivers'...")
-        proc.stdin.write("drivers\n")
-        proc.stdin.flush()
+        # Shell input comes from the emulated keyboard, not the serial port.
+        # Serial is intentionally output-only in this test.
         time.sleep(2)
-        
-        # Power off
         proc.terminate()
         stdout, stderr = proc.communicate(timeout=5)
     except Exception as e:
@@ -50,12 +46,17 @@ def run_qemu_test():
     print(stdout)
     print("----------------------------------------")
     
-    # Check if USB keyboard and mouse are active/ready
-    if "USB HID devices:  2" in stdout and "ready" in stdout:
-        print("[SUCCESS] USB HID devices detected and ready!")
-    else:
-        print("[FAIL] USB HID devices NOT ready!")
+    required = [
+        "[XHCI] Device addressed successfully!",
+        "[HID] registered as keyboard",
+        "[HID] registered as mouse",
+        "[KERN] Shell ready",
+    ]
+    missing = [marker for marker in required if marker not in stdout]
+    if missing:
+        print("[FAIL] Missing xHCI/HID boot markers: " + ", ".join(missing))
         sys.exit(1)
+    print("[SUCCESS] xHCI keyboard and mouse initialized!")
 
 if __name__ == "__main__":
     run_qemu_test()
