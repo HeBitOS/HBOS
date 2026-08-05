@@ -14,6 +14,7 @@ typedef struct loaded_lib {
     const char        *strtab;
     elf64_sym_t       *symtab;
     uint64_t           symtab_entries;
+    uint32_t          *gnu_hash;
     elf64_rela_t      *jmprel;
     uint64_t           jmprel_size;
     void              *pltgot;
@@ -42,6 +43,70 @@ static elf64_sym_t *symtab_lookup(elf64_sym_t *symtab, uint64_t nentries,
         if (strcmp(sym_name, name) == 0) return &symtab[i];
     }
     return 0;
+}
+
+static uint32_t gnu_symbol_hash(const char *name) {
+    uint32_t hash = 5381;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+        hash = hash * 33U + *p;
+    return hash;
+}
+
+static elf64_sym_t *gnu_hash_lookup(const loaded_lib_t *lib,
+                                     const char *name) {
+    if (!lib || !lib->gnu_hash || !lib->symtab || !lib->strtab)
+        return NULL;
+    const uint32_t *header = lib->gnu_hash;
+    uint32_t bucket_count = header[0];
+    uint32_t symbol_offset = header[1];
+    uint32_t bloom_size = header[2];
+    uint32_t bloom_shift = header[3];
+    if (!bucket_count || !bloom_size) return NULL;
+
+    const uint64_t *bloom = (const uint64_t *)(header + 4);
+    const uint32_t *buckets =
+        (const uint32_t *)(bloom + bloom_size);
+    const uint32_t *chains = buckets + bucket_count;
+    uint32_t hash = gnu_symbol_hash(name);
+    uint64_t word = bloom[(hash / 64U) % bloom_size];
+    uint64_t mask = (1ULL << (hash % 64U)) |
+                    (1ULL << ((hash >> bloom_shift) % 64U));
+    if ((word & mask) != mask) return NULL;
+
+    uint32_t index = buckets[hash % bucket_count];
+    if (index < symbol_offset) return NULL;
+    for (uint32_t scanned = 0; scanned < 1048576U; scanned++, index++) {
+        uint32_t chain_hash = chains[index - symbol_offset];
+        if ((chain_hash | 1U) == (hash | 1U)) {
+            elf64_sym_t *symbol = &lib->symtab[index];
+            if (strcmp(lib->strtab + symbol->st_name, name) == 0)
+                return symbol;
+        }
+        if (chain_hash & 1U) break;
+    }
+    return NULL;
+}
+
+static uint64_t gnu_hash_symbol_count(const uint32_t *header) {
+    if (!header || !header[0] || !header[2]) return 0;
+    uint32_t bucket_count = header[0];
+    uint32_t symbol_offset = header[1];
+    uint32_t bloom_size = header[2];
+    const uint64_t *bloom = (const uint64_t *)(header + 4);
+    const uint32_t *buckets =
+        (const uint32_t *)(bloom + bloom_size);
+    const uint32_t *chains = buckets + bucket_count;
+    uint64_t count = symbol_offset;
+    for (uint32_t i = 0; i < bucket_count; i++) {
+        uint32_t index = buckets[i];
+        if (index < symbol_offset) continue;
+        for (uint32_t scanned = 0; scanned < 1048576U; scanned++, index++) {
+            uint32_t chain_hash = chains[index - symbol_offset];
+            if ((uint64_t)index + 1 > count) count = (uint64_t)index + 1;
+            if (chain_hash & 1U) break;
+        }
+    }
+    return count;
 }
 
 /* 对已加载库执行 R_X86_64_RELATIVE 重定位 */
@@ -177,6 +242,7 @@ void *ldso_load(const uint8_t *data, size_t size) {
     elf64_rela_t         *jmprel     = 0;
     uint64_t              jmprel_size= 0;
     void                 *pltgot     = 0;
+    uint32_t             *gnu_hash   = 0;
 
     for (int i = 0; i < (int)ehdr->e_phnum; i++) {
         if (phdrs[i].p_type != PT_DYNAMIC) continue;
@@ -194,6 +260,7 @@ void *ldso_load(const uint8_t *data, size_t size) {
             case DT_JMPREL:   jmprel  = (elf64_rela_t *)(vaddr_base + dyn[j].d_un.d_ptr); break;
             case DT_PLTRELSZ: jmprel_size = dyn[j].d_un.d_val; break;
             case DT_PLTGOT:   pltgot  = (void *)(vaddr_base + dyn[j].d_un.d_ptr); break;
+            case DT_GNU_HASH: gnu_hash = (uint32_t *)(vaddr_base + dyn[j].d_un.d_ptr); break;
             default: break;
             }
         }
@@ -211,9 +278,12 @@ void *ldso_load(const uint8_t *data, size_t size) {
     lib->jmprel     = jmprel;
     lib->jmprel_size= jmprel_size;
     lib->pltgot     = pltgot;
+    lib->gnu_hash   = gnu_hash;
 
     /* 计算符号表条目数 */
-    if (strtab && symtab) {
+    if (gnu_hash) {
+        lib->symtab_entries = gnu_hash_symbol_count(gnu_hash);
+    } else if (strtab && symtab) {
         uint64_t sym_off = (uint64_t)((uint8_t *)symtab - (uint8_t *)vaddr_base);
         uint64_t str_off = (uint64_t)((const uint8_t *)strtab - (const uint8_t *)vaddr_base);
         if (str_off > sym_off) {
@@ -267,12 +337,14 @@ void *ldso_dlsym(void *handle, const char *name) {
     loaded_lib_t *lib = (loaded_lib_t *)handle;
     if (!lib->strtab || !lib->symtab || lib->symtab_entries == 0) return 0;
 
-    elf64_sym_t *sym = symtab_lookup(lib->symtab, lib->symtab_entries,
-                                      lib->strtab, name);
+    elf64_sym_t *sym = gnu_hash_lookup(lib, name);
+    if (!sym)
+        sym = symtab_lookup(lib->symtab, lib->symtab_entries,
+                            lib->strtab, name);
     if (!sym || sym->st_value == 0) return 0;
     if (ELF64_ST_BIND(sym->st_info) != STB_GLOBAL &&
         ELF64_ST_BIND(sym->st_info) != STB_WEAK) return 0;
-    return (uint8_t *)lib->base + sym->st_value;
+    return (void *)(uintptr_t)(lib->vaddr_base + sym->st_value);
 }
 
 int ldso_close(void *handle) {
@@ -280,7 +352,7 @@ int ldso_close(void *handle) {
     loaded_lib_t *lib = (loaded_lib_t *)handle;
 
     for (uint64_t p = 0; p < lib->num_pages; p++) {
-        uint64_t va = lib->vaddr_base + p * PAGE_SIZE;
+        uint64_t va = (uint64_t)(uintptr_t)lib->base + p * PAGE_SIZE;
         uint64_t phys = vmm_get_phys(va);
         if (phys) {
             pmm_free_page(phys);
@@ -304,12 +376,13 @@ void *ldso_resolve(const char *name) {
     loaded_lib_t *lib = g_loaded_libs;
     while (lib) {
         if (lib->strtab && lib->symtab && lib->symtab_entries > 0) {
-            elf64_sym_t *sym = symtab_lookup(lib->symtab,
-                                              lib->symtab_entries,
-                                              lib->strtab, name);
+            elf64_sym_t *sym = gnu_hash_lookup(lib, name);
+            if (!sym)
+                sym = symtab_lookup(lib->symtab, lib->symtab_entries,
+                                    lib->strtab, name);
             if (sym && sym->st_value != 0 &&
                 ELF64_ST_BIND(sym->st_info) == STB_GLOBAL) {
-                return (uint8_t *)lib->base + sym->st_value;
+                return (void *)(uintptr_t)(lib->vaddr_base + sym->st_value);
             }
         }
         lib = lib->next;

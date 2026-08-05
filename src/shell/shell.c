@@ -60,14 +60,27 @@ const char *cmd_get_group_name(int g) {
 
 #define MAX_ARGS 64
 static int parse_line(char *line, char **argv, int max_args) {
-    int argc = 0, in_word = 0;
-    for (int i = 0; line[i] && argc < max_args; i++) {
-        if (line[i] == ' ' || line[i] == '\t') {
-            if (in_word) { line[i] = '\0'; in_word = 0; }
-        } else {
-            if (!in_word) { argv[argc++] = &line[i]; in_word = 1; }
+    int argc = 0;
+    char *src = line;
+    char *dst = line;
+    while (*src && argc < max_args) {
+        while (*src == ' ' || *src == '\t') src++;
+        if (!*src) break;
+        argv[argc++] = dst;
+        char quote = 0;
+        while (*src) {
+            char c = *src;
+            if (!quote && (c == ' ' || c == '\t')) break;
+            if (c == '"' || c == '\'') {
+                if (!quote) { quote = c; src++; continue; }
+                if (c == quote) { quote = 0; src++; continue; }
+            }
+            *dst++ = *src++;
         }
+        if (*src) { *dst++ = '\0'; src++; }
+        else *dst = '\0';
     }
+    *dst = '\0';
     return argc;
 }
 
@@ -446,18 +459,18 @@ typedef struct {
 static int shell_bind_stdio(int std_fd, int file_fd, shell_fd_save_t *save) {
     task_t *task = task_current();
     if (!task || !save || std_fd < 0 || std_fd >= POSIX_MAX_FDS ||
-        file_fd < 0 || file_fd >= POSIX_MAX_FDS || !task->fds[file_fd].used) {
+        file_fd < 0 || file_fd >= POSIX_MAX_FDS || !task->fd_table->entries[file_fd].used) {
         return -1;
     }
 
     save->std_fd = std_fd;
     save->active = 1;
-    save->saved_used = task->fds[std_fd].used;
-    save->saved_node = task->fds[std_fd].node;
-    save->saved_offset = task->fds[std_fd].offset;
-    save->saved_flags = task->fds[std_fd].flags;
-    task->fds[std_fd] = task->fds[file_fd];
-    task->fds[file_fd].used = false;
+    save->saved_used = task->fd_table->entries[std_fd].used;
+    save->saved_node = task->fd_table->entries[std_fd].node;
+    save->saved_offset = task->fd_table->entries[std_fd].offset;
+    save->saved_flags = task->fd_table->entries[std_fd].flags;
+    task->fd_table->entries[std_fd] = task->fd_table->entries[file_fd];
+    task->fd_table->entries[file_fd].used = false;
     return 0;
 }
 
@@ -466,10 +479,10 @@ static void shell_restore_stdio(shell_fd_save_t *save) {
     close(save->std_fd);
     task_t *task = task_current();
     if (task) {
-        task->fds[save->std_fd].used = save->saved_used;
-        task->fds[save->std_fd].node = save->saved_node;
-        task->fds[save->std_fd].offset = save->saved_offset;
-        task->fds[save->std_fd].flags = save->saved_flags;
+        task->fd_table->entries[save->std_fd].used = save->saved_used;
+        task->fd_table->entries[save->std_fd].node = save->saved_node;
+        task->fd_table->entries[save->std_fd].offset = save->saved_offset;
+        task->fd_table->entries[save->std_fd].flags = save->saved_flags;
     }
     save->active = 0;
 }

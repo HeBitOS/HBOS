@@ -99,30 +99,36 @@ static void cmd_credits(int argc, char **argv) {
 }
 
 static void cmd_echo(int argc, char **argv) {
+    char buf[1024];
+    size_t len = 0;
     int raw = 0;
     int start = 1;
     if (argc >= 2 && strcmp(argv[1], "-e") == 0) { raw = 1; start = 2; }
     for (int i = start; i < argc; i++) {
-        if (i > start) console_putchar(' ');
+        if (i > start && len < sizeof(buf) - 1) buf[len++] = ' ';
         const char *s = argv[i];
         if (raw) {
-            while (*s) {
+            while (*s && len < sizeof(buf) - 1) {
                 if (*s == '\\' && s[1]) {
                     s++;
-                    if (*s == 'n') console_putchar('\n');
-                    else if (*s == 't') console_putchar('\t');
-                    else if (*s == '\\') console_putchar('\\');
-                    else { console_putchar('\\'); console_putchar(*s); }
+                    if (*s == 'n') buf[len++] = '\n';
+                    else if (*s == 't') buf[len++] = '\t';
+                    else if (*s == '\\') buf[len++] = '\\';
+                    else {
+                        if (len + 1 < sizeof(buf) - 1) { buf[len++] = '\\'; buf[len++] = *s; }
+                        else break;
+                    }
                 } else {
-                    console_putchar(*s);
+                    buf[len++] = *s;
                 }
                 s++;
             }
         } else {
-            console_puts(s);
+            while (*s && len < sizeof(buf) - 1) buf[len++] = *s++;
         }
     }
-    console_putchar('\n');
+    if (len < sizeof(buf) - 1) buf[len++] = '\n';
+    write(STDOUT_FILENO, buf, len);
 }
 
 static void cmd_version(int argc, char **argv) {
@@ -244,14 +250,16 @@ static void cmd_neofetch(int argc, char **argv) {
     uint64_t used_kb = (total > free ? total - free : 0) / 1024;
     uint64_t total_kb = total / 1024;
 
-    extern uint64_t pit_get_ticks(void);
-    uint64_t up_sec = pit_get_ticks() / 100;   /* pit_init(100) — 100Hz */
+    uint32_t pit_hz = pit_get_frequency_hz();
+    uint64_t up_sec = pit_hz ? pit_get_ticks() / pit_hz : 0;
     uint32_t up_h = (uint32_t)(up_sec / 3600);
     uint32_t up_m = (uint32_t)((up_sec / 60) % 60);
     uint32_t up_s = (uint32_t)(up_sec % 60);
 
     console_puts("   \x1b[36m/\\_/\\\x1b[0m      \x1b[1m\x1b[35mHBOS (HeBitOS) " HBOS_VERSION_NAME "\x1b[0m\n");
-    console_puts("  \x1b[36m( o.o )\x1b[0m     \x1b[32mKernel:\x1b[0m  Coop-Multitasking, PIT 100Hz\n");
+    console_puts("  \x1b[36m( o.o )\x1b[0m     \x1b[32mKernel:\x1b[0m  Coop-Multitasking, PIT ");
+    print_uint(pit_hz);
+    console_puts("Hz\n");
     console_puts("   \x1b[36m> ^ <\x1b[0m      \x1b[32mArch:\x1b[0m    x86_64\n");
     console_puts("  \x1b[36m/     \\\x1b[0m     \x1b[32mCPU:\x1b[0m     ");
     console_puts(brand);
