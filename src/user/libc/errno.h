@@ -1,14 +1,14 @@
 #ifndef HBOS_USER_LIBC_ERRNO_H
 #define HBOS_USER_LIBC_ERRNO_H
 
-/* User-mode errno — HBOS's .hax apps are single-threaded processes, so a
- * plain global (no TLS / __errno_location() indirection like the kernel's
- * own src/errno.h) is enough. Numeric values mirror src/errno.h so they
- * agree with the negative -errno values HBOS's syscalls return. Not every
- * existing libc wrapper sets this yet (audited: none did, before this file
- * existed) — wire up specific call sites if something is found to actually
- * depend on an accurate value rather than just a compiling <errno.h>. */
-extern int errno;
+/*
+ * errno is thread-local at the API boundary.  HBOS does not yet load ELF
+ * PT_TLS images, so __errno_location() uses a compact TID-keyed table until
+ * the dynamic loader can provide compiler TLS.  The lookup only occurs on
+ * an error path or when an application explicitly reads errno.
+ */
+int *__errno_location(void);
+#define errno (*__errno_location())
 
 /* Converts a syscall's raw return value (negative -errno on failure, per
  * src/syscall.c's finish_syscall() convention) into a POSIX-shaped result:
@@ -51,6 +51,24 @@ long __syscall_errno(long ret);
 #define ENOSYS          38
 #define ENOTEMPTY       39
 #define ELOOP           40
+#define ENOTSOCK        88
+#define EDESTADDRREQ    89
+#define EMSGSIZE        90
+#define EPROTOTYPE      91
+#define ENOPROTOOPT     92
+#define EPROTONOSUPPORT 93
+#define ESOCKTNOSUPPORT 94
+#define EOPNOTSUPP      95
+#define EAFNOSUPPORT    97
+#define EADDRINUSE      98
+#define EADDRNOTAVAIL   99
+#define ECONNRESET      104
+#define EISCONN         106
+#define ENOTCONN        107
+#define ETIMEDOUT       110
+#define ECONNREFUSED    111
+#define EALREADY        114
+#define EINPROGRESS     115
 #define EWOULDBLOCK     EAGAIN
 
 #endif

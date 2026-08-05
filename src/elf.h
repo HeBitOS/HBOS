@@ -53,7 +53,9 @@
 
 /** 段标志 */
 #define PF_X           1
+#ifndef PF_W
 #define PF_W           2
+#endif
 #define PF_R           4
 
 /**

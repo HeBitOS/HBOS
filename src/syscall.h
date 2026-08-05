@@ -178,6 +178,29 @@ typedef enum {
     HBOS_SYS_HTTPS_GET,      /**< https_get(host,ip,port,path,out,cap) */
     HBOS_SYS_HTTPS_GET_V2,   /**< CA/X.509 verified DNS/IPv4/IPv6 HTTPS GET */
 
+    // ---- Linux/POSIX compatibility event core ----
+    HBOS_SYS_POLL,           /**< poll(fds,nfds,timeout_ms) */
+    HBOS_SYS_PIPE2,          /**< pipe2(pipefd,flags) */
+    HBOS_SYS_EVENTFD2,       /**< eventfd2(initial_value,flags) */
+    HBOS_SYS_EPOLL_CREATE1,  /**< epoll_create1(flags) */
+    HBOS_SYS_EPOLL_CTL,      /**< epoll_ctl(epfd,op,fd,event) */
+    HBOS_SYS_EPOLL_WAIT,     /**< epoll_wait(epfd,events,maxevents,timeout) */
+    HBOS_SYS_SCHED_YIELD,    /**< sched_yield() */
+    HBOS_SYS_GETRANDOM,      /**< getrandom(buf,len,flags) */
+    HBOS_SYS_FUTEX,          /**< futex(uaddr,op,val,timeout,uaddr2,val3) */
+    HBOS_SYS_ARCH_PRCTL,     /**< arch_prctl(ARCH_SET_FS/ARCH_GET_FS,address) */
+    HBOS_SYS_CLONE_THREAD,   /**< lightweight shared-VM clone(request) */
+    HBOS_SYS_SET_TID_ADDRESS,/**< set_tid_address(clear_child_tid) */
+    HBOS_SYS_SOCKETPAIR,     /**< socketpair(domain,type,protocol,pair) */
+    HBOS_SYS_GETSOCKOPT,     /**< getsockopt(fd,level,opt,value,length) */
+    HBOS_SYS_SETSOCKOPT,     /**< setsockopt(fd,level,opt,value,length) */
+    HBOS_SYS_SHUTDOWN,       /**< shutdown(fd,how) */
+    HBOS_SYS_MEMFD_CREATE,   /**< anonymous shared-memory fd */
+    HBOS_SYS_SENDMSG,        /**< sendmsg with Linux-compatible msghdr */
+    HBOS_SYS_RECVMSG,        /**< recvmsg with SCM_RIGHTS support */
+    HBOS_SYS_SET_ROBUST_LIST,/**< set_robust_list(head,length) */
+    HBOS_SYS_GET_ROBUST_LIST,/**< get_robust_list(tid,head,length) */
+
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;
 
@@ -201,5 +224,6 @@ typedef struct {
  * @return 系统调用返回值（负值表示 -errno）
  */
 uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *frame);
+uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 
 #endif /* HBOS_SYSCALL_H */

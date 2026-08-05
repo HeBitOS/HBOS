@@ -29,7 +29,7 @@ static int set_errno(int e) {
 
 static fd_entry_t *fd_table(void) {
     task_t *task = task_current();
-    return task ? task->fds : NULL;
+    return task ? task->fd_table->entries : NULL;
 }
 
 static int fd_alloc(vfs_node_t *node, int flags, const char *path) {
@@ -82,6 +82,8 @@ ssize_t write(int fd, const void *buf, size_t count) {
                 uint32_t written = 0;
                 while (written < count) {
                     if (p->count >= PIPE_BUF_SIZE) {
+                        if (redir->flags & O_NONBLOCK)
+                            return written ? (ssize_t)written : set_errno(EAGAIN);
                         task_yield();
                         continue;
                     }
@@ -112,6 +114,8 @@ ssize_t write(int fd, const void *buf, size_t count) {
         uint32_t written = 0;
         while (written < count) {
             if (p->count >= PIPE_BUF_SIZE) {
+                if (ent->flags & O_NONBLOCK)
+                    return written ? (ssize_t)written : set_errno(EAGAIN);
                 task_yield();
                 continue;
             }
@@ -143,6 +147,8 @@ ssize_t read(int fd, void *buf, size_t count) {
                 while (got < count) {
                     if (p->count == 0) {
                         if (p->ref_count < 2) break;
+                        if (redir->flags & O_NONBLOCK)
+                            return got ? (ssize_t)got : set_errno(EAGAIN);
                         task_yield();
                         continue;
                     }
@@ -185,6 +191,8 @@ ssize_t read(int fd, void *buf, size_t count) {
         while (got < count) {
             if (p->count == 0) {
                 if (p->ref_count < 2) break;
+                if (ent->flags & O_NONBLOCK)
+                    return got ? (ssize_t)got : set_errno(EAGAIN);
                 task_yield();
                 continue;
             }
@@ -431,7 +439,7 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
 }
 
 pid_t getpid(void) {
-    return (pid_t)task_get_id();
+    return (pid_t)task_get_process_id();
 }
 
 pid_t getppid(void) {
