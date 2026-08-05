@@ -12,7 +12,7 @@
 #define HBFS_MAGIC 0x3146534248ULL /**< HBFS 魔数，对应 "HBFS1" 的小端标记 */
 #define HBFS_VERSION 1             /**< HBFS 版本号 */
 #define HBFS_DEFAULT_START_LBA 2048 /**< HBFS 默认起始 LBA 地址（1MiB 对齐） */
-#define HBFS_TABLE_SECTORS 8       /**< 文件表占用的扇区数 */
+#define HBFS_TABLE_SECTORS 16      /**< 文件表占用的扇区数（与 MAX_FILES=128 的 64B 表项对应） */
 #define HBFS_FILE_SECTORS (RAMFS_MAX_FILE_SIZE / BLOCK_SECTOR_SIZE) /**< 单文件占用的扇区数 */
 #define HBFS_PARTITION_TYPE 0xEB   /**< HBFS 分区类型码（MBR） */
 #define GPT_ENTRY_SIZE 128         /**< GPT 分区项大小（字节） */

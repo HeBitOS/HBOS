@@ -10,9 +10,9 @@
 
 // 文件系统相关定义
 #define SECTOR_SIZE 512          /**< 扇区大小（字节） */
-#define MAX_FILES 64             /**< 最大文件数量 */
+#define MAX_FILES 128            /**< 最大文件数量 */
 #define MAX_FILENAME 32          /**< 文件名最大长度（含结尾 '\0'） */
-#define RAMFS_MAX_FILE_SIZE 65536 /**< ramfs/HBFS 单文件最大容量（字节） */
+#define RAMFS_MAX_FILE_SIZE 131072 /**< ramfs/HBFS 单文件最大容量（字节） */
 
 // 文件结构
 typedef struct file {
