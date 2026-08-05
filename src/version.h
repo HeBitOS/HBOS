@@ -6,5 +6,7 @@
 #define HBOS_VERSION_REL "0.1-beta5-pre5"
 #define HBOS_VERSION_TAG "v0.1-beta5-pre5"
 #define HBOS_VERSION_NAME "HBOS - He Bit OS " HBOS_VERSION
+#define HIVE_VERSION_REL "0.1-beta5-gui.3"
+#define HIVE_VERSION_TAG "HIVE 0.1-beta5-gui.3"
 
 #endif /* HBOS_VERSION_H */

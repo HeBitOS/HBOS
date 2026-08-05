@@ -54,6 +54,7 @@ typedef struct {
     uint64_t ep_data_buf_phys[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
     uint32_t ep_data_buf_len[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
     volatile uint32_t ep_has_data[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
+    volatile uint32_t ep_transfer_residue[XHCI_MAX_SLOTS + 1][XHCI_MAX_EP];
     uint32_t initialized;
 } xhci_t;
 
@@ -146,6 +147,8 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           uint8_t bRequest, uint16_t wValue,
                           uint16_t wIndex, void *data, uint16_t wLength);
 int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len);
+int xhci_bulk_transfer_packet(int slot_id, int ep_addr, void *data,
+                              uint32_t len, uint32_t max_packet);
 int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len, uint32_t interval);
 
 #endif

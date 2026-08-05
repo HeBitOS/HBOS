@@ -29,8 +29,10 @@ int          unlink(const char *path);
 ssize_t      read(int fd, void *buf, size_t count);
 ssize_t      write(int fd, const void *buf, size_t count);
 off_t        lseek(int fd, off_t offset, int whence);
+int          ftruncate(int fd, off_t length);
 int          close(int fd);
 int          rmdir(const char *path);
+int          pipe2(int pipefd[2], int flags);
 
 /* Real exec — see unistd.c: on success this never returns (the calling
  * task is replaced/terminated by the kernel), -1 on failure. */

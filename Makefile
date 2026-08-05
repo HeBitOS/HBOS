@@ -19,6 +19,7 @@ NOGUI_BUILD_DIR ?= build-nogui
 #     · MAJOR 大版本 / MINOR 中版本 — 里程碑号（当前 0.1，目标大版本 1.0）
 #     · BETA  每次对外更新 +1
 #     · PRE   内部小版本号（迭代构建）
+#     · HIVE_GUI_REV 当前 HBOS beta 发布线上的 GUI 修订号
 #   src/version.h 由下面这些值自动生成（仅在变化时重写），请勿手改 version.h。
 #   设版本有三种方式：
 #     · `make ver`  交互式询问并写入 version.mk（推荐）
@@ -31,11 +32,14 @@ HBOS_VER_MAJOR ?= 0
 HBOS_VER_MINOR ?= 1
 HBOS_VER_BETA  ?= 4
 HBOS_VER_PRE   ?= 4
+HIVE_GUI_REV   ?= 3
 
 # 派生的各种格式
 HBOS_VERSION     = v$(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)
 HBOS_VERSION_REL = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)
 HBOS_VERSION_STR = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR) beta$(HBOS_VER_BETA) pre$(HBOS_VER_PRE)
+HIVE_VERSION_REL = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-gui.$(HIVE_GUI_REV)
+HIVE_VERSION_TAG = HIVE $(HIVE_VERSION_REL)
 
 # 默认目标仍为 all（下面的 version.h 规则在前，避免它抢占默认目标）
 .DEFAULT_GOAL := all
@@ -48,9 +52,10 @@ ver:
 	 printf '  中版本 MINOR [%s]: ' '$(HBOS_VER_MINOR)'; read N; N=$${N:-$(HBOS_VER_MINOR)}; \
 	 printf '  beta  号  [%s]: ' '$(HBOS_VER_BETA)'; read B; B=$${B:-$(HBOS_VER_BETA)}; \
 	 printf '  pre   号  [%s]: ' '$(HBOS_VER_PRE)'; read P; P=$${P:-$(HBOS_VER_PRE)}; \
-	 printf 'HBOS_VER_MAJOR = %s\nHBOS_VER_MINOR = %s\nHBOS_VER_BETA = %s\nHBOS_VER_PRE = %s\n' \
-	        "$$M" "$$N" "$$B" "$$P" > version.mk; \
-	 echo "✓ 已写入 version.mk:  v$$M.$$N-beta$$B-pre$$P"
+	 printf '  GUI 修订号 [%s]: ' '$(HIVE_GUI_REV)'; read G; G=$${G:-$(HIVE_GUI_REV)}; \
+	 printf 'HBOS_VER_MAJOR = %s\nHBOS_VER_MINOR = %s\nHBOS_VER_BETA = %s\nHBOS_VER_PRE = %s\nHIVE_GUI_REV = %s\n' \
+	        "$$M" "$$N" "$$B" "$$P" "$$G" > version.mk; \
+	 echo "✓ 已写入 version.mk:  v$$M.$$N-beta$$B-pre$$P / HIVE $$M.$$N-beta$$B-gui.$$G"
 
 # 交互式选择要打包进镜像的 app/*.c（回车默认保留当前状态）。
 # 选"不包含"时把源码移到 app/.disabled/（不是直接删除，可随时在下次
@@ -102,6 +107,8 @@ $(SRC_DIR)/version.h: Makefile version.mk
 	  '#define HBOS_VERSION_REL "$(HBOS_VERSION_REL)"' \
 	  '#define HBOS_VERSION_TAG "$(HBOS_VERSION)"' \
 	  '#define HBOS_VERSION_NAME "HBOS - He Bit OS " HBOS_VERSION' \
+	  '#define HIVE_VERSION_REL "$(HIVE_VERSION_REL)"' \
+	  '#define HIVE_VERSION_TAG "$(HIVE_VERSION_TAG)"' \
 	  '' \
 	  '#endif /* HBOS_VERSION_H */' > $@.tmp
 	@if cmp -s $@.tmp $@ 2>/dev/null; then rm -f $@.tmp; \
@@ -174,6 +181,7 @@ C_SRCS = \
 	$(SRC_DIR)/selftest.c \
 	$(SRC_DIR)/acpi.c \
 	$(SRC_DIR)/syscall.c \
+	$(SRC_DIR)/linux_compat.c \
 	$(SRC_DIR)/elf.c \
 	$(SRC_DIR)/devfs.c \
 	$(SRC_DIR)/rtc.c \
@@ -230,6 +238,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/cc.c \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/tools/tcc_runtime_seed.c \
+	$(SRC_DIR)/tools/hpt_repo_seed.c \
 	$(SRC_DIR)/tools/audio.c \
 	$(SRC_DIR)/rtc_tz.c \
 	$(APP_SRCS)
@@ -246,6 +255,7 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/compositor.c \
 	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gui/gui_dirty.c \
+	$(SRC_DIR)/gui/browser_backend.c \
 	$(SRC_DIR)/gui/gui_apps.c \
 	$(SRC_DIR)/gui/apps/app_calc.c \
 	$(SRC_DIR)/gui/apps/app_clock.c \
@@ -278,6 +288,7 @@ ASM_SRCS = \
 	$(SRC_DIR)/graphics/cjk_glyph.asm \
 	$(SRC_DIR)/user/tcc_runtime_blob.asm \
 	$(SRC_DIR)/user/tcc_headers_blob.asm \
+	$(SRC_DIR)/user/hpt_repo_blob.asm \
 	$(SRC_DIR)/smp_trampoline.asm
 
 ifeq ($(HBOS_ENABLE_GUI),1)
@@ -292,11 +303,19 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 # ── HAX 应用：./app/*.c 自动编译为 .hax 并打包进内核 ───────────────────
 # “只要 app 里有编译产物，就加入系统”：扫描 app/ 下的源码与预编译 .hax，
 # 由 genhax.py 读取各自的 .haxmeta 段，生成清单与二进制 blob 嵌入内核。
+HBOS_COMPAT_SMOKE ?= 0
 ifeq ($(HBOS_BUNDLE_APPS),1)
 HAX_APP_SRCS = $(wildcard $(APP_DIR)/*.c)
 HAX_APP_BINS = $(HAX_APP_SRCS:$(APP_DIR)/%.c=$(BUILD_DIR)/app/%.hax)
 HAX_PREBUILT = $(wildcard $(APP_DIR)/*.hax)
 HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax $(BUSYBOX_HAX)
+ifeq ($(HBOS_COMPAT_SMOKE),1)
+HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
+	$(BUILD_DIR)/tests/linux_syscall.hax \
+	$(BUILD_DIR)/tests/linux_pie.hax \
+	$(BUILD_DIR)/tests/linux_abi.hax \
+	$(BUILD_DIR)/tests/linux_epoll_et.hax
+endif
 else
 HAX_APP_SRCS =
 HAX_APP_BINS =
@@ -305,13 +324,14 @@ HAX_ALL_BINS =
 endif
 HAX_BLOB     = $(BUILD_DIR)/hax_blob.bin
 HAX_MANIFEST = $(BUILD_DIR)/hax_manifest.c
+HAX_MODE_STAMP = $(BUILD_DIR)/.hax-mode-$(HBOS_COMPAT_SMOKE)
 HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 include mk/secure_net.mk
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke chromium-baseline hive-test nogui nogui-bios nogui-uefi nogui-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke xhci-smoke chromium-baseline browser-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
 
 all: iso
 
@@ -322,8 +342,12 @@ help:
 	@echo "  make run-uefi   Boot UEFI hard disk image in QEMU"
 	@echo "  make release    Build ISOs plus VMware/VirtualBox disk images"
 	@echo "  make smoke      Build release and boot-test BIOS/UEFI ISO/HDD/VMDK"
+	@echo "  make xhci-smoke Boot-test xHCI keyboard and mouse enumeration"
 	@echo "  make chromium-baseline  Check module/API compatibility baseline"
+	@echo "  make browser-test  Run browser backend capability-gate tests"
 	@echo "  make hive-test  Run HIVE widget event/layout unit tests"
+	@echo "  make hive-sync  Export the transitional runtime/SDK mirror to HIVE_REPO"
+	@echo "  make linux-compat-lib  Build opt-in Linux source compatibility library"
 	@echo "  make nogui      Build BIOS/UEFI without desktop GUI or bundled apps"
 	@echo "  make run-nogui  Build and boot the no-GUI BIOS ISO in QEMU"
 	@echo "  make run-nogui-uefi  Build and boot the no-GUI UEFI ISO in QEMU"
@@ -410,6 +434,28 @@ $(BUILD_DIR)/tcc/headers.bin: tools/genheaders.py $(wildcard $(SRC_DIR)/user/lib
 	python3 tools/genheaders.py $(SRC_DIR)/user/libc $(TCC_DIR)/include $@
 
 $(BUILD_DIR)/user/tcc_headers_blob.o: $(SRC_DIR)/user/tcc_headers_blob.asm $(BUILD_DIR)/tcc/headers.bin | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
+
+# ── 内置 HPT 软件仓库 ─────────────────────────────────────────────────
+# 把打包在镜像里的 HAX 应用生成一份 HPT 仓库（Packages + pool/），打成 blob
+# 经 hpt_repo_blob.asm incbin 嵌入内核，开机由 src/tools/hpt_repo_seed.c
+# 解包到 ramfs /packages，让 `run hpt list/install/remove` 开箱可用。
+HPT_REPO_DIR       = $(BUILD_DIR)/hpt-repo
+HPT_REPO_PACKAGES  = $(HPT_REPO_DIR)/Packages
+HPT_REPO_BIN       = $(BUILD_DIR)/hpt-repo.bin
+
+$(BUILD_DIR)/hpt-repo:
+	mkdir -p $@
+
+$(HPT_REPO_PACKAGES): tools/genhpt_repo.py $(HAX_ALL_BINS) | $(BUILD_DIR)/hpt-repo
+	rm -f $(HPT_REPO_DIR)/*.hax
+	python3 tools/genhpt_repo.py $(BUILD_DIR)/app $(HPT_REPO_DIR)
+
+$(HPT_REPO_BIN): tools/genhptblob.py $(HPT_REPO_PACKAGES)
+	python3 tools/genhptblob.py $(HPT_REPO_DIR) $@
+
+$(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_BIN) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -556,8 +602,21 @@ release: $(ISO_BIOS) $(ISO_UEFI) $(VMWARE_BIOS_VMDK) $(VMWARE_UEFI_VMDK) $(VBOX_
 smoke:
 	bash scripts/smoke.sh
 
+linux-compat-smoke: $(ISO_BIOS)
+	bash scripts/test_linux_compat_smoke.sh $(ISO_BIOS)
+
+xhci-smoke: $(ISO_BIOS)
+	python3 scripts/test_usb_input.py
+	python3 scripts/test_usb_disk.py
+
 chromium-baseline:
 	bash scripts/check_chromium_baseline.sh
+
+browser-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc/gui \
+		tests/test_browser_backend.c src/gui/browser_backend.c \
+		-o $(BUILD_DIR)/test_browser_backend
+	$(BUILD_DIR)/test_browser_backend
 
 hive-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Iapp/include -Isrc/user \
@@ -568,6 +627,11 @@ hive-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/test_hive_winsrv
 	$(BUILD_DIR)/test_hive_winsrv
 	@echo "✓ HIVE UI 1.3 event/layout/widget tests"
+
+hive-sync:
+	@test -x "$(HIVE_REPO)/tools/sync-from-hbos.sh" || \
+		{ echo "HIVE repository not found at $(HIVE_REPO)" >&2; exit 1; }
+	$(MAKE) -C "$(HIVE_REPO)" sync HBOS_DIR="$(CURDIR)"
 
 nogui:
 	@$(MAKE) --no-print-directory BUILD_DIR=$(NOGUI_BUILD_DIR) \
@@ -762,6 +826,53 @@ USER_LIBC_SRCS = \
 	$(USER_LIBC_DIR)/getopt.c
 
 USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o) $(BUILD_DIR)/user/libc/setjmp.o
+USER_LINUX_COMPAT_OBJ = $(BUILD_DIR)/user/libc/linux.o
+USER_LINUX_COMPAT_LIB = $(BUILD_DIR)/user/libhboslinux.a
+
+.PHONY: linux-compat-lib linux-thread-test-bin
+linux-compat-lib: $(USER_LINUX_COMPAT_LIB)
+
+$(USER_LINUX_COMPAT_LIB): $(USER_LINUX_COMPAT_OBJ) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AR) rcs $@ $<
+	@echo "✓ Linux compatibility library: $@"
+
+linux-thread-test-bin: $(BUILD_DIR)/tests/linux_compat_thread.hax
+
+$(BUILD_DIR)/tests/linux_compat_thread.hax: tests/linux_compat_thread.c $(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_compat_thread.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_compat_thread.o $(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ Linux thread test binary: $@"
+
+$(BUILD_DIR)/tests/linux_epoll_et.hax: tests/linux_epoll_et.c $(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_epoll_et.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_epoll_et.o $(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ Linux epoll edge/one-shot test binary: $@"
+
+$(BUILD_DIR)/tests/linux_syscall.hax: tests/linux_syscall.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_syscall.o
+	$(LD) -m elf_x86_64 -static -nostdlib -e _start \
+		-Ttext 0x0000001001000000 $(BUILD_DIR)/tests/linux_syscall.o -o $@
+	@echo "✓ Native Linux syscall ELF: $@"
+
+$(BUILD_DIR)/tests/linux_pie.hax: tests/linux_syscall.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_pie.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_pie.o -o $@
+	@echo "✓ Native Linux static PIE: $@"
+
+$(BUILD_DIR)/tests/linux_abi.hax: tests/linux_abi.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_abi.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_abi.o -o $@
+	@echo "✓ Native Linux structure/vector ABI test: $@"
 
 USER_PROG_SRCS = $(wildcard $(USER_PROG_DIR)/*.c)
 USER_PROG_BINS = $(USER_PROG_SRCS:$(USER_PROG_DIR)/%.c=$(USER_BUILD_DIR)/%.elf)
@@ -867,7 +978,11 @@ BUSYBOX_HAX = $(BUSYBOX_APPLETS:%=$(BUILD_DIR)/app/%.hax)
 include mk/hpt.mk
 
 # 生成清单与 blob（grouped target：一次调用产出两者，GNU Make >= 4.3）
-$(HAX_BLOB) $(HAX_MANIFEST) &: $(HAX_ALL_BINS) tools/genhax.py | $(BUILD_DIR)
+$(HAX_MODE_STAMP): | $(BUILD_DIR)
+	@rm -f $(BUILD_DIR)/.hax-mode-0 $(BUILD_DIR)/.hax-mode-1
+	@touch $@
+
+$(HAX_BLOB) $(HAX_MANIFEST) &: $(HAX_ALL_BINS) tools/genhax.py $(HAX_MODE_STAMP) | $(BUILD_DIR)
 	python3 tools/genhax.py --blob $(HAX_BLOB) --manifest $(HAX_MANIFEST) $(HAX_ALL_BINS)
 
 # 编译生成的清单 C（位于 build/，需显式规则）

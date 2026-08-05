@@ -42,6 +42,11 @@ off_t lseek(int fd, off_t offset, int whence) {
     return (off_t)__syscall_errno(ret);
 }
 
+int ftruncate(int fd, off_t length) {
+    long ret = __syscall3(HBOS_SYS_FTRUNCATE, fd, length, 0);
+    return (int)__syscall_errno(ret);
+}
+
 int rmdir(const char *path) {
     long ret = __syscall1(HBOS_SYS_RMDIR, (long)path);
     return (int)__syscall_errno(ret);

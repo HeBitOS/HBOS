@@ -26,9 +26,9 @@ import os
 import sys
 
 SECTOR_SIZE = 512
-MAX_FILES = 64
+MAX_FILES = 128
 MAX_FILENAME = 32
-DEFAULT_MAX_FILE_SIZE = 65536
+DEFAULT_MAX_FILE_SIZE = 131072
 HBFS_MAGIC = 0x3146534248
 
 # Superblock layout: magic(8) + version(4) + start_lba(4) + max_files(4) +

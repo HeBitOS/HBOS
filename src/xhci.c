@@ -3,6 +3,9 @@
 #include "core/pmm.h"
 #include "core/vmm.h"
 #include "core/heap.h"
+#include "core/io.h"
+#include "core/task.h"
+#include "core/wait.h"
 #include "string.h"
 #include "unistd.h"
 
@@ -22,6 +25,7 @@
 #define XHCI_DCBAAP_LO     0x30
 #define XHCI_DCBAAP_HI     0x34
 #define XHCI_CONFIG         0x38
+#define XHCI_PAGESIZE       0x08
 
 #define XHCI_CMD_RS         (1 << 0)
 #define XHCI_CMD_HCRST      (1 << 1)
@@ -56,6 +60,32 @@
 #define XHCI_PORTSC_WOE      (1 << 27)
 #define XHCI_PORTSC_DR       (1 << 30)
 #define XHCI_PORTSC_WPR      (1 << 31)
+
+/*
+ * PORTSC 混合了 RO、RWS、RW1S 和 RW1C 位。按 Linux xHCI 驱动的 neutral
+ * 写法，只回写 RO 与“0 清/1 置”的 RWS 位，避免无意清除变化位或禁用端口。
+ */
+#define XHCI_PORTSC_RO       ((1U << 0) | (1U << 3) | \
+                              (0xFU << 10) | (1U << 30))
+#define XHCI_PORTSC_RWS      ((0xFU << 5) | (1U << 9) | \
+                              (0x3U << 14) | (0x7U << 25))
+
+#define XHCI_CONTROLLER_TIMEOUT_MS 1000U
+#define XHCI_PORT_TIMEOUT_MS       1000U
+#define XHCI_COMMAND_TIMEOUT_MS    1000U
+#define XHCI_TRANSFER_TIMEOUT_MS   1000U
+#define XHCI_HANDOVER_TIMEOUT_MS   1000U
+#define XHCI_INIT_MAX_STALL_SPINS  10000000U
+#define XHCI_IO_MAX_STALL_SPINS     5000000U
+#define XHCI_MMIO_MAP_SIZE             0x10000U
+#define XHCI_TRB_MAX_BUFFER             65536U
+
+#define XHCI_STATE_UNINITIALIZED 0U
+#define XHCI_STATE_READY         1U
+#define XHCI_STATE_FAILED        2U
+
+#define XHCI_COMP_SUCCESS       1U
+#define XHCI_COMP_SHORT_PACKET 13U
 
 #define TRB_NORMAL        1
 #define TRB_SETUP_STAGE   2
@@ -162,6 +192,10 @@ static void xhci_write_portsc(uint32_t port, uint32_t value) {
     xhci_op[(PORTSC_OFFSET + (port - 1) * 16) / 4] = value;
 }
 
+static uint32_t xhci_port_state_to_neutral(uint32_t portsc) {
+    return portsc & (XHCI_PORTSC_RO | XHCI_PORTSC_RWS);
+}
+
 static void xhci_ring_doorbell(uint32_t slot, uint32_t target) {
     if (xhci.doorbell) xhci.doorbell[slot] = target;
 }
@@ -242,7 +276,8 @@ static int xhci_wait_cmd_resp(void) {
     dbg_print_uint(xhci.event_ring_cycle);
     console_puts("\n");
 
-    for (int timeout = 0; timeout < 5000000; timeout++) {
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
         uint32_t idx = xhci.event_ring_idx;
         xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[idx];
         
@@ -258,7 +293,12 @@ static int xhci_wait_cmd_resp(void) {
             console_puts("\n");
         }
 
-        if (!xhci_event_ready(evt)) continue;
+        if (!xhci_event_ready(evt)) {
+            if (hw_deadline_expired_ms(&deadline, XHCI_COMMAND_TIMEOUT_MS,
+                                       XHCI_IO_MAX_STALL_SPINS)) break;
+            cpu_relax();
+            continue;
+        }
 
         uint32_t evt_type = (evt->param3 >> 10) & 0x3F;
         console_puts("[XHCI] Event ready! Type: ");
@@ -271,7 +311,7 @@ static int xhci_wait_cmd_resp(void) {
             dbg_print_uint(code);
             console_puts("\n");
             xhci_advance_event();
-            return code == 1 ? 0 : -code;
+            return code == XHCI_COMP_SUCCESS ? 0 : -code;
         }
 
         xhci_advance_event();
@@ -285,26 +325,28 @@ static int xhci_reset_controller(void) {
     cmd &= ~XHCI_CMD_RS;
     xhci_op_write32(XHCI_USBCMD, cmd);
 
-    for (int i = 0; i < 100000; i++) {
-        if (xhci_op_read32(XHCI_USBSTS) & XHCI_STS_HCH) break;
-        for (volatile int j = 0; j < 1000; j++);
+    hw_deadline_t deadline = hw_deadline_start();
+    while (!(xhci_op_read32(XHCI_USBSTS) & XHCI_STS_HCH)) {
+        if (hw_deadline_expired_ms(&deadline, XHCI_CONTROLLER_TIMEOUT_MS,
+                                   XHCI_INIT_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-
-    uint32_t status = xhci_op_read32(XHCI_USBSTS);
-    if (!(status & XHCI_STS_HCH)) return -1;
 
     xhci_op_write32(XHCI_USBCMD, XHCI_CMD_HCRST);
-    for (int i = 0; i < 100000; i++) {
-        if (!(xhci_op_read32(XHCI_USBCMD) & XHCI_CMD_HCRST)) break;
-        for (volatile int j = 0; j < 1000; j++);
+    deadline = hw_deadline_start();
+    while (xhci_op_read32(XHCI_USBCMD) & XHCI_CMD_HCRST) {
+        if (hw_deadline_expired_ms(&deadline, XHCI_CONTROLLER_TIMEOUT_MS,
+                                   XHCI_INIT_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    if (xhci_op_read32(XHCI_USBCMD) & XHCI_CMD_HCRST) return -1;
 
-    for (int i = 0; i < 100000; i++) {
-        if (!(xhci_op_read32(XHCI_USBSTS) & XHCI_STS_CNR)) break;
-        for (volatile int j = 0; j < 1000; j++);
+    deadline = hw_deadline_start();
+    while (xhci_op_read32(XHCI_USBSTS) & XHCI_STS_CNR) {
+        if (hw_deadline_expired_ms(&deadline, XHCI_CONTROLLER_TIMEOUT_MS,
+                                   XHCI_INIT_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return (xhci_op_read32(XHCI_USBSTS) & XHCI_STS_CNR) ? -1 : 0;
+    return 0;
 }
 
 static int xhci_init_rings(void) {
@@ -348,19 +390,22 @@ static int xhci_init_scratchpad(void) {
     if (!xhci.dcbaa) return -1;
     memset(xhci.dcbaa, 0, XHCI_MAX_SLOTS * 8 + 16);
 
-    if (xhci.max_scratchpad > 0 && xhci.max_scratchpad <= XHCI_MAX_SCRATCHPAD_BUFFERS) {
+    if (xhci.max_scratchpad > XHCI_MAX_SCRATCHPAD_BUFFERS) return -1;
+    if (xhci.max_scratchpad > 0) {
         uint64_t scratchpad_array_phys = 0;
         xhci.scratchpad_array = (uint64_t *)xhci_alloc_aligned(
             xhci.max_scratchpad * 8, &scratchpad_array_phys);
-        if (xhci.scratchpad_array) {
-            for (uint32_t i = 0; i < xhci.max_scratchpad; i++) {
-                uint64_t scratchpad_phys = 0;
-                xhci.scratchpad_buffers[i] = (uint64_t *)xhci_alloc_aligned(
-                    4096, &scratchpad_phys);
-                xhci.scratchpad_array[i] = scratchpad_phys;
-            }
-            xhci.dcbaa[0] = scratchpad_array_phys;
+        if (!xhci.scratchpad_array) return -1;
+        memset(xhci.scratchpad_array, 0, xhci.max_scratchpad * 8);
+        for (uint32_t i = 0; i < xhci.max_scratchpad; i++) {
+            uint64_t scratchpad_phys = 0;
+            xhci.scratchpad_buffers[i] = (uint64_t *)xhci_alloc_aligned(
+                4096, &scratchpad_phys);
+            if (!xhci.scratchpad_buffers[i]) return -1;
+            memset(xhci.scratchpad_buffers[i], 0, 4096);
+            xhci.scratchpad_array[i] = scratchpad_phys;
         }
+        xhci.dcbaa[0] = scratchpad_array_phys;
     }
 
     xhci_op_write32(XHCI_DCBAAP_LO, (uint32_t)(xhci.dcbaa_phys & 0xFFFFFFFF));
@@ -374,31 +419,37 @@ static int xhci_start_controller(void) {
     cmd |= XHCI_CMD_RS;
     xhci_op_write32(XHCI_USBCMD, cmd);
 
-    for (int i = 0; i < 100000; i++) {
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
         if (!(xhci_op_read32(XHCI_USBSTS) & XHCI_STS_HCH)) return 0;
-        for (volatile int j = 0; j < 1000; j++);
+        if (hw_deadline_expired_ms(&deadline, XHCI_CONTROLLER_TIMEOUT_MS,
+                                   XHCI_INIT_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return -1;
 }
 
 static int xhci_reset_port(uint32_t port) {
     uint32_t portsc = xhci_read_portsc(port);
-    portsc |= XHCI_PORTSC_PR;
-    xhci_write_portsc(port, portsc);
+    xhci_write_portsc(port, xhci_port_state_to_neutral(portsc) |
+                      XHCI_PORTSC_PR);
 
-    for (int i = 0; i < 500000; i++) {
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
         portsc = xhci_read_portsc(port);
         if (!(portsc & XHCI_PORTSC_PR)) break;
-        for (volatile int j = 0; j < 1000; j++);
+        if (hw_deadline_expired_ms(&deadline, XHCI_PORT_TIMEOUT_MS,
+                                   XHCI_INIT_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    if (xhci_read_portsc(port) & XHCI_PORTSC_PR) return -1;
 
-    for (int i = 0; i < 100000; i++) {
+    deadline = hw_deadline_start();
+    for (;;) {
         portsc = xhci_read_portsc(port);
-        if (portsc & XHCI_PORTSC_PED) break;
-        for (volatile int j = 0; j < 1000; j++);
+        if (portsc & XHCI_PORTSC_PED) return 0;
+        if (hw_deadline_expired_ms(&deadline, XHCI_PORT_TIMEOUT_MS,
+                                   XHCI_INIT_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
     }
-    return (xhci_read_portsc(port) & XHCI_PORTSC_PED) ? 0 : -1;
 }
 
 static int xhci_setup_device_context(uint32_t slot_id) {
@@ -475,7 +526,11 @@ static int xhci_configure_endpoint(uint32_t slot_id, uint32_t ep_type,
 
     uint32_t *ctx = (uint32_t *)input_ctx;
     ctx[1] = (1 << 0) | (1 << ep_id); /* Add slot + target endpoint */
-    ctx[8] = (ep_id << 27);
+    uint32_t context_entries = ep_id;
+    for (uint32_t i = ep_id + 1; i < XHCI_MAX_EP; i++) {
+        if (xhci.ep_configured[slot_id][i]) context_entries = i;
+    }
+    ctx[8] = context_entries << 27;
 
     uint32_t ep_off = 16 + (ep_id - 1) * 8;
     ctx[ep_off + 0] = (interval & 0xFF) << 16;
@@ -547,15 +602,19 @@ static int xhci_init_internal(void) {
     dbg_print_hex16((uint16_t)(bar0 >> 16));
     dbg_print_hex16((uint16_t)(bar0 & 0xFFFF));
     console_puts("\n");
-    if (!(bar0 & 0xFFFFFFF0)) {
+    int bar_is_io = 0;
+    uint64_t bar_address = pci_bar_address(dev.bus, dev.slot, dev.func, 0,
+                                           &bar_is_io);
+    if (!bar_address || bar_is_io) {
         console_puts("[XHCI] BAR0 is invalid!\n");
         return -1;
     }
-    xhci.mmio_phys = bar0 & 0xFFFFFFF0;
+    xhci.mmio_phys = bar_address;
 
     pci_enable_bus_master_mmio(&dev);
 
-    xhci.mmio = (volatile uint32_t *)vmm_map_mmio(xhci.mmio_phys, 0x10000);
+    xhci.mmio = (volatile uint32_t *)vmm_map_mmio(
+        xhci.mmio_phys, XHCI_MMIO_MAP_SIZE);
     if (!xhci.mmio) {
         console_puts("[XHCI] MMIO mapping failed!\n");
         return -1;
@@ -563,6 +622,10 @@ static int xhci_init_internal(void) {
     console_puts("[XHCI] MMIO mapped successfully.\n");
 
     uint8_t caplength = (uint8_t)(xhci_read32(XHCI_CAPLENGTH) & 0xFF);
+    if (caplength < 0x20U) {
+        console_puts("[XHCI] Invalid capability length!\n");
+        return -1;
+    }
     xhci_op = (volatile uint32_t *)((uint8_t *)xhci.mmio + caplength);
 
     uint32_t hcsparams1 = xhci_read32(XHCI_HCSPARAMS1);
@@ -571,7 +634,9 @@ static int xhci_init_internal(void) {
 
     // --- BIOS Legacy Handover ---
     uint32_t ext_cap_offset = (hccparams1 >> 16) << 2;
-    while (ext_cap_offset) {
+    uint32_t ext_cap_hops = 0;
+    while (ext_cap_offset && ext_cap_offset + 8U <= 0x10000U &&
+           ext_cap_hops++ < 64U) {
         uint32_t cap = xhci_read32(ext_cap_offset);
         uint32_t cap_id = cap & 0xFF;
         if (cap_id == 1) { // USB Legacy Support
@@ -582,14 +647,14 @@ static int xhci_init_internal(void) {
                 val |= (1 << 16); // OS owned
                 xhci_write32(ext_cap_offset, val);
                 
-                int timeout = 1000;
-                while (timeout-- > 0) {
+                hw_deadline_t handover_deadline = hw_deadline_start();
+                while (val & (1U << 24)) {
                     val = xhci_read32(ext_cap_offset);
-                    if (!(val & (1 << 24))) {
-                        break;
-                    }
-                    // Delay using volatile loop to be safe in early boot
-                    for (volatile int j = 0; j < 10000; j++);
+                    if (!(val & (1U << 24))) break;
+                    if (hw_deadline_expired_ms(
+                            &handover_deadline, XHCI_HANDOVER_TIMEOUT_MS,
+                            XHCI_INIT_MAX_STALL_SPINS)) break;
+                    cpu_relax();
                 }
                 if (val & (1 << 24)) {
                      console_puts("[XHCI] Handover timed out! Forcing OS ownership...\n");
@@ -615,11 +680,23 @@ static int xhci_init_internal(void) {
         ext_cap_offset += next << 2;
     }
 
-    xhci.max_slots = (hcsparams1 & 0xFF);
-    xhci.max_ports = (hcsparams1 >> 24) & 0xFF;
-    xhci.max_scratchpad = (hcsparams2 >> 21) & 0x1F;
-    uint32_t db_offset = xhci_read32(XHCI_DBOFF) & 0xFFFFFFFF;
-    uint32_t rts_offset = xhci_read32(XHCI_RTSOFF) & 0xFFFFFFFF;
+    xhci.max_slots = hcsparams1 & 0xFFU;
+    if (xhci.max_slots > XHCI_MAX_SLOTS) xhci.max_slots = XHCI_MAX_SLOTS;
+    xhci.max_ports = (hcsparams1 >> 24) & 0xFFU;
+    if (xhci.max_ports > XHCI_MAX_PORTS) xhci.max_ports = XHCI_MAX_PORTS;
+    xhci.max_scratchpad = (((hcsparams2 >> 27) & 0x1FU) << 5) |
+                          ((hcsparams2 >> 21) & 0x1FU);
+    if (!xhci.max_slots || !xhci.max_ports) return -1;
+
+    uint32_t db_offset = xhci_read32(XHCI_DBOFF) & ~0x3U;
+    uint32_t rts_offset = xhci_read32(XHCI_RTSOFF) & ~0x1FU;
+    uint64_t doorbell_end = (uint64_t)db_offset +
+                            ((uint64_t)xhci.max_slots + 1U) * sizeof(uint32_t);
+    if (doorbell_end > XHCI_MMIO_MAP_SIZE ||
+        (uint64_t)rts_offset + 0x40U > XHCI_MMIO_MAP_SIZE) {
+        console_puts("[XHCI] MMIO register offsets exceed mapped BAR!\n");
+        return -1;
+    }
 
     xhci.doorbell = (volatile uint32_t *)((uint8_t *)xhci.mmio + db_offset);
     xhci.runtime = (volatile uint32_t *)((uint8_t *)xhci.mmio + rts_offset);
@@ -628,6 +705,11 @@ static int xhci_init_internal(void) {
         console_puts("[XHCI] Controller reset failed!\n");
         return -1;
     }
+    if (!(xhci_op_read32(XHCI_PAGESIZE) & 1U)) {
+        console_puts("[XHCI] Controller does not support 4KiB pages!\n");
+        return -1;
+    }
+    xhci.page_size = 4096U;
     if (xhci_init_rings() < 0) {
         console_puts("[XHCI] Ring initialization failed!\n");
         return -1;
@@ -691,20 +773,20 @@ static int xhci_init_internal(void) {
 }
 
 int xhci_init(void) {
-    if (xhci.initialized) {
-        return xhci.initialized == 1 ? 0 : -1;
+    if (xhci.initialized != XHCI_STATE_UNINITIALIZED) {
+        return xhci.initialized == XHCI_STATE_READY ? 0 : -1;
     }
     int ret = xhci_init_internal();
     if (ret < 0) {
-        xhci.initialized = 2; // Permanently mark as failed
+        xhci.initialized = XHCI_STATE_FAILED;
     } else {
-        xhci.initialized = 1; // Successfully initialized
+        xhci.initialized = XHCI_STATE_READY;
     }
     return ret;
 }
 
 void xhci_poll(void) {
-    if (!xhci.initialized) return;
+    if (xhci.initialized != XHCI_STATE_READY) return;
 
     uint32_t usbsts = xhci_op_read32(XHCI_USBSTS);
     if (usbsts & XHCI_STS_EINT) {
@@ -728,11 +810,9 @@ void xhci_poll(void) {
                 int code = (evt->param2 >> 24) & 0xFF;
 
                 if (slot > 0 && slot <= xhci.max_slots && ep > 0 && ep < XHCI_MAX_EP) {
-                    if (code == 1 || code == 0x26) {
-                        xhci.ep_has_data[slot][ep] = 1;
-                    } else {
-                        xhci.ep_has_data[slot][ep] = code;
-                    }
+                    xhci.ep_transfer_residue[slot][ep] =
+                        evt->param2 & 0x00FFFFFFU;
+                    xhci.ep_has_data[slot][ep] = (uint32_t)code;
                     
                     if (xhci.ep_data_buf[slot][ep]) {
                         // Re-enqueue the TRB to keep polling
@@ -780,14 +860,6 @@ int xhci_get_device_desc(int idx, usb_device_desc_t *desc) {
     if (ret >= 0) memcpy(desc, buf, 18);
     kfree(buf);
     return ret;
-}
-
-extern void task_yield(void);
-
-static inline uint64_t rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
 }
 
 static xhci_trb_t *xhci_get_or_create_ep_ring(uint32_t slot_id, uint32_t ep_id,
@@ -878,7 +950,8 @@ static void xhci_post_transfer_trb(uint32_t slot_id, uint32_t ep_id,
 int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           uint8_t bRequest, uint16_t wValue,
                           uint16_t wIndex, void *data, uint16_t wLength) {
-    if (!xhci.initialized || slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
+    if (xhci.initialized != XHCI_STATE_READY || slot_id <= 0 ||
+        (uint32_t)slot_id > xhci.max_slots) return -1;
     if (!xhci.slot_enabled[slot_id]) return -1;
 
     uint64_t ring_phys;
@@ -926,12 +999,14 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
     xhci_ring_doorbell((uint32_t)slot_id, 1);
 
     int ret_val = -1;
-    for (int i = 0; i < 5000000; i++) {
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
         xhci_poll();
         uint32_t code = xhci.ep_has_data[slot_id][1];
         if (code != 0) {
             xhci.ep_has_data[slot_id][1] = 0;
-            if (code == 1 || code == 0x26) {
+            if (code == XHCI_COMP_SUCCESS ||
+                code == XHCI_COMP_SHORT_PACKET) {
                 if (data_buf && dir_in) memcpy(data, data_buf, wLength);
                 ret_val = (int)wLength;
             } else {
@@ -939,6 +1014,8 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
             }
             break;
         }
+        if (hw_deadline_expired_ms(&deadline, XHCI_TRANSFER_TIMEOUT_MS,
+                                   XHCI_IO_MAX_STALL_SPINS)) break;
         task_yield();
     }
 
@@ -946,10 +1023,13 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
     return ret_val;
 }
 
-int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
-    if (!xhci.initialized || !data || !len) return -1;
+int xhci_bulk_transfer_packet(int slot_id, int ep_addr, void *data,
+                              uint32_t len, uint32_t max_packet) {
+    if (xhci.initialized != XHCI_STATE_READY || !data || !len) return -1;
+    if (len > XHCI_TRB_MAX_BUFFER) return -1;
     if (slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
     if (!xhci.slot_enabled[slot_id]) return -1;
+    if (!max_packet || max_packet > 1024U) return -1;
 
     int ep_num = ep_addr & 0x0F;
     int is_in = (ep_addr & 0x80) ? 1 : 0;
@@ -957,13 +1037,19 @@ int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
 
     uint32_t ep_type = is_in ? EP_CTX_BULK_IN : 2; /* EP_CTX_BULK_OUT = 2 */
     uint64_t ring_phys = 0;
-    xhci_trb_t *ring = xhci_get_or_create_ep_ring((uint32_t)slot_id, ep_id, ep_type, 512, 0, &ring_phys);
+    xhci_trb_t *ring = xhci_get_or_create_ep_ring(
+        (uint32_t)slot_id, ep_id, ep_type, max_packet, 0, &ring_phys);
     if (!ring) return -1;
 
     /* Data buffer for the transfer */
-    uint64_t data_phys = 0;
-    void *data_buf = xhci_alloc_aligned(len, &data_phys);
+    void *data_buf = kmalloc_aligned(len, XHCI_TRB_MAX_BUFFER);
     if (!data_buf) return -1;
+    uint64_t data_phys =
+        vmm_virt_to_phys((uint64_t)(uintptr_t)data_buf);
+    if ((data_phys & (XHCI_TRB_MAX_BUFFER - 1U)) != 0) {
+        kfree(data_buf);
+        return -1;
+    }
 
     if (is_in) {
         memset(data_buf, 0, len);
@@ -982,27 +1068,27 @@ int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
     xhci_ring_doorbell((uint32_t)slot_id, ep_id);
 
     int ret_val = -1;
-    uint64_t start_tsc = rdtsc();
-    uint64_t timeout_ticks = 1000ULL * 1000000ULL; // 1-second timeout
-
-    while (1) {
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
         xhci_poll();
         uint32_t code = xhci.ep_has_data[slot_id][ep_id];
         if (code != 0) {
             xhci.ep_has_data[slot_id][ep_id] = 0;
-            if (code == 1 || code == 0x26) {
+            if (code == XHCI_COMP_SUCCESS ||
+                code == XHCI_COMP_SHORT_PACKET) {
+                uint32_t residue = xhci.ep_transfer_residue[slot_id][ep_id];
+                uint32_t actual = residue <= len ? len - residue : 0;
                 if (is_in) {
-                    memcpy(data, data_buf, len);
+                    memcpy(data, data_buf, actual);
                 }
-                ret_val = (int)len;
+                ret_val = (int)actual;
             } else {
                 ret_val = -(int)code;
             }
             break;
         }
-        if (rdtsc() - start_tsc >= timeout_ticks) {
-            break;
-        }
+        if (hw_deadline_expired_ms(&deadline, XHCI_TRANSFER_TIMEOUT_MS,
+                                   XHCI_IO_MAX_STALL_SPINS)) break;
         task_yield();
     }
 
@@ -1010,8 +1096,12 @@ int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
     return ret_val;
 }
 
+int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
+    return xhci_bulk_transfer_packet(slot_id, ep_addr, data, len, 512U);
+}
+
 int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len, uint32_t interval) {
-    if (!xhci.initialized || !data || !len) return -1;
+    if (xhci.initialized != XHCI_STATE_READY || !data || !len) return -1;
     if (slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
     if (!xhci.slot_enabled[slot_id]) return -1;
 
@@ -1033,9 +1123,12 @@ int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len, 
     uint32_t code = xhci.ep_has_data[slot_id][ep_id];
     if (code != 0) {
         xhci.ep_has_data[slot_id][ep_id] = 0;
-        if (code == 1 || code == 0x26) {
-            uint32_t copy_len = len;
-            if (copy_len > max_packet) copy_len = max_packet;
+        if (code == XHCI_COMP_SUCCESS ||
+            code == XHCI_COMP_SHORT_PACKET) {
+            uint32_t residue = xhci.ep_transfer_residue[slot_id][ep_id];
+            uint32_t copy_len = residue <= max_packet
+                              ? max_packet - residue : 0;
+            if (copy_len > len) copy_len = len;
             memcpy(data, xhci.ep_data_buf[slot_id][ep_id], copy_len);
             return (int)copy_len;
         }

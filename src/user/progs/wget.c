@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
 
     char buf[4096];
     while (1) {
-        int n = recv(sock, buf, sizeof(buf) - 1);
+        int n = (int)recv(sock, buf, sizeof(buf) - 1, 0);
         if (n <= 0) break;
         buf[n] = '\0';
         printf("%s", buf);
