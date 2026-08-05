@@ -4,6 +4,8 @@
 
 当前版本：`v0.1-beta5-pre5` · 支持 BIOS / UEFI · 正在积极开发
 
+GUI 版本：`HIVE 0.1-beta5-gui.3`（Toolkit API 1.3）
+
 ![HBOS 桌面截图](photo/v0.1beta3.png)
 
 _截图来自 beta3；beta5 的 HIVE 界面仍在持续迭代。_
@@ -236,9 +238,17 @@ HBOS/
 | [`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md) | 内核、GUI、应用拆仓边界 |
 | [`docs/CHROMIUM_COMPAT_BASELINE.md`](docs/CHROMIUM_COMPAT_BASELINE.md) | Chromium 兼容工作的阶段 1 基线 |
 | [`CHROMIUM_COMPAT_ROADMAP.md`](CHROMIUM_COMPAT_ROADMAP.md) | Chromium 平台兼容层十阶段计划 |
+| [`docs/LINUX_KDE_COMPAT.md`](docs/LINUX_KDE_COMPAT.md) | 轻量 Linux ABI 与原版 KDE 分阶段路线 |
+| [`HIVE/docs/BROWSER_BILIBILI_UPGRADE.md`](HIVE/docs/BROWSER_BILIBILI_UPGRADE.md) | 浏览器现状、Vue/Bilibili 技术栈审计与分级验收方案 |
 
 Chromium 目前尚未移植；路线图描述的是兼容层建设计划，而不是已经可运行的
 Chromium 浏览器。
+
+HBOS 也在建设轻量 Linux ABI 兼容层，现已提供原生 x86-64 `syscall`、静态
+ELF/PIE、线程/TLS、`poll`/`epoll`/`eventfd`/`futex`、AF_UNIX、
+`SCM_RIGHTS`、memfd 与 `MAP_SHARED` 基线。长期目标是在不修改
+KDE/Qt/Plasma 上游源码的情况下运行 KDE；动态 `PT_INTERP` 和通用发行版
+Linux 二进制仍不属于已支持范围。
 
 ## 当前限制
 
@@ -250,7 +260,7 @@ Chromium 浏览器。
 
 ## 版本简史
 
-- `beta5 pre5`：HIVE 1.1、no-GUI 构建边界、浏览器/TLS 兼容性和模块化路线。
+- `beta5 pre5`：HIVE Toolkit API 1.3、no-GUI 构建边界、浏览器/TLS 兼容性和模块化路线。
 - `beta4`：新桌面、TinyCC、动态链接、BusyBox、网络栈和真机输入修复。
 - `beta3`：桌面交互、任务栏、日历、字体、终端刷新与虚拟机启动改进。
 - `beta2`：BIOS/UEFI 双 ISO、文件工作流、HBFS、系统自测与磁盘工具。

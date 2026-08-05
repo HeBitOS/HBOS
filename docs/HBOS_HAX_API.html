@@ -51,7 +51,7 @@
   <div style="height:4.5cm;"></div>
   <div style="background:#14a6e0; color:#fff; padding:22px 18px; font-size:11pt; font-weight:600;">
     HBOS APPLICATION DEVELOPER GUIDE<br>
-    <span style="font-size:9.5pt; font-weight:400;">2026/07/29 &nbsp;·&nbsp; VERSION 1.6 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; SDK rev.7（HAX ABI + HIVE 1.3）</span>
+    <span style="font-size:9.5pt; font-weight:400;">2026/07/29 &nbsp;·&nbsp; VERSION 1.6 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; HIVE 0.1-beta5-gui.3（Toolkit API 1.3）</span>
   </div>
 </div>
 
@@ -95,7 +95,7 @@
   <div class="s">4.4 ls —— 列出目录内容</div>
   <div class="s">4.5 GUI 全屏画布（文档示例）</div>
   <div class="s">4.6 HIVE 并发窗口（文档示例）</div>
-  <div class="s">4.7 HIVE 1.3 控件（文档示例）</div>
+  <div class="s">4.7 HIVE Toolkit API 1.3 控件（文档示例）</div>
   <div class="c">附录 A — 底层 POSIX 系统调用速查</div>
   <div class="c">附录 B — hax_meta_t 二进制布局</div>
   <div class="c">附录 C — 常见构建错误排查</div>
@@ -409,7 +409,7 @@ hax_win_close();</pre>
 窗口的事件队列。应用退出后窗口自动回收。最多 8 个并发窗口，单窗口最大 900×640。窗口应用应从
 <b>开始菜单</b>或在 GUI 终端用 <code>run</code> 启动（均为非阻塞）。鼠标按下后由内容窗口捕获，
 移动和松开事件会继续投递；连续移动事件自动合并，防止事件队列被填满。</div>
-<p><b>HIVE 1.3 / 窗口 ABI v2：</b>应用可用 <code>hive_window_query</code> 查询能力，
+<p><b>HIVE 0.1-beta5-gui.3 / Toolkit API 1.3 / 窗口 ABI v2：</b>应用可用 <code>hive_window_query</code> 查询能力，
 通过 <code>hive_window_create</code> 创建多个带显式代数句柄的窗口，并独立设置标题、几何和
 普通/最小化/最大化状态。<code>hive_window_draw</code> 支持批量 Clear、Fill、Text 与 ARGB
 位图上传，<code>hive_window_present_rect</code> 支持脏矩形提交；事件扩展为 Move、Resize、
@@ -473,7 +473,7 @@ while (hive_window_active(&amp;w, &amp;h)) {
     hive_yield();
 }
 done: hive_window_close();</pre>
-<div class="warn">HIVE 1.3 能按 UTF-8 码点移动、鼠标/键盘选择、替换和删除已有文本；
+<div class="warn">HIVE Toolkit API 1.3 能按 UTF-8 码点移动、鼠标/键盘选择、替换和删除已有文本；
 窗口键盘事件目前仍只直接产生可打印 ASCII，完整中文输入法、系统剪贴板和无障碍语义
 将在后续版本追加。</div>
 </div>
@@ -733,7 +733,7 @@ done:
     return 0;
 }</pre>
 
-<h2>4.7 HIVE 1.3 控件（文档示例）</h2>
+<h2>4.7 HIVE Toolkit API 1.3 控件（文档示例）</h2>
 <p>以下片段覆盖首批控件、悬停/按下反馈、
 滑杆拖动、控件联动、动态文本和响应式网格。布局代码不硬编码每个控件的绝对宽度：</p>
 <pre>hive_layout_t layout;

@@ -115,3 +115,6 @@ Git 仓库前还需要：
 HIVE 仓库首轮以源码镜像方式接收 runtime、SDK 和已独立的 HAX 应用；HBOS
 仓库暂时保留集成副本，直到 runtime 完成 ring3 服务化并建立可版本化的
 Kernel SDK。迁移期间不建立反向依赖，也不重写 HBOS 现有 Git 历史。
+
+当前镜像可通过 `make hive-sync HIVE_REPO=/path/to/HIVE` 显式同步；该目标
+不参与 HBOS 的正常构建，也不会让内核反向依赖 HIVE 仓库。

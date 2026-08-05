@@ -1,8 +1,23 @@
 # HIVE 桌面与应用 API
 
 > HIVE：HBOS Interface & Visual Environment
-> 当前工具包版本：1.3
+> 当前 GUI 版本：0.1-beta5-gui.3
+> 当前 Toolkit API 版本：1.3
 > 首选头文件：`app/include/hive.h`
+
+## 版本规则
+
+HIVE GUI 发布版本使用 `<HBOS主版本>.<HBOS次版本>-beta<阶段>-gui.<修订号>`
+格式。当前版本为 `HIVE 0.1-beta5-gui.3`：
+
+- 前半段 `0.1-beta5` 表示兼容的 HBOS 发布线，不包含 HBOS 内部 `pre`
+  构建号。
+- `gui.3` 表示该发布线上的第 3 个 GUI 版本；窗口管理、桌面交互、主题或
+  控件行为发生可见变化时递增。
+- HBOS 进入新的 beta 发布线后，前半段随之更新，GUI 修订号从 `gui.1`
+  重新开始。
+- Toolkit API 版本独立编号；当前为 `1.3`，只在公开接口或行为契约变化时
+  更新。
 
 ## 分层
 
@@ -72,7 +87,7 @@ done:
 
 ## 显式窗口 API
 
-HIVE 1.3 保留 `hive_window_open()` 等单窗口兼容接口，并提供带不透明句柄的
+HIVE 0.1-beta5-gui.3（Toolkit API 1.3）保留 `hive_window_open()` 等单窗口兼容接口，并提供带不透明句柄的
 显式接口：
 
 ```c
