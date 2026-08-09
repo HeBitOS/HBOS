@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
 
 #include "../acpi.h"
@@ -4957,47 +4958,79 @@ static void br_img_url_rewrite(char *url, uint32_t cap) {
  * 共用）：返回 0 表示有脚本执行；title/out 由调用者提供缓冲。 */
 int browser_exec_scripts_core(const char *body, char *title, uint32_t title_cap,
                               char *out, uint32_t out_cap) {
-    static char script[8192];
-    uint32_t slen = 0;
     const char *p = body;
+    int script_count = 0;
     int ran = 0;
 
     if (!body) return 0;
-    while (*p && slen < sizeof(script) - 2) {
+    /* v1: each inline script is written to its own file and evaluated in
+     * its own unit — a SyntaxError in one (e.g. Vite import.meta chunks)
+     * must not block the remaining scripts.  External src= scripts are
+     * skipped. */
+    while (*p && script_count < 12) {
+        static char script[8192];
+        uint32_t slen = 0;
         const char *s = body_strcasestr(p, "<script");
         if (!s) break;
         const char *gt = strchr(s, '>');
         if (!gt) break;
-        /* 外链脚本（src=...）v1 不执行——网络子加载会增加加载时长，
-         * 且 bilibili 的外链脚本全是打包后的框架代码。 */
         const char *src_attr = body_strcasestr(s, "src");
         if (src_attr && src_attr < gt) { p = gt + 1; continue; }
         const char *end = body_strcasestr(gt + 1, "</script>");
         if (!end) break;
         size_t n = (size_t)(end - (gt + 1));
-        if (slen + n + 1 < sizeof(script)) {
-            memcpy(script + slen, gt + 1, n);
-            slen += (uint32_t)n;
-            script[slen++] = ';';
+        if (n > sizeof(script) - 1) n = sizeof(script) - 1;
+        if (n > 0) {
+            char path[32];
+            static const char pfx[] = "/system/js_p";
+            static const char sfx[] = ".js";
+            uint32_t pi = 0;
+            for (const char *q = pfx; *q && pi < sizeof(path) - 1; q++)
+                path[pi++] = *q;
+            if (script_count >= 10) path[pi++] = (char)('0' + script_count / 10);
+            path[pi++] = (char)('0' + script_count % 10);
+            for (const char *q = sfx; *q && pi < sizeof(path) - 1; q++)
+                path[pi++] = *q;
+            path[pi] = 0;
+            memcpy(script, gt + 1, n);
+            script[n] = 0;
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                size_t off = 0;
+                while (off < n) {
+                    long w = write(fd, script + off, n - off);
+                    if (w <= 0) break;
+                    off += (size_t)w;
+                }
+                close(fd);
+                script_count++;
+            }
         }
         p = end + 9;
     }
-    if (!slen) return 0;
-    script[slen] = 0;
+    if (!script_count) return 0;
 
-    int fd = open("/system/js_page.js", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return 0;
-    size_t off = 0;
-    while (off < slen) {
-        long n = write(fd, script + off, slen - off);
-        if (n <= 0) break;
-        off += (size_t)n;
+    char *js_argv[16];
+    int a = 0;
+    js_argv[a++] = "js";
+    js_argv[a++] = "-w";
+    js_argv[a++] = "/system/js_out.txt";
+    for (int i = 0; i < script_count && a < 15; i++) {
+        static char path[16][32];
+        static const char pfx[] = "/system/js_p";
+        static const char sfx[] = ".js";
+        uint32_t pi = 0;
+        for (const char *q = pfx; *q && pi < sizeof(path[i]) - 1; q++)
+            path[i][pi++] = *q;
+        if (i >= 10) path[i][pi++] = (char)('0' + i / 10);
+        path[i][pi++] = (char)('0' + i % 10);
+        for (const char *q = sfx; *q && pi < sizeof(path[i]) - 1; q++)
+            path[i][pi++] = *q;
+        path[i][pi] = 0;
+        js_argv[a++] = path[i];
     }
-    close(fd);
-
-    char *js_argv[] = { "js", "-w", "/system/js_out.txt",
-                        "/system/js_page.js", 0 };
-    (void)hax_app_run("js", 4, js_argv);
+    js_argv[a] = 0;
+    (void)hax_app_run("js", a, js_argv);
     ran = 1;
 
     /* 读回 title（第一行）+ 脚本输出（其余行） */

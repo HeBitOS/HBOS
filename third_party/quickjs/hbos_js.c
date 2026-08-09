@@ -63,6 +63,7 @@ static void print_exception(JSContext *ctx) {
 static char g_js_out[8192];
 static size_t g_js_out_len;
 static char g_js_title[256];
+static char g_js_href[512] = "about:blank";
 static int g_js_out_file = -1;
 
 static void capture_out(const char *s, size_t n) {
@@ -119,6 +120,34 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this_val,
     return js_print_internal(ctx, argc, argv, 1);
 }
 
+/* DOM stubs so real-world inline scripts (e.g. bilibili's boot scripts)
+ * parse and run instead of throwing: no DOM tree exists in v1, so
+ * querySelector returns null and navigator/location carry fixed values. */
+static JSValue js_document_querySelector(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    return JS_NULL;
+}
+
+static JSValue js_document_getElementById(JSContext *ctx,
+                                          JSValueConst this_val, int argc,
+                                          JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    return JS_NULL;
+}
+
+static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    return JS_NULL;
+}
+
 static JSValue js_document_write(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
     (void)this_val;
@@ -131,6 +160,67 @@ static JSValue js_document_write(JSContext *ctx, JSValueConst this_val,
     }
     return JS_UNDEFINED;
 }
+
+static const char dom_stub_js[] =
+    "var _hbos_el = function(){ return {"
+    " innerHTML:'', textContent:'', value:'', className:'', id:'',"
+    " style:{}, dataset:{}, classList:{add:function(){},"
+    "  remove:function(){}, contains:function(){return false},"
+    "  toggle:function(){}},"
+    " setAttribute:function(){}, getAttribute:function(){return null},"
+    " removeAttribute:function(){},"
+    " appendChild:function(){return arguments[0]},"
+    " removeChild:function(){}, insertBefore:function(){},"
+    " replaceChild:function(){}, cloneNode:function(){return _hbos_el()},"
+    " addEventListener:function(){}, removeEventListener:function(){},"
+    " dispatchEvent:function(){return false},"
+    " querySelector:function(){return _hbos_el()},"
+    " querySelectorAll:function(){return []},"
+    " getElementsByTagName:function(){return []},"
+    " getBoundingClientRect:function(){return {top:0,left:0,width:0,"
+    "  height:0,right:0,bottom:0}},"
+    " contains:function(){return false}, focus:function(){},"
+    " blur:function(){}, click:function(){},"
+    " parentNode:null, parentElement:null, firstChild:null,"
+    " lastChild:null, nextSibling:null, previousSibling:null,"
+    " children:[], childNodes:[], nodeType:1, nodeName:'DIV',"
+    " tagName:'DIV', offsetWidth:0, offsetHeight:0,"
+    " scrollIntoView:function(){}, remove:function(){}"
+    " }; };"
+    "document.querySelector=function(){return _hbos_el()};"
+    "document.querySelectorAll=function(){return []};"
+    "document.getElementById=function(){return _hbos_el()};"
+    "document.getElementsByTagName=function(){return []};"
+    "document.getElementsByClassName=function(){return []};"
+    "document.createElement=function(){return _hbos_el()};"
+    "document.createTextNode=function(){return {nodeType:3,"
+    " textContent:arguments[0]||''}};"
+    "document.body=_hbos_el();document.documentElement=_hbos_el();"
+    "document.head=_hbos_el();"
+    "document.addEventListener=function(){};"
+    "document.removeEventListener=function(){};"
+    "document.readyState='complete';"
+    "document.documentURI=window.location.href;"
+    "document.referrer='';"
+    "window.addEventListener=function(){};"
+    "window.removeEventListener=function(){};"
+    "window.setTimeout=function(fn){return 0};"
+    "window.clearTimeout=function(){};"
+    "window.setInterval=function(){return 0};"
+    "window.clearInterval=function(){};"
+    "window.requestAnimationFrame=function(fn){return 0};"
+    "window.getComputedStyle=function(){return {display:'block',"
+    " visibility:'visible', opacity:'1', color:'rgb(0, 0, 0)',"
+    " backgroundColor:'rgba(0, 0, 0, 0)', position:'static',"
+    " width:'0px', height:'0px'}};"
+    "window.scrollTo=function(){};window.scrollBy=function(){};"
+    "window.alert=function(){};window.confirm=function(){return false};"
+    "window.prompt=function(){return null};"
+    "window.open=function(){return null};"
+    "window.fetch=function(){return Promise.reject(new Error("
+    " 'fetch: not implemented'))};"
+    "window.XMLHttpRequest=function(){};"
+    "window.console=console;";
 
 static void register_globals(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -149,12 +239,60 @@ static void register_globals(JSContext *ctx) {
     /* Minimal document object: title (plain property; read back after the
      * script runs and reported through the -w file) and write() (appends
      * to the captured output). */
+    JSValue nav, loc;
+
     doc = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, doc, "title", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, doc, "write",
                       JS_NewCFunction(ctx, js_document_write, "write", 1));
+    JS_SetPropertyStr(ctx, doc, "querySelector",
+                      JS_NewCFunction(ctx, js_document_querySelector,
+                                      "querySelector", 1));
+    JS_SetPropertyStr(ctx, doc, "getElementById",
+                      JS_NewCFunction(ctx, js_document_getElementById,
+                                      "getElementById", 1));
+    JS_SetPropertyStr(ctx, doc, "createElement",
+                      JS_NewCFunction(ctx, js_document_createElement,
+                                      "createElement", 1));
+    /* Plain properties instead of getter/setter pairs: JS_DefineProperty
+     * with JS_CFUNC_getter/setter does not bind reliably in this quickjs
+     * build (the assignment silently becomes a plain property and the
+     * runtime leaks the function objects).  Fixed values are fine for the
+     * v1 DOM stub surface. */
+    JS_SetPropertyStr(ctx, doc, "cookie", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, global, "document", doc);
+
+    nav = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, nav, "userAgent",
+                      JS_NewString(ctx,
+                                   "Mozilla/5.0 (X11; Linux x86_64) "
+                                   "HBOS/0.1"));
+    JS_SetPropertyStr(ctx, global, "navigator", nav);
+
+    loc = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, loc, "href", JS_NewString(ctx, g_js_href));
+    JS_SetPropertyStr(ctx, global, "location", loc);
+
+    /* window === globalThis */
+    JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
     JS_FreeValue(ctx, global);
+
+    /* Lazy DOM element stub: every property/method that real pages touch
+     * resolves to a harmless value so scripts run to completion instead of
+     * throwing (v1 has no DOM tree to operate on).  Defined in JS — far
+     * shorter than the equivalent C object construction. */
+    JSValue stub_ret = JS_Eval(ctx, dom_stub_js,
+                               sizeof(dom_stub_js) - 1, "<dom-stub>",
+                               JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(stub_ret)) {
+        JSValue e = JS_GetException(ctx);
+        const char *estr = JS_ToCString(ctx, e);
+        fprintf(stderr, "dom-stub eval error: %s\n",
+                estr ? estr : "?");
+        if (estr) JS_FreeCString(ctx, estr);
+        JS_FreeValue(ctx, e);
+    }
+    JS_FreeValue(ctx, stub_ret);
 }
 
 static char *read_file(const char *path, size_t *out_len) {
@@ -270,15 +408,11 @@ int main(int argc, char **argv) {
         code = argv[argi + 1];
         code_len = strlen(code);
     } else if (argc >= argi + 1) {
-        file_buf = read_file(argv[argi], &code_len);
-        if (!file_buf) {
-            fprintf(stderr, "js: cannot read %s\n", argv[argi]);
-            return 1;
-        }
-        code = file_buf;
-        filename = argv[argi];
+        file_buf = NULL;   /* multi-file mode: each file evals in its own
+                            * unit so a SyntaxError in one (e.g. Vite
+                            * import.meta chunks) never blocks the rest */
     } else {
-        fprintf(stderr, "usage: js <file.js> | js -e <code>\n");
+        fprintf(stderr, "usage: js <file.js>... | js -e <code>\n");
         return 1;
     }
 
@@ -299,19 +433,40 @@ int main(int argc, char **argv) {
 
     register_globals(ctx);
 
-    result = JS_Eval(ctx, code, code_len, filename, JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(result)) {
-        print_exception(ctx);
-        exit_code = 1;
-    } else if (JS_IsUndefined(result)) {
-        JS_FreeValue(ctx, result);
-    } else {
-        const char *str = JS_ToCString(ctx, result);
-        if (str) {
-            printf("%s\n", str);
-            JS_FreeCString(ctx, str);
+    if (code) {
+        result = JS_Eval(ctx, code, code_len, filename, JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(result)) {
+            print_exception(ctx);
+            exit_code = 1;
+        } else if (JS_IsUndefined(result)) {
+            JS_FreeValue(ctx, result);
+        } else {
+            const char *str = JS_ToCString(ctx, result);
+            if (str) {
+                printf("%s\n", str);
+                JS_FreeCString(ctx, str);
+            }
+            JS_FreeValue(ctx, result);
         }
-        JS_FreeValue(ctx, result);
+    } else {
+        int f;
+        for (f = argi; f < argc; f++) {
+            size_t flen;
+            char *fbuf = read_file(argv[f], &flen);
+            if (!fbuf) {
+                fprintf(stderr, "js: cannot read %s\n", argv[f]);
+                exit_code = 1;
+                continue;
+            }
+            result = JS_Eval(ctx, fbuf, flen, argv[f], JS_EVAL_TYPE_GLOBAL);
+            if (JS_IsException(result)) {
+                print_exception(ctx);
+                exit_code = 1;
+            } else {
+                JS_FreeValue(ctx, result);
+            }
+            free(fbuf);
+        }
     }
 
     if (out_path) {
