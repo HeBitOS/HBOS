@@ -57,6 +57,25 @@ static void print_exception(JSContext *ctx) {
     JS_FreeValue(ctx, exception);
 }
 
+/* Captured script output: console.log/document.write text plus the final
+ * document.title, written to the -w file (and the console).  The browser
+ * backend reads the file back to render script results into the page. */
+static char g_js_out[8192];
+static size_t g_js_out_len;
+static char g_js_title[256];
+static int g_js_out_file = -1;
+
+static void capture_out(const char *s, size_t n) {
+    if (!s || n == 0) return;
+    if (g_js_out_len + n < sizeof(g_js_out)) {
+        memcpy(g_js_out + g_js_out_len, s, n);
+        g_js_out_len += n;
+    }
+    if (g_js_out_file >= 0)
+        (void)write(g_js_out_file, s, n);
+    (void)write(1, s, n);
+}
+
 static JSValue js_print_internal(JSContext *ctx, int argc, JSValueConst *argv,
                                  int to_stderr) {
     int i;
@@ -66,19 +85,19 @@ static JSValue js_print_internal(JSContext *ctx, int argc, JSValueConst *argv,
         if (to_stderr)
             fprintf(stderr, "%s", str);
         else
-            printf("%s", str);
+            capture_out(str, strlen(str));
         JS_FreeCString(ctx, str);
         if (i < argc - 1) {
             if (to_stderr)
                 fprintf(stderr, " ");
             else
-                printf(" ");
+                capture_out(" ", 1);
         }
     }
     if (to_stderr)
         fprintf(stderr, "\n");
     else
-        printf("\n");
+        capture_out("\n", 1);
     return JS_UNDEFINED;
 }
 
@@ -100,9 +119,23 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this_val,
     return js_print_internal(ctx, argc, argv, 1);
 }
 
+static JSValue js_document_write(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    for (int i = 0; i < argc; i++) {
+        const char *str = JS_ToCString(ctx, argv[i]);
+        if (str) {
+            capture_out(str, strlen(str));
+            JS_FreeCString(ctx, str);
+        }
+    }
+    return JS_UNDEFINED;
+}
+
 static void register_globals(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue console;
+    JSValue doc;
 
     JS_SetPropertyStr(ctx, global, "print",
                       JS_NewCFunction(ctx, js_print, "print", 1));
@@ -112,6 +145,15 @@ static void register_globals(JSContext *ctx) {
     JS_SetPropertyStr(ctx, console, "error",
                       JS_NewCFunction(ctx, js_console_error, "error", 1));
     JS_SetPropertyStr(ctx, global, "console", console);
+
+    /* Minimal document object: title (plain property; read back after the
+     * script runs and reported through the -w file) and write() (appends
+     * to the captured output). */
+    doc = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, doc, "title", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, doc, "write",
+                      JS_NewCFunction(ctx, js_document_write, "write", 1));
+    JS_SetPropertyStr(ctx, global, "document", doc);
     JS_FreeValue(ctx, global);
 }
 
@@ -213,20 +255,28 @@ int main(int argc, char **argv) {
     size_t code_len = 0;
     int exit_code = 0;
 
+    const char *out_path = NULL;
+    int argi = 1;
+
     if (argc >= 2 && strcmp(argv[1], "-t") == 0)
         return js_selftest();
 
-    if (argc >= 3 && strcmp(argv[1], "-e") == 0) {
-        code = argv[2];
+    if (argc >= 3 && strcmp(argv[argi], "-w") == 0) {
+        out_path = argv[argi + 1];
+        argi += 2;
+    }
+
+    if (argc >= argi + 2 && strcmp(argv[argi], "-e") == 0) {
+        code = argv[argi + 1];
         code_len = strlen(code);
-    } else if (argc >= 2) {
-        file_buf = read_file(argv[1], &code_len);
+    } else if (argc >= argi + 1) {
+        file_buf = read_file(argv[argi], &code_len);
         if (!file_buf) {
-            fprintf(stderr, "js: cannot read %s\n", argv[1]);
+            fprintf(stderr, "js: cannot read %s\n", argv[argi]);
             return 1;
         }
         code = file_buf;
-        filename = argv[1];
+        filename = argv[argi];
     } else {
         fprintf(stderr, "usage: js <file.js> | js -e <code>\n");
         return 1;
@@ -262,6 +312,33 @@ int main(int argc, char **argv) {
             JS_FreeCString(ctx, str);
         }
         JS_FreeValue(ctx, result);
+    }
+
+    if (out_path) {
+        JSValue global = JS_GetGlobalObject(ctx);
+        JSValue docv = JS_GetPropertyStr(ctx, global, "document");
+        JSValue tv = JS_GetPropertyStr(ctx, docv, "title");
+        if (JS_IsString(tv)) {
+            const char *ts = JS_ToCString(ctx, tv);
+            if (ts) {
+                size_t n = strlen(ts);
+                if (n >= sizeof(g_js_title)) n = sizeof(g_js_title) - 1;
+                memcpy(g_js_title, ts, n);
+                g_js_title[n] = 0;
+                JS_FreeCString(ctx, ts);
+            }
+        }
+        JS_FreeValue(ctx, tv);
+        JS_FreeValue(ctx, docv);
+        JS_FreeValue(ctx, global);
+
+        int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            (void)write(fd, g_js_title, strlen(g_js_title));
+            (void)write(fd, "\n", 1);
+            (void)write(fd, g_js_out, g_js_out_len);
+            close(fd);
+        }
     }
 
     JS_FreeContext(ctx);

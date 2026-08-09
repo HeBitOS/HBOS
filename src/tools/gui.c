@@ -4155,6 +4155,20 @@ static int  g_br_og_has_image;        /* og:image 是否已登记进图片槽 */
 static void browser_fetch_stylesheet(gui_state_t *st, const char *href);
 static int g_br_css_fetches;
 
+/* 大小写不敏感子串查找：HTML 标签名/属性可能任意大小写（<SCRIPT>、
+ * <ScRiPt src=...>），解析器现有 tag_ci_eq 只比较已提取的标签名，这里
+ * 需要在整个 body 上直接找 "<script" / "</script>" / "src"。 */
+static const char *body_strcasestr(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !*needle) return NULL;
+    size_t nl = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        size_t i = 0;
+        while (i < nl && p[i] && (p[i] | 0x20) == (needle[i] | 0x20)) i++;
+        if (i == nl) return p;
+    }
+    return NULL;
+}
+
 static const char *browser_skipped_tag_close(const char *name, int len) {
     static const char *const tags[] = {
         "svg", "noscript", "template", "select", "iframe", "canvas", "video", "audio"
@@ -4934,6 +4948,120 @@ static void br_img_url_rewrite(char *url, uint32_t cap) {
 }
 
 /* 页面加载后统一抓取并解码所有已登记的内联图片。每张独立抓取一次
+ * 提取内联 <script> 交给 ring3 quickjs 运行时（js.hax）执行，把脚本的
+ * document.title 和 console/print/document.write 输出读回：title 更新窗口
+ * 标题栏，输出作为 BRK_CODE 块追加到渲染流末尾。v1 只执行无 src 的内联
+ * 脚本，忽略外链脚本和 DOM 操作（脚本内 document.write 文本原样展示）。
+ *
+ * browser_exec_scripts_core 是不依赖 GUI 的核心（jspage 命令与浏览器
+ * 共用）：返回 0 表示有脚本执行；title/out 由调用者提供缓冲。 */
+int browser_exec_scripts_core(const char *body, char *title, uint32_t title_cap,
+                              char *out, uint32_t out_cap) {
+    static char script[8192];
+    uint32_t slen = 0;
+    const char *p = body;
+    int ran = 0;
+
+    if (!body) return 0;
+    while (*p && slen < sizeof(script) - 2) {
+        const char *s = body_strcasestr(p, "<script");
+        if (!s) break;
+        const char *gt = strchr(s, '>');
+        if (!gt) break;
+        /* 外链脚本（src=...）v1 不执行——网络子加载会增加加载时长，
+         * 且 bilibili 的外链脚本全是打包后的框架代码。 */
+        const char *src_attr = body_strcasestr(s, "src");
+        if (src_attr && src_attr < gt) { p = gt + 1; continue; }
+        const char *end = body_strcasestr(gt + 1, "</script>");
+        if (!end) break;
+        size_t n = (size_t)(end - (gt + 1));
+        if (slen + n + 1 < sizeof(script)) {
+            memcpy(script + slen, gt + 1, n);
+            slen += (uint32_t)n;
+            script[slen++] = ';';
+        }
+        p = end + 9;
+    }
+    if (!slen) return 0;
+    script[slen] = 0;
+
+    int fd = open("/system/js_page.js", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return 0;
+    size_t off = 0;
+    while (off < slen) {
+        long n = write(fd, script + off, slen - off);
+        if (n <= 0) break;
+        off += (size_t)n;
+    }
+    close(fd);
+
+    char *js_argv[] = { "js", "-w", "/system/js_out.txt",
+                        "/system/js_page.js", 0 };
+    (void)hax_app_run("js", 4, js_argv);
+    ran = 1;
+
+    /* 读回 title（第一行）+ 脚本输出（其余行） */
+    char tmp[4096];
+    int ofd = open("/system/js_out.txt", O_RDONLY);
+    if (ofd < 0) return ran;
+    long olen = 0;
+    for (;;) {
+        long n = read(ofd, tmp + olen, (size_t)(sizeof(tmp) - 1 - olen));
+        if (n <= 0) break;
+        olen += n;
+        if (olen >= (long)sizeof(tmp) - 1) break;
+    }
+    close(ofd);
+    if (olen <= 0) return ran;
+    tmp[olen] = 0;
+
+    char *nl = strchr(tmp, '\n');
+    size_t title_len = nl ? (size_t)(nl - tmp) : (size_t)olen;
+    if (title && title_cap && title_len > 0 && title_len < title_cap) {
+        memcpy(title, tmp, title_len);
+        title[title_len] = 0;
+    }
+    if (out && out_cap) {
+        const char *js_out = nl ? nl + 1 : "";
+        size_t jlen = strlen(js_out);
+        if (jlen >= out_cap) jlen = out_cap - 1;
+        if (jlen > 0) {
+            memcpy(out, js_out, jlen);
+            out[jlen] = 0;
+        } else {
+            out[0] = 0;
+        }
+    }
+    return ran;
+}
+
+static void browser_exec_scripts(gui_state_t *st, const char *body) {
+    static char js_title[BROWSER_TITLE_CAP];
+    static char js_out[2048];
+
+    if (!browser_exec_scripts_core(body, js_title, sizeof(js_title),
+                                   js_out, sizeof(js_out)))
+        return;
+    if (js_title[0]) {
+        uint32_t tlen = (uint32_t)strlen(js_title);
+        if (tlen < BROWSER_TITLE_CAP) {
+            memcpy(g_browser_page_title, js_title, tlen);
+            g_browser_page_title[tlen] = 0;
+            g_browser_title_len = tlen;
+        }
+    }
+    size_t jlen = strlen(js_out);
+    if (jlen == 0) return;
+    if (jlen > BROWSER_PAGE_CAP / 2) jlen = BROWSER_PAGE_CAP / 2;
+    if (st->browser_render_len + jlen + 4 >= BROWSER_PAGE_CAP) return;
+    st->browser_render[st->browser_render_len++] = (char)BRK_CODE;
+    memcpy(st->browser_render + st->browser_render_len, js_out, jlen);
+    st->browser_render_len += (uint32_t)jlen;
+    st->browser_render[st->browser_render_len++] = '\n';
+    st->browser_render[st->browser_render_len] = 0;
+}
+
+/* browser_fetch_images：
  * （串行，复用同一个静态响应缓冲），解码进对应槽位；失败/超尺寸/JPEG
  * 等不支持的就把该槽宽高留 0，绘制端画占位。 */
 static void browser_fetch_images(gui_state_t *st) {
@@ -4988,6 +5116,26 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     }
     static char response[BROWSER_FETCH_CAP];
     uint32_t len = 0;
+    /* file:// 本地页面：直接读文件渲染，绕过网络与重定向循环。本地
+     * HTML 是路线图阶段 6 的回归载体，也用于内联 <script> 的 JS 测试。 */
+    if (strncmp(st->browser_url, "file://", 7) == 0) {
+        int lfd = open(st->browser_url + 7, O_RDONLY);
+        if (lfd < 0) {
+            browser_set_plain2(st, "无法读取本地文件: ", st->browser_url + 7);
+            br_status(st, "浏览器本地文件失败");
+            return;
+        }
+        long n = read(lfd, response, sizeof(response) - 1);
+        close(lfd);
+        if (n <= 0) {
+            browser_set_plain(st, "本地文件为空");
+            br_status(st, "浏览器本地文件失败");
+            return;
+        }
+        len = (uint32_t)n;
+        response[len] = 0;
+        goto render_page;
+    }
     /* 重定向循环：真实网站首页 301/302 到 www/https 非常普遍，之前浏览器
      * 不跟随（只有 shell 的 wget 会），用户看到的就是一页 301 Moved 文本。
      * 最多 4 跳防环；每跳把地址栏更新为当前 URL（既是 Chrome 行为，也让
@@ -5044,11 +5192,15 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
         st->browser_url[BROWSER_URL_CAP - 1] = 0;
         st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
     }
+render_page:
     const char *body = http_body_ptr(response);
     st->browser_required_caps =
         hive_browser_detect_requirements(body, strlen(body));
     browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
     browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
+    /* 执行内联 <script>（v1：无 src、quickjs ring3 运行时），输出追加到
+     * 渲染流末尾。放在 og 卡片/图片之前，JS 写的标题优先。 */
+    browser_exec_scripts(st, body);
     /* og 卡片：视频页（和其他 CSR 页面）body 几乎是空的，但 <head> 里有
      * og:title/og:description/og:image。若解析后正文很少，就把 og 信息作为
      * "视频卡片"插到渲染缓冲最前——用 memmove 挪出头部空间，写入一个

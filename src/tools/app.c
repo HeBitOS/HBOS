@@ -342,6 +342,51 @@ static void cmd_wait(int argc, char **argv) {
     console_putchar('\n');
 }
 
+/* 从本地 HTML 文件提取内联 <script> 交给 ring3 quickjs 执行，把
+ * document.title 与脚本输出打到串口——浏览器 script 管线的命令行验证
+ * 入口（browser_exec_scripts_core 与浏览器共用同一实现）。 */
+extern int browser_exec_scripts_core(const char *body, char *title,
+                                     uint32_t title_cap, char *out,
+                                     uint32_t out_cap);
+static void cmd_jspage(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("Usage: jspage <file.html>\n");
+        return;
+    }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        console_puts("jspage: cannot open file\n");
+        return;
+    }
+    static char html[16384];
+    long n = 0;
+    for (;;) {
+        long r = read(fd, html + n, (size_t)(sizeof(html) - 1 - n));
+        if (r <= 0) break;
+        n += r;
+        if (n >= (long)sizeof(html) - 1) break;
+    }
+    close(fd);
+    if (n <= 0) {
+        console_puts("jspage: empty file\n");
+        return;
+    }
+    html[n] = 0;
+    static char title[256];
+    static char out[2048];
+    if (!browser_exec_scripts_core(html, title, sizeof(title), out,
+                                   sizeof(out))) {
+        console_puts("jspage: no inline <script> found\n");
+        return;
+    }
+    console_puts("title: ");
+    console_puts(title[0] ? title : "(none)");
+    console_putchar('\n');
+    console_puts("output:\n");
+    console_puts(out);
+    console_putchar('\n');
+}
+
 void tool_app_init(void) {
     static const command_t cmds[] = {
         {"apps", CMD_GROUP_USER, "List user apps", "apps", cmd_apps},
@@ -350,6 +395,8 @@ void tool_app_init(void) {
         {"elfinfo", CMD_GROUP_USER, "Show ELF binary info", "elfinfo <file.elf>", cmd_elfinfo},
         {"ps",   CMD_GROUP_USER, "List tasks", "ps", cmd_ps},
         {"wait", CMD_GROUP_USER, "Wait for task", "wait <pid>", cmd_wait},
+        {"jspage", CMD_GROUP_USER, "Run inline <script> of an HTML file",
+         "jspage <file.html>", cmd_jspage},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

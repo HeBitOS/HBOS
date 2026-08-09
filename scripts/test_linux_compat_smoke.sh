@@ -63,7 +63,12 @@ run_guest() {
     # The boot menu offers a launch-mode prompt; pick the command-line Shell.
     printf 'T\n' >&9
     sleep 2
-    printf '%s\n' "$command" >&9
+    # Multi-line commands (linux_jspage) are sent line by line; the shell
+    # mishandles ';' separators after a redirect, so keep them apart.
+    printf '%b\n' "$command" | while IFS= read -r line; do
+        printf '%s\n' "$line" >&9
+        sleep 1
+    done
     sleep 5
     exec 9>&-
     if grep -Fq "$expected" "$LOG"; then
@@ -85,7 +90,7 @@ run_guest() {
 if [[ -n "${HBOS_COMPAT_TESTS:-}" ]]; then
     read -r -a tests <<<"$HBOS_COMPAT_TESTS"
 else
-    tests=(linux_syscall linux_pie linux_dynamic linux_abi linux_signal linux_signal_siginfo linux_js linux_mprotect linux_mmap_reclaim linux_file_mmap linux_process_abi linux_dlopen linux_dlopen_deps linux_compat_thread linux_clone3 linux_epoll_et linux_inotify)
+    tests=(linux_syscall linux_pie linux_dynamic linux_abi linux_signal linux_signal_siginfo linux_js linux_jspage linux_mprotect linux_mmap_reclaim linux_file_mmap linux_process_abi linux_dlopen linux_dlopen_deps linux_compat_thread linux_clone3 linux_epoll_et linux_inotify)
     if [[ "${HBOS_MUSL_SMOKE:-0}" == "1" ]]; then
         tests=(linux_musl_stream linux_musl_pthread "${tests[@]}")
     fi
@@ -106,6 +111,7 @@ for test in "${tests[@]}"; do
         linux_signal) expected="LINUX_SIGNAL: PASS" ;;
         linux_signal_siginfo) expected="LINUX_SIGNAL_SIGINFO: PASS" ;;
         linux_js) expected="LINUX_JS: PASS" ;;
+        linux_jspage) expected="title: JT" ;;
         linux_mprotect) expected="LINUX_MPROTECT: PASS" ;;
         linux_mmap_reclaim) expected="LINUX_MMAP_RECLAIM: PASS" ;;
         linux_file_mmap) expected="LINUX_FILE_MMAP: PASS" ;;
@@ -120,6 +126,7 @@ for test in "${tests[@]}"; do
     esac
     case "$test" in
         linux_js) command="run js -t" ;;
+        linux_jspage) command="echo '<html><script>document.title=\"JT\";document.write(6*7)</script></html>' > /tmp/j.html\njspage /tmp/j.html" ;;
         *) command="run $test" ;;
     esac
     if run_guest "$test" "$command" "$expected"; then
