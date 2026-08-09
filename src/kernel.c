@@ -143,6 +143,30 @@ void kmain(void *mbi) {
     extern void tcc_runtime_seed_init(void);
     tcc_runtime_seed_init();
 
+    /* Present only in HBOS_COMPAT_SMOKE images.  A normal build does not
+     * bundle linux_interp, so this is an allocation-free no-op there. */
+    extern int hax_seed_embedded_file(const char *, const char *);
+    (void)hax_seed_embedded_file("linux_interp", "/linux_interp");
+    (void)hax_seed_embedded_file(
+        "linux_musl_loader", "/lib/ld-musl-x86_64.so.1");
+    (void)hax_seed_embedded_file("linux_musl_loader", "/lib/libc.so");
+    (void)hax_seed_embedded_file("linux_musl", "/linux_musl");
+    (void)hax_seed_embedded_file(
+        "linux_glibc_loader", "/lib64/ld-linux-x86-64.so.2");
+    (void)hax_seed_embedded_file(
+        "linux_glibc_loader", "/lib/ld-linux-x86-64.so.2");
+    (void)hax_seed_embedded_file(
+        "linux_glibc_libc", "/lib/x86_64-linux-gnu/libc.so.6");
+    (void)hax_seed_embedded_file("linux_glibc_libc", "/lib/libc.so.6");
+    (void)hax_seed_embedded_file("linux_glibc", "/linux_glibc");
+    (void)hax_seed_embedded_file("linux_file_mmap", "/linux_file_mmap");
+    (void)hax_seed_embedded_file(
+        "linux_dlopen_lib", "/lib/liblinux_dlopen.so");
+    (void)hax_seed_embedded_file(
+        "linux_dlopen_dep_leaf", "/lib/liblinux_dep_leaf.so");
+    (void)hax_seed_embedded_file(
+        "linux_dlopen_dep_root", "/lib/liblinux_dep_root.so");
+
     // 内置 HPT 软件仓库（/packages）：镜像自带的 HAX 应用，供 hpt 装卸
     extern void hpt_repo_seed_init(void);
     hpt_repo_seed_init();

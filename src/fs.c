@@ -293,7 +293,8 @@ static void hbfs_rebuild_files_from_table(void) {
         f->capacity = RAMFS_MAX_FILE_SIZE;
         f->data = NULL;
         f->disk_slot = i;
-        f->node.type = VFS_NODE_FILE;
+        f->node.type = f->type == 1 ? VFS_NODE_DIR :
+                       (f->type == 2 ? VFS_NODE_SYMLINK : VFS_NODE_FILE);
         f->node.size = e->size;
         f->node.capacity = RAMFS_MAX_FILE_SIZE;
         f->node.private_data = f;
@@ -1404,6 +1405,35 @@ file_t *fs_create_file(const char *name) {
     return NULL;
 }
 
+/** 创建轻量符号链接。链接目标直接存放在文件槽的数据区，不新增 inode
+ * 或动态分配；HBFS 会连同 type=2 一次同步。ext2/FAT32 需要各自的真实
+ * inode/目录项实现，因此在对应后端明确拒绝，避免伪装成普通文件。 */
+file_t *fs_create_symlink(const char *name, const char *target) {
+    if (!name || !target || !target[0]) return NULL;
+    size_t length = strlen(target);
+    if (length >= VFS_MAX_NAME) return NULL;
+    if (fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_FAT32)
+        return NULL;
+    if (fs_find_file(name)) return NULL;
+
+    file_t *link = fs_create_file(name);
+    if (!link) return NULL;
+    if (length > link->capacity ||
+        fs_write_file_data(link, 0, target, (uint32_t)length) < 0) {
+        (void)fs_delete_file(name);
+        return NULL;
+    }
+    link->type = 2;
+    link->node.type = VFS_NODE_SYMLINK;
+    link->size = (uint32_t)length;
+    link->node.size = (uint32_t)length;
+    if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(link) < 0) {
+        (void)fs_delete_file(name);
+        return NULL;
+    }
+    return link;
+}
+
 /** 删除指定名称的文件 */
 int fs_delete_file(const char *name) {
     file_t *f = fs_find_file(name);
@@ -1486,7 +1516,20 @@ int fs_copy_file(const char *src_name, const char *dst_name) {
     return 0;
 }
 
-/** 重命名普通文件 */
+static int fs_path_in_tree(const char *path, const char *root) {
+    size_t length = strlen(root);
+    return strcmp(path, root) == 0 ||
+           (strncmp(path, root, length) == 0 && path[length] == '/');
+}
+
+/**
+ * 重命名文件或目录树。
+ *
+ * ramfs/HBFS 的目录是扁平文件表中的规范路径前缀，因此先对整棵子树做长度
+ * 和冲突预检，再一次性改写所有名称。HBFS 只同步一次文件表；若写盘失败，
+ * 内存和表项名称都会回滚。ext2/FAT32 尚无底层 rename primitive，普通文件
+ * 保留 copy-delete 回退，目录则明确失败。
+ */
 int fs_rename_file(const char *old_name, const char *new_name) {
     char old_norm[MAX_FILENAME];
     char new_norm[MAX_FILENAME];
@@ -1497,11 +1540,69 @@ int fs_rename_file(const char *old_name, const char *new_name) {
 
     file_t *f = fs_find_file(old_norm);
     if (!f) return fs_fail("源文件不存在");
-    if (f->type != 0) return fs_fail("暂不支持重命名目录");
 
     if (fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_FAT32) {
+        if (f->type != 0)
+            return fs_fail("当前磁盘后端暂不支持重命名目录");
         if (fs_copy_file(old_norm, new_norm) < 0) return -1;
         if (fs_delete_file(old_norm) < 0) return fs_fail("删除源文件失败");
+        fs_error = "ok";
+        return 0;
+    }
+
+    if (f->type == 1) {
+        size_t old_length = strlen(old_norm);
+        size_t new_length = strlen(new_norm);
+        if (fs_path_in_tree(new_norm, old_norm))
+            return fs_fail("不能把目录移动到自身内部");
+
+        uint8_t moved[MAX_FILES];
+        char previous[MAX_FILES][MAX_FILENAME];
+        memset(moved, 0, sizeof(moved));
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            file_t *entry = &fs.files[i];
+            if (!entry->used || !fs_path_in_tree(entry->name, old_norm))
+                continue;
+            const char *suffix = entry->name + old_length;
+            if (new_length + strlen(suffix) >= MAX_FILENAME)
+                return fs_fail("重命名后的后代路径过长");
+            moved[i] = 1;
+            strcpy(previous[i], entry->name);
+        }
+
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            if (!moved[i]) continue;
+            const char *suffix = previous[i] + old_length;
+            char candidate[MAX_FILENAME];
+            strcpy(candidate, new_norm);
+            strcat(candidate, suffix);
+            for (uint32_t j = 0; j < MAX_FILES; j++) {
+                if (!fs.files[j].used || moved[j]) continue;
+                if (strcmp(fs.files[j].name, candidate) == 0)
+                    return fs_fail("重命名后的后代路径冲突");
+            }
+        }
+
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            if (!moved[i]) continue;
+            const char *suffix = previous[i] + old_length;
+            strcpy(fs.files[i].name, new_norm);
+            strcat(fs.files[i].name, suffix);
+            strcpy(fs.files[i].node.name, fs.files[i].name);
+            if (fs_backend == FS_BACKEND_HBFS)
+                strcpy(hbfs_table[fs.files[i].disk_slot].name,
+                       fs.files[i].name);
+        }
+        if (fs_backend == FS_BACKEND_HBFS && hbfs_sync_table() < 0) {
+            for (uint32_t i = 0; i < MAX_FILES; i++) {
+                if (!moved[i]) continue;
+                strcpy(fs.files[i].name, previous[i]);
+                strcpy(fs.files[i].node.name, previous[i]);
+                strcpy(hbfs_table[fs.files[i].disk_slot].name, previous[i]);
+            }
+            (void)hbfs_sync_table();
+            return fs_fail("同步目录重命名失败");
+        }
         fs_error = "ok";
         return 0;
     }

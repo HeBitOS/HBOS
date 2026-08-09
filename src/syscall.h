@@ -201,6 +201,16 @@ typedef enum {
     HBOS_SYS_SET_ROBUST_LIST,/**< set_robust_list(head,length) */
     HBOS_SYS_GET_ROBUST_LIST,/**< get_robust_list(tid,head,length) */
 
+    /* Append-only dynamic-loader user-mode callback enumeration. */
+    HBOS_SYS_DLINIT_NEXT,    /**< next dependency-ordered init entry */
+    HBOS_SYS_DLFINI_NEXT,    /**< next reverse-ordered fini entry */
+    HBOS_SYS_DLTLS_GET,      /**< per-thread General Dynamic TLS address */
+    HBOS_SYS_DLIFUNC_NEXT,   /**< next ring3 GNU IFUNC resolver */
+    HBOS_SYS_DLIFUNC_APPLY,  /**< commit one validated IFUNC result */
+    HBOS_SYS_RENAME,         /**< rename(old,new,flags), append-only ABI */
+    HBOS_SYS_GETSOCKNAME,    /**< getsockname(fd,address,length) */
+    HBOS_SYS_GETPEERNAME,    /**< getpeername(fd,address,length) */
+
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;
 
@@ -225,5 +235,11 @@ typedef struct {
  */
 uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *frame);
+
+/** Rewrite a ring3 exception return frame for synchronous signal delivery.
+ *  cr2/err_code describe the faulting access (CR2 and page-fault error code);
+ *  they are reported in siginfo.si_addr / ucontext REG_CR2 and REG_ERR. */
+int linux_signal_prepare_exception(void *exception_frame, int signal_number,
+                                   uint64_t cr2, uint64_t err_code);
 
 #endif /* HBOS_SYSCALL_H */

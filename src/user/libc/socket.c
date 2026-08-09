@@ -47,6 +47,16 @@ int connect(int sockfd, const void *addr, socklen_t addrlen) {
         __syscall3(HBOS_SYS_CONNECT, sockfd, (long)addr, (long)addrlen));
 }
 
+int getsockname(int sockfd, void *addr, socklen_t *addrlen) {
+    return (int)__syscall_errno(__syscall3(
+        HBOS_SYS_GETSOCKNAME, sockfd, (long)addr, (long)addrlen));
+}
+
+int getpeername(int sockfd, void *addr, socklen_t *addrlen) {
+    return (int)__syscall_errno(__syscall3(
+        HBOS_SYS_GETPEERNAME, sockfd, (long)addr, (long)addrlen));
+}
+
 long send(int sockfd, const void *buf, size_t len, int flags) {
     return __syscall_errno(__syscall6(
         HBOS_SYS_SEND, sockfd, (long)buf, (long)len, flags, 0, 0));

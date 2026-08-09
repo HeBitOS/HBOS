@@ -24,7 +24,10 @@ unsigned int sleep(unsigned int seconds);
 int          usleep(unsigned int useconds);
 pid_t        getpid(void);
 char        *getcwd(char *buf, size_t size);
+int          chdir(const char *path);
 int          unlink(const char *path);
+int          symlink(const char *target, const char *linkpath);
+ssize_t      readlink(const char *path, char *buf, size_t bufsiz);
 
 ssize_t      read(int fd, void *buf, size_t count);
 ssize_t      write(int fd, const void *buf, size_t count);
@@ -42,12 +45,8 @@ int          execvp(const char *file, char *const argv[]);
 int          access(const char *path, int mode);
 int          isatty(int fd);
 
-/* HBOS has no true in-place VFS rename (ramfs/ext2/fat32 have no "just
- * relink this node under a new name" primitive) -- always reports EXDEV
- * ("cross-device"), which every real mv implementation (including
- * BusyBox's) already treats as "fall back to copy + delete", so this
- * still gets a correct (if less efficient) mv for every case rather than
- * needing real move-in-place support. */
+/* Same-filesystem file rename.  ramfs/HBFS relink metadata in place;
+ * ext2/FAT32 currently use the filesystem copy/delete fallback. */
 int          rename(const char *oldpath, const char *newpath);
 
 /* HBOS-specific: HBOS's "programs" are .hax apps looked up by name in an

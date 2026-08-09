@@ -39,6 +39,8 @@
 #define SYS_recvmsg          47
 #define SYS_bind             49
 #define SYS_listen           50
+#define SYS_getsockname      51
+#define SYS_getpeername      52
 #define SYS_socketpair       53
 #define SYS_setsockopt       54
 #define SYS_getsockopt       55
@@ -53,9 +55,11 @@
 #define SYS_ftruncate        77
 #define SYS_getcwd           79
 #define SYS_chdir            80
+#define SYS_rename           82
 #define SYS_mkdir            83
 #define SYS_rmdir            84
 #define SYS_unlink           87
+#define SYS_symlink          88
 #define SYS_readlink         89
 #define SYS_chmod            90
 #define SYS_chown            92
@@ -78,6 +82,8 @@
 #define SYS_epoll_wait      232
 #define SYS_epoll_ctl       233
 #define SYS_openat          257
+#define SYS_renameat        264
+#define SYS_symlinkat       266
 #define SYS_newfstatat      262
 #define SYS_readlinkat      267
 #define SYS_set_robust_list 273
@@ -88,6 +94,7 @@
 #define SYS_epoll_create1   291
 #define SYS_dup3            292
 #define SYS_pipe2           293
+#define SYS_renameat2       316
 #define SYS_getrandom       318
 #define SYS_memfd_create    319
 #define SYS_shutdown         48

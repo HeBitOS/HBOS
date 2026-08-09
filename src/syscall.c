@@ -20,10 +20,13 @@
 #include "syscall.h"
 #include "unistd.h"
 #include "core/task.h"
+#include "core/cpu.h"
 #include "core/vmm.h"
+#include "core/pmm.h"
 #include "fd.h"
 #include "string.h"
 #include "acpi.h"
+#include "rtc.h"
 #include "net.h"
 #include "signal.h"
 #include "fs.h"
@@ -38,8 +41,6 @@
 #include "https.h"
 #include "linux_compat.h"
 
-/* Interim buffered limit; the next loader step is fd-backed segment streaming. */
-#define SYSCALL_EXEC_MAX_SIZE (512u * 1024u)
 #define SYSCALL_HTTPS_MAX_SIZE (2u * 1024u * 1024u)
 
 /**
@@ -51,6 +52,35 @@ static uint64_t finish_syscall(long ret) {
     if (ret < 0 && errno > 0)
         return (uint64_t)(-(int64_t)errno);
     return (uint64_t)ret;
+}
+
+static uint64_t vm_protection_flags(int protection) {
+    uint64_t flags = VMM_P;
+    if (protection != 0) flags |= VMM_U;
+    if (protection & 0x02) flags |= VMM_W;  /* PROT_WRITE */
+    if (!(protection & 0x04)) flags |= VMM_NX; /* !PROT_EXEC */
+    return flags;
+}
+
+static int protect_user_range(uint64_t address, size_t length,
+                              int protection) {
+    if (!length || (address & (PAGE_SIZE - 1)) ||
+        (protection & ~0x07) ||
+        address >= 0x0000800000000000ULL ||
+        length > 0x0000800000000000ULL - address)
+        return -EINVAL;
+    uint64_t rounded = (uint64_t)length;
+    if (rounded > UINT64_MAX - (PAGE_SIZE - 1)) return -EINVAL;
+    rounded = (rounded + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE) {
+        if (!vmm_get_phys(address + offset)) return -ENOMEM;
+    }
+    uint64_t flags = vm_protection_flags(protection);
+    for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE) {
+        if (vmm_protect_page(address + offset, flags) < 0)
+            return -ENOMEM;
+    }
+    return 0;
 }
 
 /*
@@ -103,6 +133,1158 @@ typedef struct {
     int32_t type;
 } linux_x86_cmsghdr_t;
 
+typedef struct {
+    uint64_t handler;
+    uint64_t flags;
+    uint64_t restorer;
+    uint64_t mask;
+} linux_x86_sigaction_t;
+
+/* Linux x86-64 rt_sigframe ABI (glibc-visible layout).  The ucontext below
+ * uses the kernel layout: glibc reads uc_flags..uc_sigmask at the same
+ * offsets, treats the 120 pad bytes as the growth area of its own 1024-bit
+ * sigset_t, and never looks at the trailing __fpregs_mem pointer unless it
+ * restores FP state via setcontext (we do not save FPU state, so it stays
+ * NULL and uc_flags stays 0).  Offsets were verified against glibc 2.43
+ * x86-64 headers and a live host probe. */
+typedef struct {
+    uint64_t ss_sp;
+    uint32_t ss_flags;
+    uint32_t ss_pad;
+    uint64_t ss_size;
+} linux_x86_stack_t;
+
+typedef struct {
+    int32_t si_signo;
+    int32_t si_errno;
+    int32_t si_code;
+    int32_t si_pad0;
+    union {
+        uint8_t raw[112];
+        struct {
+            int32_t si_pid;
+            int32_t si_uid;
+        } kill_field;
+        struct {
+            void *si_addr;
+            int16_t si_addr_lsb;
+        } fault_field;
+    } si_fields;
+} linux_x86_siginfo_t;
+
+typedef struct {
+    uint64_t gregs[23];   /* REG_R8 .. REG_CR2, see LINUX_REG_* below */
+    void *fpregs;         /* always NULL: FPU state is not saved */
+    uint64_t reserved[8];
+} linux_x86_mcontext_t;
+
+typedef struct {
+    uint64_t uc_flags;
+    void *uc_link;
+    linux_x86_stack_t uc_stack;
+    linux_x86_mcontext_t uc_mcontext;
+    uint64_t uc_sigmask;  /* kernel sigset (64 signals); pad follows */
+    uint8_t uc_unused[120];
+    void *uc_fpregs_mem;  /* kernel layout only, unused */
+} linux_x86_ucontext_t;
+
+typedef struct {
+    void *pretcode;
+    linux_x86_ucontext_t uc;
+    linux_x86_siginfo_t info;
+} linux_x86_rt_sigframe_t;
+
+typedef struct {
+    int64_t uptime;
+    uint64_t loads[3];
+    uint64_t totalram;
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs;
+    uint16_t pad;
+    uint32_t alignment_pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;
+    uint32_t reserved;
+} linux_x86_sysinfo_t;
+
+typedef struct {
+    uint64_t current;
+    uint64_t maximum;
+} linux_x86_rlimit64_t;
+
+typedef struct {
+    int64_t seconds;
+    int64_t microseconds;
+} linux_x86_timeval_t;
+
+typedef struct {
+    linux_x86_timeval_t user_time;
+    linux_x86_timeval_t system_time;
+    int64_t max_resident_set;
+    int64_t integral_shared_memory;
+    int64_t integral_unshared_data;
+    int64_t integral_unshared_stack;
+    int64_t minor_faults;
+    int64_t major_faults;
+    int64_t swaps;
+    int64_t block_inputs;
+    int64_t block_outputs;
+    int64_t messages_sent;
+    int64_t messages_received;
+    int64_t signals_received;
+    int64_t voluntary_switches;
+    int64_t involuntary_switches;
+} linux_x86_rusage_t;
+
+_Static_assert(sizeof(linux_x86_sysinfo_t) == 112,
+               "Linux x86-64 sysinfo ABI size");
+_Static_assert(sizeof(linux_x86_rusage_t) == 144,
+               "Linux x86-64 rusage ABI size");
+
+static uint64_t linux_sysinfo(linux_x86_sysinfo_t *information) {
+    if (!information) return (uint64_t)(-EFAULT);
+    memset(information, 0, sizeof(*information));
+    uint32_t frequency = pit_get_frequency_hz();
+    information->uptime = frequency ?
+        (int64_t)(pit_get_ticks() / frequency) : 0;
+    information->totalram = pmm_get_total_mem();
+    information->freeram = pmm_get_free_mem();
+    int processes = task_get_count();
+    information->procs = processes > UINT16_MAX ? UINT16_MAX :
+                         (uint16_t)processes;
+    information->mem_unit = 1;
+    return 0;
+}
+
+static uint64_t linux_prlimit64(int pid, unsigned int resource,
+                                const linux_x86_rlimit64_t *new_limit,
+                                linux_x86_rlimit64_t *old_limit) {
+    if (pid != 0 && (uint32_t)pid != task_get_process_id())
+        return (uint64_t)(-ESRCH);
+    if (resource >= 16) return (uint64_t)(-EINVAL);
+    const uint64_t infinity = UINT64_MAX;
+    linux_x86_rlimit64_t value = {infinity, infinity};
+    switch (resource) {
+        case 2: /* RLIMIT_DATA */
+            value.current = value.maximum = TASK_USER_HEAP_SIZE;
+            break;
+        case 3: /* RLIMIT_STACK */
+            value.current = value.maximum = 1024ULL * 1024ULL;
+            break;
+        case 6: /* RLIMIT_NPROC */
+            value.current = value.maximum = MAX_TASKS;
+            break;
+        case 7: /* RLIMIT_NOFILE */
+            value.current = value.maximum = POSIX_MAX_FDS;
+            break;
+        default:
+            break;
+    }
+    if (old_limit) *old_limit = value;
+    if (new_limit && (new_limit->current != value.current ||
+                      new_limit->maximum != value.maximum))
+        return (uint64_t)(-EPERM);
+    return 0;
+}
+
+static uint64_t linux_getrusage(int who, linux_x86_rusage_t *usage) {
+    if (!usage) return (uint64_t)(-EFAULT);
+    if (who != 0 && who != -1 && who != 1)
+        return (uint64_t)(-EINVAL);
+    memset(usage, 0, sizeof(*usage));
+    /* CPU-time accounting is not yet per-task.  Zero is a valid conservative
+     * value; context-switch counters can be added without changing the ABI. */
+    return 0;
+}
+
+static uint64_t linux_prctl(uint64_t option, uint64_t argument2,
+                            uint64_t argument3, uint64_t argument4,
+                            uint64_t argument5) {
+    (void)argument3;
+    (void)argument4;
+    (void)argument5;
+    task_t *task = task_current();
+    if (!task) return (uint64_t)(-ESRCH);
+    switch (option) {
+        case 1: /* PR_SET_PDEATHSIG */
+            if (argument2 >= _NSIG) return (uint64_t)(-EINVAL);
+            task->parent_death_signal = (uint8_t)argument2;
+            return 0;
+        case 2: /* PR_GET_PDEATHSIG */
+            if (!argument2) return (uint64_t)(-EFAULT);
+            *(int *)(uintptr_t)argument2 = task->parent_death_signal;
+            return 0;
+        case 3: /* PR_GET_DUMPABLE */
+            return task->dumpable ? 1 : 0;
+        case 4: /* PR_SET_DUMPABLE */
+            if (argument2 > 1) return (uint64_t)(-EINVAL);
+            task->dumpable = argument2 != 0;
+            return 0;
+        case 15: { /* PR_SET_NAME */
+            if (!argument2) return (uint64_t)(-EFAULT);
+            const char *name = (const char *)(uintptr_t)argument2;
+            size_t length = strnlen(name, 15);
+            memcpy(task->name, name, length);
+            task->name[length] = '\0';
+            return 0;
+        }
+        case 16: /* PR_GET_NAME */
+            if (!argument2) return (uint64_t)(-EFAULT);
+            memset((void *)(uintptr_t)argument2, 0, 16);
+            strncpy((char *)(uintptr_t)argument2, task->name, 15);
+            return 0;
+        case 21: /* PR_GET_SECCOMP */
+            return 0;
+        case 23: /* PR_CAPBSET_READ: no ambient capabilities */
+            return 0;
+        case 38: /* PR_SET_NO_NEW_PRIVS */
+            if (argument2 != 1 || argument3 || argument4 || argument5)
+                return (uint64_t)(-EINVAL);
+            task->no_new_privs = true;
+            return 0;
+        case 39: /* PR_GET_NO_NEW_PRIVS */
+            if (argument2 || argument3 || argument4 || argument5)
+                return (uint64_t)(-EINVAL);
+            return task->no_new_privs ? 1 : 0;
+        default:
+            return (uint64_t)(-EINVAL);
+    }
+}
+
+static uint64_t linux_tgkill(int tgid, int tid, int signal_number) {
+    if (tgid <= 0 || tid <= 0 || signal_number < 0 ||
+        signal_number >= _NSIG)
+        return (uint64_t)(-EINVAL);
+    const task_t *target = task_get_by_id((uint32_t)tid);
+    if (!target || target->state == TASK_TERMINATED ||
+        target->thread_group_id != (uint32_t)tgid)
+        return (uint64_t)(-ESRCH);
+    if (signal_number == 0) return 0;
+    return task_kill((uint32_t)tid, signal_number) == 0 ? 0 :
+           (uint64_t)(-ESRCH);
+}
+
+typedef struct {
+    int64_t seconds;
+    int64_t nanoseconds;
+} linux_x86_timespec_t;
+
+static int linux_clock_now(int clock_id, linux_x86_timespec_t *time) {
+    static uint64_t realtime_epoch_base;
+    static uint64_t realtime_tick_base;
+    static bool realtime_initialized;
+    if (!time) return -EFAULT;
+    uint32_t frequency = pit_get_frequency_hz();
+    uint64_t ticks = pit_get_ticks();
+    uint64_t uptime_seconds = frequency ? ticks / frequency : 0;
+    uint64_t remainder = frequency ? ticks % frequency : 0;
+    uint64_t nanoseconds = frequency ?
+        remainder * 1000000000ULL / frequency : 0;
+    switch (clock_id) {
+        case 0: /* CLOCK_REALTIME */
+        case 5: /* CLOCK_REALTIME_COARSE */
+            if (!realtime_initialized) {
+                realtime_epoch_base = rtc_timestamp();
+                realtime_tick_base = ticks;
+                realtime_initialized = true;
+            }
+            if (frequency) {
+                uint64_t elapsed = ticks - realtime_tick_base;
+                time->seconds = (int64_t)(realtime_epoch_base +
+                                           elapsed / frequency);
+                time->nanoseconds = (clock_id == 5) ? 0 :
+                    (int64_t)((elapsed % frequency) * 1000000000ULL /
+                              frequency);
+            } else {
+                time->seconds = (int64_t)realtime_epoch_base;
+                time->nanoseconds = 0;
+            }
+            return 0;
+        case 1: /* CLOCK_MONOTONIC */
+        case 2: /* CLOCK_PROCESS_CPUTIME_ID: conservative uptime baseline */
+        case 3: /* CLOCK_THREAD_CPUTIME_ID */
+        case 4: /* CLOCK_MONOTONIC_RAW */
+        case 6: /* CLOCK_MONOTONIC_COARSE */
+        case 7: /* CLOCK_BOOTTIME */
+            time->seconds = (int64_t)uptime_seconds;
+            time->nanoseconds = (clock_id == 6) ? 0 : (int64_t)nanoseconds;
+            return 0;
+        default:
+            return -EINVAL;
+    }
+}
+
+static uint64_t linux_clock_gettime(int clock_id,
+                                    linux_x86_timespec_t *time) {
+    int result = linux_clock_now(clock_id, time);
+    return result < 0 ? (uint64_t)(int64_t)result : 0;
+}
+
+static uint64_t linux_clock_nanosleep(int clock_id, int flags,
+                                      const void *request,
+                                      void *remaining) {
+    const linux_x86_timespec_t *duration =
+        (const linux_x86_timespec_t *)request;
+    linux_x86_timespec_t *left = (linux_x86_timespec_t *)remaining;
+    if (!duration) return (uint64_t)(-EFAULT);
+    if ((clock_id != 0 && clock_id != 1) || (flags & ~1) ||
+        duration->seconds < 0 || duration->nanoseconds < 0 ||
+        duration->nanoseconds >= 1000000000LL)
+        return (uint64_t)(-EINVAL);
+
+    uint64_t milliseconds;
+    if (flags & 1) {
+        linux_x86_timespec_t now;
+        int result = linux_clock_now(clock_id, &now);
+        if (result < 0) return (uint64_t)(int64_t)result;
+        if (duration->seconds < now.seconds ||
+            (duration->seconds == now.seconds &&
+             duration->nanoseconds <= now.nanoseconds)) {
+            milliseconds = 0;
+        } else {
+            uint64_t seconds = (uint64_t)(duration->seconds - now.seconds);
+            int64_t nanos = duration->nanoseconds - now.nanoseconds;
+            if (nanos < 0) {
+                seconds--;
+                nanos += 1000000000LL;
+            }
+            if (seconds > UINT64_MAX / 1000ULL)
+                return (uint64_t)(-EINVAL);
+            milliseconds = seconds * 1000ULL +
+                           ((uint64_t)nanos + 999999ULL) / 1000000ULL;
+        }
+    } else {
+        if ((uint64_t)duration->seconds > UINT64_MAX / 1000ULL)
+            return (uint64_t)(-EINVAL);
+        milliseconds = (uint64_t)duration->seconds * 1000ULL +
+                       ((uint64_t)duration->nanoseconds + 999999ULL) /
+                       1000000ULL;
+    }
+    while (milliseconds >= 1000) {
+        sleep(1);
+        milliseconds -= 1000;
+    }
+    if (milliseconds) usleep((useconds_t)(milliseconds * 1000ULL));
+    if (left) memset(left, 0, sizeof(*left));
+    return 0;
+}
+
+static uint64_t linux_madvise(uint64_t address, uint64_t length, int advice) {
+    if (address & (PAGE_SIZE - 1)) return (uint64_t)(-EINVAL);
+    if (!length) return 0;
+    if (address >= 0x0000800000000000ULL ||
+        length > 0x0000800000000000ULL - address ||
+        length > UINT64_MAX - (PAGE_SIZE - 1))
+        return (uint64_t)(-EINVAL);
+    uint64_t rounded = (length + PAGE_SIZE - 1) &
+                       ~(uint64_t)(PAGE_SIZE - 1);
+    switch (advice) {
+        case 0: case 1: case 2: case 3: case 14: case 15:
+        case 16: case 17: case 20: case 21: case 22: case 23:
+            break;
+        case 4:  /* MADV_DONTNEED */
+        case 8:  /* MADV_FREE */
+            break;
+        default:
+            return (uint64_t)(-EINVAL);
+    }
+    for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE)
+        if (!vmm_get_phys(address + offset)) return (uint64_t)(-ENOMEM);
+    if (advice == 4 || advice == 8) {
+        task_t *current = task_current();
+        for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE) {
+            uint64_t virtual_page = address + offset;
+            bool file_snapshot = false;
+            for (vm_area_t *area = current && current->mm ?
+                     current->mm->areas : NULL;
+                 area; area = area->next) {
+                if (virtual_page >= area->start && virtual_page < area->end) {
+                    file_snapshot =
+                        area->backing_type == VM_BACKING_VFS_PRIVATE ||
+                        area->backing_type == VM_BACKING_VFS_SHARED;
+                    break;
+                }
+            }
+            /* Without demand paging there is no safe way to discard a file
+             * snapshot and fault it back in. MADV_* is advisory, so retaining
+             * those bytes is preferable to silently replacing executable or
+             * library contents with zeroes. */
+            if (!file_snapshot &&
+                (vmm_get_page_flags(virtual_page) & VMM_OWNED)) {
+                int private_result = vmm_make_page_private(virtual_page);
+                if (private_result < 0) return -ENOMEM;
+                uint64_t physical = vmm_get_phys(virtual_page) &
+                                    ~(uint64_t)(PAGE_SIZE - 1);
+                memset((void *)(uintptr_t)physical, 0, PAGE_SIZE);
+            }
+        }
+    }
+    return 0;
+}
+
+typedef struct {
+    hbos_syscall_frame_t call;
+    uint64_t rcx;
+    uint64_t r11;
+    uint64_t rbx;
+    uint64_t rbp;
+    uint64_t r12;
+    uint64_t r13;
+    uint64_t r14;
+    uint64_t r15;
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
+} linux_x86_syscall_return_frame_t;
+
+#define LINUX_SA_RESTORER  0x04000000ULL
+#define LINUX_SA_SIGINFO   0x00000004ULL
+#define LINUX_SA_ONSTACK   0x08000000ULL
+#define LINUX_SA_NODEFER   0x40000000ULL
+#define LINUX_SA_RESETHAND 0x80000000ULL
+
+#define LINUX_SS_ONSTACK   1U
+#define LINUX_SS_DISABLE   2U
+#define LINUX_MINSIGSTKSZ  2048U
+
+#define LINUX_SI_USER      0
+#define LINUX_SEGV_MAPERR  1
+#define LINUX_SEGV_ACCERR  2
+
+/* mcontext.gregs[] indices, matching glibc's REG_* enum. */
+#define LINUX_REG_R8       0
+#define LINUX_REG_R9       1
+#define LINUX_REG_R10      2
+#define LINUX_REG_R11      3
+#define LINUX_REG_R12      4
+#define LINUX_REG_R13      5
+#define LINUX_REG_R14      6
+#define LINUX_REG_R15      7
+#define LINUX_REG_RDI      8
+#define LINUX_REG_RSI      9
+#define LINUX_REG_RBP      10
+#define LINUX_REG_RBX      11
+#define LINUX_REG_RDX      12
+#define LINUX_REG_RAX      13
+#define LINUX_REG_RCX      14
+#define LINUX_REG_RSP      15
+#define LINUX_REG_RIP      16
+#define LINUX_REG_EFL      17
+#define LINUX_REG_CSGSFS   18
+#define LINUX_REG_ERR      19
+#define LINUX_REG_TRAPNO   20
+#define LINUX_REG_OLDMASK  21
+#define LINUX_REG_CR2      22
+
+/* rt_sigframe footprint: pretcode + ucontext + siginfo.  The delivery rsp
+ * is computed so the handler is entered ABI-aligned (rsp % 16 == 8), like
+ * the legacy single-argument path. */
+#define LINUX_RT_FRAME_SIZE \
+    (sizeof(linux_x86_rt_sigframe_t))
+#define LINUX_SIGINFO_NEST_MAX 8
+
+static int linux_user_range_mapped(uint64_t address, uint64_t length) {
+    if (!address || !length || address >= 0x0000800000000000ULL ||
+        length > 0x0000800000000000ULL - address)
+        return 0;
+    uint64_t end = address + length - 1;
+    for (uint64_t page = address & ~0xfffULL;; page += 0x1000ULL) {
+        if (!vmm_get_phys(page)) return 0;
+        if (page >= (end & ~0xfffULL)) break;
+    }
+    return 1;
+}
+
+static int linux_user_range_writable(uint64_t address, uint64_t length) {
+    if (!linux_user_range_mapped(address, length)) return 0;
+    uint64_t end = address + length - 1;
+    for (uint64_t page = address & ~0xfffULL;; page += 0x1000ULL) {
+        uint64_t flags = vmm_get_page_flags(page);
+        if ((flags & (VMM_U | VMM_W)) != (VMM_U | VMM_W)) return 0;
+        if (page >= (end & ~0xfffULL)) break;
+    }
+    return 1;
+}
+
+typedef struct {
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+    uint64_t set_tid;
+    uint64_t set_tid_size;
+    uint64_t cgroup;
+} linux_x86_clone_args_t;
+
+#define LINUX_CLONE_ARGS_SIZE_VER0 64U
+#define LINUX_CLONE_ARGS_SIZE_VER2 88U
+
+static void linux_clone_context_from_frame(
+    const linux_x86_syscall_return_frame_t *frame, uint64_t stack,
+    hbos_linux_clone_context_t *context) {
+    memset(context, 0, sizeof(*context));
+    context->rip = frame->rip;
+    context->rsp = stack;
+    context->rflags = frame->rflags;
+    context->rdi = frame->call.a0;
+    context->rsi = frame->call.a1;
+    context->rdx = frame->call.a2;
+    context->r10 = frame->call.a3;
+    context->r8 = frame->call.a4;
+    context->r9 = frame->call.a5;
+    context->rbx = frame->rbx;
+    context->rbp = frame->rbp;
+    context->r12 = frame->r12;
+    context->r13 = frame->r13;
+    context->r14 = frame->r14;
+    context->r15 = frame->r15;
+}
+
+static uint64_t linux_fork(linux_x86_syscall_return_frame_t *frame) {
+    if (!frame || !linux_user_range_mapped(frame->rip, 1) ||
+        !linux_user_range_mapped(frame->rsp, 1))
+        return (uint64_t)(-EFAULT);
+    hbos_linux_clone_context_t context;
+    linux_clone_context_from_frame(frame, frame->rsp, &context);
+    int pid = task_fork_linux(&context);
+    return pid < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)pid;
+}
+
+static uint64_t linux_clone(linux_x86_syscall_return_frame_t *frame) {
+    enum {
+        CLONE_VM = 0x00000100,
+        CLONE_FS = 0x00000200,
+        CLONE_FILES = 0x00000400,
+        CLONE_SIGHAND = 0x00000800,
+        CLONE_THREAD = 0x00010000,
+        CLONE_SYSVSEM = 0x00040000,
+        CLONE_SETTLS = 0x00080000,
+        CLONE_PARENT_SETTID = 0x00100000,
+        CLONE_CHILD_CLEARTID = 0x00200000,
+        CLONE_DETACHED = 0x00400000,
+        CLONE_CHILD_SETTID = 0x01000000
+    };
+    const uint64_t required = CLONE_VM | CLONE_FILES |
+                              CLONE_SIGHAND | CLONE_THREAD;
+    const uint64_t supported = required | CLONE_FS | CLONE_SYSVSEM |
+                               CLONE_SETTLS | CLONE_PARENT_SETTID |
+                               CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID |
+                               CLONE_DETACHED;
+    if (!frame) return (uint64_t)(-EFAULT);
+    uint64_t flags = frame->call.a0;
+    uint64_t stack = frame->call.a1;
+    uint64_t parent_tid = frame->call.a2;
+    uint64_t child_tid = frame->call.a3;
+    uint64_t tls = frame->call.a4;
+    if ((flags & required) != required || (flags & ~supported) != 0)
+        return (uint64_t)(-EINVAL);
+    if (!linux_user_range_mapped(frame->rip, 1) ||
+        !linux_user_range_mapped(stack, 1))
+        return (uint64_t)(-EFAULT);
+    if ((flags & CLONE_SETTLS) &&
+        !linux_user_range_mapped(tls, 1))
+        return (uint64_t)(-EFAULT);
+    if ((flags & CLONE_PARENT_SETTID) &&
+        !linux_user_range_mapped(parent_tid, sizeof(uint32_t)))
+        return (uint64_t)(-EFAULT);
+    if ((flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) &&
+        !linux_user_range_mapped(child_tid, sizeof(uint32_t)))
+        return (uint64_t)(-EFAULT);
+
+    hbos_clone_request_t request = {
+        .version = HBOS_CLONE_REQUEST_VERSION,
+        .size = sizeof(request),
+        /* CLONE_DETACHED is a historical no-op in Linux and musl still
+         * supplies it.  Validate it above, then omit it from HBOS's compact
+         * internal clone contract. */
+        .flags = flags & ~(uint64_t)CLONE_DETACHED,
+        .entry = frame->rip,
+        .stack = stack,
+        .argument = 0,
+        .tls = tls,
+        .parent_tid = parent_tid,
+        .child_tid = child_tid,
+        .clear_child_tid = child_tid
+    };
+    hbos_linux_clone_context_t context;
+    linux_clone_context_from_frame(frame, stack, &context);
+    int tid = task_clone_linux_thread(&request, &context);
+    return tid < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)tid;
+}
+
+static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
+                             const void *arguments, uint64_t size) {
+    enum {
+        CLONE_VM = 0x00000100,
+        CLONE_FS = 0x00000200,
+        CLONE_FILES = 0x00000400,
+        CLONE_SIGHAND = 0x00000800,
+        CLONE_THREAD = 0x00010000,
+        CLONE_SYSVSEM = 0x00040000,
+        CLONE_SETTLS = 0x00080000,
+        CLONE_PARENT_SETTID = 0x00100000,
+        CLONE_CHILD_CLEARTID = 0x00200000,
+        CLONE_CHILD_SETTID = 0x01000000
+    };
+    const uint64_t required = CLONE_VM | CLONE_FILES |
+                              CLONE_SIGHAND | CLONE_THREAD;
+    const uint64_t supported = required | CLONE_FS | CLONE_SYSVSEM |
+                               CLONE_SETTLS | CLONE_PARENT_SETTID |
+                               CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
+    if (!frame || !arguments || size < LINUX_CLONE_ARGS_SIZE_VER0)
+        return (uint64_t)(-EINVAL);
+    if (size > PAGE_SIZE ||
+        !linux_user_range_mapped((uint64_t)(uintptr_t)arguments, size))
+        return (uint64_t)(-EFAULT);
+
+    linux_x86_clone_args_t args;
+    memset(&args, 0, sizeof(args));
+    uint64_t copied = size < sizeof(args) ? size : sizeof(args);
+    memcpy(&args, arguments, (size_t)copied);
+    if (size > LINUX_CLONE_ARGS_SIZE_VER2) {
+        const uint8_t *tail =
+            (const uint8_t *)arguments + LINUX_CLONE_ARGS_SIZE_VER2;
+        for (uint64_t i = LINUX_CLONE_ARGS_SIZE_VER2; i < size; i++)
+            if (tail[i - LINUX_CLONE_ARGS_SIZE_VER2] != 0)
+                return (uint64_t)(-E2BIG);
+    }
+    if ((args.flags & required) != required ||
+        (args.flags & ~supported) != 0 || args.exit_signal != 0 ||
+        args.set_tid || args.set_tid_size || !args.stack ||
+        !args.stack_size || args.stack > UINT64_MAX - args.stack_size)
+        return (uint64_t)(-EINVAL);
+    /* pidfd and cgroup are interpreted only when CLONE_PIDFD or
+     * CLONE_INTO_CGROUP is present.  Both flags are excluded by the
+     * supported mask above, but glibc legitimately leaves pidfd pointing at
+     * parent_tid without CLONE_PIDFD; Linux ignores that inactive field. */
+    uint64_t stack_top = args.stack + args.stack_size;
+    if (!linux_user_range_mapped(args.stack, args.stack_size) ||
+        !linux_user_range_mapped(frame->rip, 1))
+        return (uint64_t)(-EFAULT);
+    if ((args.flags & CLONE_SETTLS) &&
+        !linux_user_range_mapped(args.tls, 1))
+        return (uint64_t)(-EFAULT);
+    if ((args.flags & CLONE_PARENT_SETTID) &&
+        !linux_user_range_mapped(args.parent_tid, sizeof(uint32_t)))
+        return (uint64_t)(-EFAULT);
+    if ((args.flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) &&
+        !linux_user_range_mapped(args.child_tid, sizeof(uint32_t)))
+        return (uint64_t)(-EFAULT);
+
+    hbos_clone_request_t request = {
+        .version = HBOS_CLONE_REQUEST_VERSION,
+        .size = sizeof(request),
+        .flags = args.flags,
+        .entry = frame->rip,
+        .stack = stack_top,
+        .argument = 0,
+        .tls = args.tls,
+        .parent_tid = args.parent_tid,
+        .child_tid = args.child_tid,
+        .clear_child_tid = args.child_tid
+    };
+    hbos_linux_clone_context_t context;
+    linux_clone_context_from_frame(frame, stack_top, &context);
+    int tid = task_clone_linux_thread(&request, &context);
+    return tid < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)tid;
+}
+
+static uint64_t linux_rt_sigaction(int signal_number,
+                                   const linux_x86_sigaction_t *action,
+                                   linux_x86_sigaction_t *old_action,
+                                   uint64_t signal_set_size) {
+    if (signal_set_size != sizeof(uint64_t))
+        return (uint64_t)(-EINVAL);
+    if (signal_number <= 0 || signal_number >= _NSIG ||
+        signal_number == SIGKILL || signal_number == SIGSTOP)
+        return (uint64_t)(-EINVAL);
+    task_t *task = task_current();
+    if (!task) return (uint64_t)(-ESRCH);
+    if (old_action) {
+        memset(old_action, 0, sizeof(*old_action));
+        old_action->handler =
+            (uint64_t)(uintptr_t)task->sig_handler[signal_number];
+        old_action->flags = task->sig_action_flags[signal_number];
+        old_action->restorer = task->sig_action_restorer[signal_number];
+        old_action->mask = task->sig_action_mask[signal_number];
+    }
+    if (action) {
+        if (action->handler > 1 &&
+            action->handler >= 0x0000800000000000ULL)
+            return (uint64_t)(-EFAULT);
+        if ((action->flags & LINUX_SA_RESTORER) &&
+            (!action->restorer ||
+             action->restorer >= 0x0000800000000000ULL))
+            return (uint64_t)(-EFAULT);
+        task->sig_handler[signal_number] =
+            (void (*)(int))(uintptr_t)action->handler;
+        task->sig_action_flags[signal_number] = action->flags;
+        task->sig_action_restorer[signal_number] = action->restorer;
+        task->sig_action_mask[signal_number] = action->mask &
+            ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    }
+    return 0;
+}
+
+/* Whether rsp currently lies inside the installed alternate signal stack. */
+static int linux_on_altstack(const task_t *task, uint64_t rsp) {
+    if (task->sig_altstack_flags & LINUX_SS_DISABLE) return 0;
+    uint64_t sp = task->sig_altstack_sp;
+    uint64_t size = task->sig_altstack_size;
+    return size > 0 && rsp >= sp && rsp < sp + size;
+}
+/* sigaltstack(2): query and/or install the alternate signal stack.  The
+ * full syscall frame is needed to answer "currently executing on it?" the
+ * same way Linux does -- from the user rsp at syscall entry. */
+static uint64_t linux_sigaltstack(const linux_x86_stack_t *user_ss,
+                                  linux_x86_stack_t *user_old,
+                                  linux_x86_syscall_return_frame_t *frame) {
+    task_t *task = task_current();
+    if (!task) return (uint64_t)(-ESRCH);
+
+    uint32_t current_flags = 0;
+    if (task->sig_altstack_flags & LINUX_SS_DISABLE) {
+        current_flags = LINUX_SS_DISABLE;
+    } else if (linux_on_altstack(task, frame->rsp)) {
+        current_flags = LINUX_SS_ONSTACK;
+    }
+
+    if (user_old) {
+        if (!linux_user_range_writable((uint64_t)(uintptr_t)user_old,
+                                       sizeof(*user_old)))
+            return (uint64_t)(-EFAULT);
+        user_old->ss_sp = task->sig_altstack_sp;
+        user_old->ss_flags = current_flags;
+        user_old->ss_pad = 0;
+        user_old->ss_size = task->sig_altstack_size;
+    }
+
+    if (!user_ss) return 0;
+    if (!linux_user_range_mapped((uint64_t)(uintptr_t)user_ss,
+                                 sizeof(*user_ss)))
+        return (uint64_t)(-EFAULT);
+
+    uint32_t new_flags = user_ss->ss_flags;
+    if (new_flags == LINUX_SS_DISABLE) {
+        if (current_flags & LINUX_SS_ONSTACK)
+            return (uint64_t)(-EPERM);
+        task->sig_altstack_sp = 0;
+        task->sig_altstack_size = 0;
+        task->sig_altstack_flags = LINUX_SS_DISABLE;
+        return 0;
+    }
+    if (new_flags != 0)
+        return (uint64_t)(-EINVAL);
+    if (user_ss->ss_size < LINUX_MINSIGSTKSZ)
+        return (uint64_t)(-ENOMEM);
+    if (current_flags & LINUX_SS_ONSTACK)
+        return (uint64_t)(-EPERM);
+    task->sig_altstack_sp = (uint64_t)(uintptr_t)user_ss->ss_sp;
+    task->sig_altstack_size = user_ss->ss_size;
+    task->sig_altstack_flags = 0;
+    return 0;
+}
+
+
+/* Shared post-frame bookkeeping for both delivery paths: consume the
+ * pending bit, apply the handler mask (SA_NODEFER) and SA_RESETHAND. */
+static void linux_signal_consume(task_t *task, int signal_number,
+                                 uint64_t flags) {
+    uint64_t pending_bit = 1ULL << (signal_number - 1);
+    task->sig_pending.sig[0] &= ~pending_bit;
+    task->sig_blocked.sig[0] |= task->sig_action_mask[signal_number];
+    if (!(flags & LINUX_SA_NODEFER))
+        task->sig_blocked.sig[0] |= pending_bit;
+    task->sig_blocked.sig[0] &=
+        ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    if (flags & LINUX_SA_RESETHAND) {
+        task->sig_handler[signal_number] = SIG_DFL;
+        task->sig_action_flags[signal_number] = 0;
+        task->sig_action_restorer[signal_number] = 0;
+        task->sig_action_mask[signal_number] = 0;
+    }
+}
+
+typedef struct {
+    uint64_t handler_rsp;
+    void *siginfo_address;
+    void *ucontext_address;
+} linux_siginfo_built_t;
+
+/* Build an SA_SIGINFO rt_sigframe and fill the task signal state.  gregs[]
+ * holds the interrupted user context (REG_R8..REG_CR2 slots); si_code/cr2/
+ * err_code/trapno describe the delivery cause.  On success the caller must
+ * rewrite its own return frame so the handler runs with rdi=signo,
+ * rsi=&siginfo, rdx=&ucontext, rip=handler, rsp=handler_rsp. */
+static int linux_siginfo_deliver(task_t *task, int signal_number,
+                                 uint64_t flags, uint64_t restorer,
+                                 uint64_t user_rsp, int si_code,
+                                 uint64_t cr2, uint64_t err_code,
+                                 uint64_t trapno, const uint64_t gregs[23],
+                                 linux_siginfo_built_t *out) {
+    uint64_t base_rsp = user_rsp;
+    if ((flags & LINUX_SA_ONSTACK) &&
+        !(task->sig_altstack_flags & LINUX_SS_DISABLE) &&
+        task->sig_altstack_size >= LINUX_MINSIGSTKSZ &&
+        !linux_on_altstack(task, user_rsp)) {
+        base_rsp = task->sig_altstack_sp + task->sig_altstack_size;
+    }
+
+    uint64_t signal_rsp =
+        ((base_rsp - 128 - LINUX_RT_FRAME_SIZE) & ~15ULL) + 8;
+    if (signal_rsp < 128 ||
+        !linux_user_range_writable(signal_rsp, LINUX_RT_FRAME_SIZE))
+        return -1;
+
+    linux_x86_rt_sigframe_t *sigframe =
+        (linux_x86_rt_sigframe_t *)(uintptr_t)signal_rsp;
+    memset(sigframe, 0, sizeof(*sigframe));
+    sigframe->pretcode = (void *)(uintptr_t)restorer;
+    /* uc_stack mirrors Linux: ss_flags reflects the *interrupted* rsp. */
+    sigframe->uc.uc_stack.ss_sp = task->sig_altstack_sp;
+    sigframe->uc.uc_stack.ss_flags =
+        linux_on_altstack(task, user_rsp) ? LINUX_SS_ONSTACK : 0;
+    sigframe->uc.uc_stack.ss_size = task->sig_altstack_size;
+    /* gregs is an array parameter: it decays to a pointer, so the size
+     * must come from the target member, not sizeof(gregs). */
+    memcpy(sigframe->uc.uc_mcontext.gregs, gregs,
+           sizeof(sigframe->uc.uc_mcontext.gregs));
+    sigframe->uc.uc_mcontext.gregs[LINUX_REG_ERR] = err_code;
+    sigframe->uc.uc_mcontext.gregs[LINUX_REG_TRAPNO] = trapno;
+    sigframe->uc.uc_mcontext.gregs[LINUX_REG_CR2] = cr2;
+    sigframe->uc.uc_mcontext.gregs[LINUX_REG_OLDMASK] =
+        task->sig_blocked.sig[0];
+    sigframe->uc.uc_mcontext.fpregs = NULL;
+    sigframe->uc.uc_sigmask = task->sig_blocked.sig[0];
+    sigframe->info.si_signo = signal_number;
+    sigframe->info.si_errno = 0;
+    sigframe->info.si_code = si_code;
+    if (signal_number == SIGSEGV) {
+        sigframe->info.si_fields.fault_field.si_addr =
+            (void *)(uintptr_t)cr2;
+        sigframe->info.si_fields.fault_field.si_addr_lsb = 0;
+    } else {
+        sigframe->info.si_fields.kill_field.si_pid =
+            (int32_t)task->sig_last_sender_pid;
+        sigframe->info.si_fields.kill_field.si_uid = 0;
+    }
+
+    linux_signal_consume(task, signal_number, flags);
+    task->sig_siginfo_depth++;
+
+    out->handler_rsp = signal_rsp;
+    out->siginfo_address = &sigframe->info;
+    out->ucontext_address = &sigframe->uc;
+    return 0;
+}
+
+static uint64_t linux_rt_sigreturn(hbos_syscall_frame_t *syscall_frame) {
+    task_t *task = task_current();
+    if (!task) return (uint64_t)(-ESRCH);
+    linux_x86_syscall_return_frame_t *frame =
+        (linux_x86_syscall_return_frame_t *)syscall_frame;
+
+    if (task->sig_siginfo_depth > 0) {
+        /* SA_SIGINFO frame: the handler's ret popped pretcode, so the
+         * ucontext begins at the current user rsp.  Validate the whole
+         * region before trusting any register it contains; a forged frame
+         * must not be able to inject kernel state. */
+        uint64_t ucontext_address = frame->rsp;
+        if (ucontext_address < PAGE_SIZE ||
+            !linux_user_range_writable(ucontext_address,
+                                       sizeof(linux_x86_ucontext_t)))
+            return (uint64_t)(-EFAULT);
+        linux_x86_ucontext_t *uc =
+            (linux_x86_ucontext_t *)(uintptr_t)ucontext_address;
+        const uint64_t *gregs = uc->uc_mcontext.gregs;
+        uint64_t rip = gregs[LINUX_REG_RIP];
+        uint64_t rsp = gregs[LINUX_REG_RSP];
+        if (!linux_user_range_mapped(rip, 1) || rsp >= 0x0000800000000000ULL)
+            return (uint64_t)(-EFAULT);
+
+        frame->call.nr = gregs[LINUX_REG_RAX];
+        frame->call.a0 = gregs[LINUX_REG_RDI];
+        frame->call.a1 = gregs[LINUX_REG_RSI];
+        frame->call.a2 = gregs[LINUX_REG_RDX];
+        frame->call.a3 = gregs[LINUX_REG_R10];
+        frame->call.a4 = gregs[LINUX_REG_R8];
+        frame->call.a5 = gregs[LINUX_REG_R9];
+        frame->rbx = gregs[LINUX_REG_RBX];
+        frame->rbp = gregs[LINUX_REG_RBP];
+        frame->r12 = gregs[LINUX_REG_R12];
+        frame->r13 = gregs[LINUX_REG_R13];
+        frame->r14 = gregs[LINUX_REG_R14];
+        frame->r15 = gregs[LINUX_REG_R15];
+        frame->rcx = gregs[LINUX_REG_RCX];
+        frame->r11 = gregs[LINUX_REG_R11];
+        frame->rip = rip;
+        frame->rflags = gregs[LINUX_REG_EFL];
+        frame->rsp = rsp;
+        /* Never let a user frame claim a privileged code segment.
+         * Parenthesize SEL_UCODE: the cpu.h macro ends with `| 3`. */
+        if (((gregs[LINUX_REG_CSGSFS] >> 32) & 0xffff) ==
+            (SEL_UCODE))
+            frame->cs = SEL_UCODE;
+        task->sig_blocked.sig[0] = uc->uc_sigmask;
+        task->sig_siginfo_depth--;
+        task->sig_suppress_delivery = true;
+        return gregs[LINUX_REG_RAX];
+    }
+
+    if (!task->sig_frame_active)
+        return (uint64_t)(-EINVAL);
+    frame->call.nr = task->sig_saved_rax;
+    frame->call.a0 = task->sig_saved_args[0];
+    frame->call.a1 = task->sig_saved_args[1];
+    frame->call.a2 = task->sig_saved_args[2];
+    frame->call.a3 = task->sig_saved_args[3];
+    frame->call.a4 = task->sig_saved_args[4];
+    frame->call.a5 = task->sig_saved_args[5];
+    frame->rbx = task->sig_saved_callee[0];
+    frame->rbp = task->sig_saved_callee[1];
+    frame->r12 = task->sig_saved_callee[2];
+    frame->r13 = task->sig_saved_callee[3];
+    frame->r14 = task->sig_saved_callee[4];
+    frame->r15 = task->sig_saved_callee[5];
+    frame->rcx = task->sig_saved_rcx;
+    frame->r11 = task->sig_saved_r11;
+    frame->rip = task->sig_saved_rip;
+    frame->rflags = task->sig_saved_rflags;
+    frame->rsp = task->sig_saved_rsp;
+    task->sig_blocked = task->sig_saved_blocked;
+    task->sig_frame_active = false;
+    task->sig_suppress_delivery = true;
+    return task->sig_saved_rax;
+}
+
+/* Called by linux_syscall_entry after the syscall result has been written
+ * into frame->call.nr.  This is the first safe place where both the current
+ * user return context and the target address space are available. */
+void linux_signal_prepare_return(hbos_syscall_frame_t *syscall_frame) {
+    task_t *task = task_current();
+    if (!task || !syscall_frame) return;
+    if (task->sig_suppress_delivery) {
+        task->sig_suppress_delivery = false;
+        return;
+    }
+    if (task->sig_frame_active) return;
+
+    uint64_t deliverable =
+        task->sig_pending.sig[0] & ~task->sig_blocked.sig[0];
+    if (!deliverable) return;
+    int signal_number = 0;
+    while (deliverable) {
+        int signal = __builtin_ctzll(deliverable) + 1;
+        if (task->sig_handler[signal] != SIG_DFL &&
+            task->sig_handler[signal] != SIG_IGN) {
+            signal_number = signal;
+            break;
+        }
+        deliverable &= deliverable - 1;
+    }
+    if (!signal_number) return;
+
+    uint64_t flags = task->sig_action_flags[signal_number];
+    uint64_t restorer = task->sig_action_restorer[signal_number];
+    uint64_t handler =
+        (uint64_t)(uintptr_t)task->sig_handler[signal_number];
+    if (!(flags & LINUX_SA_RESTORER) || !restorer) return;
+
+    linux_x86_syscall_return_frame_t *frame =
+        (linux_x86_syscall_return_frame_t *)syscall_frame;
+    if (frame->rsp < 136) return;
+
+    if (flags & LINUX_SA_SIGINFO) {
+        if (task->sig_siginfo_depth >= LINUX_SIGINFO_NEST_MAX) return;
+        uint64_t gregs[23];
+        memset(gregs, 0, sizeof(gregs));
+        gregs[LINUX_REG_R8]  = frame->call.a4;
+        gregs[LINUX_REG_R9]  = frame->call.a5;
+        gregs[LINUX_REG_R10] = frame->call.a3;
+        gregs[LINUX_REG_R11] = frame->r11;
+        gregs[LINUX_REG_R12] = frame->r12;
+        gregs[LINUX_REG_R13] = frame->r13;
+        gregs[LINUX_REG_R14] = frame->r14;
+        gregs[LINUX_REG_R15] = frame->r15;
+        gregs[LINUX_REG_RDI] = frame->call.a0;
+        gregs[LINUX_REG_RSI] = frame->call.a1;
+        gregs[LINUX_REG_RBP] = frame->rbp;
+        gregs[LINUX_REG_RBX] = frame->rbx;
+        gregs[LINUX_REG_RDX] = frame->call.a2;
+        gregs[LINUX_REG_RAX] = frame->call.nr;
+        gregs[LINUX_REG_RCX] = frame->rcx;
+        gregs[LINUX_REG_RSP] = frame->rsp;
+        gregs[LINUX_REG_RIP] = frame->rip;
+        gregs[LINUX_REG_EFL] = frame->rflags;
+        gregs[LINUX_REG_CSGSFS] = (uint64_t)frame->cs << 32;
+
+        linux_siginfo_built_t built;
+        if (linux_siginfo_deliver(task, signal_number, flags, restorer,
+                                  frame->rsp, LINUX_SI_USER, 0, 0, 0, gregs,
+                                  &built) < 0)
+            return;
+        frame->call.nr = 0;
+        frame->call.a0 = (uint64_t)signal_number;
+        frame->call.a1 = (uint64_t)(uintptr_t)built.siginfo_address;
+        frame->call.a2 = (uint64_t)(uintptr_t)built.ucontext_address;
+        frame->call.a3 = 0;
+        frame->call.a4 = 0;
+        frame->call.a5 = 0;
+        frame->rip = handler;
+        frame->rsp = built.handler_rsp;
+        return;
+    }
+
+    if (task->sig_siginfo_depth > 0) return;
+    uint64_t signal_rsp = ((frame->rsp - 128) & ~15ULL) - 8;
+    if (!linux_user_range_writable(signal_rsp, sizeof(uint64_t))) return;
+    *(uint64_t *)(uintptr_t)signal_rsp = restorer;
+
+    task->sig_saved_rax = frame->call.nr;
+    task->sig_saved_args[0] = frame->call.a0;
+    task->sig_saved_args[1] = frame->call.a1;
+    task->sig_saved_args[2] = frame->call.a2;
+    task->sig_saved_args[3] = frame->call.a3;
+    task->sig_saved_args[4] = frame->call.a4;
+    task->sig_saved_args[5] = frame->call.a5;
+    task->sig_saved_callee[0] = frame->rbx;
+    task->sig_saved_callee[1] = frame->rbp;
+    task->sig_saved_callee[2] = frame->r12;
+    task->sig_saved_callee[3] = frame->r13;
+    task->sig_saved_callee[4] = frame->r14;
+    task->sig_saved_callee[5] = frame->r15;
+    task->sig_saved_rcx = frame->rcx;
+    task->sig_saved_r11 = frame->r11;
+    task->sig_saved_rip = frame->rip;
+    task->sig_saved_rflags = frame->rflags;
+    task->sig_saved_rsp = frame->rsp;
+    task->sig_saved_blocked = task->sig_blocked;
+    task->sig_frame_active = true;
+
+    linux_signal_consume(task, signal_number, flags);
+
+    frame->call.nr = 0;
+    frame->call.a0 = (uint64_t)signal_number;
+    frame->call.a1 = 0;
+    frame->call.a2 = 0;
+    frame->call.a3 = 0;
+    frame->call.a4 = 0;
+    frame->call.a5 = 0;
+    frame->rip = handler;
+    frame->rsp = signal_rsp;
+}
+
+int linux_signal_prepare_exception(void *exception_frame,
+                                   int signal_number, uint64_t cr2,
+                                   uint64_t err_code) {
+    isr_regs_t *frame = (isr_regs_t *)exception_frame;
+    task_t *task = task_current();
+    if (!frame || !task || (frame->cs & 3) != 3 ||
+        signal_number <= 0 || signal_number >= _NSIG ||
+        task->sig_frame_active)
+        return -1;
+
+    uint64_t pending_bit = 1ULL << (signal_number - 1);
+    uint64_t flags = task->sig_action_flags[signal_number];
+    uint64_t handler =
+        (uint64_t)(uintptr_t)task->sig_handler[signal_number];
+    uint64_t restorer = task->sig_action_restorer[signal_number];
+    if (handler <= 1 || (task->sig_blocked.sig[0] & pending_bit) ||
+        !(flags & LINUX_SA_RESTORER) || !restorer ||
+        !linux_user_range_mapped(handler, 1) ||
+        !linux_user_range_mapped(restorer, 1) || frame->rsp < 136)
+        return -1;
+
+    if (flags & LINUX_SA_SIGINFO) {
+        if (task->sig_siginfo_depth >= LINUX_SIGINFO_NEST_MAX) return -1;
+        uint64_t gregs[23];
+        memset(gregs, 0, sizeof(gregs));
+        gregs[LINUX_REG_R8]  = frame->r8;
+        gregs[LINUX_REG_R9]  = frame->r9;
+        gregs[LINUX_REG_R10] = frame->r10;
+        gregs[LINUX_REG_R11] = frame->r11;
+        gregs[LINUX_REG_R12] = frame->r12;
+        gregs[LINUX_REG_R13] = frame->r13;
+        gregs[LINUX_REG_R14] = frame->r14;
+        gregs[LINUX_REG_R15] = frame->r15;
+        gregs[LINUX_REG_RDI] = frame->rdi;
+        gregs[LINUX_REG_RSI] = frame->rsi;
+        gregs[LINUX_REG_RBP] = frame->rbp;
+        gregs[LINUX_REG_RBX] = frame->rbx;
+        gregs[LINUX_REG_RDX] = frame->rdx;
+        gregs[LINUX_REG_RAX] = frame->rax;
+        gregs[LINUX_REG_RCX] = frame->rcx;
+        gregs[LINUX_REG_RSP] = frame->rsp;
+        gregs[LINUX_REG_RIP] = frame->rip;
+        gregs[LINUX_REG_EFL] = frame->rflags;
+        gregs[LINUX_REG_CSGSFS] = (uint64_t)frame->cs << 32;
+        gregs[LINUX_REG_ERR] = err_code;
+        gregs[LINUX_REG_TRAPNO] = 14;
+        gregs[LINUX_REG_CR2] = cr2;
+
+        int si_code = (err_code & 0x1) ? LINUX_SEGV_ACCERR
+                                       : LINUX_SEGV_MAPERR;
+        linux_siginfo_built_t built;
+        if (linux_siginfo_deliver(task, signal_number, flags, restorer,
+                                  frame->rsp, si_code, cr2, err_code, 14,
+                                  gregs, &built) < 0)
+            return -1;
+        frame->rdi = (uint64_t)signal_number;
+        frame->rsi = (uint64_t)(uintptr_t)built.siginfo_address;
+        frame->rdx = (uint64_t)(uintptr_t)built.ucontext_address;
+        frame->rip = handler;
+        frame->rsp = built.handler_rsp;
+        return 1;
+    }
+
+    if (task->sig_siginfo_depth > 0) return -1;
+    uint64_t signal_rsp = ((frame->rsp - 128) & ~15ULL) - 8;
+    if (!linux_user_range_writable(signal_rsp, sizeof(uint64_t)))
+        return -1;
+    *(uint64_t *)(uintptr_t)signal_rsp = restorer;
+
+    task->sig_saved_rax = frame->rax;
+    task->sig_saved_args[0] = frame->rdi;
+    task->sig_saved_args[1] = frame->rsi;
+    task->sig_saved_args[2] = frame->rdx;
+    task->sig_saved_args[3] = frame->r10;
+    task->sig_saved_args[4] = frame->r8;
+    task->sig_saved_args[5] = frame->r9;
+    task->sig_saved_callee[0] = frame->rbx;
+    task->sig_saved_callee[1] = frame->rbp;
+    task->sig_saved_callee[2] = frame->r12;
+    task->sig_saved_callee[3] = frame->r13;
+    task->sig_saved_callee[4] = frame->r14;
+    task->sig_saved_callee[5] = frame->r15;
+    task->sig_saved_rcx = frame->rcx;
+    task->sig_saved_r11 = frame->r11;
+    task->sig_saved_rip = frame->rip;
+    task->sig_saved_rflags = frame->rflags;
+    task->sig_saved_rsp = frame->rsp;
+    task->sig_saved_blocked = task->sig_blocked;
+    task->sig_frame_active = true;
+
+    linux_signal_consume(task, signal_number, flags);
+
+    frame->rdi = (uint64_t)signal_number;
+    frame->rsi = 0;
+    frame->rdx = 0;
+    frame->rip = handler;
+    frame->rsp = signal_rsp;
+    return 1;
+}
+
 static void linux_copy_stat(linux_x86_stat_t *output,
                             const struct stat *input) {
     memset(output, 0, sizeof(*output));
@@ -131,17 +1313,39 @@ static uint64_t linux_stat_path(const char *path, linux_x86_stat_t *output) {
     return 0;
 }
 
+static uint64_t linux_lstat_path(const char *path, linux_x86_stat_t *output) {
+    if (!path || !output) return (uint64_t)(-EFAULT);
+    struct stat native;
+    if (lstat(path, &native) < 0)
+        return (uint64_t)(-(errno > 0 ? errno : EIO));
+    linux_copy_stat(output, &native);
+    return 0;
+}
+
 static uint64_t linux_fstat_fd(int fd, linux_x86_stat_t *output) {
     if (!output) return (uint64_t)(-EFAULT);
     struct stat native;
     task_t *current = task_current();
     if (current && current->fd_table && fd >= 0 && fd < POSIX_MAX_FDS &&
         current->fd_table->entries[fd].used &&
-        current->fd_table->entries[fd].type == FD_MEMFD) {
+        (current->fd_table->entries[fd].type == FD_MEMFD ||
+         current->fd_table->entries[fd].type == FD_INOTIFY)) {
+        if (current->fd_table->entries[fd].type == FD_INOTIFY) {
+            memset(&native, 0, sizeof(native));
+            native.st_dev = 4;
+            native.st_ino =
+                (ino_t)(current->fd_table->entries[fd].compat_id + 1);
+            native.st_mode = S_IFREG | S_IRUSR | S_IWUSR;
+            native.st_nlink = 1;
+            linux_copy_stat(output, &native);
+            return 0;
+        }
         uint64_t size;
         if (linux_compat_memfd_size(fd, &size) < 0)
             return (uint64_t)(-(errno > 0 ? errno : EBADF));
         memset(&native, 0, sizeof(native));
+        native.st_dev = 3;
+        native.st_ino = (ino_t)(current->fd_table->entries[fd].compat_id + 1);
         native.st_mode = S_IFREG | S_IRUSR | S_IWUSR;
         native.st_nlink = 1;
         native.st_size = (off_t)size;
@@ -164,6 +1368,58 @@ static int64_t linux_native_call(uint64_t number, uint64_t a0, uint64_t a1,
     return (int64_t)syscall_dispatch_frame(&native);
 }
 
+/* Resolve a Linux *at pathname without adding a second VFS path model.
+ * Absolute paths intentionally ignore dirfd, matching Linux.  Relative
+ * paths reuse the canonical path already retained by HBOS directory fds. */
+static int linux_resolve_at_path(int dirfd, const char *path,
+                                 char output[VFS_MAX_NAME]) {
+    if (!path) return -EFAULT;
+    if (!path[0]) return -ENOENT;
+    if (path[0] == '/')
+        return vfs_resolve_path("/", path, output, VFS_MAX_NAME) < 0 ?
+            -EINVAL : 0;
+
+    const char *base = NULL;
+    char cwd[VFS_MAX_NAME];
+    if (dirfd == -100) { /* AT_FDCWD */
+        if (!getcwd(cwd, sizeof(cwd))) return -EIO;
+        base = cwd;
+    } else {
+        task_t *current = task_current();
+        if (!current || !current->fd_table || dirfd < 0 ||
+            dirfd >= POSIX_MAX_FDS ||
+            !current->fd_table->entries[dirfd].used)
+            return -EBADF;
+        fd_entry_t *entry = &current->fd_table->entries[dirfd];
+        if (!entry->node || entry->node->type != VFS_NODE_DIR)
+            return -ENOTDIR;
+        if (!entry->path[0]) return -ENOENT;
+        base = entry->path;
+    }
+    return vfs_resolve_path(base, path, output, VFS_MAX_NAME) < 0 ?
+        -EINVAL : 0;
+}
+
+static uint64_t linux_newfstatat(int dirfd, const char *path,
+                                 linux_x86_stat_t *output, int flags) {
+    const int supported = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+    if (flags & ~supported) return (uint64_t)(-EINVAL);
+    if (!path || !output) return (uint64_t)(-EFAULT);
+    if (!path[0]) {
+        if (!(flags & AT_EMPTY_PATH)) return (uint64_t)(-ENOENT);
+        if (dirfd != AT_FDCWD) return linux_fstat_fd(dirfd, output);
+        char cwd[VFS_MAX_NAME];
+        if (!getcwd(cwd, sizeof(cwd)))
+            return (uint64_t)(-(errno > 0 ? errno : EIO));
+        return linux_stat_path(cwd, output);
+    }
+    char resolved[VFS_MAX_NAME];
+    int status = linux_resolve_at_path(dirfd, path, resolved);
+    if (status < 0) return (uint64_t)(int64_t)status;
+    return (flags & AT_SYMLINK_NOFOLLOW) ?
+        linux_lstat_path(resolved, output) : linux_stat_path(resolved, output);
+}
+
 static uint64_t linux_vector_io(int fd, const linux_x86_iovec_t *vectors,
                                 uint64_t count, int write_operation) {
     if ((!vectors && count) || count > 1024)
@@ -183,6 +1439,36 @@ static uint64_t linux_vector_io(int fd, const linux_x86_iovec_t *vectors,
         if ((uint64_t)result < vectors[i].length) break;
     }
     return (uint64_t)total;
+}
+
+static uint64_t linux_pread64(int fd, void *buffer, uint64_t count,
+                              uint64_t offset) {
+    if (!buffer && count) return (uint64_t)(-EFAULT);
+    if (count > INT32_MAX) return (uint64_t)(-EINVAL);
+    task_t *current = task_current();
+    if (!current || !current->fd_table || fd < 0 || fd >= POSIX_MAX_FDS)
+        return (uint64_t)(-EBADF);
+    fd_entry_t *entry = &current->fd_table->entries[fd];
+    if (!entry->used) return (uint64_t)(-EBADF);
+
+    if (entry->type == FD_MEMFD) {
+        uint64_t size;
+        if (linux_compat_memfd_size(fd, &size) < 0)
+            return (uint64_t)(-EBADF);
+        if (offset >= size) return 0;
+        uint64_t available = size - offset;
+        if (count > available) count = available;
+        if (linux_compat_memfd_read_at(fd, offset, buffer, (size_t)count) < 0)
+            return (uint64_t)(-EIO);
+        return count;
+    }
+
+    if (entry->type != FD_FILE || !entry->node)
+        return (uint64_t)(-ESPIPE);
+    if (offset > UINT32_MAX) return 0;
+    int result = vfs_read(entry->node, (uint32_t)offset, buffer,
+                          (uint32_t)count);
+    return result < 0 ? (uint64_t)(-EIO) : (uint64_t)result;
 }
 
 static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
@@ -312,7 +1598,8 @@ static uint64_t linux_getdents64(int fd, void *buffer, uint64_t count) {
         *(uint64_t *)(record + 0) = entry->offset + 1;
         *(int64_t *)(record + 8) = (int64_t)(entry->offset + 1);
         *(uint16_t *)(record + 16) = (uint16_t)record_length;
-        record[18] = type == VFS_NODE_DIR ? 4 : 8;
+        record[18] = type == VFS_NODE_DIR ? DT_DIR :
+                     (type == VFS_NODE_SYMLINK ? DT_LNK : DT_REG);
         memcpy(record + 19, name, name_length);
         entry->offset++;
         written += record_length;
@@ -343,9 +1630,24 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 10:  native.nr = HBOS_SYS_MPROTECT; break;
         case 11:  native.nr = HBOS_SYS_MUNMAP; break;
         case 12:  native.nr = HBOS_SYS_BRK; break;
-        case 13:  native.nr = HBOS_SYS_SIGACTION; break;
-        case 14:  native.nr = HBOS_SYS_SIGPROCMASK; break;
+        case 13:
+            return linux_rt_sigaction(
+                (int)linux_frame->a0,
+                (const linux_x86_sigaction_t *)linux_frame->a1,
+                (linux_x86_sigaction_t *)linux_frame->a2,
+                linux_frame->a3);
+        case 14:
+            if (linux_frame->a3 != sizeof(uint64_t))
+                return (uint64_t)(-EINVAL);
+            native.nr = HBOS_SYS_SIGPROCMASK;
+            break;
+        case 15:
+            return linux_rt_sigreturn(linux_frame);
         case 16:  native.nr = HBOS_SYS_IOCTL; break;
+        case 17:
+            return linux_pread64((int)linux_frame->a0,
+                                 (void *)linux_frame->a1,
+                                 linux_frame->a2, linux_frame->a3);
         case 19:
             return linux_vector_io(
                 (int)linux_frame->a0,
@@ -359,6 +1661,9 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 21:  native.nr = HBOS_SYS_ACCESS; break;
         case 22:  native.nr = HBOS_SYS_PIPE; break;
         case 24:  native.nr = HBOS_SYS_SCHED_YIELD; break;
+        case 28:
+            return linux_madvise(linux_frame->a0, linux_frame->a1,
+                                 (int)linux_frame->a2);
         case 32:  native.nr = HBOS_SYS_DUP; break;
         case 33:  native.nr = HBOS_SYS_DUP2; break;
         case 35:  native.nr = HBOS_SYS_NANOSLEEP; break;
@@ -381,10 +1686,17 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 48:  native.nr = HBOS_SYS_SHUTDOWN; break;
         case 49:  native.nr = HBOS_SYS_BIND; break;
         case 50:  native.nr = HBOS_SYS_LISTEN; break;
+        case 51:  native.nr = HBOS_SYS_GETSOCKNAME; break;
+        case 52:  native.nr = HBOS_SYS_GETPEERNAME; break;
         case 53:  native.nr = HBOS_SYS_SOCKETPAIR; break;
         case 54:  native.nr = HBOS_SYS_SETSOCKOPT; break;
         case 55:  native.nr = HBOS_SYS_GETSOCKOPT; break;
-        case 57:  native.nr = HBOS_SYS_FORK; break;
+        case 56:
+            return linux_clone(
+                (linux_x86_syscall_return_frame_t *)linux_frame);
+        case 57:
+            return linux_fork(
+                (linux_x86_syscall_return_frame_t *)linux_frame);
         case 59:  native.nr = HBOS_SYS_EXECVE; break;
         case 60:
         case 231: native.nr = HBOS_SYS_EXIT; break;
@@ -395,13 +1707,24 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 77:  native.nr = HBOS_SYS_FTRUNCATE; break;
         case 79:  native.nr = HBOS_SYS_GETCWD; break;
         case 80:  native.nr = HBOS_SYS_CHDIR; break;
+        case 82:
+            native.nr = HBOS_SYS_RENAME;
+            native.a2 = 0;
+            break;
         case 83:  native.nr = HBOS_SYS_MKDIR; break;
         case 84:  native.nr = HBOS_SYS_RMDIR; break;
         case 87:  native.nr = HBOS_SYS_UNLINK; break;
+        case 88:  native.nr = HBOS_SYS_SYMLINK; break;
         case 89:  native.nr = HBOS_SYS_READLINK; break;
         case 90:  native.nr = HBOS_SYS_CHMOD; break;
         case 92:  native.nr = HBOS_SYS_CHOWN; break;
         case 96:  native.nr = HBOS_SYS_GETTOD; break;
+        case 98:
+            return linux_getrusage(
+                (int)linux_frame->a0,
+                (linux_x86_rusage_t *)linux_frame->a1);
+        case 99:
+            return linux_sysinfo((linux_x86_sysinfo_t *)linux_frame->a0);
         case 102: native.nr = HBOS_SYS_GETUID; break;
         case 104: native.nr = HBOS_SYS_GETGID; break;
         case 107: native.nr = HBOS_SYS_GETEUID; break;
@@ -410,6 +1733,15 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 115: native.nr = HBOS_SYS_GETGROUPS; break;
         case 116: native.nr = HBOS_SYS_SETGROUPS; break;
         case 121: native.nr = HBOS_SYS_GETPGID; break;
+        case 131:
+            return linux_sigaltstack(
+                (const linux_x86_stack_t *)linux_frame->a0,
+                (linux_x86_stack_t *)linux_frame->a1,
+                (linux_x86_syscall_return_frame_t *)linux_frame);
+        case 157:
+            return linux_prctl(linux_frame->a0, linux_frame->a1,
+                               linux_frame->a2, linux_frame->a3,
+                               linux_frame->a4);
         case 158: native.nr = HBOS_SYS_ARCH_PRCTL; break;
         case 186: native.nr = HBOS_SYS_GETTID; break;
         case 202: native.nr = HBOS_SYS_FUTEX; break;
@@ -418,31 +1750,88 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
                 (int)linux_frame->a0, (void *)linux_frame->a1,
                 linux_frame->a2);
         case 218: native.nr = HBOS_SYS_SET_TID_ADDRESS; break;
-        case 228: native.nr = HBOS_SYS_CLOCK_GETTIME; break;
+        case 228:
+            return linux_clock_gettime(
+                (int)linux_frame->a0,
+                (linux_x86_timespec_t *)linux_frame->a1);
+        case 230:
+            return linux_clock_nanosleep(
+                (int)linux_frame->a0, (int)linux_frame->a1,
+                (const void *)linux_frame->a2,
+                (void *)linux_frame->a3);
         case 232: native.nr = HBOS_SYS_EPOLL_WAIT; break;
         case 233: native.nr = HBOS_SYS_EPOLL_CTL; break;
-        case 257:
-            if ((int64_t)linux_frame->a0 != -100)
-                return (uint64_t)(-ENOSYS);
-            native.nr = HBOS_SYS_OPEN;
-            native.a0 = linux_frame->a1;
-            native.a1 = linux_frame->a2;
-            native.a2 = linux_frame->a3;
-            break;
-        case 262:
-            if ((int64_t)linux_frame->a0 != -100 || linux_frame->a3 != 0)
-                return (uint64_t)(-ENOSYS);
-            return linux_stat_path(
-                (const char *)linux_frame->a1,
-                (linux_x86_stat_t *)linux_frame->a2);
-        case 267:
-            if ((int64_t)linux_frame->a0 != -100)
-                return (uint64_t)(-ENOSYS);
-            native.nr = HBOS_SYS_READLINK;
-            native.a0 = linux_frame->a1;
-            native.a1 = linux_frame->a2;
-            native.a2 = linux_frame->a3;
-            break;
+        case 234:
+            return linux_tgkill((int)linux_frame->a0,
+                                (int)linux_frame->a1,
+                                (int)linux_frame->a2);
+        case 253: {
+            int result = linux_compat_inotify_init1(0);
+            return result < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO)) :
+                                (uint64_t)result;
+        }
+        case 254: {
+            int result = linux_compat_inotify_add_watch(
+                (int)linux_frame->a0, (const char *)linux_frame->a1,
+                (uint32_t)linux_frame->a2);
+            return result < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO)) :
+                                (uint64_t)result;
+        }
+        case 255: {
+            int result = linux_compat_inotify_rm_watch(
+                (int)linux_frame->a0, (int)linux_frame->a1);
+            return result < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO)) :
+                                (uint64_t)result;
+        }
+        case 257: {
+            char path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a2,
+                linux_frame->a3, 0, 0, 0);
+        }
+        case 262: {
+            return linux_newfstatat(
+                (int)linux_frame->a0, (const char *)linux_frame->a1,
+                (linux_x86_stat_t *)linux_frame->a2,
+                (int)linux_frame->a3);
+        }
+        case 264: {
+            char old_path[VFS_MAX_NAME];
+            char new_path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1,
+                old_path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            resolved = linux_resolve_at_path(
+                (int)linux_frame->a2, (const char *)linux_frame->a3,
+                new_path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_RENAME, (uint64_t)old_path, (uint64_t)new_path,
+                0, 0, 0, 0);
+        }
+        case 266: {
+            char link_path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a1, (const char *)linux_frame->a2,
+                link_path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_SYMLINK, linux_frame->a0, (uint64_t)link_path,
+                0, 0, 0, 0);
+        }
+        case 267: {
+            char path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_READLINK, (uint64_t)path, linux_frame->a2,
+                linux_frame->a3, 0, 0, 0);
+        }
         case 273: native.nr = HBOS_SYS_SET_ROBUST_LIST; break;
         case 274: native.nr = HBOS_SYS_GET_ROBUST_LIST; break;
         case 281: native.nr = HBOS_SYS_EPOLL_WAIT; break;
@@ -470,11 +1859,42 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
             native.nr = HBOS_SYS_DUP2;
             break;
         case 293: native.nr = HBOS_SYS_PIPE2; break;
+        case 294: {
+            int result = linux_compat_inotify_init1((int)linux_frame->a0);
+            return result < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO)) :
+                                (uint64_t)result;
+        }
+        case 302:
+            return linux_prlimit64(
+                (int)linux_frame->a0, (unsigned int)linux_frame->a1,
+                (const linux_x86_rlimit64_t *)linux_frame->a2,
+                (linux_x86_rlimit64_t *)linux_frame->a3);
+        case 316: {
+            if (linux_frame->a4 & ~1ULL)
+                return (uint64_t)(-EOPNOTSUPP);
+            char old_path[VFS_MAX_NAME];
+            char new_path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1,
+                old_path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            resolved = linux_resolve_at_path(
+                (int)linux_frame->a2, (const char *)linux_frame->a3,
+                new_path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_RENAME, (uint64_t)old_path, (uint64_t)new_path,
+                linux_frame->a4, 0, 0, 0);
+        }
         case 318: native.nr = HBOS_SYS_GETRANDOM; break;
         case 319:
             return (uint64_t)(int64_t)linux_compat_memfd_create(
                 (const char *)linux_frame->a0,
                 (unsigned int)linux_frame->a1);
+        case 435:
+            return linux_clone3(
+                (linux_x86_syscall_return_frame_t *)linux_frame,
+                (const void *)linux_frame->a0, linux_frame->a1);
         default: return (uint64_t)(-ENOSYS);
     }
     return syscall_dispatch_frame(&native);
@@ -484,17 +1904,168 @@ static uint64_t align_page_up(uint64_t value) {
     return (value + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 }
 
+static void vm_area_drop_backing(vm_area_t *area) {
+    if (area && area->backing_type == VM_BACKING_MEMFD)
+        linux_compat_memfd_unmap(area->backing_id);
+}
+
+/* Remove every VMA fragment intersecting [start,end), splitting a VMA when
+ * the hole is strictly inside it.  Linux munmap accepts already-unmapped
+ * pages, so absence of metadata is not an error. */
+static int vm_unmap_area_range(task_mm_t *mm, uint64_t start, uint64_t end) {
+    if (!mm || start >= end) return 0;
+
+    size_t splits = 0;
+    for (vm_area_t *area = mm->areas; area; area = area->next)
+        if (start > area->start && end < area->end)
+            splits++;
+
+    vm_area_t *spares = NULL;
+    while (splits--) {
+        vm_area_t *spare = (vm_area_t *)kmalloc(sizeof(*spare));
+        if (!spare) {
+            while (spares) {
+                vm_area_t *next = spares->next;
+                kfree(spares);
+                spares = next;
+            }
+            return -ENOMEM;
+        }
+        spare->next = spares;
+        spares = spare;
+    }
+
+    vm_area_t **link = &mm->areas;
+    while (*link) {
+        vm_area_t *area = *link;
+        if (end <= area->start || start >= area->end) {
+            link = &area->next;
+            continue;
+        }
+        uint64_t cut_start = start > area->start ? start : area->start;
+        uint64_t cut_end = end < area->end ? end : area->end;
+        for (uint64_t page = cut_start; page < cut_end; page += PAGE_SIZE)
+            vmm_release_page(page);
+
+        if (cut_start == area->start && cut_end == area->end) {
+            *link = area->next;
+            vm_area_drop_backing(area);
+            kfree(area);
+        } else if (cut_start == area->start) {
+            area->backing_offset += cut_end - area->start;
+            area->start = cut_end;
+            link = &area->next;
+        } else if (cut_end == area->end) {
+            area->end = cut_start;
+            link = &area->next;
+        } else {
+            vm_area_t *right = spares;
+            spares = spares->next;
+            *right = *area;
+            right->start = cut_end;
+            right->backing_offset += cut_end - area->start;
+            right->next = area->next;
+            if (right->backing_type == VM_BACKING_MEMFD &&
+                linux_compat_memfd_retain_map(right->backing_id) < 0) {
+                kfree(right);
+                while (spares) {
+                    vm_area_t *next = spares->next;
+                    kfree(spares);
+                    spares = next;
+                }
+                return -EINVAL;
+            }
+            area->end = cut_start;
+            area->next = right;
+            link = &right->next;
+        }
+    }
+    while (spares) {
+        vm_area_t *next = spares->next;
+        kfree(spares);
+        spares = next;
+    }
+    return 0;
+}
+
+static int vm_allocate_owned_pages(uint64_t address, size_t pages) {
+    size_t mapped = 0;
+    for (; mapped < pages; mapped++) {
+        uint64_t page = address + mapped * PAGE_SIZE;
+        if (!vmm_alloc_page_at(page, VMM_P | VMM_U | VMM_W)) break;
+        memset((void *)(uintptr_t)page, 0, PAGE_SIZE);
+    }
+    if (mapped == pages) return 0;
+    while (mapped)
+        vmm_release_page(address + --mapped * PAGE_SIZE);
+    return -ENOMEM;
+}
+
+static int vm_fill_vfs_snapshot(vfs_node_t *node, uint64_t address,
+                                size_t length, uint64_t file_offset) {
+    if (!node || node->type != VFS_NODE_FILE) return -ENODEV;
+    size_t copied = 0;
+    while (copied < length && file_offset + copied < node->size) {
+        size_t chunk = length - copied;
+        uint64_t available = node->size - (file_offset + copied);
+        if (chunk > PAGE_SIZE) chunk = PAGE_SIZE;
+        if ((uint64_t)chunk > available) chunk = (size_t)available;
+        int got = vfs_read(node, (uint32_t)(file_offset + copied),
+                           (void *)(uintptr_t)(address + copied),
+                           (uint32_t)chunk);
+        if (got < 0) return -EIO;
+        if ((size_t)got != chunk) return -EIO;
+        copied += chunk;
+    }
+    return 0;
+}
+
+static int vm_fill_memfd_snapshot(int fd, uint64_t address,
+                                  size_t length, uint64_t file_offset,
+                                  uint64_t file_size) {
+    size_t copy = length;
+    if (file_offset >= file_size) copy = 0;
+    else if ((uint64_t)copy > file_size - file_offset)
+        copy = (size_t)(file_size - file_offset);
+    return copy && linux_compat_memfd_read_at(
+                       fd, file_offset, (void *)(uintptr_t)address, copy) < 0
+        ? -(errno > 0 ? errno : EIO) : 0;
+}
+
 static int map_user_heap_growth(uint64_t old_brk, uint64_t new_brk) {
     if (new_brk <= old_brk) return 0;
     if (new_brk > UINT64_MAX - (PAGE_SIZE - 1)) return -1;
 
     uint64_t va_start = old_brk & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t va_end = align_page_up(new_brk);
+    uint64_t first_allocated = 0;
     for (uint64_t va = va_start; va < va_end; va += PAGE_SIZE) {
-        if (vmm_get_phys(va) != 0) continue;
-        if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) return -1;
+        if (!vmm_get_phys(va)) {
+            if (!first_allocated) first_allocated = va;
+        } else if (first_allocated) {
+            /* A foreign mapping punched into the future heap would make OOM
+             * rollback ambiguous. Reject it before changing any PTE. */
+            return -1;
+        }
+    }
+    if (!first_allocated) return 0;
+    for (uint64_t va = first_allocated; va < va_end; va += PAGE_SIZE) {
+        if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) {
+            for (uint64_t rollback = first_allocated;
+                 rollback < va; rollback += PAGE_SIZE)
+                vmm_release_page(rollback);
+            return -1;
+        }
     }
     return 0;
+}
+
+static void unmap_user_heap_shrink(uint64_t old_brk, uint64_t new_brk) {
+    if (new_brk >= old_brk) return;
+    uint64_t release_start = align_page_up(new_brk);
+    uint64_t release_end = align_page_up(old_brk);
+    for (uint64_t va = release_start; va < release_end; va += PAGE_SIZE)
+        vmm_release_page(va);
 }
 
 static uint64_t user_sbrk(intptr_t increment) {
@@ -519,6 +2090,7 @@ static uint64_t user_sbrk(intptr_t increment) {
 
     if (map_user_heap_growth(old_brk, new_brk) != 0)
         return (uint64_t)(-ENOMEM);
+    unmap_user_heap_shrink(old_brk, new_brk);
     mm->user_brk = new_brk;
     return old_brk;
 }
@@ -536,6 +2108,7 @@ static uint64_t user_brk(uint64_t new_brk) {
     uint64_t old_brk = mm->user_brk ? mm->user_brk : mm->user_heap_start;
     if (map_user_heap_growth(old_brk, new_brk) != 0)
         return (uint64_t)(-ENOMEM);
+    unmap_user_heap_shrink(old_brk, new_brk);
     mm->user_brk = new_brk;
     return new_brk;
 }
@@ -560,7 +2133,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 task_current()->fd_table->entries[(int)f->a0].used &&
                 (task_current()->fd_table->entries[(int)f->a0].type == FD_EVENT ||
                  task_current()->fd_table->entries[(int)f->a0].type == FD_UNIX ||
-                 task_current()->fd_table->entries[(int)f->a0].type == FD_MEMFD))
+                 task_current()->fd_table->entries[(int)f->a0].type == FD_MEMFD ||
+                 task_current()->fd_table->entries[(int)f->a0].type == FD_INOTIFY))
                 return (uint64_t)linux_compat_read(
                     (int)f->a0, (void *)f->a1, (size_t)f->a2);
             return finish_syscall((long)read((int)f->a0, (void *)f->a1, (size_t)f->a2));
@@ -571,7 +2145,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 task_current()->fd_table->entries[(int)f->a0].used &&
                 (task_current()->fd_table->entries[(int)f->a0].type == FD_EVENT ||
                  task_current()->fd_table->entries[(int)f->a0].type == FD_UNIX ||
-                 task_current()->fd_table->entries[(int)f->a0].type == FD_MEMFD))
+                 task_current()->fd_table->entries[(int)f->a0].type == FD_MEMFD ||
+                 task_current()->fd_table->entries[(int)f->a0].type == FD_INOTIFY))
                 return (uint64_t)linux_compat_write(
                     (int)f->a0, (const void *)f->a1, (size_t)f->a2);
             return finish_syscall((long)write((int)f->a0, (const void *)f->a1, (size_t)f->a2));
@@ -586,6 +2161,11 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_LSEEK: {
             int fd = (int)f->a0;
             task_t *current = task_current();
+            if (current && current->fd_table && fd >= 0 &&
+                fd < POSIX_MAX_FDS &&
+                current->fd_table->entries[fd].used &&
+                current->fd_table->entries[fd].type == FD_INOTIFY)
+                return (uint64_t)(-ESPIPE);
             if (current && current->fd_table && fd >= 0 &&
                 fd < POSIX_MAX_FDS &&
                 current->fd_table->entries[fd].used &&
@@ -613,6 +2193,20 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (current && current->fd_table && fd >= 0 &&
                 fd < POSIX_MAX_FDS &&
                 current->fd_table->entries[fd].used &&
+                current->fd_table->entries[fd].type == FD_INOTIFY) {
+                struct stat *output = (struct stat *)f->a1;
+                if (!output) return (uint64_t)(-EFAULT);
+                memset(output, 0, sizeof(*output));
+                output->st_dev = 4;
+                output->st_ino = (ino_t)(
+                    current->fd_table->entries[fd].compat_id + 1);
+                output->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
+                output->st_nlink = 1;
+                return 0;
+            }
+            if (current && current->fd_table && fd >= 0 &&
+                fd < POSIX_MAX_FDS &&
+                current->fd_table->entries[fd].used &&
                 current->fd_table->entries[fd].type == FD_MEMFD) {
                 struct stat *output = (struct stat *)f->a1;
                 uint64_t size;
@@ -620,6 +2214,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 if (linux_compat_memfd_size(fd, &size) < 0)
                     return (uint64_t)(-EBADF);
                 memset(output, 0, sizeof(*output));
+                output->st_dev = 3;
+                output->st_ino = (ino_t)(current->fd_table->entries[fd].compat_id + 1);
                 output->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
                 output->st_nlink = 1;
                 output->st_size = (off_t)size;
@@ -629,7 +2225,9 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_STAT:
-            return finish_syscall((long)stat((const char *)f->a0, (struct stat *)f->a1));
+            return finish_syscall((long)(f->a2 ?
+                lstat((const char *)f->a0, (struct stat *)f->a1) :
+                stat((const char *)f->a0, (struct stat *)f->a1)));
 
         case HBOS_SYS_UNLINK:
             return finish_syscall((long)unlink((const char *)f->a0));
@@ -692,20 +2290,17 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_GETTOD: {
-            // gettimeofday: 返回当前时间（基于 RDTSC 的近似值）
             struct timeval {
                 uint64_t tv_sec;
                 uint64_t tv_usec;
             };
             struct timeval *tv = (struct timeval *)f->a0;
             if (!tv) return (uint64_t)(-EFAULT);
-            // 使用 RDTSC 近似时间（从启动开始的秒数）
-            uint32_t lo, hi;
-            __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-            uint64_t tsc = ((uint64_t)hi << 32) | lo;
-            // 假设 ~1GHz TSC
-            tv->tv_sec = tsc / 1000000000ULL;
-            tv->tv_usec = (tsc % 1000000000ULL) / 1000;
+            linux_x86_timespec_t now;
+            int result = linux_clock_now(0, &now);
+            if (result < 0) return (uint64_t)(int64_t)result;
+            tv->tv_sec = (uint64_t)now.seconds;
+            tv->tv_usec = (uint64_t)now.nanoseconds / 1000ULL;
             return 0;
         }
 
@@ -841,19 +2436,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_READLINK: {
-            const char *path = (const char *)f->a0;
-            char *buf = (char *)f->a1;
-            size_t bufsiz = (size_t)f->a2;
-            if (!path) return (uint64_t)(-EFAULT);
-            file_t *file = fs_find_file(path);
-            if (!file) return (uint64_t)(-ENOENT);
-            if (file->type != 2) return (uint64_t)(-EINVAL);
-            uint32_t n = fs_read_file_data(file, 0, buf, (uint32_t)(bufsiz - 1));
-            if (buf && bufsiz > 0) {
-                if (n > bufsiz - 1) n = (uint32_t)(bufsiz - 1);
-                ((uint8_t *)buf)[n] = '\0';
-            }
-            return (uint64_t)n;
+            return finish_syscall((long)readlink(
+                (const char *)f->a0, (char *)f->a1, (size_t)f->a2));
         }
 
         // ============================================================
@@ -870,34 +2454,10 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             char *const *argv = (char *const *)f->a1;
             char *const *envp = (char *const *)f->a2;
             if (!path) return (uint64_t)(-EFAULT);
-            int fd = open(path, O_RDONLY);
-            if (fd < 0) return (uint64_t)(-(int64_t)(errno ? errno : ENOENT));
-
-            uint8_t *elf_buf = (uint8_t *)kmalloc(SYSCALL_EXEC_MAX_SIZE);
-            if (!elf_buf) {
-                close(fd);
-                return (uint64_t)(-ENOMEM);
-            }
-
-            size_t size = 0;
-            ssize_t n = 0;
-            while ((n = read(fd, elf_buf + size, SYSCALL_EXEC_MAX_SIZE - size)) > 0) {
-                size += (size_t)n;
-                if (size >= SYSCALL_EXEC_MAX_SIZE) break;
-            }
-            int saved_errno = errno;
-            close(fd);
-
-            if (n < 0) {
-                kfree(elf_buf);
-                return (uint64_t)(-(int64_t)(saved_errno ? saved_errno : EIO));
-            }
-            if (size < sizeof(elf64_ehdr_t) || size >= SYSCALL_EXEC_MAX_SIZE) {
-                kfree(elf_buf);
-                return (uint64_t)(size >= SYSCALL_EXEC_MAX_SIZE ? -E2BIG : -ENOEXEC);
-            }
-            int ret = elf64_load_and_exec(elf_buf, size, argv, envp);
-            kfree(elf_buf);
+            vfs_node_t *node = vfs_lookup(path);
+            if (!node) return (uint64_t)(-ENOENT);
+            if (node->type != VFS_NODE_FILE) return (uint64_t)(-EACCES);
+            int ret = elf64_load_vfs_and_exec(node, argv, envp);
             if (ret < 0) return (uint64_t)(-ENOEXEC);
             return 0;
         }
@@ -974,6 +2534,30 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_SIGPROCMASK: {
+            int how = (int)f->a0;
+            const sigset_t *set = (const sigset_t *)f->a1;
+            sigset_t *old_set = (sigset_t *)f->a2;
+            size_t set_size = (size_t)f->a3;
+            if (set_size && set_size != sizeof(sigset_t))
+                return (uint64_t)(-EINVAL);
+            if (how != SIG_BLOCK && how != SIG_UNBLOCK &&
+                how != SIG_SETMASK)
+                return (uint64_t)(-EINVAL);
+            task_t *current = task_current();
+            if (!current) return (uint64_t)(-ESRCH);
+            if (old_set) *old_set = current->sig_blocked;
+            if (set) {
+                if (how == SIG_BLOCK)
+                    current->sig_blocked.sig[0] |= set->sig[0];
+                else if (how == SIG_UNBLOCK)
+                    current->sig_blocked.sig[0] &= ~set->sig[0];
+                else
+                    current->sig_blocked = *set;
+                /* SIGKILL and SIGSTOP can never be blocked. */
+                current->sig_blocked.sig[0] &=
+                    ~((1ULL << (SIGKILL - 1)) |
+                      (1ULL << (SIGSTOP - 1)));
+            }
             return 0;
         }
 
@@ -992,9 +2576,15 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             int fd = (int)f->a4;
             off_t off = (off_t)f->a5;
             if (len == 0) return (uint64_t)(-EINVAL);
+            int mapping_kind = flags & 0x03;
+            if (mapping_kind != 0x01 && mapping_kind != 0x02)
+                return (uint64_t)(-EINVAL);
             if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1)))
                 return (uint64_t)(-EINVAL);
+            if (len > UINT64_MAX - (PAGE_SIZE - 1))
+                return (uint64_t)(-ENOMEM);
             size_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+            uint64_t span = (uint64_t)pages * PAGE_SIZE;
             void *p = addr;
             int fixed = flags & 0x10;
             int fixed_noreplace = flags & 0x100000;
@@ -1003,9 +2593,21 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 return (uint64_t)(-EINVAL);
             if (p && !fixed && !fixed_noreplace)
                 p = (void *)((uint64_t)p & ~(uint64_t)(PAGE_SIZE - 1));
+            if (p && ((uint64_t)p >= 0x0000800000000000ULL ||
+                      span > 0x0000800000000000ULL - (uint64_t)p))
+                return (uint64_t)(-ENOMEM);
+            if (p && !fixed && !fixed_noreplace) {
+                for (size_t i = 0; i < pages; i++) {
+                    if (vmm_get_phys((uint64_t)p + i * PAGE_SIZE)) {
+                        p = NULL;
+                        break;
+                    }
+                }
+            }
             if (!p) {
                 for (uint64_t va = 0x0000100000000000ULL;
-                     va < 0x0000200000000000ULL; va += PAGE_SIZE) {
+                     va <= 0x0000200000000000ULL - span;
+                     va += PAGE_SIZE) {
                     int free = 1;
                     for (uint64_t va2 = va;
                          va2 < va + pages * PAGE_SIZE; va2 += PAGE_SIZE) {
@@ -1023,16 +2625,46 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             }
             task_t *cur = task_current();
             if (!cur || !cur->mm) return (uint64_t)(-ESRCH);
+            int anonymous = (flags & 0x20) != 0;
+            fd_entry_t *mapping_entry = NULL;
+            uint64_t mapping_file_size = 0;
+            if (!anonymous) {
+                if (fd < 0 || fd >= POSIX_MAX_FDS || !cur->fd_table ||
+                    !cur->fd_table->entries[fd].used)
+                    return (uint64_t)(-EBADF);
+                mapping_entry = &cur->fd_table->entries[fd];
+                if (mapping_entry->type == FD_MEMFD) {
+                    if (linux_compat_memfd_size(fd, &mapping_file_size) < 0)
+                        return (uint64_t)(-EBADF);
+                } else if (mapping_entry->type == FD_FILE &&
+                           mapping_entry->node &&
+                           mapping_entry->node->type == VFS_NODE_FILE) {
+                    mapping_file_size = mapping_entry->node->size;
+                } else {
+                    return (uint64_t)(-ENODEV);
+                }
+                if ((uint64_t)off >= mapping_file_size)
+                    return (uint64_t)(-EINVAL);
+                if (mapping_kind == 0x01 && (prot & 0x02) &&
+                    mapping_entry->type != FD_MEMFD)
+                    return (uint64_t)(-EOPNOTSUPP);
+            }
             vm_area_t *vma = (vm_area_t *)kmalloc(sizeof(vm_area_t));
             if (!vma) return (uint64_t)(-ENOMEM);
             memset(vma, 0, sizeof(*vma));
-
-            int file_backed = !(flags & 0x20) && fd >= 0;
-            if (file_backed) {
-                if (!(flags & 0x01)) {
+            if (fixed) {
+                int unmap_result = vm_unmap_area_range(
+                    cur->mm, (uint64_t)p, (uint64_t)p + span);
+                if (unmap_result < 0) {
                     kfree(vma);
-                    return (uint64_t)(-EOPNOTSUPP);
+                    return (uint64_t)unmap_result;
                 }
+                for (size_t i = 0; i < pages; i++)
+                    vmm_release_page((uint64_t)p + i * PAGE_SIZE);
+            }
+
+            if (!anonymous && mapping_entry->type == FD_MEMFD &&
+                mapping_kind == 0x01) {
                 uint32_t backing_id = 0;
                 if (linux_compat_memfd_map(
                         fd, (uint64_t)p, len, (uint64_t)off,
@@ -1041,28 +2673,50 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                     kfree(vma);
                     return (uint64_t)(-(saved > 0 ? saved : EINVAL));
                 }
-                vma->backing_type = 1;
+                vma->backing_type = VM_BACKING_MEMFD;
                 vma->backing_id = backing_id;
             } else {
-                size_t mapped = 0;
-                for (; mapped < pages; mapped++) {
-                    uint64_t va = (uint64_t)p + mapped * PAGE_SIZE;
-                    if (fixed && vmm_get_phys(va)) vmm_unmap_page(va);
-                    if (!vmm_alloc_page_at(
-                            va, VMM_P | VMM_U | VMM_W))
-                        break;
-                    memset((void *)va, 0, PAGE_SIZE);
-                }
-                if (mapped != pages) {
-                    while (mapped)
-                        vmm_unmap_page(
-                            (uint64_t)p + --mapped * PAGE_SIZE);
+                int map_result = vm_allocate_owned_pages((uint64_t)p, pages);
+                if (map_result < 0) {
                     kfree(vma);
-                    return (uint64_t)(-ENOMEM);
+                    return (uint64_t)map_result;
                 }
+                if (!anonymous) {
+                    int fill_result;
+                    if (mapping_entry->type == FD_MEMFD) {
+                        fill_result = vm_fill_memfd_snapshot(
+                            fd, (uint64_t)p, len, (uint64_t)off,
+                            mapping_file_size);
+                    } else {
+                        fill_result = vm_fill_vfs_snapshot(
+                            mapping_entry->node, (uint64_t)p, len,
+                            (uint64_t)off);
+                    }
+                    if (fill_result < 0) {
+                        for (size_t i = 0; i < pages; i++)
+                            vmm_release_page((uint64_t)p + i * PAGE_SIZE);
+                        kfree(vma);
+                        return (uint64_t)fill_result;
+                    }
+                    vma->backing_type = mapping_kind == 0x01 ?
+                        VM_BACKING_VFS_SHARED : VM_BACKING_VFS_PRIVATE;
+                    vma->backing_node = mapping_entry->type == FD_FILE ?
+                        mapping_entry->node : NULL;
+                }
+            }
+            int protect_result = protect_user_range(
+                (uint64_t)(uintptr_t)p, pages * PAGE_SIZE, prot);
+            if (protect_result < 0) {
+                for (size_t i = 0; i < pages; i++)
+                    vmm_release_page((uint64_t)(uintptr_t)p +
+                                     i * PAGE_SIZE);
+                vm_area_drop_backing(vma);
+                kfree(vma);
+                return (uint64_t)protect_result;
             }
             vma->start = (uint64_t)p;
             vma->end   = (uint64_t)p + pages * PAGE_SIZE;
+            vma->backing_offset = (uint64_t)off;
             vma->next  = cur->mm->areas;
             cur->mm->areas = vma;
             return (uint64_t)p;
@@ -1071,28 +2725,28 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_MUNMAP: {
             void *addr = (void *)f->a0;
             size_t len = (size_t)f->a1;
-            if (!addr || len == 0) return (uint64_t)(-EINVAL);
+            if (!addr || len == 0 ||
+                ((uint64_t)addr & (PAGE_SIZE - 1)) ||
+                len > UINT64_MAX - (PAGE_SIZE - 1))
+                return (uint64_t)(-EINVAL);
             size_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
             task_t *cur = task_current();
-            vm_area_t **pp = (cur && cur->mm) ? &cur->mm->areas : NULL;
-            while (pp && *pp) {
-                if ((*pp)->start == (uint64_t)addr) {
-                    for (size_t i = 0; i < pages; i++)
-                        vmm_unmap_page((uint64_t)addr + i * PAGE_SIZE);
-                    vm_area_t *vma = *pp;
-                    *pp = vma->next;
-                    if (vma->backing_type == 1)
-                        linux_compat_memfd_unmap(vma->backing_id);
-                    kfree(vma);
-                    return 0;
-                }
-                pp = &(*pp)->next;
-            }
-            return (uint64_t)(-EINVAL);
+            if (!cur || !cur->mm) return (uint64_t)(-ESRCH);
+            uint64_t span = (uint64_t)pages * PAGE_SIZE;
+            if ((uint64_t)addr >= 0x0000800000000000ULL ||
+                span > 0x0000800000000000ULL - (uint64_t)addr)
+                return (uint64_t)(-EINVAL);
+            int result = vm_unmap_area_range(
+                cur->mm, (uint64_t)addr, (uint64_t)addr + span);
+            if (result < 0) return (uint64_t)result;
+            for (size_t i = 0; i < pages; i++)
+                vmm_release_page((uint64_t)addr + i * PAGE_SIZE);
+            return 0;
         }
 
         case HBOS_SYS_MPROTECT: {
-            return 0;
+            return (uint64_t)protect_user_range(
+                (uint64_t)f->a0, (size_t)f->a1, (int)f->a2);
         }
 
         case HBOS_SYS_BRK: {
@@ -1111,17 +2765,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_SYMLINK: {
             const char *target = (const char *)f->a0;
             const char *linkpath = (const char *)f->a1;
-            if (!target || !linkpath) return (uint64_t)(-EFAULT);
-            if (fs_find_file(linkpath)) return (uint64_t)(-EEXIST);
-            file_t *link = fs_create_file(linkpath);
-            if (!link) return (uint64_t)(-ENOSPC);
-            link->type = 2;
-            size_t tlen = strlen(target);
-            if (tlen > link->capacity) tlen = link->capacity;
-            if (fs_write_file_data(link, 0, target, (uint32_t)tlen) < 0)
-                return (uint64_t)(-EIO);
-            link->size = (uint32_t)tlen;
-            return 0;
+            return finish_syscall((long)symlink(target, linkpath));
         }
 
         case HBOS_SYS_CHMOD: {
@@ -1178,18 +2822,10 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
 
         case HBOS_SYS_CLOCK_GETTIME: {
             int clockid = (int)f->a0;
-            struct timespec_out {
-                uint64_t tv_sec;
-                uint64_t tv_nsec;
-            } *tp = (struct timespec_out *)f->a1;
+            linux_x86_timespec_t *tp = (linux_x86_timespec_t *)f->a1;
             if (!tp) return (uint64_t)(-EFAULT);
-            uint32_t lo, hi;
-            __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-            uint64_t tsc = ((uint64_t)hi << 32) | lo;
-            tp->tv_sec = tsc / 1000000000ULL;
-            tp->tv_nsec = tsc % 1000000000ULL;
-            (void)clockid;
-            return 0;
+            int result = linux_clock_now(clockid, tp);
+            return result < 0 ? (uint64_t)(int64_t)result : 0;
         }
 
         case HBOS_SYS_TIMES: {
@@ -1483,7 +3119,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 struct dirent dent;
                 dent.d_ino = (uint64_t)i;
                 dent.d_off = (int64_t)i;
-                dent.d_type = (type == VFS_NODE_DIR) ? DT_DIR : DT_REG;
+                dent.d_type = type == VFS_NODE_DIR ? DT_DIR :
+                              (type == VFS_NODE_SYMLINK ? DT_LNK : DT_REG);
                 size_t name_len = strlen(name);
                 if (name_len > NAME_MAX) name_len = NAME_MAX;
                 memcpy(dent.d_name, name, name_len);
@@ -1639,29 +3276,19 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_DLOPEN: {
             const char *path = (const char *)f->a0;
             if (!path) return (uint64_t)(-EFAULT);
-            int fd = open(path, O_RDONLY);
-            if (fd < 0) return (uint64_t)(-(int64_t)(errno ? errno : ENOENT));
-
-            uint8_t *buf = (uint8_t *)kmalloc(SYSCALL_EXEC_MAX_SIZE);
-            if (!buf) { close(fd); return (uint64_t)(-ENOMEM); }
-
-            size_t size = 0;
-            ssize_t n = 0;
-            while ((n = read(fd, buf + size, SYSCALL_EXEC_MAX_SIZE - size)) > 0) {
-                size += (size_t)n;
-                if (size >= SYSCALL_EXEC_MAX_SIZE) break;
-            }
-            close(fd);
-
-            void *handle = ldso_load(buf, size);
-            kfree(buf);
+            vfs_node_t *node = vfs_lookup(path);
+            if (!node || node->type != VFS_NODE_FILE) return 0;
+            void *handle = ldso_load_vfs_path(node, path);
             return (uint64_t)(uintptr_t)handle;
         }
 
         case HBOS_SYS_DLSYM: {
             void *handle = (void *)f->a0;
             const char *name = (const char *)f->a1;
-            void *addr = ldso_dlsym(handle, name);
+            const char *version = (const char *)f->a2;
+            void *addr = version ?
+                ldso_dlsym_version(handle, name, version) :
+                ldso_dlsym(handle, name);
             return (uint64_t)(uintptr_t)addr;
         }
 
@@ -1669,6 +3296,27 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             void *handle = (void *)f->a0;
             return (uint64_t)(long)ldso_close(handle);
         }
+
+        case HBOS_SYS_DLINIT_NEXT:
+            return (uint64_t)ldso_init_next((void *)f->a0, f->a1);
+
+        case HBOS_SYS_DLFINI_NEXT:
+            return (uint64_t)ldso_fini_next((void *)f->a0, f->a1);
+
+        case HBOS_SYS_DLTLS_GET:
+            return (uint64_t)ldso_tls_get_addr((uint32_t)f->a0, f->a1);
+
+        case HBOS_SYS_DLIFUNC_NEXT:
+            return (uint64_t)ldso_ifunc_next((void *)f->a0, f->a1);
+
+        case HBOS_SYS_DLIFUNC_APPLY:
+            return (uint64_t)(long)ldso_ifunc_apply(
+                (void *)f->a0, f->a1, (uintptr_t)f->a2);
+
+        case HBOS_SYS_RENAME:
+            return finish_syscall(posix_rename(
+                (const char *)f->a0, (const char *)f->a1,
+                (unsigned int)f->a2));
 
         case HBOS_SYS_HAX_EXISTS: {
             const char *name = (const char *)f->a0;
@@ -1863,6 +3511,24 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 return finish_syscall(
                     linux_compat_unix_shutdown(fd, (int)f->a1));
             return 0;
+        }
+
+        case HBOS_SYS_GETSOCKNAME:
+        case HBOS_SYS_GETPEERNAME: {
+            int fd = (int)f->a0;
+            task_t *cur = task_current();
+            if (!cur || !cur->fd_table || fd < 0 ||
+                fd >= POSIX_MAX_FDS ||
+                !cur->fd_table->entries[fd].used)
+                return (uint64_t)(-EBADF);
+            if (cur->fd_table->entries[fd].type != FD_UNIX)
+                return (uint64_t)(-EOPNOTSUPP);
+            int result = f->nr == HBOS_SYS_GETSOCKNAME ?
+                linux_compat_unix_getsockname(
+                    fd, (void *)f->a1, (uint32_t *)f->a2) :
+                linux_compat_unix_getpeername(
+                    fd, (void *)f->a1, (uint32_t *)f->a2);
+            return finish_syscall(result);
         }
 
         case HBOS_SYS_MEMFD_CREATE: {

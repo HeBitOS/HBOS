@@ -22,6 +22,10 @@
 #define O_NOFOLLOW 0x20000  /**< 不跟随符号链接 */
 #define O_CLOEXEC  0x80000  /**< 执行时关闭 */
 
+#define AT_FDCWD            (-100)
+#define AT_SYMLINK_NOFOLLOW 0x0100
+#define AT_EMPTY_PATH       0x1000
+
 int open(const char *path, int flags, ...);
 
 #endif

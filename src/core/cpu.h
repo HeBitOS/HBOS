@@ -213,10 +213,10 @@ typedef struct {
 // EFER (Extended Feature Enable Register) 位定义
 // ============================================================
 
-#define EFER_SCE  0x01   /**< SCE: SYSCALL 启用 */
-#define EFER_LME  0x08   /**< LME: Long Mode 启用 */
-#define EFER_LMA  0x10   /**< LMA: Long Mode 活跃（只读） */
-#define EFER_NXE  0x20   /**< NXE: No-Execute 启用 */
+#define EFER_SCE  (1ULL << 0)  /**< SCE: SYSCALL 启用 */
+#define EFER_LME  (1ULL << 8)  /**< LME: Long Mode 启用 */
+#define EFER_LMA  (1ULL << 10) /**< LMA: Long Mode 活跃（只读） */
+#define EFER_NXE  (1ULL << 11) /**< NXE: No-Execute 启用 */
 
 // ============================================================
 // 内联汇编辅助函数

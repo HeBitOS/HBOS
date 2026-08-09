@@ -83,6 +83,9 @@ char *getcwd(char *buf, size_t size);
 int chdir(const char *path);
 int mkdir(const char *path, mode_t mode);
 int rmdir(const char *path);
+int rename(const char *old_path, const char *new_path);
+int posix_rename(const char *old_path, const char *new_path,
+                 unsigned int flags);
 int symlink(const char *target, const char *linkpath);
 int chmod(const char *path, mode_t mode);
 int chown(const char *path, uid_t uid, gid_t gid);

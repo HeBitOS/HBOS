@@ -1,0 +1,7 @@
+HBOS_1.0 {
+    global: hbos_versioned_value; hbos_versioned_tls;
+};
+
+HBOS_2.0 {
+    global: hbos_versioned_value; hbos_versioned_tls;
+} HBOS_1.0;

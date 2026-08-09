@@ -17,6 +17,7 @@
 #include "errno.h"
 #include "fcntl.h"
 #include "fd.h"
+#include "smp.h"
 #include "string.h"
 #include "unistd.h"
 
@@ -49,6 +50,22 @@
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
 #define LINUX_MFD_CLOEXEC 0x0001
 #define LINUX_MFD_ALLOW_SEALING 0x0002
+#define LINUX_INOTIFY_SLOTS 8
+#define LINUX_INOTIFY_WATCHES 16
+#define LINUX_INOTIFY_EVENTS 32
+#define LINUX_INOTIFY_NAME_MAX 256
+#define LINUX_IN_NONBLOCK 0x00000800
+#define LINUX_IN_CLOEXEC  0x00080000
+#define LINUX_IN_ONLYDIR  0x01000000U
+#define LINUX_IN_DONT_FOLLOW 0x02000000U
+#define LINUX_IN_EXCL_UNLINK 0x04000000U
+#define LINUX_IN_MASK_CREATE 0x10000000U
+#define LINUX_IN_MASK_ADD 0x20000000U
+#define LINUX_IN_ONESHOT 0x80000000U
+#define LINUX_IN_ALL_EVENTS 0x00000fffU
+#define LINUX_IN_MODIFIERS (LINUX_IN_ONLYDIR | LINUX_IN_DONT_FOLLOW | \
+                            LINUX_IN_EXCL_UNLINK | LINUX_IN_MASK_CREATE | \
+                            LINUX_IN_MASK_ADD | LINUX_IN_ONESHOT)
 
 typedef struct {
     fd_entry_t *entries;
@@ -130,11 +147,51 @@ typedef struct {
     uint64_t *pages;
 } memfd_slot_t;
 
+typedef struct {
+    int used;
+    int descriptor;
+    int is_directory;
+    uint32_t mask;
+    char path[VFS_MAX_NAME];
+} inotify_watch_t;
+
+typedef struct {
+    int descriptor;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t name_length;
+    char name[LINUX_INOTIFY_NAME_MAX];
+} inotify_queued_event_t;
+
+typedef struct {
+    int used;
+    uint32_t refs;
+    int flags;
+    int next_descriptor;
+    uint8_t event_read;
+    uint8_t event_write;
+    uint8_t event_count;
+    uint8_t overflow_pending;
+    inotify_watch_t watches[LINUX_INOTIFY_WATCHES];
+    inotify_queued_event_t events[LINUX_INOTIFY_EVENTS];
+} inotify_slot_t;
+
 static event_slot_t event_slots[LINUX_EVENT_SLOTS];
 static epoll_slot_t epoll_slots[LINUX_EPOLL_SLOTS];
 static futex_slot_t futex_slots[LINUX_FUTEX_SLOTS];
 static unix_socket_slot_t unix_socket_slots[UNIX_SOCKET_SLOTS];
 static memfd_slot_t memfd_slots[LINUX_MEMFD_SLOTS];
+static inotify_slot_t inotify_slots[LINUX_INOTIFY_SLOTS];
+static volatile uint32_t inotify_active_slots;
+static volatile uint32_t inotify_next_cookie;
+static spinlock_t inotify_lock;
+
+typedef struct {
+    int descriptor;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t length;
+} linux_inotify_event_header_t;
 
 static int compat_set_errno(int value) {
     errno = value;
@@ -202,6 +259,136 @@ static memfd_slot_t *memfd_for_fd(task_t *task, int fd) {
     return slot->used ? slot : NULL;
 }
 
+static inotify_slot_t *inotify_for_fd(task_t *task, int fd) {
+    fd_entry_t *entry = compat_fd(task, fd);
+    if (!entry || entry->type != FD_INOTIFY ||
+        entry->compat_id >= LINUX_INOTIFY_SLOTS)
+        return NULL;
+    inotify_slot_t *slot = &inotify_slots[entry->compat_id];
+    return slot->used ? slot : NULL;
+}
+
+static void inotify_lock_enter(void) {
+    task_preempt_disable();
+    spinlock_acquire(&inotify_lock);
+}
+
+static void inotify_lock_leave(void) {
+    spinlock_release(&inotify_lock);
+    task_preempt_enable();
+}
+
+static void inotify_slot_release(inotify_slot_t *slot) {
+    if (!slot) return;
+    inotify_lock_enter();
+    if (slot->used && slot->refs && --slot->refs == 0) {
+        memset(slot, 0, sizeof(*slot));
+        __sync_fetch_and_sub(&inotify_active_slots, 1);
+    }
+    inotify_lock_leave();
+}
+
+static void inotify_queue(inotify_slot_t *slot, int descriptor,
+                          uint32_t mask, uint32_t cookie,
+                          const char *name) {
+    if (!slot || !slot->used) return;
+    uint32_t name_length = name ? (uint32_t)strlen(name) : 0;
+    if (name_length >= LINUX_INOTIFY_NAME_MAX)
+        name_length = LINUX_INOTIFY_NAME_MAX - 1;
+
+    if (slot->event_count) {
+        uint32_t previous_index =
+            (slot->event_write + LINUX_INOTIFY_EVENTS - 1) %
+            LINUX_INOTIFY_EVENTS;
+        const inotify_queued_event_t *previous =
+            &slot->events[previous_index];
+        if (previous->descriptor == descriptor && previous->mask == mask &&
+            previous->cookie == cookie &&
+            previous->name_length == name_length &&
+            (!name_length || memcmp(previous->name, name, name_length) == 0))
+            return;
+    }
+    if (slot->event_count >= LINUX_INOTIFY_EVENTS) {
+        slot->overflow_pending = 1;
+        return;
+    }
+    inotify_queued_event_t *event = &slot->events[slot->event_write];
+    memset(event, 0, sizeof(*event));
+    event->descriptor = descriptor;
+    event->mask = mask;
+    event->cookie = cookie;
+    event->name_length = name_length;
+    if (name_length) memcpy(event->name, name, name_length);
+    slot->event_write =
+        (uint8_t)((slot->event_write + 1) % LINUX_INOTIFY_EVENTS);
+    slot->event_count++;
+}
+
+static long inotify_read(int fd, void *buffer, size_t count) {
+    inotify_slot_t *slot = inotify_for_fd(compat_task(), fd);
+    if (!slot) return -EBADF;
+    if (!buffer && count) return -EFAULT;
+    size_t copied = 0;
+    for (;;) {
+        inotify_lock_enter();
+        if (!slot->used) {
+            inotify_lock_leave();
+            return copied ? (long)copied : -EBADF;
+        }
+        if (!slot->event_count && !slot->overflow_pending) {
+            int nonblocking = slot->flags & LINUX_IN_NONBLOCK;
+            inotify_lock_leave();
+            if (copied) return (long)copied;
+            if (nonblocking) return -EAGAIN;
+            task_yield();
+            continue;
+        }
+
+        inotify_queued_event_t overflow;
+        inotify_queued_event_t *event;
+        int consume_overflow = 0;
+        if (!slot->event_count) {
+            memset(&overflow, 0, sizeof(overflow));
+            overflow.descriptor = -1;
+            overflow.mask = LINUX_IN_Q_OVERFLOW;
+            event = &overflow;
+            consume_overflow = 1;
+        } else {
+            event = &slot->events[slot->event_read];
+        }
+        uint32_t payload_length = event->name_length ?
+            (event->name_length + 1U + 3U) & ~3U : 0;
+        size_t record_length = sizeof(linux_inotify_event_header_t) +
+                               payload_length;
+        if (record_length > count - copied) {
+            inotify_lock_leave();
+            return copied ? (long)copied : -EINVAL;
+        }
+        linux_inotify_event_header_t *header =
+            (linux_inotify_event_header_t *)((uint8_t *)buffer + copied);
+        header->descriptor = event->descriptor;
+        header->mask = event->mask;
+        header->cookie = event->cookie;
+        header->length = payload_length;
+        if (payload_length) {
+            char *destination = (char *)(header + 1);
+            memset(destination, 0, payload_length);
+            memcpy(destination, event->name, event->name_length);
+        }
+        if (consume_overflow) {
+            slot->overflow_pending = 0;
+        } else {
+            memset(event, 0, sizeof(*event));
+            slot->event_read =
+                (uint8_t)((slot->event_read + 1) % LINUX_INOTIFY_EVENTS);
+            slot->event_count--;
+        }
+        inotify_lock_leave();
+        copied += record_length;
+        if (copied == count) return (long)copied;
+    }
+}
+
 static void memfd_maybe_reset(memfd_slot_t *slot) {
     if (!slot || !slot->used || slot->refs || slot->map_refs) return;
     for (uint32_t i = 0; i < slot->page_count; i++) {
@@ -247,6 +434,14 @@ static int compat_entry_retain(const fd_entry_t *entry) {
         slot->refs++;
         return 0;
     }
+    if (entry->type == FD_INOTIFY &&
+        entry->compat_id < LINUX_INOTIFY_SLOTS) {
+        inotify_slot_t *slot = &inotify_slots[entry->compat_id];
+        if (!slot->used || slot->refs == UINT32_MAX)
+            return compat_set_errno(EBADF);
+        __sync_fetch_and_add(&slot->refs, 1);
+        return 0;
+    }
     if (entry->type == FD_PIPE && entry->pipe) {
         entry->pipe->ref_count++;
         return 0;
@@ -276,6 +471,10 @@ static void compat_entry_release(const fd_entry_t *entry) {
         memfd_slot_t *slot = &memfd_slots[entry->compat_id];
         if (slot->used && slot->refs) slot->refs--;
         memfd_maybe_reset(slot);
+    } else if (entry->type == FD_INOTIFY &&
+               entry->compat_id < LINUX_INOTIFY_SLOTS) {
+        inotify_slot_t *slot = &inotify_slots[entry->compat_id];
+        inotify_slot_release(slot);
     } else if (entry->type == FD_PIPE && entry->pipe) {
         if (--entry->pipe->ref_count <= 0) kfree(entry->pipe);
     }
@@ -359,6 +558,34 @@ static int unix_address_equal(const unix_socket_slot_t *slot,
            memcmp(slot->address, address, length) == 0;
 }
 
+/* Copy sockaddr_un with Linux's value/result length contract. Abstract
+ * addresses retain their leading NUL and exact byte length; pathname
+ * addresses gain one trailing NUL. The caller may supply a short buffer,
+ * but always receives the full required length. */
+static int unix_address_export(const unix_socket_slot_t *slot,
+                               void *opaque_address, uint32_t *length) {
+    if (!slot || !length) return compat_set_errno(EFAULT);
+    if (!opaque_address) return compat_set_errno(EFAULT);
+    uint32_t path_length = slot->address_length;
+    uint32_t needed = sizeof(uint16_t);
+    if (path_length)
+        needed += path_length + (slot->address[0] ? 1U : 0U);
+    uint32_t available = *length;
+    uint32_t copy = available < needed ? available : needed;
+    if (copy) memset(opaque_address, 0, copy);
+    if (copy >= sizeof(uint16_t)) {
+        uint16_t family = LINUX_AF_UNIX;
+        memcpy(opaque_address, &family, sizeof(family));
+        uint32_t bytes = copy - sizeof(uint16_t);
+        if (bytes > path_length) bytes = path_length;
+        if (bytes)
+            memcpy((uint8_t *)opaque_address + sizeof(uint16_t),
+                   slot->address, bytes);
+    }
+    *length = needed;
+    return 0;
+}
+
 static uint32_t fd_ready_mask(task_t *task, int fd) {
     if (fd == 0) return LINUX_POLLIN;
     if (fd == 1 || fd == 2) return LINUX_POLLOUT;
@@ -385,6 +612,13 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
     }
 
     if (entry->type == FD_EPOLL) return LINUX_POLLIN;
+
+    if (entry->type == FD_INOTIFY) {
+        inotify_slot_t *slot = inotify_for_fd(task, fd);
+        if (!slot) return LINUX_POLLERR;
+        return (slot->event_count || slot->overflow_pending) ?
+            LINUX_POLLIN : 0;
+    }
 
     if (entry->type == FD_UNIX) {
         unix_socket_slot_t *slot = unix_for_fd(task, fd);
@@ -428,6 +662,7 @@ static int timeout_expired(int timeout_ms, uint64_t deadline) {
 
 long linux_compat_read(int fd, void *buffer, size_t count) {
     task_t *task = compat_task();
+    if (inotify_for_fd(task, fd)) return inotify_read(fd, buffer, count);
     event_slot_t *slot = event_for_fd(task, fd);
     if (!slot) {
         if (unix_for_fd(task, fd))
@@ -551,6 +786,12 @@ int linux_compat_close(int fd) {
         memfd_maybe_reset(slot);
         return 1;
     }
+    if (entry->type == FD_INOTIFY &&
+        entry->compat_id < LINUX_INOTIFY_SLOTS) {
+        inotify_slot_t *slot = &inotify_slots[entry->compat_id];
+        inotify_slot_release(slot);
+        return 1;
+    }
     return 0;
 }
 
@@ -572,6 +813,11 @@ void linux_compat_retain(int fd) {
                entry->compat_id < LINUX_MEMFD_SLOTS) {
         memfd_slot_t *slot = &memfd_slots[entry->compat_id];
         if (slot->used && slot->refs < UINT32_MAX) slot->refs++;
+    } else if (entry->type == FD_INOTIFY &&
+               entry->compat_id < LINUX_INOTIFY_SLOTS) {
+        inotify_slot_t *slot = &inotify_slots[entry->compat_id];
+        if (slot->used && slot->refs < UINT32_MAX)
+            __sync_fetch_and_add(&slot->refs, 1);
     }
 }
 
@@ -596,6 +842,11 @@ void linux_compat_retain_task(struct task *opaque_task) {
                    entry->compat_id < LINUX_MEMFD_SLOTS) {
             memfd_slot_t *slot = &memfd_slots[entry->compat_id];
             if (slot->used && slot->refs < UINT32_MAX) slot->refs++;
+        } else if (entry->type == FD_INOTIFY &&
+                   entry->compat_id < LINUX_INOTIFY_SLOTS) {
+            inotify_slot_t *slot = &inotify_slots[entry->compat_id];
+            if (slot->used && slot->refs < UINT32_MAX)
+                __sync_fetch_and_add(&slot->refs, 1);
         }
     }
 }
@@ -625,6 +876,10 @@ void linux_compat_release_task(struct task *opaque_task) {
             memfd_slot_t *slot = &memfd_slots[entry->compat_id];
             if (slot->used && slot->refs) slot->refs--;
             memfd_maybe_reset(slot);
+        } else if (entry->type == FD_INOTIFY &&
+                   entry->compat_id < LINUX_INOTIFY_SLOTS) {
+            inotify_slot_t *slot = &inotify_slots[entry->compat_id];
+            inotify_slot_release(slot);
         }
     }
 }
@@ -784,6 +1039,293 @@ int linux_compat_epoll_wait(int epfd, linux_epoll_event_t *events,
     }
 }
 
+int linux_compat_inotify_init1(int flags) {
+    if (flags & ~(LINUX_IN_NONBLOCK | LINUX_IN_CLOEXEC))
+        return compat_set_errno(EINVAL);
+    inotify_lock_enter();
+    for (uint32_t i = 0; i < LINUX_INOTIFY_SLOTS; i++) {
+        if (inotify_slots[i].used) continue;
+        inotify_slot_t *slot = &inotify_slots[i];
+        memset(slot, 0, sizeof(*slot));
+        slot->used = 1;
+        slot->refs = 1;
+        slot->flags = flags;
+        slot->next_descriptor = 1;
+        __sync_fetch_and_add(&inotify_active_slots, 1);
+        int fd = compat_fd_alloc(compat_task(), FD_INOTIFY, i,
+                                 flags | O_RDONLY);
+        if (fd < 0) {
+            memset(slot, 0, sizeof(*slot));
+            __sync_fetch_and_sub(&inotify_active_slots, 1);
+        }
+        inotify_lock_leave();
+        return fd;
+    }
+    inotify_lock_leave();
+    return compat_set_errno(ENFILE);
+}
+
+int linux_compat_inotify_add_watch(int fd, const char *path, uint32_t mask) {
+    if (!path) return compat_set_errno(EFAULT);
+    uint32_t valid = LINUX_IN_ALL_EVENTS | LINUX_IN_MODIFIERS;
+    if ((mask & ~valid) || !(mask & LINUX_IN_ALL_EVENTS))
+        return compat_set_errno(EINVAL);
+
+    char cwd[VFS_MAX_NAME];
+    char full[VFS_MAX_NAME];
+    if (!getcwd(cwd, sizeof(cwd))) strcpy(cwd, "/");
+    if (vfs_resolve_path(cwd, path, full, sizeof(full)) < 0)
+        return compat_set_errno(EINVAL);
+    vfs_node_t *node = vfs_lookup(full);
+    if (!node) return compat_set_errno(ENOENT);
+    if ((mask & LINUX_IN_ONLYDIR) && node->type != VFS_NODE_DIR)
+        return compat_set_errno(ENOTDIR);
+
+    inotify_lock_enter();
+    inotify_slot_t *slot = inotify_for_fd(compat_task(), fd);
+    if (!slot) {
+        inotify_lock_leave();
+        return compat_set_errno(EBADF);
+    }
+    int empty = -1;
+    for (int i = 0; i < LINUX_INOTIFY_WATCHES; i++) {
+        inotify_watch_t *watch = &slot->watches[i];
+        if (!watch->used) {
+            if (empty < 0) empty = i;
+            continue;
+        }
+        if (strcmp(watch->path, full) != 0) continue;
+        if (mask & LINUX_IN_MASK_CREATE) {
+            inotify_lock_leave();
+            return compat_set_errno(EEXIST);
+        }
+        if (mask & LINUX_IN_MASK_ADD)
+            watch->mask |= mask & ~LINUX_IN_MASK_ADD;
+        else
+            watch->mask = mask;
+        int descriptor = watch->descriptor;
+        inotify_lock_leave();
+        return descriptor;
+    }
+    if (empty < 0) {
+        inotify_lock_leave();
+        return compat_set_errno(ENOSPC);
+    }
+    inotify_watch_t *watch = &slot->watches[empty];
+    memset(watch, 0, sizeof(*watch));
+    watch->used = 1;
+    watch->descriptor = slot->next_descriptor++;
+    if (slot->next_descriptor <= 0) slot->next_descriptor = 1;
+    watch->is_directory = node->type == VFS_NODE_DIR;
+    watch->mask = mask;
+    strcpy(watch->path, full);
+    int descriptor = watch->descriptor;
+    inotify_lock_leave();
+    return descriptor;
+}
+
+int linux_compat_inotify_rm_watch(int fd, int watch_descriptor) {
+    inotify_lock_enter();
+    inotify_slot_t *slot = inotify_for_fd(compat_task(), fd);
+    if (!slot) {
+        inotify_lock_leave();
+        return compat_set_errno(EBADF);
+    }
+    for (int i = 0; i < LINUX_INOTIFY_WATCHES; i++) {
+        inotify_watch_t *watch = &slot->watches[i];
+        if (!watch->used || watch->descriptor != watch_descriptor) continue;
+        inotify_queue(slot, watch->descriptor, LINUX_IN_IGNORED, 0, NULL);
+        memset(watch, 0, sizeof(*watch));
+        inotify_lock_leave();
+        return 0;
+    }
+    inotify_lock_leave();
+    return compat_set_errno(EINVAL);
+}
+
+void linux_compat_inotify_notify(const char *path, uint32_t mask,
+                                 int is_directory) {
+    if (!inotify_active_slots || !path || path[0] != '/') return;
+    char parent[VFS_MAX_NAME];
+    const char *name = strrchr(path, '/');
+    if (!name) return;
+    if (name == path) {
+        strcpy(parent, "/");
+    } else {
+        size_t length = (size_t)(name - path);
+        if (length >= sizeof(parent)) return;
+        memcpy(parent, path, length);
+        parent[length] = '\0';
+    }
+    name++;
+    uint32_t exact_mask = mask | (is_directory ? LINUX_IN_ISDIR : 0);
+    uint32_t parent_mask =
+        (mask == LINUX_IN_DELETE_SELF ? LINUX_IN_DELETE : mask) |
+        (is_directory ? LINUX_IN_ISDIR : 0);
+
+    inotify_lock_enter();
+    for (int slot_index = 0; slot_index < LINUX_INOTIFY_SLOTS;
+         slot_index++) {
+        inotify_slot_t *slot = &inotify_slots[slot_index];
+        if (!slot->used) continue;
+        for (int watch_index = 0; watch_index < LINUX_INOTIFY_WATCHES;
+             watch_index++) {
+            inotify_watch_t *watch = &slot->watches[watch_index];
+            if (!watch->used) continue;
+            uint32_t delivered_mask = 0;
+            const char *delivered_name = NULL;
+            if (strcmp(watch->path, path) == 0) {
+                delivered_mask = exact_mask;
+            } else if (watch->is_directory &&
+                       strcmp(watch->path, parent) == 0) {
+                delivered_mask = parent_mask;
+                delivered_name = name;
+            }
+            if (!(watch->mask & delivered_mask & LINUX_IN_ALL_EVENTS))
+                continue;
+            int descriptor = watch->descriptor;
+            inotify_queue(slot, descriptor, delivered_mask, 0,
+                          delivered_name);
+            int remove = (watch->mask & LINUX_IN_ONESHOT) ||
+                         (delivered_mask & LINUX_IN_DELETE_SELF);
+            if (remove) {
+                inotify_queue(slot, descriptor, LINUX_IN_IGNORED, 0, NULL);
+                memset(watch, 0, sizeof(*watch));
+            }
+        }
+    }
+    inotify_lock_leave();
+}
+
+static int inotify_split_path(const char *path, char parent[VFS_MAX_NAME],
+                              const char **name) {
+    if (!path || path[0] != '/' || !name) return -1;
+    const char *slash = strrchr(path, '/');
+    if (!slash) return -1;
+    if (slash == path) {
+        strcpy(parent, "/");
+    } else {
+        size_t length = (size_t)(slash - path);
+        if (length >= VFS_MAX_NAME) return -1;
+        memcpy(parent, path, length);
+        parent[length] = '\0';
+    }
+    *name = slash + 1;
+    return 0;
+}
+
+static int inotify_path_in_tree(const char *path, const char *root) {
+    size_t length = strlen(root);
+    return strcmp(path, root) == 0 ||
+           (strncmp(path, root, length) == 0 && path[length] == '/');
+}
+
+void linux_compat_inotify_move(const char *old_path, const char *new_path,
+                               int is_directory) {
+    if (!inotify_active_slots || !old_path || !new_path) return;
+    char old_parent[VFS_MAX_NAME];
+    char new_parent[VFS_MAX_NAME];
+    const char *old_name;
+    const char *new_name;
+    if (inotify_split_path(old_path, old_parent, &old_name) < 0 ||
+        inotify_split_path(new_path, new_parent, &new_name) < 0)
+        return;
+    uint32_t cookie = __sync_add_and_fetch(&inotify_next_cookie, 1);
+    if (!cookie) cookie = __sync_add_and_fetch(&inotify_next_cookie, 1);
+    uint32_t directory_bit = is_directory ? LINUX_IN_ISDIR : 0;
+    size_t old_length = strlen(old_path);
+
+    inotify_lock_enter();
+    for (int slot_index = 0; slot_index < LINUX_INOTIFY_SLOTS;
+         slot_index++) {
+        inotify_slot_t *slot = &inotify_slots[slot_index];
+        if (!slot->used) continue;
+        for (int watch_index = 0; watch_index < LINUX_INOTIFY_WATCHES;
+             watch_index++) {
+            inotify_watch_t *watch = &slot->watches[watch_index];
+            if (!watch->used) continue;
+            int exact_move = strcmp(watch->path, old_path) == 0;
+            int follows_tree = exact_move ||
+                (is_directory && inotify_path_in_tree(watch->path,
+                                                       old_path));
+            if (exact_move) {
+                if (watch->mask & LINUX_IN_MOVE_SELF)
+                    inotify_queue(slot, watch->descriptor,
+                                  LINUX_IN_MOVE_SELF | directory_bit,
+                                  0, NULL);
+                if ((watch->mask & LINUX_IN_ONESHOT) &&
+                    (watch->mask & LINUX_IN_MOVE_SELF)) {
+                    inotify_queue(slot, watch->descriptor,
+                                  LINUX_IN_IGNORED, 0, NULL);
+                    memset(watch, 0, sizeof(*watch));
+                    continue;
+                }
+            }
+            if (follows_tree) {
+                const char *suffix = watch->path + old_length;
+                char rewritten[VFS_MAX_NAME];
+                if (strlen(new_path) + strlen(suffix) < sizeof(rewritten)) {
+                    strcpy(rewritten, new_path);
+                    strcat(rewritten, suffix);
+                    strcpy(watch->path, rewritten);
+                }
+            }
+            if (watch->is_directory &&
+                strcmp(watch->path, old_parent) == 0 &&
+                (watch->mask & LINUX_IN_MOVED_FROM)) {
+                int descriptor = watch->descriptor;
+                inotify_queue(slot, descriptor,
+                              LINUX_IN_MOVED_FROM | directory_bit,
+                              cookie, old_name);
+                if (watch->mask & LINUX_IN_ONESHOT) {
+                    inotify_queue(slot, descriptor,
+                                  LINUX_IN_IGNORED, 0, NULL);
+                    memset(watch, 0, sizeof(*watch));
+                    continue;
+                }
+            }
+            if (watch->used && watch->is_directory &&
+                strcmp(watch->path, new_parent) == 0 &&
+                (watch->mask & LINUX_IN_MOVED_TO)) {
+                int descriptor = watch->descriptor;
+                inotify_queue(slot, descriptor,
+                              LINUX_IN_MOVED_TO | directory_bit,
+                              cookie, new_name);
+                if (watch->mask & LINUX_IN_ONESHOT) {
+                    inotify_queue(slot, descriptor,
+                                  LINUX_IN_IGNORED, 0, NULL);
+                    memset(watch, 0, sizeof(*watch));
+                }
+            }
+        }
+    }
+    inotify_lock_leave();
+}
+
+void linux_compat_inotify_replace_target(const char *path,
+                                         int is_directory) {
+    if (!inotify_active_slots || !path) return;
+    uint32_t mask = LINUX_IN_DELETE_SELF |
+                    (is_directory ? LINUX_IN_ISDIR : 0);
+    inotify_lock_enter();
+    for (int slot_index = 0; slot_index < LINUX_INOTIFY_SLOTS;
+         slot_index++) {
+        inotify_slot_t *slot = &inotify_slots[slot_index];
+        if (!slot->used) continue;
+        for (int watch_index = 0; watch_index < LINUX_INOTIFY_WATCHES;
+             watch_index++) {
+            inotify_watch_t *watch = &slot->watches[watch_index];
+            if (!watch->used || strcmp(watch->path, path) != 0) continue;
+            int descriptor = watch->descriptor;
+            if (watch->mask & LINUX_IN_DELETE_SELF)
+                inotify_queue(slot, descriptor, mask, 0, NULL);
+            inotify_queue(slot, descriptor, LINUX_IN_IGNORED, 0, NULL);
+            memset(watch, 0, sizeof(*watch));
+        }
+    }
+    inotify_lock_leave();
+}
+
 static int cpu_has_rdrand(void) {
     uint32_t eax = 1, ebx, ecx, edx;
     __asm__ volatile("cpuid"
@@ -932,6 +1474,8 @@ int linux_compat_unix_connect(int fd, const void *address, size_t length) {
     int client_index = unix_slot_index(client);
     int server_index = unix_slot_index(server);
     server->owner_pid = listener->owner_pid;
+    memcpy(server->address, listener->address, listener->address_length);
+    server->address_length = listener->address_length;
     client->peer = server_index;
     server->peer = client_index;
     listener->pending[listener->pending_write] = (uint8_t)server_index;
@@ -971,23 +1515,45 @@ int linux_compat_unix_accept(int fd, void *address, uint32_t *length) {
         return -1;
     }
     unix_socket_slots[server_index].refs = 1;
-    if (length) {
-        if (!address) return accepted;
-        uint32_t available = *length;
-        uint32_t needed = sizeof(uint16_t) + listener->address_length + 1;
-        uint32_t copy = available < needed ? available : needed;
-        if (copy >= sizeof(uint16_t)) {
-            uint16_t family = LINUX_AF_UNIX;
-            memcpy(address, &family, sizeof(family));
-            uint32_t path_copy = copy - sizeof(uint16_t);
-            if (path_copy > listener->address_length)
-                path_copy = listener->address_length;
-            memcpy((uint8_t *)address + sizeof(uint16_t),
-                   listener->address, path_copy);
+    if (address || length) {
+        if (!address || !length) {
+            (void)linux_compat_close(accepted);
+            task_t *task = compat_task();
+            if (task && task->fd_table)
+                memset(&task->fd_table->entries[accepted], 0,
+                       sizeof(task->fd_table->entries[accepted]));
+            return compat_set_errno(EFAULT);
         }
-        *length = needed;
+        unix_socket_slot_t *server = &unix_socket_slots[server_index];
+        unix_socket_slot_t *peer = server->peer >= 0 &&
+            server->peer < UNIX_SOCKET_SLOTS ?
+            &unix_socket_slots[server->peer] : NULL;
+        if (!peer || unix_address_export(peer, address, length) < 0) {
+            (void)linux_compat_close(accepted);
+            task_t *task = compat_task();
+            if (task && task->fd_table)
+                memset(&task->fd_table->entries[accepted], 0,
+                       sizeof(task->fd_table->entries[accepted]));
+            return -1;
+        }
     }
     return accepted;
+}
+
+int linux_compat_unix_getsockname(int fd, void *address, uint32_t *length) {
+    unix_socket_slot_t *slot = unix_for_fd(compat_task(), fd);
+    if (!slot) return compat_set_errno(EBADF);
+    return unix_address_export(slot, address, length);
+}
+
+int linux_compat_unix_getpeername(int fd, void *address, uint32_t *length) {
+    unix_socket_slot_t *slot = unix_for_fd(compat_task(), fd);
+    if (!slot) return compat_set_errno(EBADF);
+    if (slot->peer < 0 || slot->peer >= UNIX_SOCKET_SLOTS ||
+        !unix_socket_slots[slot->peer].used)
+        return compat_set_errno(ENOTCONN);
+    return unix_address_export(&unix_socket_slots[slot->peer],
+                               address, length);
 }
 
 long linux_compat_unix_send(int fd, const void *buffer, size_t count,
@@ -1279,6 +1845,29 @@ int linux_compat_memfd_size(int fd, uint64_t *size) {
     return 0;
 }
 
+int linux_compat_memfd_read_at(int fd, uint64_t offset,
+                               void *buffer, size_t count) {
+    memfd_slot_t *slot = memfd_for_fd(compat_task(), fd);
+    if (!slot) return compat_set_errno(EBADF);
+    if ((!buffer && count) || offset > slot->size ||
+        count > slot->size - offset)
+        return compat_set_errno(EINVAL);
+    uint8_t *output = (uint8_t *)buffer;
+    size_t copied = 0;
+    while (copied < count) {
+        uint64_t position = offset + copied;
+        uint32_t page = (uint32_t)(position / PAGE_SIZE);
+        size_t within = (size_t)(position % PAGE_SIZE);
+        size_t chunk = PAGE_SIZE - within;
+        if (chunk > count - copied) chunk = count - copied;
+        memcpy(output + copied,
+               (const uint8_t *)(uintptr_t)slot->pages[page] + within,
+               chunk);
+        copied += chunk;
+    }
+    return 0;
+}
+
 int linux_compat_memfd_map(int fd, uint64_t address, size_t length,
                            uint64_t offset, int writable,
                            uint32_t *backing_id) {
@@ -1319,6 +1908,15 @@ void linux_compat_memfd_unmap(uint32_t backing_id) {
     if (!slot->used) return;
     if (slot->map_refs) slot->map_refs--;
     memfd_maybe_reset(slot);
+}
+
+int linux_compat_memfd_retain_map(uint32_t backing_id) {
+    if (backing_id >= LINUX_MEMFD_SLOTS) return compat_set_errno(EINVAL);
+    memfd_slot_t *slot = &memfd_slots[backing_id];
+    if (!slot->used || slot->map_refs == UINT32_MAX)
+        return compat_set_errno(EINVAL);
+    slot->map_refs++;
+    return 0;
 }
 
 static futex_slot_t *futex_find(uint32_t *address, int create) {

@@ -34,6 +34,7 @@
 #include "heap.h"
 #include "../smp.h"
 #include "../linux_compat.h"
+#include "../user/ldso.h"
 
 static void task_sig_deliver(task_t *task);
 #include "../signal.h"
@@ -52,6 +53,7 @@ extern void task_entry_trampoline(void);
 
 /** Ring3 入口蹦床: 构建 iretq 帧并切换到 ring3 */
 extern void task_enter_ring3(void);
+extern void task_resume_linux_syscall(void);
 
 typedef struct {
     uint64_t user_entry;
@@ -78,6 +80,8 @@ static uint8_t task_fpu_state[MAX_TASKS][512]
     __attribute__((aligned(16)));
 static fd_table_t task_fd_tables[MAX_TASKS];
 static task_mm_t task_memory_spaces[MAX_TASKS];
+static uint64_t retired_address_spaces[MAX_TASKS];
+static size_t retired_address_space_count;
 
 /**
  * 将一块 FXSAVE 区域初始化为 CPU 复位后的默认状态（FCW=0x037F,
@@ -91,6 +95,13 @@ static void task_fpu_init(void *area) {
     memset(area, 0, 512);
     *(uint16_t *)((uint8_t *)area + 0)  = 0x037F; /* FCW */
     *(uint32_t *)((uint8_t *)area + 24) = 0x1F80; /* MXCSR */
+}
+
+static void task_fpu_capture(void *area) {
+    /* clone()/fork() inherit the calling thread's live floating-point
+     * environment.  The task's cached FXSAVE image may predate its current
+     * timeslice, so snapshot hardware here instead of copying stale state. */
+    __asm__ volatile("fxsave (%0)" :: "r"(area) : "memory");
 }
 
 static uint64_t task_irq_save(void) {
@@ -149,11 +160,13 @@ static fd_table_t *task_fd_table_alloc(void) {
 
 static task_mm_t *task_mm_alloc(uint64_t pml4_phys,
                                 uint64_t heap_start,
-                                uint64_t heap_limit) {
+                                uint64_t heap_limit,
+                                bool owns_pml4) {
     for (int i = 0; i < MAX_TASKS; i++) {
         if (task_memory_spaces[i].refs) continue;
         memset(&task_memory_spaces[i], 0, sizeof(task_memory_spaces[i]));
         task_memory_spaces[i].refs = 1;
+        task_memory_spaces[i].owns_pml4 = owns_pml4;
         task_memory_spaces[i].pml4_phys = pml4_phys;
         task_memory_spaces[i].user_heap_start = heap_start;
         task_memory_spaces[i].user_brk = heap_start;
@@ -163,9 +176,35 @@ static task_mm_t *task_mm_alloc(uint64_t pml4_phys,
     return NULL;
 }
 
+static void task_reap_address_spaces(void) {
+    size_t write = 0;
+    for (size_t i = 0; i < retired_address_space_count; i++) {
+        uint64_t pml4 = retired_address_spaces[i];
+        if (pml4 == vmm_get_pml4()) {
+            retired_address_spaces[write++] = pml4;
+            continue;
+        }
+        vmm_destroy_address_space(pml4);
+    }
+    retired_address_space_count = write;
+}
+
+static void task_retire_address_space(uint64_t pml4) {
+    if (!pml4) return;
+    if (pml4 != vmm_get_pml4()) {
+        vmm_destroy_address_space(pml4);
+        return;
+    }
+    if (retired_address_space_count < MAX_TASKS)
+        retired_address_spaces[retired_address_space_count++] = pml4;
+}
+
 static void task_release_mm(task_t *task) {
     if (!task || !task->mm || !task->mm->refs) return;
     if (--task->mm->refs == 0) {
+        uint64_t pml4 = task->mm->pml4_phys;
+        bool owns_pml4 = task->mm->owns_pml4;
+        ldso_release_address_space(task->mm);
         vm_area_t *area = task->mm->areas;
         while (area) {
             vm_area_t *next = area->next;
@@ -174,15 +213,30 @@ static void task_release_mm(task_t *task) {
             kfree(area);
             area = next;
         }
-        /*
-         * Address-space page reclamation is intentionally deferred: HBOS's
-         * current VMM destroy hook only frees the PML4 page, not the mapped
-         * user pages.  Reusing the metadata is safe and avoids pretending a
-         * partial teardown is complete.
-         */
         memset(task->mm, 0, sizeof(*task->mm));
+        if (owns_pml4) task_retire_address_space(pml4);
     }
     task->mm = NULL;
+}
+
+static int task_copy_vm_areas(task_mm_t *destination,
+                              const task_mm_t *source) {
+    if (!destination || !source) return -1;
+    vm_area_t **tail = &destination->areas;
+    for (const vm_area_t *area = source->areas; area; area = area->next) {
+        vm_area_t *copy = (vm_area_t *)kmalloc(sizeof(*copy));
+        if (!copy) return -1;
+        *copy = *area;
+        copy->next = NULL;
+        if (copy->backing_type == 1 &&
+            linux_compat_memfd_retain_map(copy->backing_id) < 0) {
+            kfree(copy);
+            return -1;
+        }
+        *tail = copy;
+        tail = &copy->next;
+    }
+    return 0;
 }
 
 static void task_release_fd_table(task_t *task) {
@@ -246,17 +300,34 @@ void task_init(void) {
     main_task->stack_size = TASK_STACK_SIZE;
     main_task->fpu_state = task_fpu_state[0];
     task_fpu_init(main_task->fpu_state);
-    main_task->mm = task_mm_alloc(vmm_get_pml4(), 0, 0);
+    main_task->mm = task_mm_alloc(vmm_get_pml4(), 0, 0, false);
     main_task->fs_base = rdmsr(MSR_FS_BASE);
     main_task->thread_group_id = main_task->id;
+    main_task->parent_death_signal = 0;
+    main_task->dumpable = true;
+    main_task->no_new_privs = false;
     main_task->clear_child_tid = NULL;
     main_task->robust_list_head = NULL;
     main_task->robust_list_length = 0;
+    memset(main_task->dynamic_tls, 0, sizeof(main_task->dynamic_tls));
     main_task->fd_table = task_fd_table_alloc();
     memset(main_task->sig_handler, 0, sizeof(main_task->sig_handler));
+    memset(main_task->sig_action_flags, 0,
+           sizeof(main_task->sig_action_flags));
+    memset(main_task->sig_action_restorer, 0,
+           sizeof(main_task->sig_action_restorer));
+    memset(main_task->sig_action_mask, 0,
+           sizeof(main_task->sig_action_mask));
     memset(&main_task->sig_pending, 0, sizeof(main_task->sig_pending));
     memset(&main_task->sig_blocked, 0, sizeof(main_task->sig_blocked));
     main_task->sig_exit_code = 0;
+    main_task->sig_last_sender_pid = 0;
+    main_task->sig_frame_active = false;
+    main_task->sig_siginfo_depth = 0;
+    main_task->sig_altstack_sp = 0;
+    main_task->sig_altstack_size = 0;
+    main_task->sig_altstack_flags = 2; /* SS_DISABLE */
+    main_task->sig_suppress_delivery = false;
     main_task->host_symtab = 0;
     main_task->host_strtab = 0;
     main_task->host_symtab_count = 0;
@@ -316,19 +387,41 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->stack_size = TASK_STACK_SIZE;
     tcb->fpu_state = task_fpu_state[idx];
     task_fpu_init(tcb->fpu_state);
-    tcb->mm = task_mm_alloc(vmm_create_address_space(), 0, 0);
-    if (!tcb->mm || !tcb->mm->pml4_phys) return -1;
+    uint64_t task_pml4 = vmm_create_address_space();
+    if (!task_pml4) return -1;
+    tcb->mm = task_mm_alloc(task_pml4, 0, 0, true);
+    if (!tcb->mm) {
+        vmm_destroy_address_space(task_pml4);
+        return -1;
+    }
     tcb->fs_base = 0;
     tcb->thread_group_id = tcb->id;
+    tcb->parent_death_signal = 0;
+    tcb->dumpable = true;
+    tcb->no_new_privs = current_task ? current_task->no_new_privs : false;
     tcb->clear_child_tid = NULL;
     tcb->robust_list_head = NULL;
     tcb->robust_list_length = 0;
+    memset(tcb->dynamic_tls, 0, sizeof(tcb->dynamic_tls));
     tcb->fd_table = task_fd_table_alloc();
-    if (!tcb->fd_table) return -1;
+    if (!tcb->fd_table) {
+        task_release_mm(tcb);
+        return -1;
+    }
     memset(tcb->sig_handler, 0, sizeof(tcb->sig_handler));
+    memset(tcb->sig_action_flags, 0, sizeof(tcb->sig_action_flags));
+    memset(tcb->sig_action_restorer, 0, sizeof(tcb->sig_action_restorer));
+    memset(tcb->sig_action_mask, 0, sizeof(tcb->sig_action_mask));
     memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
     memset(&tcb->sig_blocked, 0, sizeof(tcb->sig_blocked));
     tcb->sig_exit_code = 0;
+    tcb->sig_last_sender_pid = 0;
+    tcb->sig_frame_active = false;
+    tcb->sig_siginfo_depth = 0;
+    tcb->sig_altstack_sp = 0;
+    tcb->sig_altstack_size = 0;
+    tcb->sig_altstack_flags = 2; /* SS_DISABLE */
+    tcb->sig_suppress_delivery = false;
     tcb->host_symtab = 0;
     tcb->host_strtab = 0;
     tcb->host_symtab_count = 0;
@@ -376,7 +469,10 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
 int task_create_ring3_full(const char *name, uint64_t user_entry,
                            uint64_t user_stack, uint64_t user_argc,
                            uint64_t user_argv, uint64_t pml4_phys) {
-    if (!user_entry || !user_stack) return -1;
+    if (!user_entry || !user_stack) {
+        if (pml4_phys) vmm_destroy_address_space(pml4_phys);
+        return -1;
+    }
 
     int idx = -1;
     int reuse = 0;
@@ -388,7 +484,10 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
         }
     }
     if (idx < 0) {
-        if (task_count >= MAX_TASKS) return -1;
+        if (task_count >= MAX_TASKS) {
+            if (pml4_phys) vmm_destroy_address_space(pml4_phys);
+            return -1;
+        }
         idx = task_count;
     }
     task_t *tcb = &task_pool[idx];
@@ -406,22 +505,46 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     tcb->stack_size = TASK_STACK_SIZE;
     tcb->fpu_state = task_fpu_state[idx];
     task_fpu_init(tcb->fpu_state);
+    uint64_t task_pml4 = pml4_phys ? pml4_phys :
+                         vmm_create_address_space();
+    if (!task_pml4) return -1;
     tcb->mm = task_mm_alloc(
-        pml4_phys ? pml4_phys : vmm_create_address_space(),
+        task_pml4,
         TASK_USER_HEAP_START,
-        TASK_USER_HEAP_START + TASK_USER_HEAP_SIZE);
-    if (!tcb->mm || !tcb->mm->pml4_phys) return -1;
+        TASK_USER_HEAP_START + TASK_USER_HEAP_SIZE,
+        true);
+    if (!tcb->mm) {
+        vmm_destroy_address_space(task_pml4);
+        return -1;
+    }
     tcb->fs_base = 0;
     tcb->thread_group_id = tcb->id;
+    tcb->parent_death_signal = 0;
+    tcb->dumpable = true;
+    tcb->no_new_privs = current_task ? current_task->no_new_privs : false;
     tcb->clear_child_tid = NULL;
     tcb->robust_list_head = NULL;
     tcb->robust_list_length = 0;
+    memset(tcb->dynamic_tls, 0, sizeof(tcb->dynamic_tls));
     tcb->fd_table = task_fd_table_alloc();
-    if (!tcb->fd_table) return -1;
+    if (!tcb->fd_table) {
+        task_release_mm(tcb);
+        return -1;
+    }
     memset(tcb->sig_handler, 0, sizeof(tcb->sig_handler));
+    memset(tcb->sig_action_flags, 0, sizeof(tcb->sig_action_flags));
+    memset(tcb->sig_action_restorer, 0, sizeof(tcb->sig_action_restorer));
+    memset(tcb->sig_action_mask, 0, sizeof(tcb->sig_action_mask));
     memset(&tcb->sig_pending, 0, sizeof(tcb->sig_pending));
     memset(&tcb->sig_blocked, 0, sizeof(tcb->sig_blocked));
     tcb->sig_exit_code = 0;
+    tcb->sig_last_sender_pid = 0;
+    tcb->sig_frame_active = false;
+    tcb->sig_siginfo_depth = 0;
+    tcb->sig_altstack_sp = 0;
+    tcb->sig_altstack_size = 0;
+    tcb->sig_altstack_flags = 2; /* SS_DISABLE */
+    tcb->sig_suppress_delivery = false;
     tcb->host_symtab = 0;
     tcb->host_strtab = 0;
     tcb->host_symtab_count = 0;
@@ -496,6 +619,7 @@ void task_yield(void) {
 
     if (next->mm && next->mm->pml4_phys)
         vmm_set_pml4(next->mm->pml4_phys);
+    task_reap_address_spaces();
     tss_set_stack(next->stack_base + next->stack_size);
     task_switch_tls(prev, next);
 
@@ -615,6 +739,7 @@ void task_exit(void) {
         __atomic_store_n(tid, 0, __ATOMIC_RELEASE);
         (void)linux_compat_futex(tid, 1, UINT32_MAX, NULL);
     }
+    ldso_release_thread_tls(current_task);
     task_release_fd_table(current_task);
     task_release_mm(current_task);
     task_irq_save();
@@ -632,6 +757,7 @@ void task_exit(void) {
         current_task = next;
         if (next->mm && next->mm->pml4_phys)
             vmm_set_pml4(next->mm->pml4_phys);
+        task_reap_address_spaces();
         tss_set_stack(next->stack_base + next->stack_size);
         task_switch_tls(prev, next);
         task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);
@@ -735,7 +861,10 @@ int task_kill(uint32_t id, int sig) {
     }
     if (!target || target->state == TASK_TERMINATED) return -1;
 
-    if (sig == SIGKILL || sig == SIGTERM) {
+    if (sig == SIGKILL ||
+        (sig == SIGTERM &&
+         (target->sig_handler[sig] == SIG_DFL ||
+          target->sig_handler[sig] == NULL))) {
         target->sig_exit_code = (sig == SIGKILL) ? 9 : 15;
         if (target == current_task) {
             task_exit();
@@ -749,13 +878,21 @@ int task_kill(uint32_t id, int sig) {
             __atomic_store_n(tid, 0, __ATOMIC_RELEASE);
             (void)linux_compat_futex(tid, 1, UINT32_MAX, NULL);
         }
+        if (current_task && target->mm == current_task->mm)
+            ldso_release_thread_tls(target);
         task_release_fd_table(target);
         task_release_mm(target);
         target->state = TASK_TERMINATED;
         return 0;
     }
 
-    target->sig_pending.sig[sig / 64] |= (1ULL << (sig % 64));
+    if (target->sig_handler[sig] == SIG_IGN) return 0;
+
+    if (current_task)
+        target->sig_last_sender_pid = current_task->id;
+    unsigned int signal_index = (unsigned int)(sig - 1);
+    target->sig_pending.sig[signal_index / 64] |=
+        (1ULL << (signal_index % 64));
     return 0;
 }
 
@@ -765,7 +902,7 @@ int task_kill(uint32_t id, int sig) {
  * 父任务返回子任务 ID，子任务在首次调度时返回 0。
  * @return 父进程返回子进程 ID，子进程返回 0，失败返回 -1
  */
-int task_fork(void) {
+static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     if (!current_task) return -1;
 
     int idx = -1;
@@ -783,43 +920,82 @@ int task_fork(void) {
     }
 
     task_t *child = &task_pool[idx];
+    task_t *saved_next = child->next;
+    memset(child, 0, sizeof(*child));
+    child->next = saved_next;
     child->id = next_id++;
     strncpy(child->name, current_task->name, TASK_NAME_MAX);
     child->name[TASK_NAME_MAX - 1] = '\0';
     child->state = TASK_READY;
-    child->entry = current_task->entry;
-    child->arg = current_task->arg;
+    child->entry = linux_context ? NULL : current_task->entry;
+    child->arg = linux_context ? NULL : current_task->arg;
     child->exit_status = 0;
     child->parent_id = current_task->id;
     child->child_id = 0;
     child->stack_base = (uint64_t)task_stacks[idx];
     child->stack_size = TASK_STACK_SIZE;
     child->fpu_state = task_fpu_state[idx];
-    task_fpu_init(child->fpu_state);
+    task_fpu_capture(child->fpu_state);
     uint64_t child_pml4 = current_task->mm &&
                           current_task->mm->pml4_phys ?
         vmm_clone_address_space(current_task->mm->pml4_phys) : 0;
     child->mm = task_mm_alloc(
         child_pml4,
         current_task->mm ? current_task->mm->user_heap_start : 0,
-        current_task->mm ? current_task->mm->user_heap_limit : 0);
-    if (!child->mm) return -1;
+        current_task->mm ? current_task->mm->user_heap_limit : 0,
+        true);
+    if (!child->mm || !child->mm->pml4_phys) {
+        if (child->mm)
+            task_release_mm(child);
+        else if (child_pml4)
+            vmm_destroy_address_space(child_pml4);
+        child->state = TASK_TERMINATED;
+        return -1;
+    }
     if (current_task->mm)
         child->mm->user_brk = current_task->mm->user_brk;
-    child->fs_base = current_task->fs_base;
+    if (current_task->mm &&
+        task_copy_vm_areas(child->mm, current_task->mm) < 0) {
+        task_release_mm(child);
+        child->state = TASK_TERMINATED;
+        return -1;
+    }
+    child->fs_base = task_get_fs_base();
     child->thread_group_id = child->id;
+    child->parent_death_signal = current_task->parent_death_signal;
+    child->dumpable = current_task->dumpable;
+    child->no_new_privs = current_task->no_new_privs;
     child->clear_child_tid = NULL;
     child->robust_list_head = NULL;
     child->robust_list_length = 0;
+    memcpy(child->dynamic_tls, current_task->dynamic_tls,
+           sizeof(child->dynamic_tls));
 
     child->fd_table = task_fd_table_alloc();
-    if (!child->fd_table) return -1;
+    if (!child->fd_table) {
+        task_release_mm(child);
+        child->state = TASK_TERMINATED;
+        return -1;
+    }
     memcpy(child->fd_table->entries, current_task->fd_table->entries, sizeof(child->fd_table->entries));
     linux_compat_retain_task(child);
     memcpy(child->sig_handler, current_task->sig_handler, sizeof(child->sig_handler));
+    memcpy(child->sig_action_flags, current_task->sig_action_flags,
+           sizeof(child->sig_action_flags));
+    memcpy(child->sig_action_restorer, current_task->sig_action_restorer,
+           sizeof(child->sig_action_restorer));
+    memcpy(child->sig_action_mask, current_task->sig_action_mask,
+           sizeof(child->sig_action_mask));
     memset(&child->sig_pending, 0, sizeof(child->sig_pending));
-    memset(&child->sig_blocked, 0, sizeof(child->sig_blocked));
+    child->sig_blocked = current_task->sig_blocked;
     child->sig_exit_code = 0;
+    child->sig_last_sender_pid = current_task->sig_last_sender_pid;
+    child->sig_frame_active = false;
+    child->sig_siginfo_depth = 0;
+    child->sig_altstack_sp = current_task->sig_altstack_sp;
+    child->sig_altstack_size = current_task->sig_altstack_size;
+    child->sig_altstack_flags = current_task->sig_altstack_flags;
+    child->sig_suppress_delivery = false;
     /* fork()'d child restarts from the same entry point in a cloned copy
      * of the parent's address space (see vmm_clone_address_space above) --
      * same executable, so the parent's own .symtab/.strtab (if any) is
@@ -829,8 +1005,21 @@ int task_fork(void) {
     child->host_symtab_count = current_task->host_symtab_count;
 
     uint64_t *sp = (uint64_t *)(child->stack_base + child->stack_size);
-    *--sp = (uint64_t)current_task->entry;
-    *--sp = (uint64_t)current_task->arg;
+    void *launch_context;
+    uint64_t launch_entry;
+    if (linux_context) {
+        sp -= sizeof(*linux_context) / sizeof(*sp);
+        hbos_linux_clone_context_t *context =
+            (hbos_linux_clone_context_t *)sp;
+        *context = *linux_context;
+        launch_context = context;
+        launch_entry = (uint64_t)(uintptr_t)task_resume_linux_syscall;
+    } else {
+        launch_context = current_task->arg;
+        launch_entry = (uint64_t)(uintptr_t)current_task->entry;
+    }
+    *--sp = launch_entry;
+    *--sp = (uint64_t)launch_context;
     *--sp = (uint64_t)task_entry_trampoline;
     *--sp = 0x2;           // RFLAGS (IF enabled by trampoline)
     *--sp = 0;  // RBP
@@ -851,7 +1040,18 @@ int task_fork(void) {
     return child->id;
 }
 
-int task_clone_user_thread(const hbos_clone_request_t *request) {
+int task_fork(void) {
+    return task_fork_common(NULL);
+}
+
+int task_fork_linux(const hbos_linux_clone_context_t *context) {
+    if (!context || !context->rip || !context->rsp) return -1;
+    return task_fork_common(context);
+}
+
+static int task_clone_thread_common(
+    const hbos_clone_request_t *request,
+    const hbos_linux_clone_context_t *linux_context) {
     /*
      * This is intentionally the pthread-shaped subset of Linux clone().
      * It shares the address space and fd table directly, so context switches
@@ -929,13 +1129,16 @@ int task_clone_user_thread(const hbos_clone_request_t *request) {
     thread->stack_base = (uint64_t)task_stacks[idx];
     thread->stack_size = TASK_STACK_SIZE;
     thread->fpu_state = task_fpu_state[idx];
-    task_fpu_init(thread->fpu_state);
+    task_fpu_capture(thread->fpu_state);
 
     thread->mm = current_task->mm;
     thread->mm->refs++;
     thread->fs_base = (request->flags & CLONE_SETTLS) ?
                       request->tls : task_get_fs_base();
     thread->thread_group_id = current_task->thread_group_id;
+    thread->parent_death_signal = current_task->parent_death_signal;
+    thread->dumpable = current_task->dumpable;
+    thread->no_new_privs = current_task->no_new_privs;
     thread->clear_child_tid =
         (request->flags & CLONE_CHILD_CLEARTID) ?
         (uint32_t *)(uintptr_t)(request->clear_child_tid ?
@@ -947,20 +1150,43 @@ int task_clone_user_thread(const hbos_clone_request_t *request) {
     thread->fd_table->refs++;
     memcpy(thread->sig_handler, current_task->sig_handler,
            sizeof(thread->sig_handler));
+    memcpy(thread->sig_action_flags, current_task->sig_action_flags,
+           sizeof(thread->sig_action_flags));
+    memcpy(thread->sig_action_restorer, current_task->sig_action_restorer,
+           sizeof(thread->sig_action_restorer));
+    memcpy(thread->sig_action_mask, current_task->sig_action_mask,
+           sizeof(thread->sig_action_mask));
+    memset(&thread->sig_pending, 0, sizeof(thread->sig_pending));
     thread->sig_blocked = current_task->sig_blocked;
+    thread->sig_exit_code = 0;
+    thread->sig_frame_active = false;
+    thread->sig_suppress_delivery = false;
     thread->host_symtab = current_task->host_symtab;
     thread->host_strtab = current_task->host_strtab;
     thread->host_symtab_count = current_task->host_symtab_count;
 
     uint64_t *sp = (uint64_t *)(thread->stack_base + thread->stack_size);
-    sp -= 4;
-    ring3_launch_ctx_t *ctx = (ring3_launch_ctx_t *)sp;
-    ctx->user_entry = request->entry;
-    ctx->user_stack = request->stack;
-    ctx->user_argc = request->argument;
-    ctx->user_argv = 0;
-    *--sp = (uint64_t)task_enter_ring3;
-    *--sp = (uint64_t)ctx;
+    void *launch_context = NULL;
+    void (*launch_entry)(void) = NULL;
+    if (linux_context) {
+        sp -= sizeof(*linux_context) / sizeof(*sp);
+        hbos_linux_clone_context_t *ctx =
+            (hbos_linux_clone_context_t *)sp;
+        *ctx = *linux_context;
+        launch_context = ctx;
+        launch_entry = task_resume_linux_syscall;
+    } else {
+        sp -= sizeof(ring3_launch_ctx_t) / sizeof(*sp);
+        ring3_launch_ctx_t *ctx = (ring3_launch_ctx_t *)sp;
+        ctx->user_entry = request->entry;
+        ctx->user_stack = request->stack;
+        ctx->user_argc = request->argument;
+        ctx->user_argv = 0;
+        launch_context = ctx;
+        launch_entry = task_enter_ring3;
+    }
+    *--sp = (uint64_t)launch_entry;
+    *--sp = (uint64_t)launch_context;
     *--sp = (uint64_t)task_entry_trampoline;
     *--sp = 0x2;
     *--sp = 0;
@@ -985,6 +1211,18 @@ int task_clone_user_thread(const hbos_clone_request_t *request) {
     }
     current_task->child_id = thread->id;
     return (int)thread->id;
+}
+
+int task_clone_user_thread(const hbos_clone_request_t *request) {
+    return task_clone_thread_common(request, NULL);
+}
+
+int task_clone_linux_thread(const hbos_clone_request_t *request,
+                            const hbos_linux_clone_context_t *context) {
+    if (!context || context->rip != request->entry ||
+        context->rsp != request->stack)
+        return -1;
+    return task_clone_thread_common(request, context);
 }
 
 /** 获取活跃任务数（不含 TERMINATED） */
@@ -1075,6 +1313,7 @@ void task_schedule(void) {
     current_task = next;
     if (next->mm && next->mm->pml4_phys)
         vmm_set_pml4(next->mm->pml4_phys);
+    task_reap_address_spaces();
     tss_set_stack(next->stack_base + next->stack_size);
     task_switch_tls(prev, next);
     task_sig_deliver(next);
@@ -1109,14 +1348,13 @@ void pit_init(uint32_t freq_hz) {
 void task_sig_deliver(task_t *task) {
     if (!task) return;
     for (int sig = 1; sig < _NSIG; sig++) {
-        int word = sig / 64;
-        int bit = sig % 64;
+        int word = (sig - 1) / 64;
+        int bit = (sig - 1) % 64;
         if (!(task->sig_pending.sig[word] & (1ULL << bit))) continue;
         if (task->sig_blocked.sig[word] & (1ULL << bit)) continue;
 
-        task->sig_pending.sig[word] &= ~(1ULL << bit);
-
         if (sig == SIGKILL || sig == SIGSTOP || sig == SIGCONT) {
+            task->sig_pending.sig[word] &= ~(1ULL << bit);
             if (sig == SIGKILL) {
                 task->sig_exit_code = 9;
                 task->state = TASK_TERMINATED;
@@ -1126,6 +1364,7 @@ void task_sig_deliver(task_t *task) {
 
         void (*handler)(int) = task->sig_handler[sig];
         if (handler == SIG_DFL || handler == NULL) {
+            task->sig_pending.sig[word] &= ~(1ULL << bit);
             if (sig == SIGINT || sig == SIGTERM || sig == SIGQUIT ||
                 sig == SIGILL || sig == SIGSEGV || sig == SIGFPE ||
                 sig == SIGBUS || sig == SIGABRT || sig == SIGPIPE) {
@@ -1134,9 +1373,13 @@ void task_sig_deliver(task_t *task) {
             }
             return;
         } else if (handler == SIG_IGN) {
+            task->sig_pending.sig[word] &= ~(1ULL << bit);
             return;
         } else {
-            handler(sig);
+            /* A user handler must never be called at CPL0.  Leave it pending;
+             * linux_signal_prepare_return() builds the ring3 return frame at
+             * the next native syscall boundary. */
+            return;
         }
     }
 }

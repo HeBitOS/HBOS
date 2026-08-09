@@ -34,6 +34,17 @@ struct robust_item_test {
 static struct robust_head_test child_robust_head;
 static struct robust_item_test child_robust_item;
 
+static long raw_syscall3(long number, long argument0, long argument1,
+                         long argument2) {
+    long result;
+    __asm__ volatile("syscall"
+                     : "=a"(result)
+                     : "a"(number), "D"(argument0), "S"(argument1),
+                       "d"(argument2)
+                     : "rcx", "r11", "memory");
+    return result;
+}
+
 static int worker(void *argument) {
     shared_value = *(int *)argument;
     child_pid = (int)syscall(SYS_getpid);
@@ -53,6 +64,37 @@ static int worker(void *argument) {
 }
 
 int main(void) {
+    enum {
+        TEST_SIG_BLOCK = 0,
+        TEST_SIG_UNBLOCK = 1,
+        TEST_SIG_SETMASK = 2,
+        TEST_SIGKILL = 9,
+        TEST_SIGUSR1 = 10,
+        TEST_SIGSTOP = 19
+    };
+    uint64_t requested_mask =
+        (1ULL << (TEST_SIGUSR1 - 1)) |
+        (1ULL << (TEST_SIGKILL - 1)) |
+        (1ULL << (TEST_SIGSTOP - 1));
+    uint64_t observed_mask = 0;
+    if (syscall(SYS_rt_sigprocmask, TEST_SIG_BLOCK,
+                (long)&requested_mask, 0L, (long)sizeof(requested_mask)) < 0 ||
+        syscall(SYS_rt_sigprocmask, TEST_SIG_BLOCK, 0L,
+                (long)&observed_mask, (long)sizeof(observed_mask)) < 0 ||
+        observed_mask != (1ULL << (TEST_SIGUSR1 - 1)) ||
+        syscall(SYS_rt_sigprocmask, TEST_SIG_UNBLOCK,
+                (long)&requested_mask, 0L, (long)sizeof(requested_mask)) < 0) {
+        puts("LINUX_THREAD: signal mask failed");
+        return 13;
+    }
+    observed_mask = UINT64_MAX;
+    if (syscall(SYS_rt_sigprocmask, TEST_SIG_SETMASK, 0L,
+                (long)&observed_mask, (long)sizeof(observed_mask)) < 0 ||
+        observed_mask != 0) {
+        puts("LINUX_THREAD: signal unmask failed");
+        return 14;
+    }
+
     int expected = 0x4842;
     int parent_tid = 0;
     int child_tid = 0;
@@ -115,6 +157,79 @@ int main(void) {
     }
     close(pair[0]);
     close(pair[1]);
+
+    /* D-Bus discovers and validates named AF_UNIX endpoints through these
+     * calls. Exercise native syscall 51 plus libc/HBOS wrappers, abstract
+     * names, truncation, accepted-local and peer address direction. */
+    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    int client = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un server_address;
+    struct sockaddr_un client_address;
+    memset(&server_address, 0, sizeof(server_address));
+    memset(&client_address, 0, sizeof(client_address));
+    server_address.sun_family = AF_UNIX;
+    client_address.sun_family = AF_UNIX;
+    memcpy(server_address.sun_path + 1, "hbos-dbus", 9);
+    memcpy(client_address.sun_path + 1, "hbos-client", 11);
+    socklen_t server_length =
+        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + 9);
+    socklen_t client_length =
+        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + 11);
+    struct sockaddr_un observed_address;
+    memset(&observed_address, 0, sizeof(observed_address));
+    socklen_t observed_length = sizeof(uint16_t);
+    if (listener < 0 || client < 0 ||
+        bind(listener, &server_address, server_length) < 0 ||
+        bind(client, &client_address, client_length) < 0 ||
+        raw_syscall3(SYS_getsockname, listener,
+                     (long)&observed_address,
+                     (long)&observed_length) != 0 ||
+        observed_length != server_length ||
+        observed_address.sun_family != AF_UNIX ||
+        raw_syscall3(SYS_getpeername, listener,
+                     (long)&observed_address,
+                     (long)&observed_length) != -107 ||
+        listen(listener, 2) < 0 ||
+        connect(client, &server_address, server_length) < 0) {
+        puts("LINUX_THREAD: AF_UNIX address setup failed");
+        return 15;
+    }
+    memset(&observed_address, 0, sizeof(observed_address));
+    observed_length = sizeof(observed_address);
+    int accepted = accept(listener, &observed_address, &observed_length);
+    if (accepted < 0 || observed_length != client_length ||
+        memcmp(&observed_address, &client_address, client_length) != 0) {
+        puts("LINUX_THREAD: AF_UNIX accept peer address failed");
+        return 16;
+    }
+    memset(&observed_address, 0, sizeof(observed_address));
+    observed_length = sizeof(observed_address);
+    if (getsockname(accepted, &observed_address, &observed_length) < 0 ||
+        observed_length != server_length ||
+        memcmp(&observed_address, &server_address, server_length) != 0) {
+        puts("LINUX_THREAD: AF_UNIX accepted names failed");
+        return 17;
+    }
+    memset(&observed_address, 0, sizeof(observed_address));
+    observed_length = sizeof(observed_address);
+    if (getpeername(accepted, &observed_address, &observed_length) < 0 ||
+        observed_length != client_length ||
+        memcmp(&observed_address, &client_address, client_length) != 0) {
+        puts("LINUX_THREAD: AF_UNIX accepted peer name failed");
+        return 17;
+    }
+    memset(&observed_address, 0, sizeof(observed_address));
+    observed_length = sizeof(observed_address);
+    if (syscall(SYS_getpeername, (long)client, (long)&observed_address,
+                (long)&observed_length) != 0 ||
+        observed_length != server_length ||
+        memcmp(&observed_address, &server_address, server_length) != 0) {
+        puts("LINUX_THREAD: AF_UNIX client peer name failed");
+        return 18;
+    }
+    close(accepted);
+    close(client);
+    close(listener);
 
     int shared_fd = memfd_create("wayland-buffer", MFD_CLOEXEC);
     if (shared_fd < 0 || ftruncate(shared_fd, 4096) < 0) {

@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+struct vfs_node;
+
 /** ELF ident 索引 */
 #define EI_MAG0        0
 #define EI_MAG1        1
@@ -50,6 +52,7 @@
 #define PT_INTERP      3
 #define PT_NOTE        4
 #define PT_PHDR        6
+#define PT_TLS         7
 
 /** 段标志 */
 #define PF_X           1
@@ -137,6 +140,10 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
  */
 int elf64_load_and_exec(const uint8_t *data, size_t size,
                         char *const argv[], char *const envp[]);
+
+/** Stream an ELF image directly from a VFS node and replace this task. */
+int elf64_load_vfs_and_exec(struct vfs_node *node,
+                            char *const argv[], char *const envp[]);
 
 const char *elf64_last_error(void);
 

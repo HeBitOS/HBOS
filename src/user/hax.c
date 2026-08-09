@@ -10,6 +10,7 @@
 #include "../elf.h"
 #include "../string.h"
 #include "../core/task.h"
+#include "../vfs.h"
 
 /** 由 hax_blob.asm 经 incbin 嵌入的应用二进制总 blob 起始地址 */
 extern const uint8_t _binary_build_hax_blob_bin_start[];
@@ -30,6 +31,15 @@ const hax_app_entry_t *hax_app_find(const char *name) {
             return &hax_app_table[i];
     }
     return 0;
+}
+
+int hax_seed_embedded_file(const char *name, const char *path) {
+    const hax_app_entry_t *entry = hax_app_find(name);
+    if (!entry) return 0;
+    if (!path || !path[0]) return -1;
+    const uint8_t *image =
+        _binary_build_hax_blob_bin_start + entry->offset;
+    return vfs_register_static_file(path, image, entry->size) ? 1 : -1;
 }
 
 /* 公共加载逻辑：组装 argv 并生成任务，返回 pid 或 -1（不等待） */

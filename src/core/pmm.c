@@ -58,6 +58,17 @@ static uint64_t  g_total_pages = 0;     /**< 总页数 */
 static uint64_t  g_free_pages = 0;      /**< 空闲页数 */
 static uint64_t  g_total_mem = 0;       /**< 总内存（字节） */
 static bool      g_pmm_ready = false;   /**< PMM 是否已初始化 */
+static uint16_t *g_page_refs = NULL;    /**< 每物理页引用计数（COW/共享映射） */
+static volatile uint32_t g_pmm_lock;
+
+static void pmm_lock(void) {
+    while (__sync_lock_test_and_set(&g_pmm_lock, 1U))
+        __asm__ volatile("pause");
+}
+
+static void pmm_unlock(void) {
+    __sync_lock_release(&g_pmm_lock);
+}
 
 // ============================================================
 // 位图操作（内联）
@@ -166,6 +177,9 @@ void pmm_init(void *mbi) {
     g_total_mem = max_addr;
 
     size_t bitmap_bytes = (g_total_pages + 7) / 8;  // 每页 1 bit
+    size_t bitmap_storage = (bitmap_bytes + 7) & ~(size_t)7;
+    size_t refs_bytes = (size_t)g_total_pages * sizeof(uint16_t);
+    size_t metadata_bytes = bitmap_storage + refs_bytes;
 
     // ---- 步骤 2: 在内核映像之后放置位图 ----
     extern uint64_t _end[];  // 链接器定义的符号: 内核映像结束地址
@@ -173,13 +187,17 @@ void pmm_init(void *mbi) {
     if (kernel_end < 0x200000) kernel_end = 0x200000;  // 至少 2MB
 
     uint64_t bitmap_phys = (kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    if (bitmap_phys + bitmap_bytes > max_addr)
-        bitmap_phys = (max_addr - bitmap_bytes) & ~(PAGE_SIZE - 1);
+    if (bitmap_phys + metadata_bytes > max_addr)
+        bitmap_phys = (max_addr - metadata_bytes) & ~(PAGE_SIZE - 1);
 
     g_bitmap = (uint8_t *)(uintptr_t)bitmap_phys;
+    g_page_refs = (uint16_t *)(uintptr_t)(bitmap_phys + bitmap_storage);
 
     // ---- 步骤 3: 全部标记为已使用 ----
-    for (size_t i = 0; i < g_total_pages; i++) bitmap_set(i);
+    for (size_t i = 0; i < g_total_pages; i++) {
+        bitmap_set(i);
+        g_page_refs[i] = 1;
+    }
     g_free_pages = 0;
 
     // ---- 步骤 4: 根据内存映射标记可用区域 ----
@@ -195,16 +213,21 @@ void pmm_init(void *mbi) {
         uint64_t start_page = (base + PAGE_SIZE - 1) >> PAGE_SHIFT;
         uint64_t end_page   = end >> PAGE_SHIFT;
         for (uint64_t p = start_page; p < end_page; p++) {
-            if (bitmap_test(p)) { bitmap_clear(p); g_free_pages++; }
+            if (bitmap_test(p)) {
+                bitmap_clear(p);
+                g_page_refs[p] = 0;
+                g_free_pages++;
+            }
         }
     }
 
-    // ---- 步骤 5: 保留位图自身占用的页 ----
-    size_t bitmap_pages = (bitmap_bytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
+    // ---- 步骤 5: 保留位图与引用计数元数据自身占用的页 ----
+    size_t bitmap_pages = (metadata_bytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
     uint64_t bitmap_start_page = bitmap_phys >> PAGE_SHIFT;
     for (size_t i = 0; i < bitmap_pages; i++) {
         if (!bitmap_test(bitmap_start_page + i)) {
             bitmap_set(bitmap_start_page + i);
+            g_page_refs[bitmap_start_page + i] = 1;
             g_free_pages--;
         }
     }
@@ -226,10 +249,16 @@ void pmm_init(void *mbi) {
  */
 uint64_t pmm_alloc_page(void) {
     if (!g_pmm_ready || g_free_pages == 0) return 0;
+    pmm_lock();
     int64_t idx = bitmap_find_first();
-    if (idx < 0) return 0;
+    if (idx < 0) {
+        pmm_unlock();
+        return 0;
+    }
     bitmap_set((size_t)idx);
+    g_page_refs[idx] = 1;
     g_free_pages--;
+    pmm_unlock();
     return (uint64_t)idx << PAGE_SHIFT;
 }
 
@@ -241,7 +270,42 @@ void pmm_free_page(uint64_t phys_addr) {
     if (!g_pmm_ready || phys_addr == 0) return;
     uint64_t page = phys_addr >> PAGE_SHIFT;
     if (page >= g_total_pages) return;
-    if (bitmap_test((size_t)page)) { bitmap_clear((size_t)page); g_free_pages++; }
+    pmm_lock();
+    if (bitmap_test((size_t)page) && g_page_refs[page] > 0) {
+        g_page_refs[page]--;
+        if (!g_page_refs[page]) {
+            bitmap_clear((size_t)page);
+            g_free_pages++;
+        }
+    }
+    pmm_unlock();
+}
+
+int pmm_retain_page(uint64_t phys_addr) {
+    if (!g_pmm_ready || !phys_addr || (phys_addr & (PAGE_SIZE - 1)))
+        return -1;
+    uint64_t page = phys_addr >> PAGE_SHIFT;
+    if (page >= g_total_pages) return -1;
+    pmm_lock();
+    if (!bitmap_test((size_t)page) || !g_page_refs[page] ||
+        g_page_refs[page] == UINT16_MAX) {
+        pmm_unlock();
+        return -1;
+    }
+    g_page_refs[page]++;
+    pmm_unlock();
+    return 0;
+}
+
+uint16_t pmm_page_refcount(uint64_t phys_addr) {
+    if (!g_pmm_ready || !phys_addr || (phys_addr & (PAGE_SIZE - 1)))
+        return 0;
+    uint64_t page = phys_addr >> PAGE_SHIFT;
+    if (page >= g_total_pages) return 0;
+    pmm_lock();
+    uint16_t refs = bitmap_test((size_t)page) ? g_page_refs[page] : 0;
+    pmm_unlock();
+    return refs;
 }
 
 /**
@@ -251,10 +315,18 @@ void pmm_free_page(uint64_t phys_addr) {
  */
 uint64_t pmm_alloc_blocks(size_t count) {
     if (!g_pmm_ready || count == 0) return 0;
+    pmm_lock();
     int64_t idx = bitmap_find_blocks(count);
-    if (idx < 0) return 0;
-    for (size_t i = 0; i < count; i++) bitmap_set((size_t)(idx + i));
+    if (idx < 0) {
+        pmm_unlock();
+        return 0;
+    }
+    for (size_t i = 0; i < count; i++) {
+        bitmap_set((size_t)(idx + i));
+        g_page_refs[idx + i] = 1;
+    }
     g_free_pages -= count;
+    pmm_unlock();
     return (uint64_t)idx << PAGE_SHIFT;
 }
 
@@ -265,9 +337,18 @@ void pmm_free_blocks(uint64_t phys_addr, size_t count) {
     if (!g_pmm_ready || phys_addr == 0 || count == 0) return;
     uint64_t start_page = phys_addr >> PAGE_SHIFT;
     if (start_page + count > g_total_pages) return;
+    pmm_lock();
     for (size_t i = 0; i < count; i++) {
-        if (bitmap_test(start_page + i)) { bitmap_clear(start_page + i); g_free_pages++; }
+        size_t page = (size_t)(start_page + i);
+        if (bitmap_test(page) && g_page_refs[page] > 0) {
+            g_page_refs[page]--;
+            if (!g_page_refs[page]) {
+                bitmap_clear(page);
+                g_free_pages++;
+            }
+        }
     }
+    pmm_unlock();
 }
 
 /**
@@ -280,13 +361,24 @@ void pmm_reserve_region(uint64_t base, uint64_t length) {
     uint64_t end = (base + length + PAGE_SIZE - 1) >> PAGE_SHIFT;
     if (start >= g_total_pages) return;
     if (end > g_total_pages) end = g_total_pages;
+    pmm_lock();
     for (uint64_t p = start; p < end; p++) {
-        if (!bitmap_test((size_t)p)) { bitmap_set((size_t)p); g_free_pages--; }
+        if (!bitmap_test((size_t)p)) {
+            bitmap_set((size_t)p);
+            g_page_refs[p] = 1;
+            g_free_pages--;
+        }
     }
+    pmm_unlock();
 }
 
 /** 获取总物理内存（字节） */
 uint64_t pmm_get_total_mem(void) { return g_total_mem; }
 
 /** 获取空闲物理内存（字节） */
-uint64_t pmm_get_free_mem(void)  { return g_free_pages << PAGE_SHIFT; }
+uint64_t pmm_get_free_mem(void)  {
+    pmm_lock();
+    uint64_t free_pages = g_free_pages;
+    pmm_unlock();
+    return free_pages << PAGE_SHIFT;
+}

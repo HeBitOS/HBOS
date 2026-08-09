@@ -1,6 +1,7 @@
 #include <stdarg.h>
 
 #include "errno.h"
+#include "fcntl.h"
 #include "poll.h"
 #include "sched.h"
 #include "sys/epoll.h"
@@ -8,10 +9,78 @@
 #include "sys/memfd.h"
 #include "sys/mman.h"
 #include "sys/random.h"
+#include "sys/stat.h"
 #include "sys/syscall.h"
 #include "sys/uio.h"
 #include "syscall.h"
+#include "string.h"
 #include "unistd.h"
+
+#define LINUX_AT_FDCWD (-100)
+
+/* Source-compat syscall() calls cannot inspect the kernel fd table directly.
+ * Reuse the lightweight /proc/self/fd metadata already exposed by HBOS to
+ * turn a directory fd into the same canonical absolute path. */
+static int resolve_linux_at_path(long dirfd, const char *path,
+                                 char output[256]) {
+    if (!path) {
+        errno = EFAULT;
+        return -1;
+    }
+    size_t path_length = strlen(path);
+    if (!path_length) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (path[0] == '/' || dirfd == LINUX_AT_FDCWD) {
+        if (path_length >= 256) {
+            errno = EINVAL;
+            return -1;
+        }
+        memcpy(output, path, path_length + 1);
+        return 0;
+    }
+
+    struct stat status;
+    long result = __syscall3(HBOS_SYS_FSTAT, dirfd, (long)&status, 0);
+    if (result < 0) {
+        errno = (int)-result;
+        return -1;
+    }
+    if (!S_ISDIR(status.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+
+    char descriptor_path[32] = "/proc/self/fd/";
+    char digits[12];
+    unsigned int value = (unsigned int)dirfd;
+    unsigned int count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value && count < sizeof(digits));
+    size_t prefix = strlen(descriptor_path);
+    for (unsigned int i = 0; i < count; i++)
+        descriptor_path[prefix + i] = digits[count - i - 1];
+    descriptor_path[prefix + count] = '\0';
+
+    result = __syscall3(HBOS_SYS_READLINK, (long)descriptor_path,
+                        (long)output, 255);
+    if (result < 0) {
+        errno = (int)-result;
+        return -1;
+    }
+    size_t base_length = (size_t)result;
+    if (base_length + 1 + path_length >= 256) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!base_length || output[base_length - 1] != '/')
+        output[base_length++] = '/';
+    memcpy(output + base_length, path, path_length + 1);
+    return 0;
+}
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     long ret = __syscall3(HBOS_SYS_POLL, (long)fds, (long)nfds, timeout);
@@ -248,6 +317,8 @@ static syscall_translation_t translate_linux_syscall(long number) {
         case SYS_recvfrom:        return (syscall_translation_t){HBOS_SYS_RECV, 4};
         case SYS_bind:            return (syscall_translation_t){HBOS_SYS_BIND, 3};
         case SYS_listen:          return (syscall_translation_t){HBOS_SYS_LISTEN, 2};
+        case SYS_getsockname:     return (syscall_translation_t){HBOS_SYS_GETSOCKNAME, 3};
+        case SYS_getpeername:     return (syscall_translation_t){HBOS_SYS_GETPEERNAME, 3};
         case SYS_socketpair:      return (syscall_translation_t){HBOS_SYS_SOCKETPAIR, 4};
         case SYS_setsockopt:      return (syscall_translation_t){HBOS_SYS_SETSOCKOPT, 5};
         case SYS_getsockopt:      return (syscall_translation_t){HBOS_SYS_GETSOCKOPT, 5};
@@ -263,9 +334,11 @@ static syscall_translation_t translate_linux_syscall(long number) {
         case SYS_ftruncate:       return (syscall_translation_t){HBOS_SYS_FTRUNCATE, 2};
         case SYS_getcwd:          return (syscall_translation_t){HBOS_SYS_GETCWD, 2};
         case SYS_chdir:           return (syscall_translation_t){HBOS_SYS_CHDIR, 1};
+        case SYS_rename:          return (syscall_translation_t){HBOS_SYS_RENAME, 2};
         case SYS_mkdir:           return (syscall_translation_t){HBOS_SYS_MKDIR, 2};
         case SYS_rmdir:           return (syscall_translation_t){HBOS_SYS_RMDIR, 1};
         case SYS_unlink:          return (syscall_translation_t){HBOS_SYS_UNLINK, 1};
+        case SYS_symlink:         return (syscall_translation_t){HBOS_SYS_SYMLINK, 2};
         case SYS_readlink:        return (syscall_translation_t){HBOS_SYS_READLINK, 3};
         case SYS_chmod:           return (syscall_translation_t){HBOS_SYS_CHMOD, 2};
         case SYS_chown:           return (syscall_translation_t){HBOS_SYS_CHOWN, 3};
@@ -301,13 +374,17 @@ long syscall(long linux_number, ...) {
     /*
      * The *at and dup3 calls need argument adaptation rather than a simple
      * number translation.  HBOS currently has one process cwd and no dirfd
-     * path resolver, so AT_FDCWD is the zero-copy fast path; other dirfds
-     * fail explicitly instead of resolving the wrong file.
+     * path adaptation.  AT_FDCWD remains the zero-copy fast path; other
+     * directory fds resolve through HBOS's lightweight /proc/self/fd view.
      */
     if (linux_number == SYS_openat || linux_number == SYS_newfstatat ||
-        linux_number == SYS_readlinkat || linux_number == SYS_dup3) {
-        long arguments[4] = {0, 0, 0, 0};
-        unsigned int count = linux_number == SYS_dup3 ? 3 : 4;
+        linux_number == SYS_readlinkat || linux_number == SYS_dup3 ||
+        linux_number == SYS_renameat || linux_number == SYS_renameat2 ||
+        linux_number == SYS_symlinkat) {
+        long arguments[5] = {0, 0, 0, 0, 0};
+        unsigned int count = (linux_number == SYS_dup3 ||
+                              linux_number == SYS_symlinkat) ? 3 :
+            (linux_number == SYS_renameat2 ? 5 : 4);
         va_list special;
         va_start(special, linux_number);
         for (unsigned int i = 0; i < count; i++)
@@ -327,23 +404,77 @@ long syscall(long linux_number, ...) {
             return __syscall_errno(ret);
         }
 
-        if (arguments[0] != -100) {
-            errno = ENOSYS;
-            return -1;
-        }
-        if (linux_number == SYS_openat)
-            return __syscall_errno(__syscall3(
-                HBOS_SYS_OPEN, arguments[1], arguments[2], arguments[3]));
-        if (linux_number == SYS_newfstatat) {
-            if (arguments[3] != 0) {
-                errno = ENOSYS;
+        if (linux_number == SYS_renameat || linux_number == SYS_renameat2) {
+            long flags = linux_number == SYS_renameat2 ? arguments[4] : 0;
+            if (flags & ~1L) {
+                errno = EOPNOTSUPP;
                 return -1;
             }
+            char old_path[256];
+            char new_path[256];
+            if (resolve_linux_at_path(arguments[0],
+                                      (const char *)arguments[1],
+                                      old_path) < 0 ||
+                resolve_linux_at_path(arguments[2],
+                                      (const char *)arguments[3],
+                                      new_path) < 0)
+                return -1;
             return __syscall_errno(__syscall3(
-                HBOS_SYS_STAT, arguments[1], arguments[2], 0));
+                HBOS_SYS_RENAME, (long)old_path, (long)new_path, flags));
+        }
+
+        if (linux_number == SYS_symlinkat) {
+            char link_path[256];
+            if (resolve_linux_at_path(arguments[1],
+                                      (const char *)arguments[2],
+                                      link_path) < 0)
+                return -1;
+            return __syscall_errno(__syscall3(
+                HBOS_SYS_SYMLINK, arguments[0], (long)link_path, 0));
+        }
+
+        if (linux_number == SYS_newfstatat) {
+            long flags = arguments[3];
+            if (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) {
+                errno = EINVAL;
+                return -1;
+            }
+            const char *input = (const char *)arguments[1];
+            if (!input) {
+                errno = EFAULT;
+                return -1;
+            }
+            if (!input[0]) {
+                if (!(flags & AT_EMPTY_PATH)) {
+                    errno = ENOENT;
+                    return -1;
+                }
+                if (arguments[0] != LINUX_AT_FDCWD)
+                    return __syscall_errno(__syscall3(
+                        HBOS_SYS_FSTAT, arguments[0], arguments[2], 0));
+                char cwd[256];
+                long got = __syscall3(HBOS_SYS_GETCWD, (long)cwd,
+                                      sizeof(cwd), 0);
+                if (got < 0) return __syscall_errno(got);
+                return __syscall_errno(__syscall3(
+                    HBOS_SYS_STAT, (long)cwd, arguments[2], 0));
+            }
+        }
+
+        char path[256];
+        if (resolve_linux_at_path(arguments[0],
+                                  (const char *)arguments[1], path) < 0)
+            return -1;
+        if (linux_number == SYS_openat)
+            return __syscall_errno(__syscall3(
+                HBOS_SYS_OPEN, (long)path, arguments[2], arguments[3]));
+        if (linux_number == SYS_newfstatat) {
+            return __syscall_errno(__syscall3(
+                HBOS_SYS_STAT, (long)path, arguments[2],
+                arguments[3] & AT_SYMLINK_NOFOLLOW));
         }
         return __syscall_errno(__syscall3(
-            HBOS_SYS_READLINK, arguments[1], arguments[2], arguments[3]));
+            HBOS_SYS_READLINK, (long)path, arguments[2], arguments[3]));
     }
 
     syscall_translation_t translation =

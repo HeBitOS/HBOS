@@ -58,4 +58,12 @@ int hax_app_run(const char *name, int argc, char **argv);
  */
 int hax_app_spawn(const char *name, int argc, char **argv);
 
+/**
+ * Expose one embedded HAX image as an immutable, zero-copy VFS file.  This
+ * lets compatibility images provide PT_INTERP loaders larger than ramfs's
+ * per-file limit without consuming kernel heap; production images that do
+ * not bundle the named image are a no-op.
+ */
+int hax_seed_embedded_file(const char *name, const char *path);
+
 #endif /* HBOS_USER_HAX_APP_H */

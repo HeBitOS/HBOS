@@ -17,6 +17,7 @@
 global task_switch
 global task_entry_trampoline
 global task_enter_ring3
+global task_resume_linux_syscall
 extern task_exit
 extern smp_sched_unlock
 
@@ -110,3 +111,32 @@ task_enter_ring3:
     mov rsi, [rax+24]
 
     iretq                ; Enter ring3!
+
+; Resume the child side of a native Linux clone3 syscall.  The context is a
+; hbos_linux_clone_context_t; all registers match the parent at syscall entry
+; except Linux's specified child return value RAX=0 and the requested RSP/TLS.
+task_resume_linux_syscall:
+    mov rax, rdi
+
+    push 0x23
+    push qword [rax+8]
+    push qword [rax+16]
+    push 0x1B
+    push qword [rax]
+
+    mov rbx, [rax+72]
+    mov rbp, [rax+80]
+    mov r12, [rax+88]
+    mov r13, [rax+96]
+    mov r14, [rax+104]
+    mov r15, [rax+112]
+    mov r10, [rax+48]
+    mov r8,  [rax+56]
+    mov r9,  [rax+64]
+    mov rdx, [rax+40]
+    mov rsi, [rax+32]
+    mov rcx, [rax]
+    mov r11, [rax+16]
+    mov rdi, [rax+24]
+    xor eax, eax
+    iretq

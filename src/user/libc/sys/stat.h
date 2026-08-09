@@ -36,9 +36,7 @@
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int mkdir(const char *path, mode_t mode);
-/* HBOS has no symlinks anywhere (ramfs/ext2/fat32 backends never set
- * S_IFLNK) -- lstat() is exactly stat() here, same as it would be on any
- * real system for a path that's never actually a symlink. */
+/* lstat() does not follow the final ramfs/HBFS symbolic-link component. */
 int lstat(const char *path, struct stat *buf);
 
 #endif

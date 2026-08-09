@@ -8,13 +8,14 @@
 #include "types.h"
 #include "sys/types.h"
 
-#define VFS_MAX_NAME 32         /**< 节点名称最大长度（含结尾 '\0'） */
+#define VFS_MAX_NAME 256        /**< 完整 VFS 路径最大长度（含结尾 '\0'） */
 #define VFS_MAX_NODES 64        /**< 最大 VFS 节点数 */
 
 /** VFS 节点类型枚举 */
 typedef enum {
     VFS_NODE_FILE = 0,          /**< 普通文件 */
     VFS_NODE_DIR,               /**< 目录 */
+    VFS_NODE_SYMLINK,           /**< 符号链接 */
     VFS_NODE_CHARDEV            /**< 字符设备 */
 } vfs_node_type_t;
 
@@ -42,14 +43,25 @@ struct vfs_node {
 
 int vfs_init(void);             /**< 初始化 VFS 层 */
 int vfs_resolve_path(const char *cwd, const char *path, char *out, uint32_t cap);
-vfs_node_t *vfs_lookup(const char *path); /**< 按路径查找 VFS 节点 */
+vfs_node_t *vfs_lookup(const char *path); /**< 查找节点并跟随符号链接 */
+vfs_node_t *vfs_lookup_nofollow(const char *path); /**< 不跟随最终符号链接 */
 vfs_node_t *vfs_create(const char *path); /**< 按路径创建 VFS 节点 */
+vfs_node_t *vfs_symlink(const char *path, const char *target); /**< 创建符号链接 */
 int vfs_unlink(const char *path); /**< 按路径删除 VFS 节点 */
+int vfs_rename(const char *old_path, const char *new_path, int replace);
 int vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count); /**< 从 VFS 节点读取数据 */
 int vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count); /**< 向 VFS 节点写入数据 */
 int vfs_truncate(vfs_node_t *node); /**< 截断 VFS 节点（清零大小） */
 uint32_t vfs_count(void);      /**< 获取 VFS 节点数量 */
 vfs_node_t *vfs_get(uint32_t index); /**< 按索引获取 VFS 节点 */
+
+/**
+ * Register an immutable file backed by caller-owned bytes.  The bytes must
+ * remain valid for the lifetime of the VFS node (embedded kernel blobs do).
+ * Reads are zero-copy from the backing store; writes/truncate/unlink fail.
+ */
+vfs_node_t *vfs_register_static_file(const char *path, const void *data,
+                                     uint32_t size);
 
 int vfs_mkdir(const char *path);
 int vfs_rmdir(const char *path);

@@ -46,6 +46,11 @@ typedef struct sockaddr {
     char sa_data[14];
 } sockaddr;
 
+typedef struct sockaddr_un {
+    uint16_t sun_family;
+    char sun_path[108];
+} sockaddr_un;
+
 struct msghdr {
     void *msg_name;
     socklen_t msg_namelen;
@@ -82,6 +87,8 @@ int     listen(int sockfd, int backlog);
 int     accept(int sockfd, void *addr, socklen_t *addrlen);
 int     accept4(int sockfd, void *addr, socklen_t *addrlen, int flags);
 int     connect(int sockfd, const void *addr, socklen_t addrlen);
+int     getsockname(int sockfd, void *addr, socklen_t *addrlen);
+int     getpeername(int sockfd, void *addr, socklen_t *addrlen);
 long    send(int sockfd, const void *buf, size_t len, int flags);
 long    recv(int sockfd, void *buf, size_t len, int flags);
 long    sendto(int sockfd, const void *buf, size_t len, int flags,

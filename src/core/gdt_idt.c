@@ -4,7 +4,10 @@
 
 #include "cpu.h"
 #include "io.h"
+#include "vmm.h"
+#include "task.h"
 #include "../syscall.h"
+#include "../signal.h"
 #include "../graphics/graphics.h"
 
 // ============================================================
@@ -231,6 +234,28 @@ void isr_handler(isr_regs_t *regs) {
     const char *name = (vec < 32) ? exc_names[vec] : "Unknown";
     uint64_t cr2_val = (vec == EXC_PF) ? read_cr2() : 0;
 
+    /* A present user write fault on a writable-before-fork COW mapping is
+     * resolved in-kernel.  This stays allocation-free when the page has
+     * become uniquely owned; otherwise only one 4 KiB page is copied. */
+    if (vec == EXC_PF && (regs->cs & 3) == 3 &&
+        (regs->err_code & (PF_P | PF_W | PF_U)) == (PF_P | PF_W | PF_U)) {
+        int cow_result = vmm_handle_cow_fault(cr2_val);
+        if (cow_result > 0) return;
+    }
+
+    /* User protection/not-present faults are synchronous SIGSEGV, not
+     * kernel failures.  A registered SA_RESTORER handler may repair the
+     * mapping and return to retry the exact faulting instruction. */
+    if (vec == EXC_PF && (regs->cs & 3) == 3) {
+        if (linux_signal_prepare_exception(regs, SIGSEGV, cr2_val,
+                                           regs->err_code) > 0)
+            return;
+        task_t *task = task_current();
+        if (task) task->sig_exit_code = SIGSEGV;
+        task_set_exit_status(128 + SIGSEGV);
+        task_exit();
+    }
+
     console_puts("\n\x1b[31m===== KERNEL PANIC =====\x1b[0m\n");
     console_puts("Exception: ");
     console_puts(name);
@@ -399,7 +424,23 @@ void gdt_idt_init(void) {
     wrmsr(MSR_STAR, (uint64_t)SEL_KCODE << 32);
     wrmsr(MSR_LSTAR, (uint64_t)(uintptr_t)linux_syscall_entry);
     wrmsr(MSR_SFMASK, (1ULL << 8) | (1ULL << 9) | (1ULL << 10));
-    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_SCE);
+    uint32_t max_extended, unused_b, unused_c, extended_features;
+    __asm__ volatile("cpuid"
+                     : "=a"(max_extended), "=b"(unused_b),
+                       "=c"(unused_c), "=d"(extended_features)
+                     : "a"(0x80000000U), "c"(0));
+    bool nx_supported = false;
+    if (max_extended >= 0x80000001U) {
+        __asm__ volatile("cpuid"
+                         : "=a"(max_extended), "=b"(unused_b),
+                           "=c"(unused_c), "=d"(extended_features)
+                         : "a"(0x80000001U), "c"(0));
+        nx_supported = (extended_features & (1U << 20)) != 0;
+    }
+    uint64_t efer = rdmsr(MSR_EFER) | EFER_SCE;
+    if (nx_supported) efer |= EFER_NXE;
+    wrmsr(MSR_EFER, efer);
+    vmm_set_nx_enabled(nx_supported);
 
     // Load IDT
     idt_ptr_t idt_ptr;

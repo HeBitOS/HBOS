@@ -46,10 +46,14 @@ struct stat {
 #define O_RDONLY  0
 #define O_WRONLY  1
 #define O_RDWR    2
+#define O_ACCMODE  3
 #define O_CREAT   0100
+#define O_EXCL    0200
 #define O_TRUNC   01000
 #define O_APPEND  02000
 #define O_NONBLOCK 04000
+#define O_DIRECTORY 0200000
+#define O_NOFOLLOW  0400000
 #define O_CLOEXEC  02000000
 
 #define SEEK_SET 0
@@ -178,6 +182,14 @@ enum {
     HBOS_SYS_RECVMSG,
     HBOS_SYS_SET_ROBUST_LIST,
     HBOS_SYS_GET_ROBUST_LIST,
+    HBOS_SYS_DLINIT_NEXT,
+    HBOS_SYS_DLFINI_NEXT,
+    HBOS_SYS_DLTLS_GET,
+    HBOS_SYS_DLIFUNC_NEXT,
+    HBOS_SYS_DLIFUNC_APPLY,
+    HBOS_SYS_RENAME,
+    HBOS_SYS_GETSOCKNAME,
+    HBOS_SYS_GETPEERNAME,
 };
 
 long __syscall6(long nr, long a0, long a1, long a2, long a3, long a4, long a5);

@@ -1,6 +1,6 @@
 /**
  * @file linux_compat.h
- * @brief Lightweight Linux/POSIX event compatibility for user programs.
+ * @brief Lightweight Linux/POSIX event and file-watch compatibility.
  *
  * The implementation deliberately reuses the HBOS task fd table and
  * cooperative scheduler.  It does not add a second VFS or a resident
@@ -32,6 +32,23 @@ struct task;
 #define LINUX_EFD_SEMAPHORE 1
 #define LINUX_EFD_NONBLOCK  0x800
 #define LINUX_EFD_CLOEXEC   0x80000
+
+/* Linux inotify event bits used by the VFS notification hook. */
+#define LINUX_IN_ACCESS        0x00000001U
+#define LINUX_IN_MODIFY        0x00000002U
+#define LINUX_IN_ATTRIB        0x00000004U
+#define LINUX_IN_CLOSE_WRITE   0x00000008U
+#define LINUX_IN_CLOSE_NOWRITE 0x00000010U
+#define LINUX_IN_OPEN          0x00000020U
+#define LINUX_IN_MOVED_FROM    0x00000040U
+#define LINUX_IN_MOVED_TO      0x00000080U
+#define LINUX_IN_CREATE        0x00000100U
+#define LINUX_IN_DELETE        0x00000200U
+#define LINUX_IN_DELETE_SELF   0x00000400U
+#define LINUX_IN_MOVE_SELF     0x00000800U
+#define LINUX_IN_Q_OVERFLOW    0x00004000U
+#define LINUX_IN_IGNORED       0x00008000U
+#define LINUX_IN_ISDIR         0x40000000U
 
 typedef struct {
     int fd;
@@ -66,6 +83,15 @@ int linux_compat_epoll_ctl(int epfd, int operation, int fd,
                            const linux_epoll_event_t *event);
 int linux_compat_epoll_wait(int epfd, linux_epoll_event_t *events,
                             int max_events, int timeout_ms);
+int linux_compat_inotify_init1(int flags);
+int linux_compat_inotify_add_watch(int fd, const char *path, uint32_t mask);
+int linux_compat_inotify_rm_watch(int fd, int watch_descriptor);
+void linux_compat_inotify_notify(const char *path, uint32_t mask,
+                                 int is_directory);
+void linux_compat_inotify_move(const char *old_path, const char *new_path,
+                               int is_directory);
+void linux_compat_inotify_replace_target(const char *path,
+                                         int is_directory);
 long linux_compat_getrandom(void *buffer, size_t count, unsigned int flags);
 int linux_compat_futex(uint32_t *address, int operation, uint32_t value,
                        const void *timeout);
@@ -79,6 +105,8 @@ int linux_compat_unix_bind(int fd, const void *address, size_t length);
 int linux_compat_unix_listen(int fd, int backlog);
 int linux_compat_unix_accept(int fd, void *address, uint32_t *length);
 int linux_compat_unix_connect(int fd, const void *address, size_t length);
+int linux_compat_unix_getsockname(int fd, void *address, uint32_t *length);
+int linux_compat_unix_getpeername(int fd, void *address, uint32_t *length);
 long linux_compat_unix_send(int fd, const void *buffer, size_t count,
                             int flags);
 long linux_compat_unix_recv(int fd, void *buffer, size_t count, int flags);
@@ -94,9 +122,12 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
 int linux_compat_memfd_create(const char *name, unsigned int flags);
 int linux_compat_memfd_truncate(int fd, uint64_t size);
 int linux_compat_memfd_size(int fd, uint64_t *size);
+int linux_compat_memfd_read_at(int fd, uint64_t offset,
+                               void *buffer, size_t count);
 int linux_compat_memfd_map(int fd, uint64_t address, size_t length,
                            uint64_t offset, int writable,
                            uint32_t *backing_id);
 void linux_compat_memfd_unmap(uint32_t backing_id);
+int linux_compat_memfd_retain_map(uint32_t backing_id);
 
 #endif /* HBOS_LINUX_COMPAT_H */

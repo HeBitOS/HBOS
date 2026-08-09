@@ -24,6 +24,7 @@
 
 #include "vmm.h"
 #include "pmm.h"
+#include "../string.h"
 #include "../graphics/graphics.h"
 
 // ============================================================
@@ -33,6 +34,7 @@
 typedef uint64_t pte_t;              /**< 页表条目类型 (64-bit) */
 
 #define PT_ENTRIES 512               /**< 每个页表 512 个条目 (9-bit 索引) */
+#define VMM_PHYS_MASK 0x000FFFFFFFFFF000ULL
 
 /**
  * 从虚拟地址提取指定页表级别的索引
@@ -48,6 +50,7 @@ typedef uint64_t pte_t;              /**< 页表条目类型 (64-bit) */
 
 static pte_t *g_pml4 = NULL;         /**< PML4 表指针（虚拟地址） */
 static uint64_t g_pml4_phys = 0;     /**< PML4 表物理地址 */
+static bool g_nx_enabled;
 
 // ============================================================
 // 页表遍历 — 获取指定虚拟地址的 PTE 指针
@@ -154,8 +157,74 @@ void vmm_init(uint64_t p4_phys) {
 int vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     pte_t *pte = vmm_get_pte(virt_addr, true, flags);
     if (!pte) return -1;
-    *pte = (phys_addr & ~0xFFFULL) | (flags & 0xFFF) | VMM_P;
+    uint64_t permitted = flags & 0xFFFULL;
+    if (g_nx_enabled) permitted |= flags & VMM_NX;
+    *pte = (phys_addr & ~0xFFFULL) | permitted | VMM_P;
     vmm_flush_tlb();
+    return 0;
+}
+
+void vmm_set_nx_enabled(bool enabled) {
+    g_nx_enabled = enabled;
+}
+
+uint64_t vmm_get_page_flags(uint64_t virt_addr) {
+    pte_t *pte = vmm_get_pte(virt_addr, false, 0);
+    if (!pte || !(*pte & VMM_P)) return 0;
+    return *pte & (0xFFFULL | VMM_NX);
+}
+
+static int vmm_resolve_cow(uint64_t virt_addr, bool force) {
+    uint64_t page_addr = virt_addr & ~(uint64_t)(PAGE_SIZE - 1);
+    pte_t *pte = vmm_get_pte(page_addr, false, 0);
+    if (!pte || !(*pte & VMM_P) || !(*pte & VMM_U) ||
+        !(*pte & VMM_OWNED) || !(*pte & VMM_COW))
+        return 0;
+    if (!force && !(*pte & VMM_COW_W)) return 0;
+
+    uint64_t old_entry = *pte;
+    uint64_t old_phys = old_entry & VMM_PHYS_MASK;
+    uint16_t references = pmm_page_refcount(old_phys);
+    if (!references) return -1;
+
+    if (references == 1) {
+        *pte = (old_entry & ~(VMM_COW | VMM_COW_W)) | VMM_W;
+    } else {
+        uint64_t new_phys = pmm_alloc_page();
+        if (!new_phys) return -1;
+        memcpy((void *)(uintptr_t)new_phys,
+               (const void *)(uintptr_t)old_phys, PAGE_SIZE);
+        *pte = (old_entry & ~(VMM_PHYS_MASK | VMM_COW | VMM_COW_W)) |
+               new_phys | VMM_W | VMM_OWNED;
+        pmm_free_page(old_phys);
+    }
+    __asm__ volatile("invlpg (%0)" :: "r"((void *)(uintptr_t)page_addr) :
+                     "memory");
+    return 1;
+}
+
+int vmm_handle_cow_fault(uint64_t virt_addr) {
+    return vmm_resolve_cow(virt_addr, false);
+}
+
+int vmm_make_page_private(uint64_t virt_addr) {
+    return vmm_resolve_cow(virt_addr, true);
+}
+
+int vmm_protect_page(uint64_t virt_addr, uint64_t flags) {
+    pte_t *pte = vmm_get_pte(virt_addr, false, 0);
+    if (!pte || !(*pte & VMM_P)) return -1;
+    if ((flags & VMM_W) && (*pte & VMM_COW)) {
+        if (vmm_make_page_private(virt_addr) < 0) return -1;
+        pte = vmm_get_pte(virt_addr, false, 0);
+        if (!pte || !(*pte & VMM_P)) return -1;
+    }
+    uint64_t permissions = flags & (VMM_W | VMM_U);
+    if (g_nx_enabled) permissions |= flags & VMM_NX;
+    *pte = (*pte & ~(VMM_W | VMM_U | VMM_NX)) | permissions;
+    if (!(flags & VMM_W)) *pte &= ~VMM_COW_W;
+    __asm__ volatile("invlpg (%0)" :: "r"((void *)(uintptr_t)virt_addr) :
+                     "memory");
     return 0;
 }
 
@@ -167,6 +236,17 @@ void vmm_unmap_page(uint64_t virt_addr) {
     if (!pte) return;
     *pte = 0;
     vmm_flush_tlb();
+}
+
+void vmm_release_page(uint64_t virt_addr) {
+    pte_t *pte = vmm_get_pte(virt_addr, false, 0);
+    if (!pte || !(*pte & VMM_P)) return;
+    uint64_t entry = *pte;
+    *pte = 0;
+    __asm__ volatile("invlpg (%0)" :: "r"((void *)(uintptr_t)virt_addr) :
+                     "memory");
+    if (entry & VMM_OWNED)
+        pmm_free_page(entry & VMM_PHYS_MASK);
 }
 
 /**
@@ -186,7 +266,8 @@ uint64_t vmm_get_phys(uint64_t virt_addr) {
     pte_t *pdpte = &pdpt[VMM_IDX(virt_addr, VMM_PDPT)];
     if (!(*pdpte & VMM_P)) return 0;
     if (*pdpte & VMM_PS) {
-        return (*pdpte & ~((1ULL << 30) - 1)) | (virt_addr & ((1ULL << 30) - 1));
+        return (*pdpte & VMM_PHYS_MASK & ~((1ULL << 30) - 1)) |
+               (virt_addr & ((1ULL << 30) - 1));
     }
 
     // PD (Level 2)
@@ -194,7 +275,8 @@ uint64_t vmm_get_phys(uint64_t virt_addr) {
     pte_t *pde = &pd[VMM_IDX(virt_addr, VMM_PD)];
     if (!(*pde & VMM_P)) return 0;
     if (*pde & VMM_PS) {
-        return (*pde & ~((1ULL << 21) - 1)) | (virt_addr & ((1ULL << 21) - 1));
+        return (*pde & VMM_PHYS_MASK & ~((1ULL << 21) - 1)) |
+               (virt_addr & ((1ULL << 21) - 1));
     }
 
     // PT (Level 1)
@@ -203,7 +285,7 @@ uint64_t vmm_get_phys(uint64_t virt_addr) {
     if (!(*pte & VMM_P)) return 0;
 
     // 4KB page
-    return (*pte & ~0xFFFULL) | (virt_addr & 0xFFF);
+    return (*pte & VMM_PHYS_MASK) | (virt_addr & 0xFFF);
 }
 
 /**
@@ -215,7 +297,7 @@ uint64_t vmm_get_phys(uint64_t virt_addr) {
 uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags) {
     uint64_t phys = pmm_alloc_page();
     if (!phys) return 0;
-    if (vmm_map_page(virt_addr, phys, flags) != 0) {
+    if (vmm_map_page(virt_addr, phys, flags | VMM_OWNED) != 0) {
         pmm_free_page(phys);  // 映射失败，释放物理页
         return 0;
     }
@@ -225,41 +307,134 @@ uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags) {
 /** 获取当前 PML4 表的物理地址 */
 uint64_t vmm_get_pml4(void) { return g_pml4_phys; }
 
-/**
- * 创建新的地址空间。
- * 当前 HBOS 内核仍运行在低地址恒等映射中，所以这里复制完整 PML4，
- * 让新任务保留内核、设备和低地址启动映射。用户 ELF 使用高于 4GB
- * 的地址区间，避免覆盖 boot 阶段的 2MB 大页恒等映射。
- * @return 新 PML4 的物理地址，失败返回 0
+/*
+ * User PML4 entries must not share lower-level page-table pages.  The old
+ * shallow PML4 copy let munmap() in one process clear another process's PTE.
+ * High-half kernel entries stay shared; lower-half table pages are cloned.
+ * VMM_OWNED distinguishes private PMM frames from borrowed memfd/MMIO frames.
  */
-uint64_t vmm_create_address_space(void) {
-    if (!g_pml4_phys) return 0;
-    uint64_t new_p4_phys = pmm_alloc_page();
-    if (!new_p4_phys) return 0;
-    pte_t *new_p4 = (pte_t *)(uintptr_t)new_p4_phys;
-    pte_t *src_p4  = g_pml4;
-    for (int i = 0; i < 512; i++) new_p4[i] = src_p4[i];
-    return new_p4_phys;
+static void destroy_table(uint64_t table_phys, int level);
+
+static uint64_t clone_table(uint64_t source_phys, int level,
+                            bool copy_user_pages, bool omit_user_pages) {
+    uint64_t destination_phys = pmm_alloc_page();
+    if (!destination_phys) return 0;
+    pte_t *source = (pte_t *)(uintptr_t)source_phys;
+    pte_t *destination = (pte_t *)(uintptr_t)destination_phys;
+    memset(destination, 0, PAGE_SIZE);
+
+    for (int index = 0; index < PT_ENTRIES; index++) {
+        uint64_t entry = source[index];
+        if (!(entry & VMM_P)) continue;
+
+        if (level == VMM_PT) {
+            if (omit_user_pages && (entry & VMM_U)) continue;
+            if (copy_user_pages && (entry & VMM_OWNED) &&
+                (entry & VMM_U)) {
+                uint64_t physical = entry & VMM_PHYS_MASK;
+                if (pmm_retain_page(physical) < 0) goto fail;
+                uint64_t shared = entry | VMM_COW;
+                if (entry & VMM_W)
+                    shared = (shared & ~VMM_W) | VMM_COW_W;
+                source[index] = shared;
+                destination[index] = shared;
+            } else if (copy_user_pages && (entry & VMM_OWNED)) {
+                uint64_t page = pmm_alloc_page();
+                if (!page) goto fail;
+                memcpy((void *)(uintptr_t)page,
+                       (const void *)(uintptr_t)(entry & VMM_PHYS_MASK),
+                       PAGE_SIZE);
+                destination[index] =
+                    (entry & ~VMM_PHYS_MASK) | page | VMM_OWNED;
+            } else {
+                destination[index] = entry;
+            }
+            continue;
+        }
+
+        if ((level == VMM_PDPT || level == VMM_PD) && (entry & VMM_PS)) {
+            /* HBOS does not create owned user large pages.  Boot/kernel large
+             * mappings are borrowed and may be copied verbatim. */
+            if (!(omit_user_pages && (entry & VMM_U)))
+                destination[index] = entry;
+            continue;
+        }
+
+        uint64_t child = clone_table(entry & VMM_PHYS_MASK, level + 1,
+                                     copy_user_pages, omit_user_pages);
+        if (!child) goto fail;
+        destination[index] = (entry & ~VMM_PHYS_MASK) | child;
+    }
+    return destination_phys;
+
+fail:
+    destroy_table(destination_phys, level);
+    return 0;
 }
 
-/**
- * 完整复制地址空间（fork 使用）
- * 复制 src PML4 的所有条目（用户+内核），共享物理页
- * @return 新 PML4 物理地址
- */
-uint64_t vmm_clone_address_space(uint64_t src_p4_phys) {
+static void destroy_table(uint64_t table_phys, int level) {
+    if (!table_phys) return;
+    pte_t *table = (pte_t *)(uintptr_t)table_phys;
+    for (int index = 0; index < PT_ENTRIES; index++) {
+        uint64_t entry = table[index];
+        if (!(entry & VMM_P)) continue;
+        if (level == VMM_PT) {
+            if (entry & VMM_OWNED)
+                pmm_free_page(entry & VMM_PHYS_MASK);
+        } else if (!((level == VMM_PDPT || level == VMM_PD) &&
+                     (entry & VMM_PS))) {
+            destroy_table(entry & VMM_PHYS_MASK, level + 1);
+        }
+    }
+    pmm_free_page(table_phys);
+}
+
+static uint64_t clone_lower_half(uint64_t src_p4_phys,
+                                 bool copy_user_pages,
+                                 bool omit_user_pages) {
     if (!src_p4_phys) return 0;
     uint64_t new_p4_phys = pmm_alloc_page();
     if (!new_p4_phys) return 0;
-    pte_t *new_p4 = (pte_t *)(uintptr_t)new_p4_phys;
-    pte_t *src_p4 = (pte_t *)(uintptr_t)src_p4_phys;
-    for (int i = 0; i < 512; i++) new_p4[i] = src_p4[i];
+    pte_t *source = (pte_t *)(uintptr_t)src_p4_phys;
+    pte_t *destination = (pte_t *)(uintptr_t)new_p4_phys;
+    memset(destination, 0, PAGE_SIZE);
+
+    for (int index = 256; index < PT_ENTRIES; index++)
+        destination[index] = source[index];
+    for (int index = 0; index < 256; index++) {
+        uint64_t entry = source[index];
+        if (!(entry & VMM_P)) continue;
+        uint64_t child = clone_table(entry & VMM_PHYS_MASK, VMM_PDPT,
+                                     copy_user_pages, omit_user_pages);
+        if (!child) {
+            for (int done = 0; done < index; done++)
+                if (destination[done] & VMM_P)
+                    destroy_table(destination[done] & VMM_PHYS_MASK,
+                                  VMM_PDPT);
+            pmm_free_page(new_p4_phys);
+            return 0;
+        }
+        destination[index] = (entry & ~VMM_PHYS_MASK) | child;
+    }
     return new_p4_phys;
 }
 
-/** 销毁地址空间 */
+uint64_t vmm_create_address_space(void) {
+    return clone_lower_half(g_pml4_phys, false, true);
+}
+
+uint64_t vmm_clone_address_space(uint64_t src_p4_phys) {
+    uint64_t clone = clone_lower_half(src_p4_phys, true, false);
+    if (clone && src_p4_phys == g_pml4_phys) vmm_flush_tlb();
+    return clone;
+}
+
 void vmm_destroy_address_space(uint64_t pml4_phys) {
-    if (!pml4_phys) return;
+    if (!pml4_phys || pml4_phys == g_pml4_phys) return;
+    pte_t *pml4 = (pte_t *)(uintptr_t)pml4_phys;
+    for (int index = 0; index < 256; index++)
+        if (pml4[index] & VMM_P)
+            destroy_table(pml4[index] & VMM_PHYS_MASK, VMM_PDPT);
     pmm_free_page(pml4_phys);
 }
 
@@ -308,7 +483,8 @@ static int vmm_split_large_page(uint64_t virt_2mb_aligned) {
     pte_t *pde = &pd[VMM_IDX(virt_2mb_aligned, VMM_PD)];
     if (!(*pde & VMM_P) || !(*pde & VMM_PS)) return -1; // 不存在，或已经不是大页
 
-    uint64_t large_phys_base = *pde & ~((1ULL << 21) - 1);
+    uint64_t large_phys_base =
+        *pde & VMM_PHYS_MASK & ~((1ULL << 21) - 1);
     uint64_t flags = *pde & 0xFFFULL & ~(uint64_t)VMM_PS;
 
     uint64_t new_pt_phys = pmm_alloc_page();

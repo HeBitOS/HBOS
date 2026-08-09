@@ -109,6 +109,7 @@ isr_stub_table:
 extern irq_handler
 extern syscall_dispatch_frame
 extern linux_syscall_dispatch_frame
+extern linux_signal_prepare_return
 
 %macro IRQ 2
 global irq_stub_%1
@@ -278,6 +279,20 @@ linux_syscall_entry:
     push qword 0x1B
     push rcx
 
+    ; Preserve the user callee-saved register set as part of the syscall
+    ; return frame.  clone3 needs an exact child resume context, and signal
+    ; delivery/rt_sigreturn must not silently replace these registers.
+    push r15
+    push r14
+    push r13
+    push r12
+    push rbp
+    push rbx
+    ; Keep explicit RCX/R11 slots.  A normal SYSCALL returns its hardware
+    ; clobbers (return RIP/RFLAGS) here; rt_sigreturn overwrites the slots
+    ; with the interrupted exception context.
+    push r11
+    push rcx
     push r9
     push r8
     push r10
@@ -290,6 +305,8 @@ linux_syscall_entry:
     call linux_syscall_dispatch_frame
 
     mov [rsp], rax
+    mov rdi, rsp
+    call linux_signal_prepare_return
     pop rax
     pop rdi
     pop rsi
@@ -297,4 +314,12 @@ linux_syscall_entry:
     pop r10
     pop r8
     pop r9
+    pop rcx
+    pop r11
+    pop rbx
+    pop rbp
+    pop r12
+    pop r13
+    pop r14
+    pop r15
     iretq

@@ -23,7 +23,7 @@ typedef struct file {
     vfs_node_t node;             /**< 对应的 VFS 节点 */
     uint32_t disk_slot;          /**< 磁盘上的槽位索引 */
     uint8_t used;                /**< 是否被占用（0=空闲, 1=已使用） */
-    uint8_t type; // 0=文件, 1=目录
+    uint8_t type; // 0=文件, 1=目录, 2=符号链接
 } file_t;
 
 // 文件系统结构
@@ -75,9 +75,10 @@ uint32_t fs_used_bytes(void);    /**< 获取已使用字节数 */
 void fs_list(void);              /**< 列出所有文件（预留接口） */
 file_t *fs_find_file(const char *name); /**< 按文件名查找文件 */
 file_t *fs_create_file(const char *name); /**< 创建文件（若已存在则返回已有文件） */
+file_t *fs_create_symlink(const char *name, const char *target); /**< 创建 ramfs/HBFS 符号链接 */
 int fs_delete_file(const char *name); /**< 删除文件 */
 int fs_copy_file(const char *src, const char *dst); /**< 复制文件 */
-int fs_rename_file(const char *old_name, const char *new_name); /**< 重命名文件 */
+int fs_rename_file(const char *old_name, const char *new_name); /**< 重命名文件或目录树 */
 int fs_truncate_file(file_t *f); /**< 截断文件（清零大小） */
 uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count); /**< 读取文件数据 */
 int fs_write_file_data(file_t *f, uint32_t offset, const void *buf, uint32_t count); /**< 写入文件数据 */

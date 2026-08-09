@@ -46,5 +46,6 @@ struct stat {
 
 int fstat(int fd, struct stat *st);
 int stat(const char *path, struct stat *st);
+int lstat(const char *path, struct stat *st);
 
 #endif

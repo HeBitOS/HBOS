@@ -304,6 +304,8 @@ ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 # “只要 app 里有编译产物，就加入系统”：扫描 app/ 下的源码与预编译 .hax，
 # 由 genhax.py 读取各自的 .haxmeta 段，生成清单与二进制 blob 嵌入内核。
 HBOS_COMPAT_SMOKE ?= 0
+HBOS_MUSL_SYSROOT ?=
+HBOS_GLIBC_LIBDIR ?=
 ifeq ($(HBOS_BUNDLE_APPS),1)
 HAX_APP_SRCS = $(wildcard $(APP_DIR)/*.c)
 HAX_APP_BINS = $(HAX_APP_SRCS:$(APP_DIR)/%.c=$(BUILD_DIR)/app/%.hax)
@@ -311,10 +313,36 @@ HAX_PREBUILT = $(wildcard $(APP_DIR)/*.hax)
 HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax $(BUSYBOX_HAX)
 ifeq ($(HBOS_COMPAT_SMOKE),1)
 HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
+	$(BUILD_DIR)/tests/linux_clone3.hax \
+	$(BUILD_DIR)/tests/linux_inotify.hax \
 	$(BUILD_DIR)/tests/linux_syscall.hax \
 	$(BUILD_DIR)/tests/linux_pie.hax \
+	$(BUILD_DIR)/tests/linux_dynamic.hax \
+	$(BUILD_DIR)/tests/linux_interp.hax \
 	$(BUILD_DIR)/tests/linux_abi.hax \
+	$(BUILD_DIR)/tests/linux_signal.hax \
+	$(BUILD_DIR)/tests/linux_signal_siginfo.hax \
+	$(BUILD_DIR)/tests/linux_mprotect.hax \
+	$(BUILD_DIR)/tests/linux_mmap_reclaim.hax \
+	$(BUILD_DIR)/tests/linux_file_mmap.hax \
+	$(BUILD_DIR)/tests/linux_process_abi.hax \
+	$(BUILD_DIR)/tests/linux_dlopen.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_lib.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_deps.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_dep_root.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_dep_leaf.hax \
 	$(BUILD_DIR)/tests/linux_epoll_et.hax
+ifneq ($(strip $(HBOS_MUSL_SYSROOT)),)
+HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_musl.hax \
+	$(BUILD_DIR)/tests/linux_musl_pthread.hax \
+	$(BUILD_DIR)/tests/linux_musl_loader.hax \
+	$(BUILD_DIR)/tests/linux_musl_stream.hax
+endif
+ifneq ($(strip $(HBOS_GLIBC_LIBDIR)),)
+HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_glibc.hax \
+	$(BUILD_DIR)/tests/linux_glibc_loader.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libc.hax
+endif
 endif
 else
 HAX_APP_SRCS =
@@ -324,7 +352,7 @@ HAX_ALL_BINS =
 endif
 HAX_BLOB     = $(BUILD_DIR)/hax_blob.bin
 HAX_MANIFEST = $(BUILD_DIR)/hax_manifest.c
-HAX_MODE_STAMP = $(BUILD_DIR)/.hax-mode-$(HBOS_COMPAT_SMOKE)
+HAX_MODE_STAMP = $(BUILD_DIR)/.hax-mode-$(HBOS_COMPAT_SMOKE)-$(if $(strip $(HBOS_MUSL_SYSROOT)),musl,nomusl)-$(if $(strip $(HBOS_GLIBC_LIBDIR)),glibc,noglibc)
 HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 include mk/secure_net.mk
@@ -845,11 +873,27 @@ $(BUILD_DIR)/tests/linux_compat_thread.hax: tests/linux_compat_thread.c $(USER_L
 	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_compat_thread.o $(USER_LINUX_COMPAT_LIB) -o $@
 	@echo "✓ Linux thread test binary: $@"
 
+$(BUILD_DIR)/tests/linux_clone3.hax: tests/linux_clone3.c tests/linux_clone3.asm \
+		$(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) tests/linux_clone3.c -o $(BUILD_DIR)/tests/linux_clone3.o
+	$(AS) $(ASFLAGS) tests/linux_clone3.asm -o $(BUILD_DIR)/tests/linux_clone3_asm.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) \
+		$(BUILD_DIR)/tests/linux_clone3.o $(BUILD_DIR)/tests/linux_clone3_asm.o \
+		$(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ Native Linux clone3 thread test binary: $@"
+
 $(BUILD_DIR)/tests/linux_epoll_et.hax: tests/linux_epoll_et.c $(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_epoll_et.o
 	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_epoll_et.o $(USER_LINUX_COMPAT_LIB) -o $@
 	@echo "✓ Linux epoll edge/one-shot test binary: $@"
+
+$(BUILD_DIR)/tests/linux_inotify.hax: tests/linux_inotify.c $(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_inotify.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_inotify.o $(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ Native Linux inotify ABI test binary: $@"
 
 $(BUILD_DIR)/tests/linux_syscall.hax: tests/linux_syscall.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
@@ -866,6 +910,92 @@ $(BUILD_DIR)/tests/linux_pie.hax: tests/linux_syscall.asm | $(BUILD_DIR)
 		$(BUILD_DIR)/tests/linux_pie.o -o $@
 	@echo "✓ Native Linux static PIE: $@"
 
+$(BUILD_DIR)/tests/linux_interp.hax: tests/linux_interp.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_interp.o
+	$(LD) -m elf_x86_64 -shared -nostdlib -e _start \
+		-z max-page-size=0x1000 $(BUILD_DIR)/tests/linux_interp.o -o $@
+	@echo "✓ Native Linux PT_INTERP test loader: $@"
+
+$(BUILD_DIR)/tests/linux_dynamic.hax: tests/linux_dynamic.asm \
+		$(BUILD_DIR)/tests/linux_interp.hax | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_dynamic.o
+	$(LD) -m elf_x86_64 -pie -nostdlib -e _start \
+		--dynamic-linker /linux_interp -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_dynamic.o -o $@
+	@echo "✓ Native Linux PT_INTERP executable: $@"
+
+$(BUILD_DIR)/tests/linux_musl.hax: tests/linux_musl.c | $(BUILD_DIR)
+	@test -n "$(HBOS_MUSL_SYSROOT)" || \
+		{ echo "HBOS_MUSL_SYSROOT is required" >&2; exit 2; }
+	@mkdir -p $(@D)
+	$(CC) -fPIE -nostdinc \
+		-isystem "$(HBOS_MUSL_SYSROOT)/usr/include/x86_64-linux-musl" \
+		-c $< -o $(BUILD_DIR)/tests/linux_musl.o
+	$(LD) -m elf_x86_64 -pie \
+		--dynamic-linker /lib/ld-musl-x86_64.so.1 -e _start \
+		-z max-page-size=0x1000 \
+		"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl/Scrt1.o" \
+		"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl/crti.o" \
+		$(BUILD_DIR)/tests/linux_musl.o \
+		-L"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl" -lc \
+		"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl/crtn.o" -o $@
+	@test "$$(stat -c %s $@)" -gt 524288 || \
+		{ echo "musl streaming exec test must exceed 512 KiB" >&2; exit 2; }
+	@echo "✓ Native dynamically linked musl executable: $@"
+
+$(BUILD_DIR)/tests/linux_musl_pthread.hax: tests/linux_musl_pthread.c | $(BUILD_DIR)
+	@test -n "$(HBOS_MUSL_SYSROOT)" || \
+		{ echo "HBOS_MUSL_SYSROOT is required" >&2; exit 2; }
+	@mkdir -p $(@D)
+	$(CC) -fPIE -nostdinc \
+		-isystem "$(HBOS_MUSL_SYSROOT)/usr/include/x86_64-linux-musl" \
+		-c $< -o $(BUILD_DIR)/tests/linux_musl_pthread.o
+	$(LD) -m elf_x86_64 -pie \
+		--dynamic-linker /lib/ld-musl-x86_64.so.1 -e _start \
+		-z max-page-size=0x1000 \
+		"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl/Scrt1.o" \
+		"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl/crti.o" \
+		$(BUILD_DIR)/tests/linux_musl_pthread.o \
+		-L"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl" -lc \
+		"$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl/crtn.o" -o $@
+	@echo "✓ Native dynamically linked musl pthread executable: $@"
+
+$(BUILD_DIR)/tests/linux_musl_loader.hax: | $(BUILD_DIR)
+	@test -n "$(HBOS_MUSL_SYSROOT)" || \
+		{ echo "HBOS_MUSL_SYSROOT is required" >&2; exit 2; }
+	cp "$(HBOS_MUSL_SYSROOT)/usr/lib/x86_64-linux-musl/libc.so" $@
+	@echo "✓ Native musl PT_INTERP/libc image: $@"
+
+$(BUILD_DIR)/tests/linux_musl_stream.hax: tests/linux_musl_stream.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_musl_stream.o
+	$(LD) -m elf_x86_64 -static -nostdlib -e _start \
+		-Ttext 0x0000001002000000 \
+		$(BUILD_DIR)/tests/linux_musl_stream.o -o $@
+	@echo "✓ Linux streaming execve launcher: $@"
+
+$(BUILD_DIR)/tests/linux_glibc.hax: tests/linux_glibc.c | $(BUILD_DIR)
+	@test -n "$(HBOS_GLIBC_LIBDIR)" || \
+		{ echo "HBOS_GLIBC_LIBDIR is required" >&2; exit 2; }
+	@mkdir -p $(@D)
+	$(CC) -fPIE -pie -pthread -Wl,-z,max-page-size=0x1000 \
+		-Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2 $< -o $@
+	@echo "✓ Native dynamically linked glibc executable: $@"
+
+$(BUILD_DIR)/tests/linux_glibc_loader.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/ld-linux-x86-64.so.2" || \
+		{ echo "glibc loader not found in HBOS_GLIBC_LIBDIR" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/ld-linux-x86-64.so.2" $@
+	@echo "✓ Native glibc PT_INTERP image: $@"
+
+$(BUILD_DIR)/tests/linux_glibc_libc.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/libc.so.6" || \
+		{ echo "glibc libc.so.6 not found in HBOS_GLIBC_LIBDIR" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/libc.so.6" $@
+	@echo "✓ Native glibc libc image: $@"
+
 $(BUILD_DIR)/tests/linux_abi.hax: tests/linux_abi.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_abi.o
@@ -873,6 +1003,106 @@ $(BUILD_DIR)/tests/linux_abi.hax: tests/linux_abi.asm | $(BUILD_DIR)
 		-e _start -z max-page-size=0x1000 \
 		$(BUILD_DIR)/tests/linux_abi.o -o $@
 	@echo "✓ Native Linux structure/vector ABI test: $@"
+
+$(BUILD_DIR)/tests/linux_signal.hax: tests/linux_signal.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_signal.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_signal.o -o $@
+	@echo "✓ Native Linux ring3 signal/rt_sigreturn test: $@"
+
+$(BUILD_DIR)/tests/linux_signal_siginfo.hax: tests/linux_signal_siginfo.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_signal_siginfo.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_signal_siginfo.o -o $@
+	@echo "✓ Native Linux SA_SIGINFO/ucontext/sigaltstack/nesting test: $@"
+
+$(BUILD_DIR)/tests/linux_mprotect.hax: tests/linux_mprotect.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_mprotect.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_mprotect.o -o $@
+	@echo "✓ Native Linux mmap/mprotect W^X test: $@"
+
+$(BUILD_DIR)/tests/linux_mmap_reclaim.hax: tests/linux_mmap_reclaim.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_mmap_reclaim.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_mmap_reclaim.o -o $@
+	@echo "✓ Native Linux mmap reclamation/VMA split test: $@"
+
+$(BUILD_DIR)/tests/linux_file_mmap.hax: tests/linux_file_mmap.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_file_mmap.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_file_mmap.o -o $@
+	@echo "✓ Native Linux regular-file mmap test: $@"
+
+$(BUILD_DIR)/tests/linux_process_abi.hax: tests/linux_process_abi.asm | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $(BUILD_DIR)/tests/linux_process_abi.o
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -static -nostdlib \
+		-e _start -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_process_abi.o -o $@
+	@echo "✓ Native Linux process/resource ABI test: $@"
+
+$(BUILD_DIR)/tests/linux_dlopen_lib.hax: tests/linux_dlopen_lib.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c -m64 -fPIC -ffreestanding -fno-stack-protector -O2 \
+		-Wall -Wextra $< -o $(BUILD_DIR)/tests/linux_dlopen_lib.o
+	$(LD) -m elf_x86_64 -shared -nostdlib --hash-style=gnu \
+		-z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_dlopen_lib.o -o $@
+	@test "$$(stat -c %s $@)" -gt 524288 || \
+		{ echo "dlopen streaming test must exceed 512 KiB" >&2; exit 2; }
+	@echo "✓ Large streaming dlopen library: $@"
+
+$(BUILD_DIR)/tests/linux_dlopen.hax: tests/linux_dlopen.c \
+		$(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_dlopen.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) \
+		$(BUILD_DIR)/tests/linux_dlopen.o -o $@
+	@echo "✓ Streaming dlopen caller: $@"
+
+$(BUILD_DIR)/tests/linux_dlopen_dep_leaf.hax: tests/linux_dlopen_dep_leaf.c \
+		tests/linux_dlopen_dep_leaf.map | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c -m64 -fPIC -ffreestanding -fno-stack-protector -O2 \
+		-Wall -Wextra $< -o $(BUILD_DIR)/tests/linux_dlopen_dep_leaf.o
+	$(LD) -m elf_x86_64 -shared -nostdlib --hash-style=gnu \
+		-soname liblinux_dep_leaf.so -init hbos_leaf_dt_init \
+		-fini hbos_leaf_dt_fini -z max-page-size=0x1000 \
+		--version-script=tests/linux_dlopen_dep_leaf.map \
+		$(BUILD_DIR)/tests/linux_dlopen_dep_leaf.o -o $@
+	@echo "✓ DT_NEEDED leaf library: $@"
+
+$(BUILD_DIR)/tests/linux_dlopen_dep_root.hax: tests/linux_dlopen_dep_root.c \
+		$(BUILD_DIR)/tests/linux_dlopen_dep_leaf.hax | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c -m64 -fPIC -ffreestanding -fno-stack-protector -O2 \
+		-Wall -Wextra $< -o $(BUILD_DIR)/tests/linux_dlopen_dep_root.o
+	$(LD) -m elf_x86_64 -shared -nostdlib --hash-style=gnu --no-as-needed \
+		-soname liblinux_dep_root.so -init hbos_root_dt_init \
+		-fini hbos_root_dt_fini -z max-page-size=0x1000 \
+		$(BUILD_DIR)/tests/linux_dlopen_dep_root.o \
+		-L$(BUILD_DIR)/tests -l:linux_dlopen_dep_leaf.hax -o $@
+	@echo "✓ DT_NEEDED root library: $@"
+
+$(BUILD_DIR)/tests/linux_dlopen_deps.hax: tests/linux_dlopen_deps.c \
+		$(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) \
+		$(BUILD_DIR)/tests/linux_dlopen_dep_root.hax | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_dlopen_deps.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) \
+		$(BUILD_DIR)/tests/linux_dlopen_deps.o $(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ DT_NEEDED dependency graph caller: $@"
 
 USER_PROG_SRCS = $(wildcard $(USER_PROG_DIR)/*.c)
 USER_PROG_BINS = $(USER_PROG_SRCS:$(USER_PROG_DIR)/%.c=$(USER_BUILD_DIR)/%.elf)

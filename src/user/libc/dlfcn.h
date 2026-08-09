@@ -6,6 +6,7 @@
 
 void *dlopen(const char *filename, int flags);
 void *dlsym(void *handle, const char *symbol);
+void *dlvsym(void *handle, const char *symbol, const char *version);
 int   dlclose(void *handle);
 char *dlerror(void);
 

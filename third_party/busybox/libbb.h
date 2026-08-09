@@ -205,8 +205,12 @@ char *single_argv(char **argv);
  * so touch.c's own code never actually tries to compute a real timestamp
  * to pass in anyway. */
 struct timespec { long tv_sec; long tv_nsec; };
+#ifndef AT_FDCWD
 #define AT_FDCWD (-100)
+#endif
+#ifndef AT_SYMLINK_NOFOLLOW
 #define AT_SYMLINK_NOFOLLOW 0x100
+#endif
 #define UTIME_NOW  ((1L << 30) - 1L)
 #define UTIME_OMIT ((1L << 30) - 2L)
 int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags);

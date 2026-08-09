@@ -14,6 +14,7 @@
 #include "../graphics/graphics.h"
 #include "../shell/shell.h"
 #include "../vfs.h"
+#include "../fs.h"
 
 static int g_errno;
 static char g_posix_cwd[256] = "/";
@@ -58,6 +59,58 @@ static int resolve_user_path(const char *path, char out[256]) {
     if (!path) return set_errno(EFAULT);
     if (vfs_resolve_path(g_posix_cwd, path, out, 256) < 0) return set_errno(EINVAL);
     return 0;
+}
+
+static int path_in_tree(const char *path, const char *root) {
+    size_t length = strlen(root);
+    return strcmp(path, root) == 0 ||
+           (strncmp(path, root, length) == 0 && path[length] == '/');
+}
+
+static int node_is_open(vfs_node_t *node) {
+    task_preempt_disable();
+    int active = task_get_count();
+    for (int task_index = 0; task_index < active; task_index++) {
+        const task_t *task = task_get_active((uint32_t)task_index);
+        if (!task || !task->fd_table) continue;
+        for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
+            const fd_entry_t *entry = &task->fd_table->entries[fd];
+            if (entry->used && entry->node == node) {
+                task_preempt_enable();
+                return 1;
+            }
+        }
+    }
+    task_preempt_enable();
+    return 0;
+}
+
+static int rename_parent_status(const char *path) {
+    char parent[256];
+    const char *slash = strrchr(path, '/');
+    if (!slash) return ENOENT;
+    if (slash == path) {
+        strcpy(parent, "/");
+    } else {
+        size_t length = (size_t)(slash - path);
+        memcpy(parent, path, length);
+        parent[length] = '\0';
+    }
+    vfs_node_t *node = vfs_lookup(parent);
+    if (!node) return ENOENT;
+    return node->type == VFS_NODE_DIR ? 0 : ENOTDIR;
+}
+
+static void rewrite_cwd_after_rename(const char *old_path,
+                                     const char *new_path) {
+    if (!path_in_tree(g_posix_cwd, old_path)) return;
+    size_t old_length = strlen(old_path);
+    const char *suffix = g_posix_cwd + old_length;
+    char rewritten[sizeof(g_posix_cwd)];
+    if (strlen(new_path) + strlen(suffix) >= sizeof(rewritten)) return;
+    strcpy(rewritten, new_path);
+    strcat(rewritten, suffix);
+    strcpy(g_posix_cwd, rewritten);
 }
 
 static fd_entry_t *fd_get(int fd) {
@@ -279,13 +332,18 @@ int open(const char *path, int flags, ...) {
         return set_errno(EINVAL);
     }
 
+    vfs_node_t *entry = vfs_lookup_nofollow(full);
+    if (entry && entry->type == VFS_NODE_SYMLINK && (flags & O_NOFOLLOW))
+        return set_errno(ELOOP);
+    if (entry && (flags & O_CREAT) && (flags & O_EXCL))
+        return set_errno(EEXIST);
     vfs_node_t *node = vfs_lookup(full);
     if (!node) {
+        if (entry && entry->type == VFS_NODE_SYMLINK)
+            return set_errno(ENOENT);
         if (!(flags & O_CREAT)) return set_errno(ENOENT);
         node = vfs_create(full);
         if (!node) return set_errno(ENOSPC);
-    } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
-        return set_errno(EEXIST);
     }
     if ((flags & O_DIRECTORY) && node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
     if (node->type == VFS_NODE_DIR && (flags & O_ACCMODE) != O_RDONLY) return set_errno(EISDIR);
@@ -302,6 +360,8 @@ int fstat(int fd, struct stat *st) {
     memset(st, 0, sizeof(*st));
 
     if (fd >= STDIN_FILENO && fd <= STDERR_FILENO) {
+        st->st_dev = 2;
+        st->st_ino = (ino_t)(fd + 1);
         st->st_mode = S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
         st->st_nlink = 1;
         return 0;
@@ -309,6 +369,8 @@ int fstat(int fd, struct stat *st) {
 
     fd_entry_t *ent = fd_get(fd);
     if (!ent) return set_errno(EBADF);
+    st->st_dev = 1;
+    st->st_ino = (ino_t)(((uintptr_t)ent->node >> 4) | 1U);
     st->st_mode = (ent->node->type == VFS_NODE_DIR ? S_IFDIR :
                    ent->node->type == VFS_NODE_CHARDEV ? S_IFCHR : S_IFREG) |
                   S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
@@ -325,7 +387,31 @@ int stat(const char *path, struct stat *st) {
     if (!node) return set_errno(ENOENT);
 
     memset(st, 0, sizeof(*st));
-    st->st_mode = (node->type == VFS_NODE_DIR ? S_IFDIR : S_IFREG) | S_IRUSR | S_IRGRP | S_IROTH;
+    st->st_dev = 1;
+    st->st_ino = (ino_t)(((uintptr_t)node >> 4) | 1U);
+    st->st_mode = (node->type == VFS_NODE_DIR ? S_IFDIR :
+                   node->type == VFS_NODE_CHARDEV ? S_IFCHR :
+                   node->type == VFS_NODE_SYMLINK ? S_IFLNK : S_IFREG) |
+                  S_IRUSR | S_IRGRP | S_IROTH;
+    st->st_nlink = 1;
+    st->st_size = (off_t)node->size;
+    return 0;
+}
+
+int lstat(const char *path, struct stat *st) {
+    if (!st) return set_errno(EFAULT);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup_nofollow(full);
+    if (!node) return set_errno(ENOENT);
+
+    memset(st, 0, sizeof(*st));
+    st->st_dev = 1;
+    st->st_ino = (ino_t)(((uintptr_t)node >> 4) | 1U);
+    st->st_mode = (node->type == VFS_NODE_DIR ? S_IFDIR :
+                   node->type == VFS_NODE_CHARDEV ? S_IFCHR :
+                   node->type == VFS_NODE_SYMLINK ? S_IFLNK : S_IFREG) |
+                  S_IRUSR | S_IRGRP | S_IROTH;
     st->st_nlink = 1;
     st->st_size = (off_t)node->size;
     return 0;
@@ -334,7 +420,7 @@ int stat(const char *path, struct stat *st) {
 int unlink(const char *path) {
     char full[256];
     if (resolve_user_path(path, full) < 0) return -1;
-    vfs_node_t *node = vfs_lookup(full);
+    vfs_node_t *node = vfs_lookup_nofollow(full);
     if (!node) return set_errno(ENOENT);
     if (node->type == VFS_NODE_DIR) return set_errno(EISDIR);
 
@@ -397,7 +483,7 @@ int mkdir(const char *path, mode_t mode) {
     (void)mode;
     char full[256];
     if (resolve_user_path(path, full) < 0) return -1;
-    if (vfs_lookup(full)) return set_errno(EEXIST);
+    if (vfs_lookup_nofollow(full)) return set_errno(EEXIST);
     if (vfs_mkdir(full) < 0) return set_errno(ENOSPC);
     return 0;
 }
@@ -405,17 +491,72 @@ int mkdir(const char *path, mode_t mode) {
 int rmdir(const char *path) {
     char full[256];
     if (resolve_user_path(path, full) < 0) return -1;
-    vfs_node_t *node = vfs_lookup(full);
+    vfs_node_t *node = vfs_lookup_nofollow(full);
     if (!node) return set_errno(ENOENT);
     if (node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
     if (vfs_rmdir(full) < 0) return set_errno(ENOTEMPTY);
     return 0;
 }
 
+int posix_rename(const char *old_path, const char *new_path,
+                 unsigned int flags) {
+    if (flags & ~1U) return set_errno(EOPNOTSUPP);
+    char old_full[256];
+    char new_full[256];
+    if (resolve_user_path(old_path, old_full) < 0 ||
+        resolve_user_path(new_path, new_full) < 0)
+        return -1;
+    vfs_node_t *source = vfs_lookup_nofollow(old_full);
+    if (!source) return set_errno(ENOENT);
+    if (strcmp(old_full, new_full) == 0) return 0;
+    int is_directory = source->type == VFS_NODE_DIR;
+    if (is_directory && path_in_tree(new_full, old_full))
+        return set_errno(EINVAL);
+    int parent_error = rename_parent_status(new_full);
+    if (parent_error) return set_errno(parent_error);
+    if (is_directory &&
+        (strcmp(fs_backend_name(), "ext2") == 0 ||
+         strcmp(fs_backend_name(), "fat32") == 0))
+        return set_errno(EOPNOTSUPP);
+    if (is_directory && !fs_find_file(old_full))
+        return set_errno(EBUSY);
+
+    vfs_node_t *target = vfs_lookup_nofollow(new_full);
+    if (target) {
+        if (flags & 1U) return set_errno(EEXIST);
+        if ((target->type == VFS_NODE_DIR) != is_directory)
+            return set_errno(target->type == VFS_NODE_DIR ? EISDIR : ENOTDIR);
+        if (node_is_open(target)) return set_errno(EBUSY);
+        if (is_directory) {
+            char child[VFS_MAX_NAME];
+            uint32_t child_type;
+            if (vfs_readdir_at(new_full, 0, child, &child_type) == 0)
+                return set_errno(ENOTEMPTY);
+        }
+    }
+    if (vfs_rename(old_full, new_full, target != NULL) < 0)
+        return set_errno(EIO);
+    if (is_directory) rewrite_cwd_after_rename(old_full, new_full);
+    return 0;
+}
+
+int rename(const char *old_path, const char *new_path) {
+    return posix_rename(old_path, new_path, 0);
+}
+
 int symlink(const char *target, const char *linkpath) {
-    (void)target;
-    (void)linkpath;
-    return set_errno(ENOSYS);
+    if (!target || !linkpath) return set_errno(EFAULT);
+    if (!target[0]) return set_errno(ENOENT);
+    char full[256];
+    if (resolve_user_path(linkpath, full) < 0) return -1;
+    if (vfs_lookup_nofollow(full)) return set_errno(EEXIST);
+    int parent_error = rename_parent_status(full);
+    if (parent_error) return set_errno(parent_error);
+    if (strcmp(fs_backend_name(), "ext2") == 0 ||
+        strcmp(fs_backend_name(), "fat32") == 0)
+        return set_errno(EOPNOTSUPP);
+    if (!vfs_symlink(full, target)) return set_errno(ENOSPC);
+    return 0;
 }
 
 int chmod(const char *path, mode_t mode) {
@@ -432,10 +573,84 @@ int chown(const char *path, uid_t uid, gid_t gid) {
 }
 
 ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
-    (void)path;
-    (void)buf;
-    (void)bufsiz;
-    return set_errno(ENOSYS);
+    if (!path || !buf) return set_errno(EFAULT);
+    if (!bufsiz) return set_errno(EINVAL);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    if (strncmp(full, "/proc/", 6) != 0) {
+        file_t *file = fs_find_file(full);
+        if (!file) return set_errno(ENOENT);
+        if (file->type != 2) return set_errno(EINVAL);
+        uint32_t count = fs_read_file_data(file, 0, buf, (uint32_t)bufsiz);
+        return (ssize_t)count;
+    }
+
+    const char *cursor = full + 6;
+    const task_t *task = NULL;
+    if (strncmp(cursor, "self/", 5) == 0) {
+        task = task_current();
+        cursor += 5;
+    } else {
+        uint32_t pid = 0;
+        while (*cursor >= '0' && *cursor <= '9') {
+            pid = pid * 10U + (uint32_t)(*cursor - '0');
+            cursor++;
+        }
+        if (!pid || *cursor != '/') return set_errno(EINVAL);
+        task = task_get_by_id(pid);
+        cursor++;
+    }
+    if (!task || task->state == TASK_TERMINATED) return set_errno(ENOENT);
+
+    char target[256];
+    target[0] = '\0';
+    if (strcmp(cursor, "exe") == 0) {
+        target[0] = '/';
+        strncpy(target + 1, task->name, sizeof(target) - 2);
+        target[sizeof(target) - 1] = '\0';
+    } else if (strncmp(cursor, "fd/", 3) == 0) {
+        cursor += 3;
+        int fd = 0;
+        if (*cursor < '0' || *cursor > '9') return set_errno(ENOENT);
+        while (*cursor >= '0' && *cursor <= '9') {
+            fd = fd * 10 + (*cursor - '0');
+            cursor++;
+        }
+        if (*cursor || fd < 0 || fd >= POSIX_MAX_FDS || !task->fd_table)
+            return set_errno(ENOENT);
+        if (fd <= STDERR_FILENO && !task->fd_table->entries[fd].used) {
+            strcpy(target, "/dev/console");
+            size_t length = strlen(target);
+            if (length > bufsiz) length = bufsiz;
+            memcpy(buf, target, length);
+            return (ssize_t)length;
+        }
+        if (!task->fd_table->entries[fd].used) return set_errno(ENOENT);
+        const fd_entry_t *entry = &task->fd_table->entries[fd];
+        if (entry->path[0]) {
+            strncpy(target, entry->path, sizeof(target) - 1);
+            target[sizeof(target) - 1] = '\0';
+        } else if (fd <= STDERR_FILENO) {
+            strcpy(target, "/dev/console");
+        } else if (entry->type == FD_SOCKET || entry->type == FD_UNIX) {
+            strcpy(target, "socket:[hbos]");
+        } else if (entry->type == FD_PIPE) {
+            strcpy(target, "pipe:[hbos]");
+        } else if (entry->type == FD_MEMFD) {
+            strcpy(target, "/memfd:hbos");
+        } else if (entry->type == FD_INOTIFY) {
+            strcpy(target, "anon_inode:inotify");
+        } else {
+            strcpy(target, "/unknown");
+        }
+    } else {
+        return set_errno(EINVAL);
+    }
+
+    size_t length = strlen(target);
+    if (length > bufsiz) length = bufsiz;
+    memcpy(buf, target, length);
+    return (ssize_t)length;
 }
 
 pid_t getpid(void) {

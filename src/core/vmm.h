@@ -20,7 +20,10 @@
 #define VMM_PS     0x080   // Page size (2MB/1GB large page) — PD/PDPT entries only;
                            // at the PT (4KB) level this same bit is PAT instead (see VMM_WC).
 #define VMM_G      0x100   // Global page
-#define VMM_NX     0x800   // No-execute (bit 63)
+#define VMM_OWNED  0x200   // HBOS software bit: PMM page is owned by this PTE
+#define VMM_COW    0x400   // HBOS software bit: shared private page
+#define VMM_COW_W  0x800   // COW mapping was writable before fork
+#define VMM_NX     (1ULL << 63) // No-execute (bit 63)
 
 // Write-combining hint for a 4KB PTE (framebuffer/MMIO). PWT=1,PCD=0,PAT=0
 // selects PAT slot 1 — pat_init() (cpu.h) reprograms IA32_PAT so that slot
@@ -54,8 +57,26 @@ int vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 // Unmap a virtual page
 void vmm_unmap_page(uint64_t virt_addr);
 
+// Unmap a page and return its physical frame when the PTE owns it.
+void vmm_release_page(uint64_t virt_addr);
+
 // Get physical address mapped at a virtual address, or 0 if not mapped
 uint64_t vmm_get_phys(uint64_t virt_addr);
+
+/** Update W/U/NX permissions on one existing 4 KiB mapping. */
+int vmm_protect_page(uint64_t virt_addr, uint64_t flags);
+
+/** Resolve a writable user COW fault.  Returns 1 if handled, 0 if not COW. */
+int vmm_handle_cow_fault(uint64_t virt_addr);
+
+/** Ensure a COW mapping is private before a kernel-side mutation. */
+int vmm_make_page_private(uint64_t virt_addr);
+
+/** Query raw leaf permissions, or 0 when the 4 KiB page is not present. */
+uint64_t vmm_get_page_flags(uint64_t virt_addr);
+
+/** Record whether EFER.NXE is active on this CPU. */
+void vmm_set_nx_enabled(bool enabled);
 
 // Allocate a physical page and map it at the given virtual address
 // Returns virtual address on success, 0 on OOM

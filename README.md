@@ -246,9 +246,37 @@ Chromium 浏览器。
 
 HBOS 也在建设轻量 Linux ABI 兼容层，现已提供原生 x86-64 `syscall`、静态
 ELF/PIE、线程/TLS、`poll`/`epoll`/`eventfd`/`futex`、AF_UNIX、
-`SCM_RIGHTS`、memfd 与 `MAP_SHARED` 基线。长期目标是在不修改
-KDE/Qt/Plasma 上游源码的情况下运行 KDE；动态 `PT_INTERP` 和通用发行版
-Linux 二进制仍不属于已支持范围。
+`getsockname/getpeername`、`SCM_RIGHTS`、memfd 与 `MAP_SHARED` 基线；命名与
+abstract Unix socket 的本地/对端地址、截断缓冲区长度回报及 accept 对端语义
+均已通过原生 syscall 和 libc 回归。长期目标是在不修改
+KDE/Qt/Plasma 上游源码的情况下运行 KDE；`PT_INTERP` 与真实 musl 1.2.5
+动态 hello 已通过，主程序 `execve` 已改为按 ELF 段从 VFS 流式加载并通过
+631 KiB 回归；`dlopen` 共享库的 General Dynamic `__thread` 也已通过
+父子线程隔离回归，GNU 符号版本与 `dlvsym` 已覆盖函数和 TLS 重定位。
+GNU IFUNC/IRELATIVE resolver 也已在 ring3 安全执行。同进程 loader 已用
+按 TID 递归事务锁覆盖构造函数重入和四线程并发引用压力，
+内核跨地址空间对象链表也采用短临界区保护。原生 Linux `clone` 与 `clone3`
+的共享 VM 线程子集都可从真实 `SYSCALL` 返回点恢复新栈、FS/TLS 和 TID
+生命周期；未修改 musl 1.2.5 的四线程 `pthread_create/join`、mutex 与静态 TLS
+隔离已通过 QEMU；同一回归还覆盖条件变量等待/广播、读写锁、`pthread_once`、
+realtime 绝对超时和 FPU 舍入环境继承。未修改 glibc 2.43 的真实动态 loader、
+2.1 MiB `libc.so.6`、符号版本、malloc
+及基础 pthread/静态 TLS 也已通过；轻量只读 procfs 的 `self/exe`、status、
+maps、fd、meminfo 与 cpuinfo，以及 CPU/网络只读 sysfs 的目录枚举和动态值，
+已由同一 glibc 程序验证；真实目录 fd 相对的 `openat/newfstatat/readlinkat`、
+`rename`/`renameat`/`renameat2(RENAME_NOREPLACE)`
+以及 ramfs/HBFS 目录整树改名已完成；打开目录 fd、cwd 和后代 watch 会随树
+迁移。`newfstatat` 已支持 `AT_EMPTY_PATH` 与 `AT_SYMLINK_NOFOLLOW`；ramfs/HBFS
+提供无堆分配、最多八层的相对/绝对符号链接解析及 `symlinkat/readlinkat/lstat`，
+默认无链接时仍走单次 VFS 查表快路径。固定容量 inotify 的创建、修改、删除、自删除、成对移动 cookie、文件 watch
+跟随改名、非阻塞读取与 poll/epoll 就绪也已通过原生 syscall QEMU 回归。用户态
+page fault 现转换为同步 `SIGSEGV`：ring3 handler 可调用 `mprotect` 修复映射，
+再由 `rt_sigreturn` 恢复完整通用寄存器并重试故障指令。原生 Linux `fork`
+也已从 syscall 现场恢复子进程，并以每物理页引用计数和软件 PTE 位实现 4 KiB
+COW；写故障只复制被修改页，单引用页直接恢复写权限，`mprotect` 与
+`MADV_DONTNEED` 会先私有化。完整 TLS ABI、
+复杂共享库程序和通用发行版 Linux 二进制
+仍不属于已支持范围。
 
 ## 当前限制
 

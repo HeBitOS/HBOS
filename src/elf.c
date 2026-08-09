@@ -14,6 +14,7 @@
 #include "core/vmm.h"
 #include "core/heap.h"
 #include "string.h"
+#include "vfs.h"
 #include "user/ldso.h"
 
 #define ELF_MAG0  0x7f
@@ -33,6 +34,10 @@
 #define ELF_ARG_MAX 32
 #define ELF_ENV_MAX 32
 #define ELF_ARG_BYTES_MAX 65536
+#define ELF_INTERP_PATH_MAX 256
+#define ELF_INTERP_HEADERS_MAX (64U * 1024U)
+#define ELF_MAIN_HEADERS_MAX (64U * 1024U)
+#define ELF_INTERP_BASE 0x0000001200000000ULL
 
 static const char *elf_error = "ok";
 
@@ -155,6 +160,332 @@ static int validate_elf64_headers(const uint8_t *data, size_t size,
     return 0;
 }
 
+typedef struct {
+    const uint8_t *memory;
+    vfs_node_t *node;
+    uint64_t size;
+    const uint8_t *headers;
+    uint8_t *owned_headers;
+    const elf64_ehdr_t *ehdr;
+} elf_image_source_t;
+
+static void release_image_source(elf_image_source_t *source) {
+    if (!source) return;
+    if (source->owned_headers) kfree(source->owned_headers);
+    memset(source, 0, sizeof(*source));
+}
+
+static int image_source_read(const elf_image_source_t *source,
+                             uint64_t offset, void *buffer,
+                             uint64_t count) {
+    if (!source || (!buffer && count) || offset > source->size ||
+        count > source->size - offset)
+        return elf_fail("ELF source read out of range");
+    if (source->memory) {
+        if (count) memcpy(buffer, source->memory + offset, (size_t)count);
+        return 0;
+    }
+    uint64_t done = 0;
+    while (done < count) {
+        uint64_t remaining = count - done;
+        uint32_t chunk = remaining > 64U * 1024U ?
+                         64U * 1024U : (uint32_t)remaining;
+        int got = vfs_read(source->node, (uint32_t)(offset + done),
+                           (uint8_t *)buffer + done, chunk);
+        if (got != (int)chunk) return elf_fail("ELF source read failed");
+        done += chunk;
+    }
+    return 0;
+}
+
+static const elf64_phdr_t *image_source_phdr(
+    const elf_image_source_t *source, uint16_t index) {
+    if (!source || !source->ehdr || index >= source->ehdr->e_phnum)
+        return NULL;
+    return (const elf64_phdr_t *)(source->headers +
+        source->ehdr->e_phoff + index * source->ehdr->e_phentsize);
+}
+
+static uint64_t elf_segment_page_flags(uint32_t program_flags) {
+    uint64_t flags = VMM_P | VMM_U;
+    if (program_flags & PF_W) flags |= VMM_W;
+    if (!(program_flags & PF_X)) flags |= VMM_NX;
+    return flags;
+}
+
+static int protect_image_segments(const elf_image_source_t *source,
+                                  uint64_t load_bias) {
+    /* Start every load page read-only/non-executable, then union the PT_LOAD
+     * permissions for legitimately shared boundary pages. */
+    for (uint16_t i = 0; i < source->ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = image_source_phdr(source, i);
+        if (!ph || ph->p_type != PT_LOAD || !ph->p_memsz) continue;
+        uint64_t start = (load_bias + ph->p_vaddr) & PAGE_MASK;
+        uint64_t end = (load_bias + ph->p_vaddr + ph->p_memsz +
+                        PAGE_SIZE - 1) & PAGE_MASK;
+        for (uint64_t page = start; page < end; page += PAGE_SIZE) {
+            if (vmm_protect_page(page, VMM_P | VMM_U | VMM_NX) < 0)
+                return elf_fail("segment protection failed");
+        }
+    }
+    for (uint16_t i = 0; i < source->ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = image_source_phdr(source, i);
+        if (!ph || ph->p_type != PT_LOAD || !ph->p_memsz) continue;
+        uint64_t start = (load_bias + ph->p_vaddr) & PAGE_MASK;
+        uint64_t end = (load_bias + ph->p_vaddr + ph->p_memsz +
+                        PAGE_SIZE - 1) & PAGE_MASK;
+        for (uint64_t page = start; page < end; page += PAGE_SIZE) {
+            uint64_t flags = vmm_get_page_flags(page);
+            if (ph->p_flags & PF_W) flags |= VMM_W;
+            if (ph->p_flags & PF_X) flags &= ~VMM_NX;
+            if (vmm_protect_page(page, flags) < 0)
+                return elf_fail("segment protection failed");
+        }
+    }
+    return 0;
+}
+
+static int prepare_memory_source(const uint8_t *data, size_t size,
+                                 elf_image_source_t *source) {
+    memset(source, 0, sizeof(*source));
+    const elf64_ehdr_t *ehdr = NULL;
+    if (validate_elf64_headers(data, size, &ehdr) < 0) return -1;
+    source->memory = data;
+    source->size = size;
+    source->headers = data;
+    source->ehdr = ehdr;
+    return 0;
+}
+
+static int prepare_vfs_source(vfs_node_t *node,
+                              elf_image_source_t *source) {
+    memset(source, 0, sizeof(*source));
+    if (!node || node->type != VFS_NODE_FILE ||
+        node->size < sizeof(elf64_ehdr_t))
+        return elf_fail("ELF VFS file too small");
+    elf64_ehdr_t header;
+    if (vfs_read(node, 0, &header, sizeof(header)) != (int)sizeof(header))
+        return elf_fail("ELF VFS header read failed");
+    if (header.e_phnum == 0 ||
+        header.e_phentsize < sizeof(elf64_phdr_t) ||
+        header.e_phentsize > UINT64_MAX / (uint64_t)header.e_phnum)
+        return elf_fail("ELF VFS program headers invalid");
+    uint64_t table_size =
+        (uint64_t)header.e_phentsize * (uint64_t)header.e_phnum;
+    if (header.e_phoff > UINT64_MAX - table_size)
+        return elf_fail("ELF VFS program headers overflow");
+    uint64_t headers_size = header.e_phoff + table_size;
+    if (headers_size > node->size || headers_size > ELF_MAIN_HEADERS_MAX)
+        return elf_fail("ELF VFS headers too large");
+    source->owned_headers = (uint8_t *)kmalloc((size_t)headers_size);
+    if (!source->owned_headers)
+        return elf_fail("ELF VFS header allocation failed");
+    source->node = node;
+    source->size = node->size;
+    source->headers = source->owned_headers;
+    if (image_source_read(source, 0, source->owned_headers,
+                          headers_size) < 0 ||
+        validate_elf64_headers(source->headers, (size_t)headers_size,
+                               &source->ehdr) < 0) {
+        release_image_source(source);
+        return elf_fail("ELF VFS header invalid");
+    }
+    return 0;
+}
+
+typedef struct {
+    char path[ELF_INTERP_PATH_MAX];
+    vfs_node_t *node;
+    uint8_t *headers;
+    size_t headers_size;
+    const elf64_ehdr_t *ehdr;
+    uint64_t load_bias;
+    uint64_t entry;
+} elf_interpreter_t;
+
+static void release_interpreter(elf_interpreter_t *interpreter) {
+    if (!interpreter) return;
+    if (interpreter->headers) kfree(interpreter->headers);
+    memset(interpreter, 0, sizeof(*interpreter));
+}
+
+/*
+ * Resolve PT_INTERP before switching CR3.  Only the ELF/program headers are
+ * retained in the kernel heap; PT_LOAD bytes are streamed from the VFS into
+ * their final user mappings.  This keeps the hot exec path independent of
+ * the interpreter's total file size.
+ */
+static int prepare_interpreter(const elf_image_source_t *main_source,
+                               elf_interpreter_t *interpreter) {
+    memset(interpreter, 0, sizeof(*interpreter));
+    const elf64_ehdr_t *main_ehdr = main_source->ehdr;
+    const elf64_phdr_t *interp_ph = NULL;
+    for (uint16_t i = 0; i < main_ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = image_source_phdr(main_source, i);
+        if (!ph) return elf_fail("invalid main program header");
+        if (ph->p_type != PT_INTERP) continue;
+        if (interp_ph) return elf_fail("multiple PT_INTERP segments");
+        interp_ph = ph;
+    }
+    if (!interp_ph) return 0;
+    if (interp_ph->p_filesz < 2 ||
+        interp_ph->p_filesz > sizeof(interpreter->path) ||
+        interp_ph->p_offset > main_source->size ||
+        interp_ph->p_filesz > main_source->size - interp_ph->p_offset)
+        return elf_fail("invalid PT_INTERP path");
+
+    if (image_source_read(main_source, interp_ph->p_offset,
+                          interpreter->path, interp_ph->p_filesz) < 0)
+        return -1;
+    if (interpreter->path[interp_ph->p_filesz - 1] != '\0' ||
+        interpreter->path[0] != '/')
+        return elf_fail("invalid PT_INTERP path");
+
+    interpreter->node = vfs_lookup(interpreter->path);
+    if (!interpreter->node || interpreter->node->type != VFS_NODE_FILE)
+        return elf_fail("PT_INTERP file not found");
+    if (interpreter->node->size < sizeof(elf64_ehdr_t))
+        return elf_fail("PT_INTERP file too small");
+
+    elf64_ehdr_t header;
+    if (vfs_read(interpreter->node, 0, &header, sizeof(header)) !=
+        (int)sizeof(header))
+        return elf_fail("PT_INTERP header read failed");
+    if (header.e_phnum == 0 ||
+        header.e_phentsize < sizeof(elf64_phdr_t) ||
+        header.e_phentsize > UINT64_MAX / (uint64_t)header.e_phnum)
+        return elf_fail("PT_INTERP program headers invalid");
+    uint64_t table_size =
+        (uint64_t)header.e_phentsize * (uint64_t)header.e_phnum;
+    if (header.e_phoff > UINT64_MAX - table_size)
+        return elf_fail("PT_INTERP program headers overflow");
+    uint64_t headers_size = header.e_phoff + table_size;
+    if (headers_size > interpreter->node->size ||
+        headers_size > ELF_INTERP_HEADERS_MAX)
+        return elf_fail("PT_INTERP headers too large");
+
+    interpreter->headers = (uint8_t *)kmalloc((size_t)headers_size);
+    if (!interpreter->headers)
+        return elf_fail("PT_INTERP header allocation failed");
+    interpreter->headers_size = (size_t)headers_size;
+    if (vfs_read(interpreter->node, 0, interpreter->headers,
+                 (uint32_t)headers_size) != (int)headers_size ||
+        validate_elf64_headers(interpreter->headers,
+                               interpreter->headers_size,
+                               &interpreter->ehdr) < 0) {
+        release_interpreter(interpreter);
+        return elf_fail("PT_INTERP ELF header invalid");
+    }
+    if (interpreter->ehdr->e_type != ET_DYN) {
+        release_interpreter(interpreter);
+        return elf_fail("PT_INTERP is not ET_DYN");
+    }
+
+    uint64_t image_min = UINT64_MAX;
+    for (uint16_t i = 0; i < interpreter->ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = (const elf64_phdr_t *)(
+            interpreter->headers + interpreter->ehdr->e_phoff +
+            i * interpreter->ehdr->e_phentsize);
+        if (ph->p_type == PT_INTERP) {
+            release_interpreter(interpreter);
+            return elf_fail("nested PT_INTERP is unsupported");
+        }
+        if (ph->p_type == PT_LOAD && ph->p_memsz) {
+            uint64_t start = ph->p_vaddr & PAGE_MASK;
+            if (start < image_min) image_min = start;
+        }
+    }
+    if (image_min == UINT64_MAX || image_min > ELF_INTERP_BASE) {
+        release_interpreter(interpreter);
+        return elf_fail("PT_INTERP load address invalid");
+    }
+    interpreter->load_bias = ELF_INTERP_BASE - image_min;
+    if (interpreter->ehdr->e_entry >
+        UINT64_MAX - interpreter->load_bias) {
+        release_interpreter(interpreter);
+        return elf_fail("PT_INTERP entry overflow");
+    }
+    interpreter->entry = interpreter->load_bias + interpreter->ehdr->e_entry;
+    return 1;
+}
+
+static int map_interpreter_segments(elf_interpreter_t *interpreter) {
+    for (uint16_t i = 0; i < interpreter->ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = (const elf64_phdr_t *)(
+            interpreter->headers + interpreter->ehdr->e_phoff +
+            i * interpreter->ehdr->e_phentsize);
+        if (ph->p_type != PT_LOAD || ph->p_memsz == 0) continue;
+        if (ph->p_offset > interpreter->node->size ||
+            ph->p_filesz > (uint64_t)interpreter->node->size - ph->p_offset ||
+            ph->p_memsz < ph->p_filesz ||
+            ph->p_vaddr > UINT64_MAX - ph->p_memsz ||
+            ph->p_vaddr > UINT64_MAX - interpreter->load_bias)
+            return elf_fail("PT_INTERP segment invalid");
+
+        uint64_t segment_vaddr = interpreter->load_bias + ph->p_vaddr;
+        if (segment_vaddr > UINT64_MAX - ph->p_memsz ||
+            segment_vaddr + ph->p_memsz > UINT64_MAX - (PAGE_SIZE - 1))
+            return elf_fail("PT_INTERP segment overflow");
+        uint64_t va_start = segment_vaddr & PAGE_MASK;
+        uint64_t va_end = (segment_vaddr + ph->p_memsz + PAGE_SIZE - 1) &
+                          PAGE_MASK;
+        for (uint64_t va = va_start; va < va_end; va += PAGE_SIZE) {
+            /* Adjacent PT_LOAD segments may legitimately share one page. */
+            if (!vmm_get_phys(va) &&
+                !vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U | VMM_NX))
+                return elf_fail("PT_INTERP segment map failed");
+        }
+
+        uint64_t copied = 0;
+        while (copied < ph->p_filesz) {
+            uint64_t remaining = ph->p_filesz - copied;
+            uint32_t chunk = remaining > 64U * 1024U ?
+                             64U * 1024U : (uint32_t)remaining;
+            int got = vfs_read(interpreter->node,
+                               (uint32_t)(ph->p_offset + copied),
+                               (void *)(uintptr_t)(segment_vaddr + copied),
+                               chunk);
+            if (got != (int)chunk)
+                return elf_fail("PT_INTERP segment read failed");
+            copied += chunk;
+        }
+        if (ph->p_memsz > ph->p_filesz)
+            memset((void *)(uintptr_t)(segment_vaddr + ph->p_filesz), 0,
+                   (size_t)(ph->p_memsz - ph->p_filesz));
+    }
+    for (uint16_t i = 0; i < interpreter->ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = (const elf64_phdr_t *)(
+            interpreter->headers + interpreter->ehdr->e_phoff +
+            i * interpreter->ehdr->e_phentsize);
+        if (ph->p_type != PT_LOAD || !ph->p_memsz) continue;
+        uint64_t start = (interpreter->load_bias + ph->p_vaddr) & PAGE_MASK;
+        uint64_t end = (interpreter->load_bias + ph->p_vaddr + ph->p_memsz +
+                        PAGE_SIZE - 1) & PAGE_MASK;
+        for (uint64_t page = start; page < end; page += PAGE_SIZE) {
+            if (vmm_protect_page(page, VMM_P | VMM_U | VMM_NX) < 0)
+                return elf_fail("PT_INTERP protection failed");
+        }
+    }
+    for (uint16_t i = 0; i < interpreter->ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = (const elf64_phdr_t *)(
+            interpreter->headers + interpreter->ehdr->e_phoff +
+            i * interpreter->ehdr->e_phentsize);
+        if (ph->p_type != PT_LOAD || !ph->p_memsz) continue;
+        uint64_t start = (interpreter->load_bias + ph->p_vaddr) & PAGE_MASK;
+        uint64_t end = (interpreter->load_bias + ph->p_vaddr + ph->p_memsz +
+                        PAGE_SIZE - 1) & PAGE_MASK;
+        uint64_t segment_flags = elf_segment_page_flags(ph->p_flags);
+        for (uint64_t page = start; page < end; page += PAGE_SIZE) {
+            uint64_t flags = vmm_get_page_flags(page);
+            if (segment_flags & VMM_W) flags |= VMM_W;
+            if (!(segment_flags & VMM_NX)) flags &= ~VMM_NX;
+            if (vmm_protect_page(page, flags) < 0)
+                return elf_fail("PT_INTERP protection failed");
+        }
+    }
+    return 0;
+}
+
 static void push_user_u64(uintptr_t *sp, uint64_t value) {
     *sp -= sizeof(uint64_t);
     *(volatile uint64_t *)(*sp) = value;
@@ -214,32 +545,37 @@ static void attach_host_symtab(const uint8_t *data, size_t size,
     task_set_host_symtab(task_id, symtab_copy, strtab_copy, count);
 }
 
-static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
-                                         char *const argv[],
-                                         char *const envp[],
-                                         const char *task_name) {
-    const elf64_ehdr_t *ehdr = NULL;
-    if (validate_elf64_headers(data, size, &ehdr) < 0) return -1;
+static int elf64_load_source_and_spawn_snapshot(
+    const elf_image_source_t *source, char *const argv[],
+    char *const envp[], const char *task_name) {
+    if (!source || !source->ehdr) return elf_fail("missing ELF source");
+    const elf64_ehdr_t *ehdr = source->ehdr;
     elf_error = "ok";
 
     uint64_t load_bias = 0;
     uint64_t image_min = UINT64_MAX;
-    int has_interp = 0;
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-        const elf64_phdr_t *ph = (const elf64_phdr_t *)
-            (data + ehdr->e_phoff + i * ehdr->e_phentsize);
-        if (ph->p_type == PT_INTERP) has_interp = 1;
+        const elf64_phdr_t *ph = image_source_phdr(source, i);
+        if (!ph) return elf_fail("invalid main program header");
         if (ph->p_type == PT_LOAD && ph->p_memsz) {
             uint64_t start = ph->p_vaddr & PAGE_MASK;
             if (start < image_min) image_min = start;
         }
     }
-    if (has_interp)
-        return elf_fail("PT_INTERP dynamic loader not available");
-    if (image_min == UINT64_MAX) return elf_fail("missing load segment");
+    elf_interpreter_t interpreter;
+    int interpreter_status = prepare_interpreter(source, &interpreter);
+    if (interpreter_status < 0) return -1;
+    int has_interp = interpreter_status > 0;
+    if (image_min == UINT64_MAX) {
+        release_interpreter(&interpreter);
+        return elf_fail("missing load segment");
+    }
     if (ehdr->e_type == ET_DYN) {
         const uint64_t pie_base = 0x0000001100000000ULL;
-        if (image_min > pie_base) return elf_fail("PIE address overflow");
+        if (image_min > pie_base) {
+            release_interpreter(&interpreter);
+            return elf_fail("PIE address overflow");
+        }
         load_bias = pie_base - image_min;
     } else if (image_min < 0x100000000ULL) {
         /*
@@ -247,85 +583,84 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
          * conventional non-PIE Linux ET_EXEC at 0x400000 cannot safely be
          * overlaid until HBOS finishes its high-half kernel migration.
          */
+        release_interpreter(&interpreter);
         return elf_fail("low ET_EXEC conflicts with kernel; use PIE");
     }
 
     uint64_t old_pml4 = vmm_get_pml4();
     uint64_t app_pml4 = vmm_create_address_space();
-    if (!app_pml4) return elf_fail("address space create failed");
+    if (!app_pml4) {
+        release_interpreter(&interpreter);
+        return elf_fail("address space create failed");
+    }
     /* pml4 临时切换到 app_pml4 期间必须禁止抢占：否则 PIT(100Hz) 触发 →
      * task_schedule 把 pml4 换成别的任务 → 后续 memcpy 写进错误地址空间，
      * 应用的段/栈从未写入 app_pml4，一运行即缺页崩溃。 */
     task_preempt_disable();
     vmm_set_pml4(app_pml4);
 
-    uint16_t phnum     = ehdr->e_phnum;
-    uint16_t phentsize = ehdr->e_phentsize;
+#define ELF_NEW_IMAGE_FAIL(message) do { \
+        vmm_set_pml4(old_pml4); \
+        task_preempt_enable(); \
+        vmm_destroy_address_space(app_pml4); \
+        release_interpreter(&interpreter); \
+        return elf_fail(message); \
+    } while (0)
 
+    uint16_t phnum     = ehdr->e_phnum;
     for (uint16_t i = 0; i < phnum; i++) {
-        const elf64_phdr_t *ph = (const elf64_phdr_t *)
-            (data + ehdr->e_phoff + i * phentsize);
+        const elf64_phdr_t *ph = image_source_phdr(source, i);
+        if (!ph) ELF_NEW_IMAGE_FAIL("invalid main program header");
 
         if (ph->p_type != PT_LOAD) continue;
-        if (ph->p_offset > (uint64_t)size ||
-            ph->p_filesz > (uint64_t)size - ph->p_offset ||
+        if (ph->p_offset > source->size ||
+            ph->p_filesz > source->size - ph->p_offset ||
             ph->p_memsz < ph->p_filesz ||
             ph->p_vaddr + ph->p_memsz < ph->p_vaddr) {
-            vmm_set_pml4(old_pml4);
-            task_preempt_enable();
-            vmm_destroy_address_space(app_pml4);
-            return elf_fail("segment out of file");
+            ELF_NEW_IMAGE_FAIL("segment out of file");
         }
         if (ph->p_memsz == 0) continue;
 
         uint64_t segment_vaddr = load_bias + ph->p_vaddr;
         if (segment_vaddr < ph->p_vaddr) {
-            vmm_set_pml4(old_pml4);
-            task_preempt_enable();
-            vmm_destroy_address_space(app_pml4);
-            return elf_fail("segment relocation overflow");
+            ELF_NEW_IMAGE_FAIL("segment relocation overflow");
         }
         if (ph->p_memsz > UINT64_MAX - segment_vaddr) {
-            vmm_set_pml4(old_pml4);
-            task_preempt_enable();
-            vmm_destroy_address_space(app_pml4);
-            return elf_fail("segment address overflow");
+            ELF_NEW_IMAGE_FAIL("segment address overflow");
         }
         uint64_t mem_end = segment_vaddr + ph->p_memsz;
         if (mem_end > UINT64_MAX - (PAGE_SIZE - 1)) {
-            vmm_set_pml4(old_pml4);
-            task_preempt_enable();
-            vmm_destroy_address_space(app_pml4);
-            return elf_fail("segment address overflow");
+            ELF_NEW_IMAGE_FAIL("segment address overflow");
         }
         uint64_t va_start = segment_vaddr & PAGE_MASK;
         uint64_t va_end   = (mem_end + PAGE_SIZE - 1) & PAGE_MASK;
 
         for (uint64_t va = va_start; va < va_end; va += PAGE_SIZE) {
-            if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) {
-                vmm_set_pml4(old_pml4);
-                task_preempt_enable();
-                vmm_destroy_address_space(app_pml4);
-                return elf_fail("segment map failed");
+            if (!vmm_get_phys(va) &&
+                !vmm_alloc_page_at(
+                    va, VMM_P | VMM_W | VMM_U | VMM_NX)) {
+                ELF_NEW_IMAGE_FAIL("segment map failed");
             }
         }
 
-        if (ph->p_filesz > 0)
-            memcpy((void *)(uintptr_t)segment_vaddr,
-                   data + ph->p_offset, ph->p_filesz);
+        if (ph->p_filesz > 0 &&
+            image_source_read(source, ph->p_offset,
+                              (void *)(uintptr_t)segment_vaddr,
+                              ph->p_filesz) < 0)
+            ELF_NEW_IMAGE_FAIL(elf64_last_error());
 
         if (ph->p_memsz > ph->p_filesz)
             memset((void *)(uintptr_t)(segment_vaddr + ph->p_filesz),
                    0, ph->p_memsz - ph->p_filesz);
     }
 
-    if (ehdr->e_type == ET_DYN) {
+    if (ehdr->e_type == ET_DYN && !has_interp) {
         elf64_rela_t *rela = NULL;
         uint64_t rela_size = 0;
         uint64_t rela_entry = sizeof(elf64_rela_t);
         for (uint16_t i = 0; i < phnum; i++) {
-            const elf64_phdr_t *ph = (const elf64_phdr_t *)
-                (data + ehdr->e_phoff + i * phentsize);
+            const elf64_phdr_t *ph = image_source_phdr(source, i);
+            if (!ph) ELF_NEW_IMAGE_FAIL("invalid main program header");
             if (ph->p_type != PT_DYNAMIC) continue;
             elf64_dyn_t *dynamic =
                 (elf64_dyn_t *)(uintptr_t)(load_bias + ph->p_vaddr);
@@ -343,20 +678,14 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
         }
         if (rela && rela_size) {
             if (rela_entry != sizeof(elf64_rela_t)) {
-                vmm_set_pml4(old_pml4);
-                task_preempt_enable();
-                vmm_destroy_address_space(app_pml4);
-                return elf_fail("unsupported PIE relocation size");
+                ELF_NEW_IMAGE_FAIL("unsupported PIE relocation size");
             }
             uint64_t count = rela_size / rela_entry;
             for (uint64_t i = 0; i < count; i++) {
                 uint32_t type = (uint32_t)ELF64_R_TYPE(rela[i].r_info);
                 if (type == R_X86_64_NONE) continue;
                 if (type != R_X86_64_RELATIVE) {
-                    vmm_set_pml4(old_pml4);
-                    task_preempt_enable();
-                    vmm_destroy_address_space(app_pml4);
-                    return elf_fail("unresolved PIE relocation");
+                    ELF_NEW_IMAGE_FAIL("unresolved PIE relocation");
                 }
                 uint64_t location = load_bias + rela[i].r_offset;
                 *(uint64_t *)(uintptr_t)location =
@@ -365,22 +694,22 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
         }
     }
 
+    if (has_interp && map_interpreter_segments(&interpreter) < 0)
+        ELF_NEW_IMAGE_FAIL(elf64_last_error());
+
+    if (protect_image_segments(source, load_bias) < 0)
+        ELF_NEW_IMAGE_FAIL(elf64_last_error());
+
     for (uint64_t va = USER_STACK_BASE; va < USER_STACK_TOP; va += PAGE_SIZE) {
-        if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U)) {
-            vmm_set_pml4(old_pml4);
-            task_preempt_enable();
-            vmm_destroy_address_space(app_pml4);
-            return elf_fail("stack map failed");
+        if (!vmm_alloc_page_at(va, VMM_P | VMM_W | VMM_U | VMM_NX)) {
+            ELF_NEW_IMAGE_FAIL("stack map failed");
         }
     }
 
     int argc = count_strs_limited(argv, ELF_ARG_MAX);
     int envc = count_strs_limited(envp, ELF_ENV_MAX);
     if (argc < 0 || envc < 0) {
-        vmm_set_pml4(old_pml4);
-        task_preempt_enable();
-        vmm_destroy_address_space(app_pml4);
-        return elf_fail("too many args");
+        ELF_NEW_IMAGE_FAIL("too many args");
     }
 
     size_t total_strs = 0;
@@ -391,10 +720,7 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
         (size_t)(1 + envc + 1 + argc + 1) * sizeof(uint64_t) +
         aux_pairs * 2 * sizeof(uint64_t);
     if (total_strs + ptr_bytes + 64 > USER_STACK_SIZE) {
-        vmm_set_pml4(old_pml4);
-        task_preempt_enable();
-        vmm_destroy_address_space(app_pml4);
-        return elf_fail("args too large");
+        ELF_NEW_IMAGE_FAIL("args too large");
     }
 
     uint8_t *sp = (uint8_t *)(uintptr_t)USER_STACK_TOP;
@@ -425,8 +751,10 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
     uint32_t tsc_low, tsc_high;
     __asm__ volatile("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
     uint64_t random_a = ((uint64_t)tsc_high << 32) | tsc_low;
-    uint64_t random_b = random_a ^ (uint64_t)(uintptr_t)data ^
-                        ((uint64_t)size << 17);
+    uint64_t source_identity = (uint64_t)(uintptr_t)(
+        source->memory ? (const void *)source->memory :
+                         (const void *)source->node);
+    uint64_t random_b = random_a ^ source_identity ^ (source->size << 17);
     memcpy(random_bytes, &random_a, sizeof(random_a));
     memcpy(random_bytes + sizeof(random_a), &random_b, sizeof(random_b));
 
@@ -438,8 +766,8 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
 
     uint64_t phdr_address = 0;
     for (uint16_t i = 0; i < phnum; i++) {
-        const elf64_phdr_t *ph = (const elf64_phdr_t *)
-            (data + ehdr->e_phoff + i * phentsize);
+        const elf64_phdr_t *ph = image_source_phdr(source, i);
+        if (!ph) ELF_NEW_IMAGE_FAIL("invalid main program header");
         if (ph->p_type == PT_PHDR) {
             phdr_address = load_bias + ph->p_vaddr;
             break;
@@ -484,7 +812,7 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
     PUSH_AUX(AT_EUID, 0);
     PUSH_AUX(AT_UID, 0);
     PUSH_AUX(AT_ENTRY, load_bias + ehdr->e_entry);
-    PUSH_AUX(AT_BASE, 0);
+    PUSH_AUX(AT_BASE, has_interp ? interpreter.load_bias : 0);
     PUSH_AUX(AT_PAGESZ, PAGE_SIZE);
     PUSH_AUX(AT_PHNUM, ehdr->e_phnum);
     PUSH_AUX(AT_PHENT, ehdr->e_phentsize);
@@ -507,16 +835,21 @@ static int elf64_load_and_spawn_snapshot(const uint8_t *data, size_t size,
     task_preempt_enable();
 
     int new_id = task_create_ring3_full(task_name ? task_name : "elf_app",
-                                        load_bias + ehdr->e_entry, user_rsp,
+                                        has_interp ? interpreter.entry :
+                                            load_bias + ehdr->e_entry,
+                                        user_rsp,
                                         (uint64_t)argc, user_argv, app_pml4);
+    release_interpreter(&interpreter);
     if (new_id < 0) {
-        vmm_destroy_address_space(app_pml4);
         return elf_fail("task create failed");
     }
 
-    attach_host_symtab(data, size, ehdr, (uint32_t)new_id);
+    if (source->memory)
+        attach_host_symtab(source->memory, (size_t)source->size, ehdr,
+                           (uint32_t)new_id);
 
     return new_id;
+#undef ELF_NEW_IMAGE_FAIL
 }
 
 int elf64_load_and_spawn(const uint8_t *data, size_t size,
@@ -536,8 +869,14 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
         kfree(snapshot);
         return elf_fail("invalid or oversized arguments");
     }
-    int result = elf64_load_and_spawn_snapshot(
-        data, size, snapshot->argv, snapshot->envp, task_name);
+    elf_image_source_t source;
+    if (prepare_memory_source(data, size, &source) < 0) {
+        kfree(snapshot);
+        return -1;
+    }
+    int result = elf64_load_source_and_spawn_snapshot(
+        &source, snapshot->argv, snapshot->envp, task_name);
+    release_image_source(&source);
     kfree(snapshot);
     return result;
 }
@@ -545,6 +884,30 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
 int elf64_load_and_exec(const uint8_t *data, size_t size,
                         char *const argv[], char *const envp[]) {
     int new_id = elf64_load_and_spawn(data, size, argv, envp, "elf_app");
+    if (new_id < 0) return -1;
+    task_exit();
+    return 0;
+}
+
+int elf64_load_vfs_and_exec(struct vfs_node *node,
+                            char *const argv[], char *const envp[]) {
+    elf_arg_snapshot_t *snapshot =
+        (elf_arg_snapshot_t *)kmalloc(sizeof(*snapshot));
+    if (!snapshot) return elf_fail("argument snapshot allocation failed");
+    if (snapshot_exec_arguments(argv, envp, snapshot) < 0) {
+        kfree(snapshot);
+        return elf_fail("invalid or oversized arguments");
+    }
+
+    elf_image_source_t source;
+    if (prepare_vfs_source((vfs_node_t *)node, &source) < 0) {
+        kfree(snapshot);
+        return -1;
+    }
+    int new_id = elf64_load_source_and_spawn_snapshot(
+        &source, snapshot->argv, snapshot->envp, "elf_app");
+    release_image_source(&source);
+    kfree(snapshot);
     if (new_id < 0) return -1;
     task_exit();
     return 0;

@@ -20,6 +20,11 @@ uint64_t pmm_alloc_page(void);
 // Free a physical page previously returned by pmm_alloc_page
 void pmm_free_page(uint64_t phys_addr);
 
+// Add/release/query references to a PMM page.  A page is returned to the
+// bitmap only when its last reference is released.
+int pmm_retain_page(uint64_t phys_addr);
+uint16_t pmm_page_refcount(uint64_t phys_addr);
+
 // Allocate a contiguous region of physical pages
 // Returns physical base address
 uint64_t pmm_alloc_blocks(size_t count);

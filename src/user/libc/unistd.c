@@ -22,9 +22,26 @@ char *getcwd(char *buf, size_t size) {
     return buf;
 }
 
+int chdir(const char *path) {
+    long ret = __syscall1(HBOS_SYS_CHDIR, (long)path);
+    return (int)__syscall_errno(ret);
+}
+
 int unlink(const char *path) {
     long ret = __syscall1(HBOS_SYS_UNLINK, (long)path);
     return (int)__syscall_errno(ret);
+}
+
+int symlink(const char *target, const char *linkpath) {
+    long ret = __syscall3(HBOS_SYS_SYMLINK, (long)target,
+                          (long)linkpath, 0);
+    return (int)__syscall_errno(ret);
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    long ret = __syscall3(HBOS_SYS_READLINK, (long)path,
+                          (long)buf, (long)bufsiz);
+    return (ssize_t)__syscall_errno(ret);
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
@@ -92,10 +109,9 @@ int isatty(int fd) {
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    (void)oldpath;
-    (void)newpath;
-    errno = EXDEV;
-    return -1;
+    long ret = __syscall3(HBOS_SYS_RENAME, (long)oldpath,
+                          (long)newpath, 0);
+    return (int)__syscall_errno(ret);
 }
 
 int hax_app_exists(const char *name) {
