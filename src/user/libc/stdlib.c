@@ -228,3 +228,50 @@ char *getenv(const char *name) {
     (void)name;
     return 0;
 }
+/* quickjs calls glibc's malloc_usable_size for memory accounting.  HBOS's
+ * heap (see src/user/libc/string.c? no - stdlib.c heap) does not expose
+ * block sizes, so report 0: quickjs treats that as "unknown" and keeps
+ * correct accounting through its own headers. */
+size_t malloc_usable_size(void *ptr) {
+    (void)ptr;
+    return 0;
+}
+
+/* 128-bit unsigned division helpers (libgcc replacements).  quickjs's
+ * bignum/int128 paths generate these calls; HBOS user programs link no
+ * libgcc, so provide a simple binary long-division implementation. */
+typedef unsigned __int128 hbos_u128;
+
+static void hbos_udivmod128(hbos_u128 n, hbos_u128 d, hbos_u128 *q,
+                            hbos_u128 *r) {
+    hbos_u128 qq = 0, rr = 0;
+    if (d == 0) {
+        *q = 0;
+        *r = 0;
+        return;
+    }
+    for (int i = 127; i >= 0; i--) {
+        rr = (rr << 1) | ((n >> i) & 1);
+        if (rr >= d) {
+            rr -= d;
+            qq |= (hbos_u128)1 << i;
+        }
+    }
+    *q = qq;
+    *r = rr;
+}
+
+unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b) {
+    hbos_u128 q, r;
+    hbos_udivmod128(a, b, &q, &r);
+    (void)r;
+    return q;
+}
+
+unsigned __int128 __udivmodti4(unsigned __int128 a, unsigned __int128 b,
+                               unsigned __int128 *rem) {
+    hbos_u128 q, r;
+    hbos_udivmod128(a, b, &q, &r);
+    if (rem) *rem = r;
+    return q;
+}

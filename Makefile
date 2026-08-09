@@ -310,7 +310,8 @@ ifeq ($(HBOS_BUNDLE_APPS),1)
 HAX_APP_SRCS = $(wildcard $(APP_DIR)/*.c)
 HAX_APP_BINS = $(HAX_APP_SRCS:$(APP_DIR)/%.c=$(BUILD_DIR)/app/%.hax)
 HAX_PREBUILT = $(wildcard $(APP_DIR)/*.hax)
-HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax $(BUSYBOX_HAX)
+HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax \
+	$(BUILD_DIR)/app/js.hax $(BUSYBOX_HAX)
 ifeq ($(HBOS_COMPAT_SMOKE),1)
 HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
 	$(BUILD_DIR)/tests/linux_clone3.hax \
@@ -1147,6 +1148,48 @@ $(BUILD_DIR)/app/%.hax: $(APP_DIR)/%.c $(wildcard $(APP_DIR)/include/*.h) $(USER
 # -mno-{80387,mmx,sse,sse2} every other .hax app builds with. See
 # third_party/tinycc/README.md for why, and the known FPU-context-switch
 # risk that trade-off carries.
+# ── quickjs (vendored third_party/quickjs) + musl libm subset ──────
+# The `js` command evaluates scripts at ring3 (used by the compat smoke
+# suite).  quickjs and the musl-math double-precision files need real SSE2
+# like TinyCC (see the TCC_CFLAGS comment below for the FPU trade-off);
+# the rest of the .hax apps build with -mno-* via USER_CFLAGS.
+QJS_DIR = third_party/quickjs
+MUSL_MATH_DIR = third_party/musl-math
+QJS_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+             -mno-red-zone -O2 -Wall -Wextra -MMD -MP \
+             -I$(SRC_DIR)/user/libc -I$(QJS_DIR) -I$(MUSL_MATH_DIR) \
+             -DCONFIG_VERSION=\"QuickJS-HBOS\"
+
+QJS_CORE_SRCS = $(QJS_DIR)/quickjs.c $(QJS_DIR)/libregexp.c \
+	$(QJS_DIR)/libunicode.c $(QJS_DIR)/dtoa.c $(QJS_DIR)/cutils.c
+MUSL_MATH_SRCS = $(wildcard $(MUSL_MATH_DIR)/*.c)
+
+-include $(QJS_CORE_SRCS:$(QJS_DIR)/%.c=$(BUILD_DIR)/quickjs/%.d)
+-include $(MUSL_MATH_SRCS:$(MUSL_MATH_DIR)/%.c=$(BUILD_DIR)/quickjs/math/%.d)
+-include $(BUILD_DIR)/quickjs/hbos_js.d
+
+$(BUILD_DIR)/quickjs/%.o: $(QJS_DIR)/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(QJS_CFLAGS) $< -o $@
+
+$(BUILD_DIR)/quickjs/math/%.o: $(MUSL_MATH_DIR)/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(QJS_CFLAGS) -Wno-overflow -Wno-parentheses -Wno-sign-compare \
+		$< -o $@
+
+$(BUILD_DIR)/quickjs/hbos_js.o: $(QJS_DIR)/hbos_js.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(QJS_CFLAGS) $< -o $@
+
+QJS_OBJS = $(QJS_CORE_SRCS:$(QJS_DIR)/%.c=$(BUILD_DIR)/quickjs/%.o) \
+	$(MUSL_MATH_SRCS:$(MUSL_MATH_DIR)/%.c=$(BUILD_DIR)/quickjs/math/%.o) \
+	$(BUILD_DIR)/quickjs/hbos_js.o
+
+$(BUILD_DIR)/app/js.hax: $(QJS_OBJS) $(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(QJS_OBJS) -o $@
+	@echo "✓ hax app: $@ (quickjs)"
+
 TCC_DIR = third_party/tinycc
 TCC_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
              -mno-red-zone -O2 -Wall -MMD -MP \

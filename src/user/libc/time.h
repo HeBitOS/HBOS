@@ -2,6 +2,16 @@
 #define HBOS_USER_LIBC_TIME_H
 
 typedef long time_t;
+typedef int clockid_t;
+
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+
+struct timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
 
 /* Seconds since boot (approximate, RDTSC-based — see HBOS_SYS_GETTOD in
  * src/syscall.c). Not wall-clock time; good enough for callers that just
@@ -18,10 +28,13 @@ struct tm {
     int tm_wday;  /* 0-6, Sunday = 0 */
     int tm_yday;
     int tm_isdst;
+    long tm_gmtoff;   /* seconds east of UTC (HBOS: always 0) */
 };
 
 /* Treats *timer as if it were UTC (HBOS has no timezone concept) —
  * TinyCC's only use of this is cosmetic __DATE__/__TIME__ macro text. */
 struct tm *localtime(const time_t *timer);
+struct tm *localtime_r(const time_t *timer, struct tm *result);
+int clock_gettime(clockid_t clockid, struct timespec *tp);
 
 #endif

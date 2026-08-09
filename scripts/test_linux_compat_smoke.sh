@@ -85,7 +85,7 @@ run_guest() {
 if [[ -n "${HBOS_COMPAT_TESTS:-}" ]]; then
     read -r -a tests <<<"$HBOS_COMPAT_TESTS"
 else
-    tests=(linux_syscall linux_pie linux_dynamic linux_abi linux_signal linux_signal_siginfo linux_mprotect linux_mmap_reclaim linux_file_mmap linux_process_abi linux_dlopen linux_dlopen_deps linux_compat_thread linux_clone3 linux_epoll_et linux_inotify)
+    tests=(linux_syscall linux_pie linux_dynamic linux_abi linux_signal linux_signal_siginfo linux_js linux_mprotect linux_mmap_reclaim linux_file_mmap linux_process_abi linux_dlopen linux_dlopen_deps linux_compat_thread linux_clone3 linux_epoll_et linux_inotify)
     if [[ "${HBOS_MUSL_SMOKE:-0}" == "1" ]]; then
         tests=(linux_musl_stream linux_musl_pthread "${tests[@]}")
     fi
@@ -105,6 +105,7 @@ for test in "${tests[@]}"; do
         linux_abi) expected="LINUX_ABI: PASS" ;;
         linux_signal) expected="LINUX_SIGNAL: PASS" ;;
         linux_signal_siginfo) expected="LINUX_SIGNAL_SIGINFO: PASS" ;;
+        linux_js) expected="LINUX_JS: PASS" ;;
         linux_mprotect) expected="LINUX_MPROTECT: PASS" ;;
         linux_mmap_reclaim) expected="LINUX_MMAP_RECLAIM: PASS" ;;
         linux_file_mmap) expected="LINUX_FILE_MMAP: PASS" ;;
@@ -117,7 +118,11 @@ for test in "${tests[@]}"; do
         linux_inotify) expected="LINUX_INOTIFY: PASS" ;;
         *) echo "Unknown compatibility test: $test" >&2; exit 2 ;;
     esac
-    if run_guest "$test" "run $test" "$expected"; then
+    case "$test" in
+        linux_js) command="run js -t" ;;
+        *) command="run $test" ;;
+    esac
+    if run_guest "$test" "$command" "$expected"; then
         :
     else
         result=1

@@ -9,6 +9,18 @@ time_t time(time_t *tloc) {
     return (time_t)tv.tv_sec;
 }
 
+static struct tm g_localtime_tm;
+
+struct tm *localtime_r(const time_t *timer, struct tm *result) {
+    /* HBOS has no timezone: treat as UTC (same as localtime). */
+    return localtime(timer), result ? result : &g_localtime_tm;
+}
+
+int clock_gettime(clockid_t clockid, struct timespec *tp) {
+    if (!tp) return -1;
+    return (int)__syscall3(HBOS_SYS_CLOCK_GETTIME, (long)clockid, (long)tp, 0);
+}
+
 int gettimeofday(struct timeval *tv, void *tz) {
     (void)tz;
     if (!tv) return -1;

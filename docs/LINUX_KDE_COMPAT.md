@@ -59,6 +59,7 @@ HBOS 原生 fd / task / VFS / socket / HIVE
 | `epoll_create1/ctl/wait` | 可用初版 | 复用原生 fd，就绪扫描无额外复制 |
 | `inotify_init1/add_watch/rm_watch` | 可用初版 | 原生 syscall 253/254/255/294；创建、修改、删除、自删除、`IN_IGNORED`、`IN_MOVED_FROM/TO` 同 cookie、`IN_MOVE_SELF`、文件及目录后代 watch 改名跟随、非阻塞读及 poll/epoll 就绪已由 QEMU 验证 |
 | `futex` | 可用初版 | 支持 `WAIT`/`WAKE`、bitset、private 标志；真实 musl condvar/rwlock/once 与超时已通过 |
+| quickjs JS 运行时 | 可用初版 | vendored quickjs + musl libm 子集编译为 `js.hax`（ring3，真实 SSE2 浮点）；`run js -e <code>` / `js <file>` 执行脚本，`-t` 内置 13 项自测（算术/Math/字符串/数组/JSON/递归/异常/Date/dtoa）输出 `LINUX_JS: PASS`。已修复初始栈 ABI 对齐（main 入口 rsp≡8 mod 16），SSE2 应用不再因 movdqa 错位 GPF。为浏览器 `<script>` 执行铺路 |
 | `sched_yield` | 可用 | 直接进入 HBOS 调度器 |
 | `getrandom` | 可用初版 | 使用 CPU RDRAND；不可用时明确返回 `ENOSYS` |
 | `clone` / `clone3` / TLS / TID | 可用初版 | 共享 VM/fd/mm、`CLONE_SETTLS`、child TID 清理、futex wake、两种原生子返回上下文，以及真实 musl pthread 与 `dlopen` 库 General Dynamic TLS |

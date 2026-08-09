@@ -761,7 +761,11 @@ static int elf64_load_source_and_spawn_snapshot(
     sp = (uint8_t *)((uintptr_t)sp & ~15ULL);
 
     uintptr_t stack_addr = (uintptr_t)sp;
-    if (((35 + argc + envc) & 1) != 0)
+    /* SysV ABI: main() entry has rsp % 16 == 8 (as if entered by call).
+     * The padding keeps the total push count odd so the stack lands at
+     * 8 mod 16; SSE2 programs (quickjs/tinycc) fault on misaligned movdqa
+     * otherwise.  Plain -mno-sse apps are alignment-agnostic. */
+    if (((35 + argc + envc) & 1) == 0)
         push_user_u64(&stack_addr, 0);
 
     uint64_t phdr_address = 0;
