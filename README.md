@@ -47,6 +47,15 @@ sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin \
   python3 python3-pil
 ```
 
+Arch linux:
+
+```bash
+sudo pacman -Sy
+sudo pacman -S --needed base-devel nasm grub xorriso mtools dosfstools \
+  qemu-system-x86 qemu-img edk2-ovmf python python-pillow
+```
+
+
 Windows 推荐使用 WSL2 + Ubuntu。仓库也提供
 `scripts/build-windows.ps1` 和 `scripts/build-windows.cmd` 作为入口。
 
