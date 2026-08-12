@@ -184,13 +184,10 @@ HBOS、HIVE 与应用遵循以下依赖方向：
 
 ```mermaid
 graph TD
-    App["应用 (Applications)"] -->|依赖| SDK["HAX / HIVE SDK"]
-    SDK -->|依赖| HIVE["HIVE"]
-    HIVE -->|依赖| Service["HBOS Kernel UAPI / gui_service"]
-    Service -->|依赖| Core["HBOS Core"]
-
-    style Core fill:#f9f9f9,stroke:#333,stroke-width:2px
-    note1["HBOS Core 保持独立<br/>不依赖具体 GUI 或应用"] -.-> Core
+    App["应用 (Apps)"] --> SDK["HAX / HIVE SDK"]
+    SDK --> HIVE["HIVE"]
+    HIVE --> UAPI["HBOS Kernel UAPI / gui_service"]
+    UAPI --> Core["HBOS Core<br/>(不依赖具体 GUI 或应用)"]
 
 
 | 变体 | 命令 | HIVE | 内嵌应用 |
