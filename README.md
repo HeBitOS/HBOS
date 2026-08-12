@@ -188,7 +188,7 @@ graph TD
     SDK --> HIVE["HIVE"]
     HIVE --> UAPI["HBOS Kernel UAPI / gui_service"]
     UAPI --> Core["HBOS Core<br/>(不依赖具体 GUI 或应用)"]
-
+```
 
 | 变体 | 命令 | HIVE | 内嵌应用 |
 |---|---|---:|---:|
