@@ -182,11 +182,16 @@ framebuffer、窗口管理器或桌面私有状态。
 
 HBOS、HIVE 与应用遵循以下依赖方向：
 
-```text
-应用 → HAX / HIVE SDK
-HIVE → HBOS Kernel UAPI / gui_service
-HBOS Core → 不依赖具体 GUI 或应用
-```
+```mermaid
+graph TD
+    App["应用 (Applications)"] -->|依赖| SDK["HAX / HIVE SDK"]
+    SDK -->|依赖| HIVE["HIVE"]
+    HIVE -->|依赖| Service["HBOS Kernel UAPI / gui_service"]
+    Service -->|依赖| Core["HBOS Core"]
+
+    style Core fill:#f9f9f9,stroke:#333,stroke-width:2px
+    note1["HBOS Core 保持独立<br/>不依赖具体 GUI 或应用"] -.-> Core
+
 
 | 变体 | 命令 | HIVE | 内嵌应用 |
 |---|---|---:|---:|
