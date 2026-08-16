@@ -1010,29 +1010,30 @@ struct flanterm_context *flanterm_fb_init(
     if (default_bg != NULL) {
         ctx->default_bg = convert_colour(_ctx, *default_bg);
     } else {
-        ctx->default_bg = 0x00000000; // background (black)
+        /* 浅色控制台：白底深字，省墨（黑底大面积黑墨）。 */
+        ctx->default_bg = 0x00ffffff;
     }
 
     if (default_fg != NULL) {
         ctx->default_fg = convert_colour(_ctx, *default_fg);
     } else {
-        ctx->default_fg = convert_colour(_ctx, 0x00aaaaaa); // foreground (grey)
+        ctx->default_fg = convert_colour(_ctx, 0x00333333); // dark grey
     }
 
     if (default_bg_bright != NULL) {
         ctx->default_bg_bright = convert_colour(_ctx, *default_bg_bright);
     } else {
-        ctx->default_bg_bright = convert_colour(_ctx, 0x00555555); // background (black)
+        ctx->default_bg_bright = 0x00ffffff;
     }
 
     if (default_fg_bright != NULL) {
         ctx->default_fg_bright = convert_colour(_ctx, *default_fg_bright);
     } else {
-        ctx->default_fg_bright = convert_colour(_ctx, 0x00ffffff); // foreground (grey)
+        ctx->default_fg_bright = convert_colour(_ctx, 0x00333333);
     }
 
     ctx->text_fg = ctx->default_fg;
-    ctx->text_bg = 0xffffffff;
+    ctx->text_bg = 0x00ffffff;
 
     ctx->framebuffer = (void *)framebuffer;
     ctx->width       = width;

@@ -3268,9 +3268,15 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     int box_w = win_w - 20 - sb_w - 4;
     int box_h = win_h - 74;
 
-    // Flat Breeze terminal surface.
-    rect(box_x, box_y, box_w, box_h, rgb(27, 30, 33));
-    border(box_x, box_y, box_w, box_h, rgb(60, 64, 69));
+    // Flat Breeze terminal surface. 跟随浅色/深色主题。
+    int light = st->theme_light;
+    uint32_t term_bg  = light ? rgb(243, 245, 248) : rgb(27, 30, 33);
+    uint32_t term_bd  = light ? rgb(188, 194, 202) : rgb(60, 64, 69);
+    uint32_t term_fg  = light ? rgb(38, 44, 52)    : rgb(220, 226, 232);
+    uint32_t term_dim = light ? rgb(118, 128, 140) : rgb(160, 167, 173);
+    uint32_t term_prompt = light ? rgb(16, 110, 60) : rgb(39, 174, 96);
+    rect(box_x, box_y, box_w, box_h, term_bg);
+    border(box_x, box_y, box_w, box_h, term_bd);
 
     int row_h = MONO_GLYPH_H + 2;          // 8x16 console font + 2px leading
     int input_y = box_y + box_h - 24;
@@ -3297,13 +3303,13 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
     int start_y = box_y + 12;
     for (uint32_t i = start_idx; i < st->console_line_count && start_y < input_y; i++) {
         const char *line = st->console_history[i];
-        uint32_t color = cyber_text(0);
+        uint32_t color = term_fg;
         if (strncmp(line, "hbos_gui_shell:", 15) == 0) {
-            color = rgb(39, 174, 96);
+            color = term_prompt;
         } else if (strncmp(line, "hbos_shell:", 11) == 0) {
-            color = rgb(218, 68, 83);
+            color = light ? rgb(176, 48, 58) : rgb(218, 68, 83);
         } else if (strncmp(line, "  ", 2) == 0) {
-            color = rgb(160, 167, 173);
+            color = term_dim;
         }
         text_mono(box_x + 12, start_y, max_x, line, color);
         start_y += row_h;
@@ -3311,30 +3317,30 @@ static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st)
 
     // 绘制当前输入行（固定 8px 等宽 cell，光标按 cell 对齐）
     const char *prompt = "hbos_gui_shell:/# ";
-    int px = text_mono(box_x + 12, input_y, max_x, prompt, rgb(39, 174, 96));
-    text_mono(px, input_y, max_x, st->console_input, cyber_text(0));
+    int px = text_mono(box_x + 12, input_y, max_x, prompt, term_prompt);
+    text_mono(px, input_y, max_x, st->console_input, term_fg);
 
     // 闪烁光标（细竖线 caret）
     static uint32_t cursor_ticks = 0;
     cursor_ticks++;
     if ((cursor_ticks / 15) % 2) {
         int cursor_x = px + (int)st->console_cursor * MONO_GLYPH_W;
-        rect(cursor_x, input_y, 2, MONO_GLYPH_H - 2, rgb(39, 174, 96));
+        rect(cursor_x, input_y, 2, MONO_GLYPH_H - 2, term_prompt);
     }
 
     // 垂直滚动条
     int sb_x = box_x + box_w + 4;
     int sb_y = box_y;
     int sb_h = box_h;
-    rect(sb_x, sb_y, sb_w, sb_h, rgb(22, 26, 30));
-    border(sb_x, sb_y, sb_w, sb_h, rgb(50, 58, 65));
+    rect(sb_x, sb_y, sb_w, sb_h, light ? rgb(232, 236, 241) : rgb(22, 26, 30));
+    border(sb_x, sb_y, sb_w, sb_h, light ? rgb(196, 202, 210) : rgb(50, 58, 65));
     if (max_scroll > 0) {
         int thumb_h = sb_h * max_lines / (total > 0 ? total : 1);
         if (thumb_h < 16) thumb_h = 16;
         if (thumb_h > sb_h) thumb_h = sb_h;
         int thumb_range = sb_h - thumb_h;
         int thumb_y = sb_y + thumb_range - (thumb_range * st->console_scroll / max_scroll);
-        rect(sb_x + 2, thumb_y + 1, sb_w - 4, thumb_h - 2, rgb(61, 174, 233));
+        rect(sb_x + 2, thumb_y + 1, sb_w - 4, thumb_h - 2, light ? rgb(70, 150, 215) : rgb(61, 174, 233));
     }
 }
 
@@ -4155,6 +4161,8 @@ static int  g_br_og_has_image;        /* og:image 是否已登记进图片槽 */
  * 就是收益的大头。 */
 static void browser_fetch_stylesheet(gui_state_t *st, const char *href);
 static int g_br_css_fetches;
+static int g_br_script_fetches;   /* 外链 <script src> 抓取计数（每页上限 10） */
+static char g_br_current_url[BROWSER_URL_CAP];   /* 当前页 URL（传给 js -u） */
 
 /* 大小写不敏感子串查找：HTML 标签名/属性可能任意大小写（<SCRIPT>、
  * <ScRiPt src=...>），解析器现有 tag_ci_eq 只比较已提取的标签名，这里
@@ -4263,6 +4271,9 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     st->browser_link_count = 0;
     g_br_img_count = 0;
     g_br_css_fetches = 0;
+    g_br_script_fetches = 0;
+    strncpy(g_br_current_url, st->browser_url, sizeof(g_br_current_url) - 1);
+    g_br_current_url[sizeof(g_br_current_url) - 1] = 0;
     g_br_dns_n = 0;
     g_br_sub_fails = 0;
     /* CSS/图片是可降级内容，整页最多给 15 秒。主体已经抓到后不能因为某个
@@ -4913,6 +4924,47 @@ static void browser_fetch_stylesheet(gui_state_t *st, const char *href) {
     css_parse_stylesheet(body, len - body_off);
 }
 
+/* 外链 <script src="..."> 抓取：走与 stylesheet 相同的网络路径（TLS
+ * 由内核处理），正文写入 ramfs 文件，供 jspage/浏览器管线按 HTML 顺序
+ * 执行。返回 0 成功；失败/超预算返回 -1（调用方继续处理剩余脚本）。 */
+static int browser_fetch_script_to_file(const char *href, const char *path) {
+    if (g_br_script_fetches >= 10 || g_br_sub_fails >= 4 ||
+        br_sub_budget_expired())
+        return -1;
+    static char jsbuf[256 * 1024];
+    char url[192];
+    if (browser_resolve_href(NULL, href, url, sizeof(url)) < 0) return -1;
+    int https = 0; char host[96]; const char *path_s = "/"; uint16_t port = 80;
+    if (gui_parse_url(url, &https, host, sizeof(host), &port, &path_s)) return -1;
+    uint32_t ip = 0; int cached = 0;
+    if (br_sub_resolve(host, &ip, &cached) < 0) { if (!cached) g_br_sub_fails++; return -1; }
+    uint32_t len = 0;
+    int ok = https ? tls_https_get_with_idle_limit(host, ip, port, path_s,
+                                                    jsbuf, sizeof(jsbuf), &len, 15)
+                   : net_http_request("GET", host, ip, port, path_s,
+                                      jsbuf, sizeof(jsbuf), &len);
+    if (ok < 0) { g_br_sub_fails++; return -1; }
+    if (br_sub_budget_expired()) return -1;
+    g_br_script_fetches++;
+    const char *body = http_body_ptr(jsbuf);
+    uint32_t body_off = (uint32_t)(body - jsbuf);
+    if (body_off >= len) return -1;
+    uint32_t blen = len - body_off;
+    /* ramfs 单文件上限 128KB。宁可跳过超大 bundle，也不能写入半截 JS：
+     * 半截源码只会产生 SyntaxError，并污染后续依赖判断。 */
+    if (blen > 120U * 1024U) return -1;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+    size_t off = 0;
+    while (off < blen) {
+        long w = write(fd, body + off, blen - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    close(fd);
+    return (off == blen) ? 0 : -1;
+}
+
 /* 图床变换后缀改写（B 站 hdslb 等）：
  * 1. 有 '@' 参数的 URL（如 xxx.jpg@672w_378h...webp）→ 把 '@' 后整段换成 "240w_180h"
  * 2. bilibili CDN 直链（i0/i1/i2.hdslb.com，无 '@'）→ 在 URL 末尾追加 "@240w_180h"
@@ -4956,6 +5008,19 @@ static void br_img_url_rewrite(char *url, uint32_t cap) {
  *
  * browser_exec_scripts_core 是不依赖 GUI 的核心（jspage 命令与浏览器
  * 共用）：返回 0 表示有脚本执行；title/out 由调用者提供缓冲。 */
+/* /system/js_pNN.js 路径构造（内联与外链脚本统一编号，供 js.hax
+ * 多文件逐个执行）。 */
+static void build_js_path(char *path, uint32_t cap, int index) {
+    static const char pfx[] = "/system/js_p";
+    static const char sfx[] = ".js";
+    uint32_t pi = 0;
+    for (const char *q = pfx; *q && pi < cap - 1; q++) path[pi++] = *q;
+    if (index >= 10) path[pi++] = (char)('0' + index / 10);
+    path[pi++] = (char)('0' + index % 10);
+    for (const char *q = sfx; *q && pi < cap - 1; q++) path[pi++] = *q;
+    path[pi] = 0;
+}
+
 int browser_exec_scripts_core(const char *body, char *title, uint32_t title_cap,
                               char *out, uint32_t out_cap) {
     const char *p = body;
@@ -4967,38 +5032,40 @@ int browser_exec_scripts_core(const char *body, char *title, uint32_t title_cap,
      * its own unit — a SyntaxError in one (e.g. Vite import.meta chunks)
      * must not block the remaining scripts.  External src= scripts are
      * skipped. */
-    while (*p && script_count < 12) {
-        static char script[8192];
-        uint32_t slen = 0;
+    while (*p && script_count < 24) {
         const char *s = body_strcasestr(p, "<script");
         if (!s) break;
         const char *gt = strchr(s, '>');
         if (!gt) break;
+        /* 外链脚本（<script src=...>）：内核网络栈抓取（TLS），按 HTML
+         * 出现顺序与内联脚本统一编号，js.hax 逐个执行。 */
         const char *src_attr = body_strcasestr(s, "src");
-        if (src_attr && src_attr < gt) { p = gt + 1; continue; }
+        if (src_attr && src_attr < gt) {
+            char src_url[256];
+            uint32_t tag_len = (uint32_t)(gt - s);
+            if (br_attr_value(s, tag_len, "src", src_url, sizeof(src_url)) > 0) {
+                char path[32];
+                build_js_path(path, sizeof(path), script_count);
+                if (browser_fetch_script_to_file(src_url, path) == 0)
+                    script_count++;
+            }
+            p = gt + 1;
+            continue;
+        }
         const char *end = body_strcasestr(gt + 1, "</script>");
         if (!end) break;
         size_t n = (size_t)(end - (gt + 1));
-        if (n > sizeof(script) - 1) n = sizeof(script) - 1;
+        /* Bilibili 的 window.__INITIAL_STATE__ 约 87KB，必须完整执行；
+         * 截断 JS 比跳过更糟。ramfs 单文件上限 128KB，留 8KB 余量。 */
+        if (n > 120U * 1024U) { p = end + 9; continue; }
         if (n > 0) {
             char path[32];
-            static const char pfx[] = "/system/js_p";
-            static const char sfx[] = ".js";
-            uint32_t pi = 0;
-            for (const char *q = pfx; *q && pi < sizeof(path) - 1; q++)
-                path[pi++] = *q;
-            if (script_count >= 10) path[pi++] = (char)('0' + script_count / 10);
-            path[pi++] = (char)('0' + script_count % 10);
-            for (const char *q = sfx; *q && pi < sizeof(path) - 1; q++)
-                path[pi++] = *q;
-            path[pi] = 0;
-            memcpy(script, gt + 1, n);
-            script[n] = 0;
+            build_js_path(path, sizeof(path), script_count);
             int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
                 size_t off = 0;
                 while (off < n) {
-                    long w = write(fd, script + off, n - off);
+                    long w = write(fd, gt + 1 + off, n - off);
                     if (w <= 0) break;
                     off += (size_t)w;
                 }
@@ -5010,31 +5077,46 @@ int browser_exec_scripts_core(const char *body, char *title, uint32_t title_cap,
     }
     if (!script_count) return 0;
 
+    /* 页面原始 HTML 写给 js.hax 解析成 DOM（脚本执行前建树） */
+    int pfd = open("/system/page.html", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (pfd >= 0) {
+        size_t boff = 0;
+        size_t blen = strlen(body);
+        /* DOM 快照限制在 ramfs 128KB 单文件上限内；关键 INITIAL_STATE
+         * 脚本另外完整写入 js_pN.js，不依赖快照尾部。 */
+        if (blen > 120U * 1024U) blen = 120U * 1024U;
+        while (boff < blen) {
+            long w = write(pfd, body + boff, blen - boff);
+            if (w <= 0) break;
+            boff += (size_t)w;
+        }
+        close(pfd);
+    }
+
     char *js_argv[16];
     int a = 0;
     js_argv[a++] = "js";
     js_argv[a++] = "-w";
     js_argv[a++] = "/system/js_out.txt";
+    js_argv[a++] = "-p";
+    js_argv[a++] = "/system/page.html";
+    js_argv[a++] = "-u";
+    js_argv[a++] = g_br_current_url[0] ? g_br_current_url : "about:blank";
+    /* 内置 Vue 运行时兜底：页面自己带 Vue（bilibili 的 vue.min.js 等）
+     * 会随后覆盖 window.Vue，预载只保证 window.Vue 一定存在。 */
+    if (access("/system/vue.global.prod.js", F_OK) == 0 && a < 14)
+        js_argv[a++] = "/system/vue.global.prod.js";
     for (int i = 0; i < script_count && a < 15; i++) {
         static char path[16][32];
-        static const char pfx[] = "/system/js_p";
-        static const char sfx[] = ".js";
-        uint32_t pi = 0;
-        for (const char *q = pfx; *q && pi < sizeof(path[i]) - 1; q++)
-            path[i][pi++] = *q;
-        if (i >= 10) path[i][pi++] = (char)('0' + i / 10);
-        path[i][pi++] = (char)('0' + i % 10);
-        for (const char *q = sfx; *q && pi < sizeof(path[i]) - 1; q++)
-            path[i][pi++] = *q;
-        path[i][pi] = 0;
+        build_js_path(path[i], sizeof(path[i]), i);
         js_argv[a++] = path[i];
     }
     js_argv[a] = 0;
     (void)hax_app_run("js", a, js_argv);
     ran = 1;
 
-    /* 读回 title（第一行）+ 脚本输出（其余行） */
-    char tmp[4096];
+    /* 读回 title（第一行）+ 渲染出的迷你 HTML（其余行） */
+    char tmp[32768];
     int ofd = open("/system/js_out.txt", O_RDONLY);
     if (ofd < 0) return ran;
     long olen = 0;
@@ -5070,7 +5152,7 @@ int browser_exec_scripts_core(const char *body, char *title, uint32_t title_cap,
 
 static void browser_exec_scripts(gui_state_t *st, const char *body) {
     static char js_title[BROWSER_TITLE_CAP];
-    static char js_out[2048];
+    static char js_out[24 * 1024];
 
     if (!browser_exec_scripts_core(body, js_title, sizeof(js_title),
                                    js_out, sizeof(js_out)))
@@ -5085,13 +5167,12 @@ static void browser_exec_scripts(gui_state_t *st, const char *body) {
     }
     size_t jlen = strlen(js_out);
     if (jlen == 0) return;
-    if (jlen > BROWSER_PAGE_CAP / 2) jlen = BROWSER_PAGE_CAP / 2;
-    if (st->browser_render_len + jlen + 4 >= BROWSER_PAGE_CAP) return;
-    st->browser_render[st->browser_render_len++] = (char)BRK_CODE;
-    memcpy(st->browser_render + st->browser_render_len, js_out, jlen);
-    st->browser_render_len += (uint32_t)jlen;
-    st->browser_render[st->browser_render_len++] = '\n';
-    st->browser_render[st->browser_render_len] = 0;
+    /* js.hax 渲染的是脚本执行后的最终 DOM（Vue 等框架已挂载）：用它
+     * 替换内核静态解析结果，重新走一遍内核渲染器拿完整样式（BRK_H1/
+     * BRK_LINK/BRK_IMG…）。输入与输出必须是独立缓冲；解析器从左向右读
+     * mini HTML，同时向输出写 BRK 标记，就地解析会在读完前破坏源码。 */
+    browser_render_from_html(st, js_out, st->browser_render,
+                             BROWSER_PAGE_CAP, &st->browser_render_len);
 }
 
 /* browser_fetch_images：
@@ -5295,12 +5376,12 @@ render_page:
 }
 
 /* browser_load_internal 的后台任务包装。task_create 的入口必须是
- * void (*)(void*)，这里把 gui_state_t* 通过 arg 传入。加载完成后
- * 清 browser_loading 标志——协作式调度不存在写-写竞争。 */
+ * void (*)(void*)，这里把 gui_state_t* 通过 arg 传入。不要在此清
+ * browser_loading：GUI 主循环用该标志检测任务终止并触发最终重绘；这里
+ * 提前清零会让页面数据已经生成但屏幕永远停在加载前一帧。 */
 static void browser_fetch_bg(void *arg) {
     gui_state_t *st = (gui_state_t *)arg;
     browser_load_internal(st, st->browser_push_hist);
-    st->browser_loading = 0;
 }
 
 static void browser_load(gui_state_t *st) {

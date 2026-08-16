@@ -2,41 +2,125 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<title>HBOS 应用开发手册</title>
+<meta name="author" content="HBOS / HIVE">
+<meta name="subject" content="HAX 与 HIVE Toolkit API 参考">
+<meta name="description" content="HBOS HAX 应用和 HIVE Toolkit API 开发参考">
 <style>
   @page { size: A4; margin: 2cm 2.2cm; }
   * { box-sizing: border-box; }
   body { font-family: "Noto Sans CJK SC", "WenQuanYi Zen Hei", "Source Han Sans SC", sans-serif;
          color: #1a1a1a; font-size: 10.5pt; line-height: 1.6; }
-  h1 { font-size: 23pt; font-weight: 800; color: #111; border: none; margin: 0 0 2px; }
+  h1 { font-size: 23pt; font-weight: 700; color: #111; border: none; margin: 0 0 2px; }
   h1 .en { display:block; font-size: 13pt; font-weight: 700; color: #0aa6dd; letter-spacing:1px; margin-top:2px; }
-  h2 { font-size: 14.5pt; font-weight: 800; color: #0c6fa6; margin: 20px 0 6px; border-bottom: 1.5px solid #d0e8f5; padding-bottom: 2px; }
+  h2 { font-size: 14.5pt; font-weight: 700; color: #0c6fa6; margin: 20px 0 6px; border-bottom: 1.5px solid #d0e8f5; padding-bottom: 2px; }
   h3 { font-size: 11.5pt; font-weight: 700; color: #1a2a3a; margin: 14px 0 4px;
-       font-family: ui-monospace, "DejaVu Sans Mono", monospace; }
+       font-family: ui-monospace, "DejaVu Sans Mono", "Noto Sans Mono", "Noto Sans CJK SC", monospace; }
   h4 { font-size: 10.5pt; font-weight: 700; color: #333; margin: 10px 0 3px; }
   .chapter { page-break-before: always; }
   p { margin: 5px 0 8px; }
-  code, .mono { font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size: 9.5pt;
+  code, .mono { font-family: ui-monospace, "DejaVu Sans Mono", "Noto Sans Mono", "Noto Sans CJK SC", monospace; font-size: 9.5pt;
                 background:#eef2f6; border-radius:2px; padding:0 3px; }
   pre { background: #f3f6f9; border-left: 3px solid #14a6e0; padding: 10px 13px; margin: 8px 0 12px;
-        font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size: 9pt; line-height:1.5;
+        font-family: ui-monospace, "DejaVu Sans Mono", "Noto Sans Mono", "Noto Sans CJK SC", monospace; font-size: 9pt; line-height:1.5;
         white-space: pre-wrap; border-radius: 3px; }
   table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 9.5pt; }
   th { background: #c5d4e0; text-align: left; padding: 5px 9px; font-weight: 700; }
   td { border-bottom: 1px solid #dde3e8; padding: 5px 9px; vertical-align: top; }
   tr:nth-child(even) td { background: #f6f8fa; }
   .toc div { margin: 3px 0; }
-  .toc .c { font-weight: 800; color: #0c6fa6; margin-top: 12px; font-size: 11pt; }
+  .toc .c { font-weight: 700; color: #0c6fa6; margin-top: 12px; font-size: 11pt; }
   .toc .s { margin-left: 18px; color:#333; font-size: 10pt; }
   .toc .ss { margin-left: 34px; color:#555; font-size: 9.5pt; }
   .note { background:#eef7fc; border:1px solid #bfe3f4; padding:8px 11px; border-radius:4px; margin:9px 0 12px; font-size:9.5pt; }
   .warn { background:#fff8e6; border:1px solid #f5c842; padding:8px 11px; border-radius:4px; margin:9px 0 12px; font-size:9.5pt; }
-  .kbd { background:#222; color:#fff; border-radius:3px; padding:1px 6px; font-size:9pt; font-family:ui-monospace,monospace; }
+  .kbd { background:#222; color:#fff; border-radius:3px; padding:1px 6px; font-size:9pt; font-family:ui-monospace,"Noto Sans Mono","Noto Sans CJK SC",monospace; }
   .small { color:#666; font-size: 9pt; }
   .tag  { display:inline-block; background:#14a6e0; color:#fff; border-radius:3px; padding:0 6px; font-size:8.5pt; font-weight:700; }
   ul { margin: 5px 0 8px; padding-left: 1.6em; }
   li { margin: 3px 0; }
-  .sig { font-family: ui-monospace,"DejaVu Sans Mono",monospace; font-size:9.5pt;
+  .sig { font-family: ui-monospace,"DejaVu Sans Mono","Noto Sans Mono","Noto Sans CJK SC",monospace; font-size:9.5pt;
          background:#eef2f6; border-radius:3px; padding:3px 8px; display:block; margin:4px 0; }
+  .screenshot { display:block; max-width:92%; margin:8px auto 12px;
+                border:1px solid #b8c6d2; border-radius:4px; }
+
+  /* PDF/打印：紧凑版式 + 少量彩色点缀，不印大面积底色，兼顾省墨。 */
+  @media print {
+    @page { size: A4; margin: 12mm 14mm 13mm; }
+    * { print-color-adjust: economy; -webkit-print-color-adjust: economy;
+        box-shadow: none !important; text-shadow: none !important; }
+    body { color:#111; font-size:8.8pt; line-height:1.34; }
+    body * { color:#111 !important; background-color:transparent !important;
+             border-color:#777 !important; }
+    /* 彩色方案：多色标题/代码/提示框/表头，浅色底点缀，兼顾省墨。 */
+    h1 .en { color:#0a6fa0 !important; }
+    h1 { color:#0a2a4a !important; }
+    h2 { color:#0b5d8f !important; border-bottom-color:#4a9bc4 !important; }
+    h3 { color:#0f7a4d !important; }                 /* 墨绿 */
+    h4 { color:#8a3fa0 !important; }                 /* 紫 */
+    .toc .c { color:#0b5d8f !important; }
+    .toc .s { color:#0f7a4d !important; }
+    .toc .ss { color:#8a3fa0 !important; }
+    code, .mono { color:#a0322e !important; }        /* 经典代码红 */
+    th { color:#ffffff !important; background-color:#3b7a9e !important;
+         border-color:#2f6585 !important; }
+    tr:nth-child(even) td { background-color:#eef4f9 !important; }
+    .tag { color:#0a6fa0 !important; background-color:#e3f2fb !important;
+           border-color:#4a9bc4 !important; }
+    .kbd { color:#ffffff !important; background-color:#3a3f4a !important;
+           border-color:#3a3f4a !important; }
+    .note { color:#14394e !important; background-color:#e3f2fb !important;
+            border-color:#7fb8d8 !important; }
+    .warn { color:#4a3408 !important; background-color:#fdf3d7 !important;
+            border-color:#d8a23c !important; }
+    pre { color:#17324a !important; background-color:#f2f7fb !important;
+          border-left-color:#4a9bc4 !important; }
+    .sig { color:#17324a !important; background-color:#e8eef4 !important; }
+    .small { color:#4a5668 !important; }
+    .screenshot { border-color:#4a9bc4 !important; }
+    body > div:first-child > div[style*="color:#0aa6dd"] {
+      color:#0a6fa0 !important; }
+    h1 { font-size:18pt; margin:0 0 1px; }
+    h1 .en { font-size:9.5pt; letter-spacing:.5px; margin-top:0; }
+    h2 { font-size:11.5pt; margin:10px 0 3px; padding-bottom:1px;
+         border-bottom-width:1px; }
+    h3 { font-size:9.3pt; margin:7px 0 2px; }
+    h4 { font-size:8.8pt; margin:6px 0 2px; }
+    p { margin:2px 0 4px; }
+    ul { margin:2px 0 4px; padding-left:1.4em; }
+    li { margin:1px 0; }
+    code, .mono { font-size:7.7pt; padding:0 1px; }
+    pre { font-size:7.25pt; line-height:1.27; padding:5px 7px;
+          margin:4px 0 6px; border-left-width:1px; }
+    table { font-size:7.65pt; margin:4px auto 6px; }
+    th, td { padding:2px 4px; border:1px solid #aaa; }
+    .toc div { margin:1px 0; }
+    .toc .c { margin-top:5px; font-size:9pt; }
+    .toc .s { margin-left:12px; font-size:8.3pt; }
+    .toc .ss { margin-left:24px; font-size:7.7pt; }
+    .note, .warn { font-size:7.7pt; padding:4px 6px; margin:4px 0 6px;
+                   border:1px solid #888; border-radius:0; }
+    .tag, .kbd { color:#111 !important; border:1px solid #777;
+                 padding:0 3px; font-size:7.3pt; }
+    .small { font-size:7.4pt; }
+    .sig { font-size:7.6pt; padding:2px 4px; margin:2px 0; }
+    tr, pre, .note, .warn { break-inside:avoid; }
+    h1, h2, h3, h4 { break-after:avoid; }
+    /* 仅封面强制分页；正文各章连续排版，减少半空页面。 */
+    .chapter { page-break-before:auto !important; break-before:auto !important; }
+    .chapter > h1 { page-break-before:auto !important; break-before:auto !important;
+                    margin-top:12px; }
+    /* 封面保留层级但压缩空白；底部恢复品牌蓝实心色块（封面整页深蓝）。 */
+    body > div:first-child > div[style*="height:5.5cm"] { height:3.2cm !important; }
+    body > div:first-child > div[style*="height:4.5cm"] { height:2.2cm !important; }
+    body > div:first-child > div[style*="font-size:40pt"] { font-size:29pt !important; }
+    body > div:first-child > div[style*="background:#14a6e0"] {
+      background-color:#14a6e0 !important; color:#ffffff !important;
+      border:none !important; padding:12px 0 !important;
+    }
+    body > div:first-child > div[style*="background:#14a6e0"] * {
+      color:#ffffff !important; }
+  }
 </style>
 </head>
 <body>
@@ -44,14 +128,14 @@
 <!-- ── 封面 ── -->
 <div style="page-break-after: always;">
   <div style="height:5.5cm;"></div>
-  <div style="font-size:13pt; font-weight:800; color:#0aa6dd; letter-spacing:2px;">HBOS · 裸机内核操作系统</div>
-  <div style="font-size:40pt; font-weight:800; color:#111; margin:6px 0 4px;">HBOS 应用开发手册</div>
+  <div style="font-size:13pt; font-weight:700; color:#0aa6dd; letter-spacing:2px;">HBOS · 裸机内核操作系统</div>
+  <div style="font-size:40pt; font-weight:700; color:#111; margin:6px 0 4px;">HBOS 应用开发手册</div>
   <div style="font-size:16pt; font-weight:600; color:#333;">HAX Application Development Guide &nbsp;·&nbsp; <span style="color:#0aa6dd;font-weight:700;">.hax / C 版</span></div>
   <div style="font-size:10pt; color:#555; margin-top:8px;">本手册随 HBOS 内核源码发布，供第三方应用开发者参考。</div>
   <div style="height:4.5cm;"></div>
   <div style="background:#14a6e0; color:#fff; padding:22px 18px; font-size:11pt; font-weight:600;">
     HBOS APPLICATION DEVELOPER GUIDE<br>
-    <span style="font-size:9.5pt; font-weight:400;">2026/07/29 &nbsp;·&nbsp; VERSION 1.6 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; HIVE 0.1-beta5-gui.3（Toolkit API 1.3）</span>
+    <span style="font-size:9.5pt; font-weight:400;">2026/08/16 &nbsp;·&nbsp; VERSION 1.9 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; HIVE 0.1-beta5-gui.4（Toolkit API 1.4 / TUI Kit 1.0）</span>
   </div>
 </div>
 
@@ -82,6 +166,7 @@
   <div class="s">2.7 GUI 全屏画布接口</div>
   <div class="s">2.8 并发窗口接口（推荐）</div>
   <div class="s">2.9 HIVE 标准窗口控件 API</div>
+  <div class="s">2.10 TUI 终端控件 API</div>
   <div class="c">第 3 章 — 运行、发现与调试</div>
   <div class="s">3.1 TUI 与 GUI 类型说明</div>
   <div class="s">3.2 apps / run 命令</div>
@@ -95,7 +180,8 @@
   <div class="s">4.4 ls —— 列出目录内容</div>
   <div class="s">4.5 GUI 全屏画布（文档示例）</div>
   <div class="s">4.6 HIVE 并发窗口（文档示例）</div>
-  <div class="s">4.7 HIVE Toolkit API 1.3 控件（文档示例）</div>
+  <div class="s">4.7 HIVE Toolkit API 1.4 控件（文档示例）</div>
+  <div class="s">4.8 实机运行画面（QEMU 截图）</div>
   <div class="c">附录 A — 底层 POSIX 系统调用速查</div>
   <div class="c">附录 B — hax_meta_t 二进制布局</div>
   <div class="c">附录 C — 常见构建错误排查</div>
@@ -108,7 +194,7 @@
 
 <h2>1.1 关于本手册</h2>
 <p>本手册面向希望在 <b>HBOS</b>（裸机内核操作系统）上开发应用的用户。HBOS 提供一套名为
-<b>HAX</b>（<em>HBOS Application eXecutable</em>）的应用机制，设计目标是：</p>
+<b>HAX</b>（HBOS Application eXecutable）的应用机制，设计目标是：</p>
 <ul>
   <li><b>零注册</b>——把源码（<code>.c</code>）或预编译应用（<code>.hax</code>）放进 <code>./app</code> 目录，执行一次 <code>make</code>，应用在系统启动后自动出现，无需修改内核代码或配置文件。</li>
   <li><b>标准入口</b>——应用写 <code>main(argc, argv)</code>，与普通 C 程序没有区别。</li>
@@ -409,7 +495,7 @@ hax_win_close();</pre>
 窗口的事件队列。应用退出后窗口自动回收。最多 8 个并发窗口，单窗口最大 900×640。窗口应用应从
 <b>开始菜单</b>或在 GUI 终端用 <code>run</code> 启动（均为非阻塞）。鼠标按下后由内容窗口捕获，
 移动和松开事件会继续投递；连续移动事件自动合并，防止事件队列被填满。</div>
-<p><b>HIVE 0.1-beta5-gui.3 / Toolkit API 1.3 / 窗口 ABI v2：</b>应用可用 <code>hive_window_query</code> 查询能力，
+<p><b>HIVE 0.1-beta5-gui.4 / Toolkit API 1.4 / 窗口 ABI v2：</b>应用可用 <code>hive_window_query</code> 查询能力，
 通过 <code>hive_window_create</code> 创建多个带显式代数句柄的窗口，并独立设置标题、几何和
 普通/最小化/最大化状态。<code>hive_window_draw</code> 支持批量 Clear、Fill、Text 与 ARGB
 位图上传，<code>hive_window_present_rect</code> 支持脏矩形提交；事件扩展为 Move、Resize、
@@ -434,8 +520,14 @@ Focus 与 State。旧 <code>hive_window_open</code> 单窗口接口保持兼容�
 <tr><td>菜单</td><td><code>hive_ui_add_menu</code></td><td>鼠标或键盘选择 → SELECT</td></tr>
 <tr><td>图片</td><td><code>hive_ui_add_image</code></td><td>上传 0xAARRGGBB 位图</td></tr>
 <tr><td>画布</td><td><code>hive_ui_add_canvas</code></td><td>应用回调自定义绘制</td></tr>
+<tr><td>单选钮</td><td><code>hive_ui_add_radio</code></td><td>同一父容器内互斥，点击或 Space → CHANGE</td></tr>
+<tr><td>开关</td><td><code>hive_ui_add_toggle</code></td><td>点击或 Space 切换 → CHANGE</td></tr>
+<tr><td>下拉选择</td><td><code>hive_ui_add_dropdown</code></td><td>鼠标左右半区或方向键切换 → SELECT</td></tr>
+<tr><td>数字微调</td><td><code>hive_ui_add_spinbox</code></td><td>加减按钮、方向键、Home/End → CHANGE</td></tr>
+<tr><td>分隔线</td><td><code>hive_ui_add_separator</code></td><td>横向或纵向视觉分组</td></tr>
+<tr><td>分组框</td><td><code>hive_ui_add_groupbox</code></td><td>带标题的父容器，可组织 Radio 组</td></tr>
 </table>
-<p>当前 <code>HIVE_API_MAJOR=1</code>、<code>HIVE_API_MINOR=3</code>。单个 UI 最多
+<p>当前 <code>HIVE_API_MAJOR=1</code>、<code>HIVE_API_MINOR=4</code>。单个 UI 最多
 48 个控件，不使用动态内存；状态完全属于应用自己的 <code>hive_ui_t</code>。
 主题统一提供普通、悬停、按下、禁用、选择和焦点环颜色。</p>
 <table>
@@ -447,7 +539,7 @@ Focus 与 State。旧 <code>hive_window_open</code> 单窗口接口保持兼容�
 <tr><td><code>hive_ui_draw(ui)</code></td><td>绘制全部可见控件和交互状态</td></tr>
 <tr><td><code>hive_ui_set_enabled / set_visible</code></td><td>启用、禁用、显示或隐藏控件</td></tr>
 <tr><td><code>hive_ui_set_text / set_value / get_value</code></td><td>更新或读取控件内容</td></tr>
-<tr><td><code>hive_ui_set_parent / parent</code></td><td>建立或查询 Panel 父子关系，子控件使用相对坐标</td></tr>
+<tr><td><code>hive_ui_set_parent / parent</code></td><td>建立或查询 Panel/Groupbox 父子关系，子控件使用相对坐标</td></tr>
 <tr><td><code>hive_ui_set_rect / get_rect / remove</code></td><td>更新相对位置、读取窗口坐标或删除整棵子树</td></tr>
 <tr><td><code>hive_textbox_select / select_all</code></td><td>按 UTF-8 码点边界设置或全选文本</td></tr>
 <tr><td><code>hive_textbox_selection / copy_selection</code></td><td>查询选区范围或复制为 NUL 结尾 UTF-8 文本</td></tr>
@@ -473,9 +565,49 @@ while (hive_window_active(&amp;w, &amp;h)) {
     hive_yield();
 }
 done: hive_window_close();</pre>
-<div class="warn">HIVE Toolkit API 1.3 能按 UTF-8 码点移动、鼠标/键盘选择、替换和删除已有文本；
+<div class="warn">HIVE Toolkit API 1.4 能按 UTF-8 码点移动、鼠标/键盘选择、替换和删除已有文本；
 窗口键盘事件目前仍只直接产生可打印 ASCII，完整中文输入法、系统剪贴板和无障碍语义
 将在后续版本追加。</div>
+
+<h2>2.10 TUI 终端控件 API</h2>
+<p><code>#include &lt;hax.h&gt;</code> 随 <code>hax_tui.h</code> 提供一套文本终端控件
+（<b>TUI Kit API 1.0</b>，<code>HIVE_TUI_API_MAJOR/MINOR=1/0</code>）。与窗口控件
+一样纯用户态、无新增系统调用、无全局变量、无动态内存：输出只依赖 stdout，
+输入只依赖 stdin（<code>hax_input</code> 读整行），在内核控制台和图形终端中行为
+一致。渲染刻意使用纯 ASCII（<code>+ - | = [ ]</code>），对齐按显示格计算
+（CJK/全角字符占 2 格），截断不会切断 UTF-8 码点。</p>
+<table>
+<tr><th>控件</th><th>函数</th><th>说明</th></tr>
+<tr><td>标题分隔线</td><td><code>hax_tui_rule / hax_tui_hline</code></td><td>带标题或纯横线</td></tr>
+<tr><td>进度条</td><td><code>hax_tui_progress</code></td><td><code>[====----] 45%</code>；in_place 用 <code>\r</code> 原地刷新</td></tr>
+<tr><td>边框盒</td><td><code>hax_tui_box</code></td><td>标题嵌顶边的 ASCII 盒</td></tr>
+<tr><td>表格</td><td><code>hax_tui_table</code></td><td>列宽/对齐由 <code>hax_tui_column_t</code> 描述</td></tr>
+<tr><td>菜单</td><td><code>hax_tui_menu</code></td><td>数字 1..N 或快捷字母选择，q 取消</td></tr>
+<tr><td>确认</td><td><code>hax_tui_confirm</code></td><td><code>[Y/n]</code> 默认值，回车取默认</td></tr>
+<tr><td>输入行</td><td><code>hax_tui_input</code></td><td>带提示与默认值，UTF-8 安全截断</td></tr>
+<tr><td>复选</td><td><code>hax_tui_checkbox</code></td><td><code>[x]</code> 状态行 + y/n 切换</td></tr>
+</table>
+<p>交互控件都是行驱动的；空行取默认值，<code>q</code>/<code>Q</code> 取消（返回 -1），
+stdin 读到 EOF 同样返回 -1，因此即使被无输入管道启动也不会死循环。
+解析逻辑（<code>hax_tui_menu_parse</code> / <code>hax_tui_confirm_parse</code>）与
+渲染逻辑（<code>*_to</code> 系列）分离，便于宿主测试。</p>
+<pre>#include &lt;hive.h&gt;
+HAX_APP("svc", "服务管理", HAX_KIND_TUI);
+
+static const char *const items[] = {"启动服务", "停止服务", "查看状态"};
+
+int main(void) {
+    hax_tui_rule("服务管理", 40);
+    HI32 sel = hax_tui_menu("请选择操作", items, 3, NULL);
+    if (sel &lt; 0) return 0;                       /* q / EOF */
+    hax_printf("选择了：%s\n", items[sel]);
+    hax_tui_progress("执行", 100, 0, 100, 24, 1);
+    hax_println("");
+    return 0;
+}</pre>
+<div class="note"><code>hax_tui_progress</code> 的 in_place 模式依赖终端支持
+<code>\r</code> 回车不换行；HBOS 图形终端会丢弃 <code>\r</code>，此时退化为逐行
+输出（功能不受影响）。<code>app/tui.c</code> 是完整的控件展示应用。</div>
 </div>
 
 <!-- ── 第 3 章 ── -->
@@ -733,9 +865,9 @@ done:
     return 0;
 }</pre>
 
-<h2>4.7 HIVE Toolkit API 1.3 控件（文档示例）</h2>
-<p>以下片段覆盖首批控件、悬停/按下反馈、
-滑杆拖动、控件联动、动态文本和响应式网格。布局代码不硬编码每个控件的绝对宽度：</p>
+<h2>4.7 HIVE Toolkit API 1.4 控件（文档示例）</h2>
+<p>以下片段覆盖响应式布局，以及 1.4 新增的分组框、单选钮、开关、下拉选择、
+数字微调和分隔线。Radio 通过共同父容器形成互斥组：</p>
 <pre>hive_layout_t layout;
 hive_layout_begin(&amp;layout, hive_rect(0,0,width,height), 20, 10);
 
@@ -747,6 +879,17 @@ hive_ui_widget(&amp;ui, ID_ENABLED)-&gt;rect =
 
 hive_ui_add_slider(&amp;ui, ID_SLIDER, hive_layout_row(&amp;layout, 28),
                    0, 100, 35, 5);
+
+static const char *const scales[] = {"100%", "125%", "150%"};
+hive_ui_add_groupbox(&amp;ui, ID_GROUP, hive_rect(20,160,300,90), "渲染模式");
+hive_ui_add_radio(&amp;ui, ID_BASIC, hive_rect(32,182,120,22), "标准", 1);
+hive_ui_add_radio(&amp;ui, ID_PRO, hive_rect(32,210,120,22), "增强", 0);
+hive_ui_set_parent(&amp;ui, ID_BASIC, ID_GROUP);
+hive_ui_set_parent(&amp;ui, ID_PRO, ID_GROUP);
+hive_ui_add_toggle(&amp;ui, ID_AUTO, hive_rect(180,182,120,22), "自动", 1);
+hive_ui_add_dropdown(&amp;ui, ID_SCALE, hive_rect(20,270,140,28), scales,3,0);
+hive_ui_add_spinbox(&amp;ui, ID_COUNT, hive_rect(180,270,120,28), 0,100,10,5);
+hive_ui_add_separator(&amp;ui, ID_SEP, hive_rect(20,310,280,4), 0);
 
 while (hive_window_active(&amp;width, &amp;height)) {
     hive_event_t ev;
@@ -762,6 +905,19 @@ while (hive_window_active(&amp;width, &amp;height)) {
 }</pre>
 <p class="small">提示：这些片段只用于 API 讲解；如需试验，请放入外部应用目录构建。</p>
 </div>
+
+<!-- ── 4.8 实机运行画面 ── -->
+<h2>4.8 实机运行画面（QEMU 截图）</h2>
+<p>以下画面来自 HBOS <code>v0.1-beta5-pre6</code> 在 QEMU（q35、1024M、1920×1080）
+中的真实运行截图，均采用<b>浅色主题</b>（F4 切换）；系统文本控制台为<b>白底深字</b>
+（省墨配色）。展示 HIVE 桌面、浅色开始菜单（应用启动器，含 <code>widgets</code>
+控件展示应用）与 TUI Kit 演示（<code>tui</code>，在实机文本控制台运行）。</p>
+<img class="screenshot" src="screenshots/hive-desktop.jpg" alt="HIVE 桌面">
+<p class="small" style="text-align:center;">图 4-1：HIVE 桌面（任务栏、桌面图标与壁纸）</p>
+<img class="screenshot" src="screenshots/hive-apps.jpg" alt="HIVE 开始菜单">
+<p class="small" style="text-align:center;">图 4-2：开始菜单——应用启动器（搜索框 + 应用网格，含控件展示）</p>
+<img class="screenshot" src="screenshots/hive-tui.png" alt="TUI Kit 演示">
+<p class="small" style="text-align:center;">图 4-3：TUI Kit 1.0 演示在实机文本控制台运行（白底省墨配色：表格、边框盒、进度条、菜单）</p>
 
 <!-- ── 附录 A ── -->
 <div class="chapter">

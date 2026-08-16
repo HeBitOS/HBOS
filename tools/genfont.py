@@ -79,7 +79,17 @@ def scan_source_cjk(roots=('src',)):
 
 def render_size(font_path, px, codepoints):
     """Render one atlas size. Returns (records, line_height, ascent)."""
-    font = ImageFont.truetype(font_path, px)
+    # 逐字形渲染不需要整形；显式用 BASIC 布局，避免 libraqm 在部分环境
+    # （Pillow >= 12 绑定）对单字符或字体 cmap 报 raqm_layout() failed。
+    try:
+        from PIL.ImageFont import Layout
+        layout_engine = Layout.BASIC
+    except Exception:
+        layout_engine = None
+    kwargs = {}
+    if layout_engine is not None:
+        kwargs["layout_engine"] = layout_engine
+    font = ImageFont.truetype(font_path, px, **kwargs)
     ascent, descent = font.getmetrics()
     line_height = ascent + descent
     pad = px
