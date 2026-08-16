@@ -4,9 +4,11 @@ static const hive_browser_backend_t g_lite_backend = {
     sizeof(hive_browser_backend_t),
     HIVE_BROWSER_BACKEND_ABI_MAJOR,
     HIVE_BROWSER_BACKEND_ABI_MINOR,
-    "Lite",
+    "LiteJS",
     HIVE_WEB_CAP_HTTP | HIVE_WEB_CAP_HTTPS | HIVE_WEB_CAP_HTML_STATIC |
-    HIVE_WEB_CAP_CSS_BASIC | HIVE_WEB_CAP_IMAGES | HIVE_WEB_CAP_HISTORY,
+    HIVE_WEB_CAP_CSS_BASIC | HIVE_WEB_CAP_IMAGES | HIVE_WEB_CAP_HISTORY |
+    HIVE_WEB_CAP_JAVASCRIPT | HIVE_WEB_CAP_DOM | HIVE_WEB_CAP_FETCH |
+    HIVE_WEB_CAP_STORAGE | HIVE_WEB_CAP_OBSERVERS,
 };
 
 const hive_browser_backend_t *hive_browser_lite_backend(void) {

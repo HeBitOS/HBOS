@@ -17,6 +17,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include "syscall.h"
 
 static void print_exception(JSContext *ctx) {
     JSValue exception = JS_GetException(ctx);
@@ -32,10 +33,9 @@ static void print_exception(JSContext *ctx) {
                 JS_FreeCString(ctx, str);
             }
             JS_FreeValue(ctx, stack);
-            JS_FreeValue(ctx, exception);
-            return;
+        } else {
+            JS_FreeValue(ctx, stack);
         }
-        JS_FreeValue(ctx, stack);
         msg = JS_GetPropertyStr(ctx, exception, "message");
         if (JS_IsString(msg)) {
             str = JS_ToCString(ctx, msg);
@@ -60,11 +60,40 @@ static void print_exception(JSContext *ctx) {
 /* Captured script output: console.log/document.write text plus the final
  * document.title, written to the -w file (and the console).  The browser
  * backend reads the file back to render script results into the page. */
-static char g_js_out[8192];
+static char g_js_out[16384];
 static size_t g_js_out_len;
 static char g_js_title[256];
 static char g_js_href[512] = "about:blank";
+static char g_js_host[256] = "";
+static char g_js_proto[16] = "";
+static char g_js_path[512] = "";
 static int g_js_out_file = -1;
+
+/* 从 URL 拆出 location 部件（内核浏览器传 -u <当前地址>） */
+static void split_url(const char *url) {
+    g_js_host[0] = 0;
+    g_js_proto[0] = 0;
+    g_js_path[0] = 0;
+    const char *scheme = strstr(url, "://");
+    if (!scheme) return;
+    size_t sl = (size_t)(scheme - url);
+    if (sl + 1 < sizeof(g_js_proto)) {
+        memcpy(g_js_proto, url, sl + 1);
+        g_js_proto[sl + 1] = 0;
+    }
+    const char *host = scheme + 3;
+    const char *pslash = strchr(host, '/');
+    size_t hl = pslash ? (size_t)(pslash - host) : strlen(host);
+    if (hl >= sizeof(g_js_host)) hl = sizeof(g_js_host) - 1;
+    memcpy(g_js_host, host, hl);
+    g_js_host[hl] = 0;
+    if (pslash) {
+        size_t pl = strlen(pslash);
+        if (pl >= sizeof(g_js_path)) pl = sizeof(g_js_path) - 1;
+        memcpy(g_js_path, pslash, pl);
+        g_js_path[pl] = 0;
+    }
+}
 
 static void capture_out(const char *s, size_t n) {
     if (!s || n == 0) return;
@@ -120,112 +149,103 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this_val,
     return js_print_internal(ctx, argc, argv, 1);
 }
 
-/* DOM stubs so real-world inline scripts (e.g. bilibili's boot scripts)
- * parse and run instead of throwing: no DOM tree exists in v1, so
- * querySelector returns null and navigator/location carry fixed values. */
-static JSValue js_document_querySelector(JSContext *ctx, JSValueConst this_val,
-                                         int argc, JSValueConst *argv) {
-    (void)this_val;
-    (void)argc;
-    (void)argv;
-    return JS_NULL;
-}
+/* DOM 平台（third_party/quickjs/hbos_dom.js，构建期由 tools/genjsheader.py
+ * 转成字符串嵌入）：真实 DOM 树 + HTML 解析器 + 选择器 + 事件 + 渲染器。
+ * register_globals 只提供 console/navigator/location/window，document 由
+ * hbos_dom.js 在 JS 侧装配。 */
+#include "hbos_dom_inc.h"
 
-static JSValue js_document_getElementById(JSContext *ctx,
-                                          JSValueConst this_val, int argc,
-                                          JSValueConst *argv) {
-    (void)this_val;
-    (void)argc;
-    (void)argv;
-    return JS_NULL;
-}
+/* -w 输出文件的格式：第一行 document.title，第二行起是渲染结果。 */
+static const char *g_page_buf = NULL;   /* -p 页面原始 HTML */
+static size_t g_page_len = 0;
 
-static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
-                                         int argc, JSValueConst *argv) {
-    (void)this_val;
-    (void)argc;
-    (void)argv;
-    return JS_NULL;
-}
+#define HBOS_FETCH_CAP (256U * 1024U)
 
-static JSValue js_document_write(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
-    (void)this_val;
-    for (int i = 0; i < argc; i++) {
-        const char *str = JS_ToCString(ctx, argv[i]);
-        if (str) {
-            capture_out(str, strlen(str));
-            JS_FreeCString(ctx, str);
-        }
+static int parse_fetch_url(const char *url, char *host, size_t host_cap,
+                           char *path, size_t path_cap, uint16_t *port,
+                           uint32_t *flags) {
+    const char *p;
+    if (strncmp(url, "https://", 8) == 0) {
+        p = url + 8;
+        *flags = HBOS_WEB_FETCH_HTTPS;
+        *port = 443;
+    } else if (strncmp(url, "http://", 7) == 0) {
+        p = url + 7;
+        *flags = 0;
+        *port = 80;
+    } else {
+        return -1;
     }
-    return JS_UNDEFINED;
+    const char *slash = strchr(p, '/');
+    const char *end = slash ? slash : p + strlen(p);
+    const char *colon = NULL;
+    for (const char *q = p; q < end; q++)
+        if (*q == ':') colon = q;
+    size_t host_len = (size_t)((colon ? colon : end) - p);
+    if (!host_len || host_len >= host_cap) return -1;
+    memcpy(host, p, host_len);
+    host[host_len] = 0;
+    if (colon) {
+        unsigned value = 0;
+        for (const char *q = colon + 1; q < end; q++) {
+            if (*q < '0' || *q > '9') return -1;
+            value = value * 10U + (unsigned)(*q - '0');
+            if (value > 65535U) return -1;
+        }
+        if (!value) return -1;
+        *port = (uint16_t)value;
+    }
+    const char *src_path = slash ? slash : "/";
+    size_t plen = strlen(src_path);
+    if (plen >= path_cap) return -1;
+    memcpy(path, src_path, plen + 1);
+    return 0;
 }
 
-static const char dom_stub_js[] =
-    "var _hbos_el = function(){ return {"
-    " innerHTML:'', textContent:'', value:'', className:'', id:'',"
-    " style:{}, dataset:{}, classList:{add:function(){},"
-    "  remove:function(){}, contains:function(){return false},"
-    "  toggle:function(){}},"
-    " setAttribute:function(){}, getAttribute:function(){return null},"
-    " removeAttribute:function(){},"
-    " appendChild:function(){return arguments[0]},"
-    " removeChild:function(){}, insertBefore:function(){},"
-    " replaceChild:function(){}, cloneNode:function(){return _hbos_el()},"
-    " addEventListener:function(){}, removeEventListener:function(){},"
-    " dispatchEvent:function(){return false},"
-    " querySelector:function(){return _hbos_el()},"
-    " querySelectorAll:function(){return []},"
-    " getElementsByTagName:function(){return []},"
-    " getBoundingClientRect:function(){return {top:0,left:0,width:0,"
-    "  height:0,right:0,bottom:0}},"
-    " contains:function(){return false}, focus:function(){},"
-    " blur:function(){}, click:function(){},"
-    " parentNode:null, parentElement:null, firstChild:null,"
-    " lastChild:null, nextSibling:null, previousSibling:null,"
-    " children:[], childNodes:[], nodeType:1, nodeName:'DIV',"
-    " tagName:'DIV', offsetWidth:0, offsetHeight:0,"
-    " scrollIntoView:function(){}, remove:function(){}"
-    " }; };"
-    "document.querySelector=function(){return _hbos_el()};"
-    "document.querySelectorAll=function(){return []};"
-    "document.getElementById=function(){return _hbos_el()};"
-    "document.getElementsByTagName=function(){return []};"
-    "document.getElementsByClassName=function(){return []};"
-    "document.createElement=function(){return _hbos_el()};"
-    "document.createTextNode=function(){return {nodeType:3,"
-    " textContent:arguments[0]||''}};"
-    "document.body=_hbos_el();document.documentElement=_hbos_el();"
-    "document.head=_hbos_el();"
-    "document.addEventListener=function(){};"
-    "document.removeEventListener=function(){};"
-    "document.readyState='complete';"
-    "document.documentURI=window.location.href;"
-    "document.referrer='';"
-    "window.addEventListener=function(){};"
-    "window.removeEventListener=function(){};"
-    "window.setTimeout=function(fn){return 0};"
-    "window.clearTimeout=function(){};"
-    "window.setInterval=function(){return 0};"
-    "window.clearInterval=function(){};"
-    "window.requestAnimationFrame=function(fn){return 0};"
-    "window.getComputedStyle=function(){return {display:'block',"
-    " visibility:'visible', opacity:'1', color:'rgb(0, 0, 0)',"
-    " backgroundColor:'rgba(0, 0, 0, 0)', position:'static',"
-    " width:'0px', height:'0px'}};"
-    "window.scrollTo=function(){};window.scrollBy=function(){};"
-    "window.alert=function(){};window.confirm=function(){return false};"
-    "window.prompt=function(){return null};"
-    "window.open=function(){return null};"
-    "window.fetch=function(){return Promise.reject(new Error("
-    " 'fetch: not implemented'))};"
-    "window.XMLHttpRequest=function(){};"
-    "window.console=console;";
+static JSValue js_fetch_raw(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "fetch requires a URL");
+    const char *url = JS_ToCString(ctx, argv[0]);
+    if (!url) return JS_EXCEPTION;
+    char host[256], path[2048];
+    uint16_t port;
+    uint32_t flags;
+    if (parse_fetch_url(url, host, sizeof(host), path, sizeof(path),
+                        &port, &flags) < 0) {
+        JS_FreeCString(ctx, url);
+        return JS_ThrowTypeError(ctx, "fetch supports absolute http(s) URLs");
+    }
+    char *response = (char *)malloc(HBOS_FETCH_CAP);
+    if (!response) {
+        JS_FreeCString(ctx, url);
+        return JS_ThrowInternalError(ctx, "fetch: out of memory");
+    }
+    hbos_web_fetch_request_t req = {
+        .version = HBOS_WEB_FETCH_VERSION,
+        .flags = flags,
+        .host = host,
+        .path = path,
+        .output = response,
+        .output_capacity = HBOS_FETCH_CAP,
+        .port = port,
+        .reserved = 0,
+    };
+    long len = __syscall1(HBOS_SYS_WEB_FETCH, (long)&req);
+    JS_FreeCString(ctx, url);
+    if (len < 0) {
+        free(response);
+        return JS_ThrowInternalError(ctx, "fetch transport failed (%ld)", len);
+    }
+    JSValue result = JS_NewStringLen(ctx, response, (size_t)len);
+    free(response);
+    return result;
+}
 
 static void register_globals(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue console;
-    JSValue doc;
+    JSValue nav, loc;
 
     JS_SetPropertyStr(ctx, global, "print",
                       JS_NewCFunction(ctx, js_print, "print", 1));
@@ -236,32 +256,6 @@ static void register_globals(JSContext *ctx) {
                       JS_NewCFunction(ctx, js_console_error, "error", 1));
     JS_SetPropertyStr(ctx, global, "console", console);
 
-    /* Minimal document object: title (plain property; read back after the
-     * script runs and reported through the -w file) and write() (appends
-     * to the captured output). */
-    JSValue nav, loc;
-
-    doc = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, doc, "title", JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, doc, "write",
-                      JS_NewCFunction(ctx, js_document_write, "write", 1));
-    JS_SetPropertyStr(ctx, doc, "querySelector",
-                      JS_NewCFunction(ctx, js_document_querySelector,
-                                      "querySelector", 1));
-    JS_SetPropertyStr(ctx, doc, "getElementById",
-                      JS_NewCFunction(ctx, js_document_getElementById,
-                                      "getElementById", 1));
-    JS_SetPropertyStr(ctx, doc, "createElement",
-                      JS_NewCFunction(ctx, js_document_createElement,
-                                      "createElement", 1));
-    /* Plain properties instead of getter/setter pairs: JS_DefineProperty
-     * with JS_CFUNC_getter/setter does not bind reliably in this quickjs
-     * build (the assignment silently becomes a plain property and the
-     * runtime leaks the function objects).  Fixed values are fine for the
-     * v1 DOM stub surface. */
-    JS_SetPropertyStr(ctx, doc, "cookie", JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, global, "document", doc);
-
     nav = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, nav, "userAgent",
                       JS_NewString(ctx,
@@ -271,28 +265,47 @@ static void register_globals(JSContext *ctx) {
 
     loc = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, loc, "href", JS_NewString(ctx, g_js_href));
+    JS_SetPropertyStr(ctx, loc, "hostname",
+                      JS_NewString(ctx, g_js_host));
+    JS_SetPropertyStr(ctx, loc, "host", JS_NewString(ctx, g_js_host));
+    JS_SetPropertyStr(ctx, loc, "protocol",
+                      JS_NewString(ctx, g_js_proto));
+    JS_SetPropertyStr(ctx, loc, "pathname",
+                      JS_NewString(ctx, g_js_path));
     JS_SetPropertyStr(ctx, global, "location", loc);
+    JS_SetPropertyStr(ctx, global, "__hbosFetchRaw",
+                      JS_NewCFunction(ctx, js_fetch_raw,
+                                      "__hbosFetchRaw", 1));
 
     /* window === globalThis */
     JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
     JS_FreeValue(ctx, global);
+}
 
-    /* Lazy DOM element stub: every property/method that real pages touch
-     * resolves to a harmless value so scripts run to completion instead of
-     * throwing (v1 has no DOM tree to operate on).  Defined in JS — far
-     * shorter than the equivalent C object construction. */
-    JSValue stub_ret = JS_Eval(ctx, dom_stub_js,
-                               sizeof(dom_stub_js) - 1, "<dom-stub>",
-                               JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(stub_ret)) {
-        JSValue e = JS_GetException(ctx);
-        const char *estr = JS_ToCString(ctx, e);
-        fprintf(stderr, "dom-stub eval error: %s\n",
-                estr ? estr : "?");
-        if (estr) JS_FreeCString(ctx, estr);
-        JS_FreeValue(ctx, e);
+/* eval 一小段脚本并吞掉异常（返回 0 成功） */
+static int eval_quiet(JSContext *ctx, const char *code, size_t len,
+                      const char *file) {
+    JSValue r = JS_Eval(ctx, code, len, file, JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) {
+        print_exception(ctx);
+        JS_FreeValue(ctx, r);
+        return -1;
     }
-    JS_FreeValue(ctx, stub_ret);
+    JS_FreeValue(ctx, r);
+    return 0;
+}
+
+/* 运行已经入队的 Promise continuation。传输当前是阻塞式内核代理，但
+ * fetch() 返回标准 Promise；脚本之间清空 job 队列即可支持 then/await
+ * 的短任务链。轮次上限防止页面自行制造无限微任务。 */
+static void drain_jobs(JSRuntime *rt) {
+    for (int i = 0; i < 64 && JS_IsJobPending(rt); i++) {
+        JSContext *job_ctx = NULL;
+        if (JS_ExecutePendingJob(rt, &job_ctx) < 0) {
+            if (job_ctx) print_exception(job_ctx);
+            break;
+        }
+    }
 }
 
 static char *read_file(const char *path, size_t *out_len) {
@@ -329,6 +342,16 @@ static char *read_file(const char *path, size_t *out_len) {
         len += (size_t)n;
     }
     close(fd);
+    /* QuickJS lexer performs sentinel look-ahead at the end of a source
+     * buffer. JS_Eval also receives len, but the backing storage must still
+     * have a NUL byte at buf[len]; otherwise a trailing newline can expose
+     * allocator metadata as a bogus token (observed as 0x03 at line 3). */
+    if (len + 1 > cap) {
+        char *nb = (char *)realloc(buf, cap + 1);
+        if (!nb) { free(buf); return NULL; }
+        buf = nb;
+    }
+    buf[len] = 0;
     *out_len = len;
     return buf;
 }
@@ -377,9 +400,77 @@ static int js_selftest(void) {
         }
         JS_FreeValue(ctx, result);
     }
-    printf("LINUX_JS: PASS\n");
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
+
+    /* DOM 平台自检：解析 → 查询 → 事件 → 渲染。selftest 的 JS 上下文
+     * 与主流程分开，这里单独建一个跑 hbos_dom.js。 */
+    {
+        JSRuntime *drt = JS_NewRuntime();
+        JSContext *dctx = drt ? JS_NewContext(drt) : NULL;
+        int dom_ok = 0;
+        if (dctx) {
+            static const char env_code[] =
+                "window = this;"
+                "print = function (s) { };"
+                "location = { href: 'about:blank', hostname: '', host: '',"
+                "  protocol: '', pathname: '/', search: '', hash: '',"
+                "  origin: 'about:blank' };";
+            JSValue sr = JS_Eval(dctx, env_code, sizeof(env_code) - 1,
+                                 "<dom-selftest-env>", JS_EVAL_TYPE_GLOBAL);
+            JS_FreeValue(dctx, sr);
+            JSValue dr = JS_Eval(dctx, hbos_dom_js, sizeof(hbos_dom_js) - 1,
+                                 "<hbos-dom-selftest>", JS_EVAL_TYPE_GLOBAL);
+            if (JS_IsException(dr)) {
+                print_exception(dctx);
+                JS_FreeValue(dctx, dr);
+            } else {
+                JS_FreeValue(dctx, dr);
+            }
+            const char *script =
+                "var __fail = 0;"
+                "function __ck(c, n) { if (!c) { __fail = 1; print('DOM-FAIL ' + n + '\\n'); } }"
+                "HBOS.parsePage('<html><head><title>T1</title></head><body>"
+                "<div id=\"a\"><p class=\"x\">hi</p><ul><li>1</li><li>2</li></ul>"
+                "<script>var s = 1<\/script></div></body></html>');"
+                "__ck(document.title === 'T1', 'title');"
+                "var el = document.querySelector('#a p.x');"
+                "__ck(el && el.textContent === 'hi', 'query');"
+                "__ck(document.querySelectorAll('li').length === 2, 'qall');"
+                "el.classList.add('y');"
+                "__ck(el.className === 'x y', 'classlist');"
+                "var fired = 0; document.addEventListener('DOMContentLoaded',"
+                " function () { fired = 1; });"
+                "HBOS.flushDeferred();"
+                "__ck(fired === 1, 'event');"
+                "var r = HBOS.renderPage();"
+                "__ck(r.indexOf('hi') >= 0 && r.indexOf('<li>1</li>') >= 0, 'render');"
+                "__ck(r.indexOf('T1') < 0, 'render-no-title');"
+                "0";
+            JSValue r = JS_Eval(dctx, script, strlen(script), "<dom-selftest>",
+                                JS_EVAL_TYPE_GLOBAL);
+            if (JS_IsException(r)) {
+                print_exception(dctx);
+                JS_FreeValue(dctx, r);
+            } else {
+                JS_FreeValue(dctx, r);
+                JSValue gf = JS_GetGlobalObject(dctx);
+                JSValue fv = JS_GetPropertyStr(dctx, gf, "__fail");
+                int32_t fv32 = 0;
+                dom_ok = JS_ToInt32(dctx, &fv32, fv) == 0 && fv32 == 0;
+                JS_FreeValue(dctx, fv);
+                JS_FreeValue(dctx, gf);
+            }
+            JS_FreeContext(dctx);
+        }
+        if (drt) JS_FreeRuntime(drt);
+        if (!dom_ok) {
+            printf("LINUX_JS: FAIL (dom)\n");
+            return 1;
+        }
+    }
+
+    printf("LINUX_JS: PASS\n");
     return 0;
 }
 
@@ -394,6 +485,7 @@ int main(int argc, char **argv) {
     int exit_code = 0;
 
     const char *out_path = NULL;
+    const char *page_path = NULL;
     int argi = 1;
 
     if (argc >= 2 && strcmp(argv[1], "-t") == 0)
@@ -401,6 +493,19 @@ int main(int argc, char **argv) {
 
     if (argc >= 3 && strcmp(argv[argi], "-w") == 0) {
         out_path = argv[argi + 1];
+        argi += 2;
+    }
+
+    if (argc >= argi + 2 && strcmp(argv[argi], "-p") == 0) {
+        page_path = argv[argi + 1];
+        argi += 2;
+    }
+
+    if (argc >= argi + 2 && strcmp(argv[argi], "-u") == 0) {
+        if (strlen(argv[argi + 1]) < sizeof(g_js_href)) {
+            strcpy(g_js_href, argv[argi + 1]);
+            split_url(g_js_href);
+        }
         argi += 2;
     }
 
@@ -432,6 +537,32 @@ int main(int argc, char **argv) {
     JS_SetRuntimeInfo(rt, "HBOS quickjs");
 
     register_globals(ctx);
+
+    /* DOM 平台：真实 DOM 树 + HTML 解析器 + 渲染器（hbos_dom.js） */
+    if (eval_quiet(ctx, hbos_dom_js, sizeof(hbos_dom_js) - 1,
+                   "<hbos-dom>") != 0) {
+        fprintf(stderr, "js: DOM platform failed to load\n");
+        return 1;
+    }
+
+    /* 页面原始 HTML → 解析成 document 树（脚本执行前） */
+    if (page_path) {
+        g_page_buf = read_file(page_path, &g_page_len);
+        if (!g_page_buf) {
+            fprintf(stderr, "js: cannot read page %s\n", page_path);
+            return 1;
+        }
+        JSValue global = JS_GetGlobalObject(ctx);
+        JS_SetPropertyStr(ctx, global, "g_page_html",
+                          JS_NewStringLen(ctx, g_page_buf, g_page_len));
+        JS_FreeValue(ctx, global);
+        char parse_code[64];
+        snprintf(parse_code, sizeof(parse_code),
+                 "HBOS.parsePage(g_page_html); 0");
+        if (eval_quiet(ctx, parse_code, strlen(parse_code),
+                       "<hbos-parse>") != 0)
+            return 1;
+    }
 
     if (code) {
         result = JS_Eval(ctx, code, code_len, filename, JS_EVAL_TYPE_GLOBAL);
@@ -465,11 +596,26 @@ int main(int argc, char **argv) {
             } else {
                 JS_FreeValue(ctx, result);
             }
+            drain_jobs(rt);
             free(fbuf);
         }
     }
 
     if (out_path) {
+        /* 浏览器语义收尾：DOMContentLoaded → 零延时回调/rAF（有轮次上限）
+         * → load；然后渲染最终 DOM。 */
+        if (eval_quiet(ctx, "HBOS.flushDeferred(); 0", 23, "<hbos-flush>") != 0) {
+            /* 事件回调里抛异常不阻塞渲染 */
+        }
+        drain_jobs(rt);
+        if (eval_quiet(ctx, "g_render_out = HBOS.renderPage(); 0", 33,
+                       "<hbos-render>") != 0) {
+            JSValue g2 = JS_GetGlobalObject(ctx);
+            JS_SetPropertyStr(ctx, g2, "g_render_out",
+                              JS_NewString(ctx, ""));
+            JS_FreeValue(ctx, g2);
+        }
+
         JSValue global = JS_GetGlobalObject(ctx);
         JSValue docv = JS_GetPropertyStr(ctx, global, "document");
         JSValue tv = JS_GetPropertyStr(ctx, docv, "title");
@@ -485,19 +631,29 @@ int main(int argc, char **argv) {
         }
         JS_FreeValue(ctx, tv);
         JS_FreeValue(ctx, docv);
+
+        JSValue rv = JS_GetPropertyStr(ctx, global, "g_render_out");
+        const char *render_str = NULL;
+        if (JS_IsString(rv))
+            render_str = JS_ToCString(ctx, rv);
         JS_FreeValue(ctx, global);
 
         int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) {
             (void)write(fd, g_js_title, strlen(g_js_title));
             (void)write(fd, "\n", 1);
-            (void)write(fd, g_js_out, g_js_out_len);
+            if (render_str) {
+                (void)write(fd, render_str, strlen(render_str));
+                JS_FreeCString(ctx, render_str);
+            }
             close(fd);
         }
+        JS_FreeValue(ctx, rv);
     }
 
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
     free(file_buf);
+    free((void *)g_page_buf);
     return exit_code;
 }

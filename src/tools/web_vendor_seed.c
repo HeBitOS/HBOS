@@ -1,15 +1,10 @@
 /**
- * @file hpt_repo_seed.c
- * @brief 把内置 HPT 软件仓库零复制映射到 VFS /packages。
+ * @file web_vendor_seed.c
+ * @brief 把内置 web vendor 包零复制映射到 VFS /system。
  *
- * 构建期把镜像自带的 HAX 应用生成 HPT 仓库（Packages + pool/），通过
- * incbin 嵌入内核并注册为只读 VFS 文件。避免 HBFS 启动阶段写入 1MB
- * 仓库造成长时间卡顿；用户仍可切换外部 server 源。
- *
- * blob 格式与 tools/genheaders.py 一致（全部小端）：
- *     [u32 count]
- *     count * { [u16 name_len][name][u32 data_len][data] }
- * name 相对仓库根，如 "Packages" 或 "pool/cat.hax"。
+ * 与 hpt_repo_seed.c 同款 blob 格式（见 tools/genwebblob.py）：当前只装了
+ * Vue 2.6 完整运行时（/system/vue.global.prod.js），适配 Bilibili 当前
+ * Vue 2 页面；页面没有自带 Vue、或外链 Vue 抓取失败时回退到它。
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -17,12 +12,12 @@
 #include "vfs.h"
 #include "graphics/graphics.h"
 
-void hpt_repo_seed_init(void) {
-    extern const uint8_t _binary_build_hpt_repo_bin_start[];
-    extern const uint8_t _binary_build_hpt_repo_bin_end[];
+void web_vendor_seed_init(void) {
+    extern const uint8_t _binary_build_web_vendor_bin_start[];
+    extern const uint8_t _binary_build_web_vendor_bin_end[];
 
-    const uint8_t *p = _binary_build_hpt_repo_bin_start;
-    const uint8_t *end = _binary_build_hpt_repo_bin_end;
+    const uint8_t *p = _binary_build_web_vendor_bin_start;
+    const uint8_t *end = _binary_build_web_vendor_bin_end;
     if (end <= p + 4) return;
 
     uint32_t count;
@@ -37,7 +32,7 @@ void hpt_repo_seed_init(void) {
         if (p + name_len + 4 > end) break;
 
         uint32_t n = 0;
-        const char prefix[] = "/packages/";
+        const char prefix[] = "/system/";
         for (const char *q = prefix; *q && n + 1 < (int)sizeof(path); q++)
             path[n++] = *q;
         for (uint16_t j = 0; j < name_len && n + 1 < (int)sizeof(path); j++)
@@ -51,7 +46,7 @@ void hpt_repo_seed_init(void) {
         if (p + data_len > end) break;
 
         if (!vfs_register_static_file(path, p, data_len)) {
-            console_puts("[KERN] hpt repo map failed: ");
+            console_puts("[KERN] web vendor map failed: ");
             console_puts(path);
             console_putchar('\n');
             return;

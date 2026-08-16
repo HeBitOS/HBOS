@@ -13,9 +13,9 @@
 #define HIVE_NAME "HIVE"
 #define HIVE_API_MAJOR HAX_UI_ABI_MAJOR
 #define HIVE_API_MINOR HAX_UI_ABI_MINOR
-#define HIVE_API_VERSION_STRING "1.3"
-#define HIVE_GUI_REVISION 3u
-#define HIVE_VERSION_STRING "0.1-beta5-gui.3"
+#define HIVE_API_VERSION_STRING "1.4"
+#define HIVE_GUI_REVISION 4u
+#define HIVE_VERSION_STRING "0.1-beta5-gui.4"
 #define HIVE_VERSION_TAG "HIVE " HIVE_VERSION_STRING
 
 /** 声明一个由 HIVE 桌面异步启动的独立窗口应用。 */
@@ -50,6 +50,12 @@ typedef hax_rect_t hive_window_rect_t;
 #define HIVE_WIDGET_IMAGE     HAX_WIDGET_IMAGE
 #define HIVE_WIDGET_CANVAS    HAX_WIDGET_CANVAS
 #define HIVE_WIDGET_PANEL     HAX_WIDGET_PANEL
+#define HIVE_WIDGET_RADIO     HAX_WIDGET_RADIO
+#define HIVE_WIDGET_DROPDOWN  HAX_WIDGET_DROPDOWN
+#define HIVE_WIDGET_SPINBOX   HAX_WIDGET_SPINBOX
+#define HIVE_WIDGET_TOGGLE    HAX_WIDGET_TOGGLE
+#define HIVE_WIDGET_SEPARATOR HAX_WIDGET_SEPARATOR
+#define HIVE_WIDGET_GROUPBOX  HAX_WIDGET_GROUPBOX
 
 #define HIVE_EVENT_NONE       HAX_UI_EVENT_NONE
 #define HIVE_EVENT_CLICK      HAX_UI_EVENT_CLICK
@@ -80,6 +86,12 @@ typedef hax_rect_t hive_window_rect_t;
 #define hive_ui_add_menu          hax_ui_add_menu
 #define hive_ui_add_image         hax_ui_add_image
 #define hive_ui_add_canvas        hax_ui_add_canvas
+#define hive_ui_add_radio         hax_ui_add_radio
+#define hive_ui_add_dropdown      hax_ui_add_dropdown
+#define hive_ui_add_spinbox       hax_ui_add_spinbox
+#define hive_ui_add_toggle        hax_ui_add_toggle
+#define hive_ui_add_separator     hax_ui_add_separator
+#define hive_ui_add_groupbox      hax_ui_add_groupbox
 #define hive_ui_set_enabled       hax_ui_set_enabled
 #define hive_ui_set_visible       hax_ui_set_visible
 #define hive_ui_set_parent        hax_ui_set_parent

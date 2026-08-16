@@ -237,9 +237,20 @@ static int _vsnprintf_core(char *buf, size_t n, const char *fmt, va_list ap) {
     while (*fmt && pos < n - 1) {
         if (*fmt != '%') { buf[pos++] = *fmt++; continue; }
         fmt++;
-        int width = 0, pad = ' ';
+        int width = 0, pad = ' ', precision = -1;
         if (*fmt == '0') { pad = '0'; fmt++; }
-        while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        if (*fmt == '*') { width = va_arg(ap, int); fmt++; }
+        else while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        if (*fmt == '.') {
+            fmt++;
+            precision = 0;
+            if (*fmt == '*') { precision = va_arg(ap, int); fmt++; }
+            else while (*fmt >= '0' && *fmt <= '9') {
+                precision = precision * 10 + (*fmt - '0');
+                fmt++;
+            }
+            if (precision < 0) precision = -1;
+        }
         int lcount = 0;
         if (*fmt == 'l') { fmt++; lcount++; }
         if (*fmt == 'l') { fmt++; lcount++; }
@@ -248,7 +259,12 @@ static int _vsnprintf_core(char *buf, size_t n, const char *fmt, va_list ap) {
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            while (*s && pos < n - 1) buf[pos++] = *s++;
+            int count = 0;
+            while (*s && pos < n - 1 &&
+                   (precision < 0 || count < precision)) {
+                buf[pos++] = *s++;
+                count++;
+            }
             break;
         }
         case 'c': buf[pos++] = (char)va_arg(ap, int); break;

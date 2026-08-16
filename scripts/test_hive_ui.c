@@ -166,6 +166,84 @@ int main(void) {
     CHECK(ui.focus_index ==
           (HI32)(hive_ui_widget(&ui, 10) - ui.widgets));
 
+    /* Toolkit API 1.4：Radio/Toggle/Dropdown/Spinbox/Separator/Groupbox。 */
+    {
+        hive_ui_t ui14;
+        hive_ui_init(&ui14);
+        CHECK(HIVE_API_MINOR >= 4);
+
+        static const char *langs[] = {"C", "C++", "HBOS-C"};
+        CHECK(hive_ui_add_groupbox(&ui14, 20, hive_rect(10, 10, 220, 120), "模式"));
+        CHECK(hive_ui_add_radio(&ui14, 21, hive_rect(20, 30, 180, 22), "标准", 1));
+        CHECK(hive_ui_add_radio(&ui14, 22, hive_rect(20, 56, 180, 22), "增强", 0));
+        CHECK(hive_ui_set_parent(&ui14, 21, 20));
+        CHECK(hive_ui_set_parent(&ui14, 22, 20));
+        CHECK(hive_ui_add_toggle(&ui14, 23, hive_rect(20, 90, 180, 22), "自动保存", 0));
+        CHECK(hive_ui_add_dropdown(&ui14, 24, hive_rect(240, 10, 120, 26),
+                                   langs, 3, 0));
+        CHECK(hive_ui_add_spinbox(&ui14, 25, hive_rect(240, 44, 120, 26),
+                                  0, 100, 10, 5));
+        CHECK(hive_ui_add_separator(&ui14, 26, hive_rect(240, 80, 120, 4), 0));
+
+        /* 点击第二个 Radio：同 Groupbox 下互斥。 */
+        mouse[0] = HAX_EV_MOUSE;
+        mouse[1] = 30; mouse[2] = 60; mouse[3] = 1;
+        hive_ui_dispatch(&ui14, mouse, &event);
+        mouse[3] = 0;
+        CHECK(hive_ui_dispatch(&ui14, mouse, &event));
+        CHECK(event.type == HIVE_EVENT_CHANGE && event.widget_id == 22);
+        CHECK(hive_ui_widget(&ui14, 22)->value == 1);
+        CHECK(hive_ui_widget(&ui14, 21)->value == 0);
+
+        /* Toggle：点击切换。 */
+        mouse[1] = 30; mouse[2] = 94; mouse[3] = 1;
+        hive_ui_dispatch(&ui14, mouse, &event);
+        mouse[3] = 0;
+        CHECK(hive_ui_dispatch(&ui14, mouse, &event));
+        CHECK(event.type == HIVE_EVENT_CHANGE && event.widget_id == 23);
+        CHECK(event.value == 1);
+
+        /* Dropdown：右半区下一项。 */
+        mouse[1] = 350; mouse[2] = 20; mouse[3] = 1;
+        CHECK(hive_ui_dispatch(&ui14, mouse, &event));
+        CHECK(event.type == HIVE_EVENT_SELECT && event.widget_id == 24);
+        CHECK(event.value == 1);
+        mouse[3] = 0;
+        hive_ui_dispatch(&ui14, mouse, &event);
+
+        /* Spinbox：[+] 区加一步。 */
+        mouse[1] = 350; mouse[2] = 54; mouse[3] = 1;
+        CHECK(hive_ui_dispatch(&ui14, mouse, &event));
+        CHECK(event.type == HIVE_EVENT_CHANGE && event.widget_id == 25);
+        CHECK(event.value == 15);
+        mouse[3] = 0;
+        hive_ui_dispatch(&ui14, mouse, &event);
+
+        /* 键盘：Dropdown 下移、Spinbox Home、Radio 空格互斥。 */
+        ui14.focus_index = (HI32)(hive_ui_widget(&ui14, 24) - ui14.widgets);
+        int key[4] = {HAX_EV_KEY, HAX_KEY_DOWN, 0, 0};
+        CHECK(hive_ui_dispatch(&ui14, key, &event));
+        CHECK(event.type == HIVE_EVENT_SELECT && event.value == 2);
+        ui14.focus_index = (HI32)(hive_ui_widget(&ui14, 25) - ui14.widgets);
+        key[1] = HAX_KEY_HOME;
+        CHECK(hive_ui_dispatch(&ui14, key, &event));
+        CHECK(event.type == HIVE_EVENT_CHANGE && event.value == 0);
+        ui14.focus_index = (HI32)(hive_ui_widget(&ui14, 21) - ui14.widgets);
+        key[1] = ' ';
+        CHECK(hive_ui_dispatch(&ui14, key, &event));
+        CHECK(event.type == HIVE_EVENT_CHANGE && event.widget_id == 21);
+        CHECK(hive_ui_widget(&ui14, 21)->value == 1);
+        CHECK(hive_ui_widget(&ui14, 22)->value == 0);
+
+        /* 值域：Spinbox clamp、Dropdown 选中项。 */
+        CHECK(hive_ui_set_value(&ui14, 25, 999));
+        HI32 value14 = 0;
+        CHECK(hive_ui_get_value(&ui14, 25, &value14) && value14 == 100);
+        CHECK(hive_ui_set_value(&ui14, 24, 0));
+        CHECK(hive_ui_get_value(&ui14, 24, &value14) && value14 == 0);
+        CHECK(hive_ui_widget(&ui14, 26)->type == HIVE_WIDGET_SEPARATOR);
+    }
+
     hive_window_caps_t caps;
     CHECK(sizeof(caps) >= 32);
 

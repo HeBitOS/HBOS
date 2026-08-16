@@ -141,7 +141,9 @@ void kmain(void *mbi) {
     selftest_run();
 
     extern void tcc_runtime_seed_init(void);
+    serial_print("[KERN] seed: tcc headers\n");
     tcc_runtime_seed_init();
+    serial_print("[KERN] seed: tcc headers done\n");
 
     /* Present only in HBOS_COMPAT_SMOKE images.  A normal build does not
      * bundle linux_interp, so this is an allocation-free no-op there. */
@@ -169,7 +171,16 @@ void kmain(void *mbi) {
 
     // 内置 HPT 软件仓库（/packages）：镜像自带的 HAX 应用，供 hpt 装卸
     extern void hpt_repo_seed_init(void);
+    serial_print("[KERN] seed: hpt repo\n");
     hpt_repo_seed_init();
+    serial_print("[KERN] seed: hpt repo done\n");
+
+    // 内置 web vendor 包（/system/vue.global.prod.js）：浏览器 js.hax 管线
+    // 的 Vue 运行时兜底，见 tools/genwebblob.py + web_vendor_seed.c
+    extern void web_vendor_seed_init(void);
+    serial_print("[KERN] seed: web vendor\n");
+    web_vendor_seed_init();
+    serial_print("[KERN] seed: web vendor done\n");
 
     // ---- Phase 6: Shell ----
     // 注册所有内置命令（help, ls, cat, echo 等）

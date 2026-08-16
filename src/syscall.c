@@ -3531,6 +3531,39 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return finish_syscall(result);
         }
 
+        case HBOS_SYS_WEB_FETCH: {
+            const hbos_web_fetch_request_t *request =
+                (const hbos_web_fetch_request_t *)f->a0;
+            if (!request || request->version != HBOS_WEB_FETCH_VERSION ||
+                !request->host || !request->path || !request->output ||
+                request->path[0] != '/' ||
+                request->output_capacity < 2 ||
+                request->output_capacity > SYSCALL_HTTPS_MAX_SIZE ||
+                strnlen(request->host, 256) >= 256 ||
+                strnlen(request->path, 2048) >= 2048)
+                return (uint64_t)(-EINVAL);
+
+            uint32_t ip = 0;
+            if (net_dns_resolve(request->host, &ip) < 0)
+                return (uint64_t)(-EHOSTUNREACH);
+
+            uint32_t out_len = 0;
+            int status;
+            if (request->flags & HBOS_WEB_FETCH_HTTPS) {
+                status = tls_https_get_with_idle_limit(
+                    request->host, ip, request->port ? request->port : 443,
+                    request->path, request->output,
+                    request->output_capacity, &out_len, 80);
+            } else {
+                status = net_http_request(
+                    "GET", request->host, ip,
+                    request->port ? request->port : 80,
+                    request->path, request->output,
+                    request->output_capacity, &out_len);
+            }
+            return status < 0 ? (uint64_t)(-EIO) : (uint64_t)out_len;
+        }
+
         case HBOS_SYS_MEMFD_CREATE: {
             int fd = linux_compat_memfd_create(
                 (const char *)f->a0, (unsigned int)f->a1);

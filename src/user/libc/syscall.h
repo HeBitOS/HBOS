@@ -4,6 +4,20 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define HBOS_WEB_FETCH_VERSION 1U
+#define HBOS_WEB_FETCH_HTTPS   0x01U
+
+typedef struct {
+    uint32_t version;
+    uint32_t flags;
+    const char *host;
+    const char *path;
+    char *output;
+    uint32_t output_capacity;
+    uint16_t port;
+    uint16_t reserved;
+} hbos_web_fetch_request_t;
+
 typedef long ssize_t;
 typedef long off_t;
 typedef int pid_t;
@@ -190,6 +204,7 @@ enum {
     HBOS_SYS_RENAME,
     HBOS_SYS_GETSOCKNAME,
     HBOS_SYS_GETPEERNAME,
+    HBOS_SYS_WEB_FETCH,
 };
 
 long __syscall6(long nr, long a0, long a1, long a2, long a3, long a4, long a5);

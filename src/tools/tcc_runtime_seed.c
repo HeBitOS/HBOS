@@ -1,33 +1,18 @@
 /**
  * @file tcc_runtime_seed.c
  * @brief 把 TinyCC 运行时捆绑包（crt0 + 用户态 libc，build/tcc/hbos_runtime.o）
- *        和 sysinclude 头文件包（build/tcc/headers.bin）写入 ramfs 固定路径，
+ *        和 sysinclude 头文件包（build/tcc/headers.bin）映射到 VFS 固定路径，
  *        供 tcc 编译用户程序时自动链接 / #include 解析。
  *
  * HBOS 的 ramfs 每次启动都是空的，没有类似真实磁盘那样在构建期就"预置好"的
- * 文件系统内容；这些文件又必须是 tcc 能按路径 open() 到的真实文件（不是
- * 内存里的一段数据），所以采用和壁纸/字体一样的 incbin 方式把它们嵌入
- * 内核镜像，开机时（vfs_init 之后）写出一次即可。
+ * 文件系统内容；资源通过 incbin 嵌入内核，开机后注册只读 VFS 节点，
+ * TCC 仍可按普通路径 open/read，同时避免在 HBFS 启动阶段逐扇区写盘。
  */
 #include <stddef.h>
 #include <stdint.h>
 
-#include "fcntl.h"
-#include "unistd.h"
 #include "graphics/graphics.h"
-
-static int write_whole_file(const char *path, const uint8_t *data, size_t total) {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return -1;
-    size_t off = 0;
-    while (off < total) {
-        long n = write(fd, data + off, total - off);
-        if (n <= 0) break;
-        off += (size_t)n;
-    }
-    close(fd);
-    return (off == total) ? 0 : -1;
-}
+#include "vfs.h"
 
 static void tcc_headers_seed_init(void) {
     extern const uint8_t _binary_build_tcc_headers_bin_start[];
@@ -40,9 +25,6 @@ static void tcc_headers_seed_init(void) {
     uint32_t count;
     __builtin_memcpy(&count, p, 4);
     p += 4;
-
-    (void)mkdir("/system/include", 0755);
-    (void)mkdir("/system/include/sys", 0755);
 
     char path[300];
     for (uint32_t i = 0; i < count && p + 2 <= end; i++) {
@@ -63,7 +45,12 @@ static void tcc_headers_seed_init(void) {
         p += 4;
         if (p + data_len > end) break;
 
-        write_whole_file(path, p, data_len);
+        if (!vfs_register_static_file(path, p, data_len)) {
+            console_puts("[KERN] tcc header map failed: ");
+            console_puts(path);
+            console_putchar('\n');
+            return;
+        }
         p += data_len;
     }
 }
@@ -77,13 +64,13 @@ void tcc_runtime_seed_init(void) {
                              _binary_build_tcc_hbos_runtime_o_start);
     if (total == 0) return;
 
-    (void)mkdir("/system", 0755);
-    (void)mkdir("/system/lib", 0755);
-
-    if (write_whole_file("/system/lib/hbos_runtime.o", data, total) != 0) {
-        console_puts("[KERN] tcc runtime bundle seed failed\n");
+    /* 运行时与头文件都是只读构建资源，直接映射 incbin 数据。旧实现
+     * 在 HBFS 模式下启动时逐扇区写入约 85KB，慢盘/异常 AHCI 会卡在
+     * “[KERN] seed: tcc headers”。静态 VFS 映射零复制、零磁盘 I/O。 */
+    if (!vfs_register_static_file("/system/lib/hbos_runtime.o", data,
+                                  (uint32_t)total)) {
+        console_puts("[KERN] tcc runtime map failed\n");
         return;
     }
-
     tcc_headers_seed_init();
 }

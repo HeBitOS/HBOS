@@ -90,7 +90,7 @@ run_guest() {
 if [[ -n "${HBOS_COMPAT_TESTS:-}" ]]; then
     read -r -a tests <<<"$HBOS_COMPAT_TESTS"
 else
-    tests=(linux_syscall linux_pie linux_dynamic linux_abi linux_signal linux_signal_siginfo linux_js linux_jspage linux_mprotect linux_mmap_reclaim linux_file_mmap linux_process_abi linux_dlopen linux_dlopen_deps linux_compat_thread linux_clone3 linux_epoll_et linux_inotify)
+    tests=(linux_syscall linux_pie linux_dynamic linux_abi linux_signal linux_signal_siginfo linux_js linux_jspage linux_jspage_vue linux_fetch linux_mprotect linux_mmap_reclaim linux_file_mmap linux_process_abi linux_dlopen linux_dlopen_deps linux_compat_thread linux_clone3 linux_epoll_et linux_inotify)
     if [[ "${HBOS_MUSL_SMOKE:-0}" == "1" ]]; then
         tests=(linux_musl_stream linux_musl_pthread "${tests[@]}")
     fi
@@ -100,6 +100,19 @@ else
 fi
 
 result=0
+fetch_server_pid=""
+fetch_root=""
+if printf '%s\n' "${tests[@]}" | grep -Fxq linux_fetch; then
+    fetch_root="$(mktemp -d)"
+    printf '%s\n' '{"marker":"FETCH_RING3_OK"}' >"$fetch_root/data.json"
+    printf '%s\n' 'XHR_OK' >"$fetch_root/xhr.txt"
+    python3 -m http.server 18765 --bind 0.0.0.0 \
+        --directory "$fetch_root" >/dev/null 2>&1 &
+    fetch_server_pid=$!
+    sleep 1
+fi
+trap '[[ -n "$fetch_server_pid" ]] && kill "$fetch_server_pid" 2>/dev/null || true; [[ -n "$fetch_root" ]] && rm -rf "$fetch_root"' EXIT
+
 for test in "${tests[@]}"; do
     case "$test" in
         linux_syscall|linux_pie) expected="LINUX_SYSCALL_ELF: PASS" ;;
@@ -112,6 +125,8 @@ for test in "${tests[@]}"; do
         linux_signal_siginfo) expected="LINUX_SIGNAL_SIGINFO: PASS" ;;
         linux_js) expected="LINUX_JS: PASS" ;;
         linux_jspage) expected="title: JT" ;;
+        linux_jspage_vue) expected="VUE_RING3_OK" ;;
+        linux_fetch) expected="FETCH_RING3_OK XHR_OK" ;;
         linux_mprotect) expected="LINUX_MPROTECT: PASS" ;;
         linux_mmap_reclaim) expected="LINUX_MMAP_RECLAIM: PASS" ;;
         linux_file_mmap) expected="LINUX_FILE_MMAP: PASS" ;;
@@ -127,6 +142,20 @@ for test in "${tests[@]}"; do
     case "$test" in
         linux_js) command="run js -t" ;;
         linux_jspage) command="echo '<html><script>document.title=\"JT\";document.write(6*7)</script></html>' > /tmp/j.html\njspage /tmp/j.html" ;;
+        linux_jspage_vue) command="echo '<html><head><title>VUET</title></head><body>' > /tmp/v.html
+echo '<div id=\"app\"></div>' >> /tmp/v.html
+echo '<script>' >> /tmp/v.html
+echo 'new Vue({el:\"#app\",data(){return{msg:\"VUE_RING3_OK\"}},template:\"<h1>{{msg}}</h1>\"});' >> /tmp/v.html
+echo '</script></body></html>' >> /tmp/v.html
+jspage /tmp/v.html" ;;
+        linux_fetch) command="echo '<html><body><div id=\"app\">WAIT</div><script>' > /tmp/f.html
+echo 'fetch(\"http://10.0.2.2:18765/data.json\")' >> /tmp/f.html
+echo '.then(r=>r.json())' >> /tmp/f.html
+echo '.then(x=>{var q=new XMLHttpRequest();q.open(\"GET\",\"http://10.0.2.2:18765/xhr.txt\");' >> /tmp/f.html
+echo 'q.onload=()=>{document.getElementById(\"app\").textContent=x.marker+\" \"+q.responseText.trim()};q.send()})' >> /tmp/f.html
+echo '.catch(e=>{document.getElementById(\"app\").textContent=\"FETCH_FAIL \"+e.message});' >> /tmp/f.html
+echo '</script></body></html>' >> /tmp/f.html
+jspage /tmp/f.html" ;;
         *) command="run $test" ;;
     esac
     if run_guest "$test" "$command" "$expected"; then

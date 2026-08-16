@@ -19,6 +19,20 @@
 /** int 0x80 中断向量号 */
 #define HBOS_SYSCALL_VECTOR 0x80
 
+#define HBOS_WEB_FETCH_VERSION 1U
+#define HBOS_WEB_FETCH_HTTPS   0x01U
+
+typedef struct {
+    uint32_t version;
+    uint32_t flags;
+    const char *host;
+    const char *path;
+    char *output;
+    uint32_t output_capacity;
+    uint16_t port;
+    uint16_t reserved;
+} hbos_web_fetch_request_t;
+
 /**
  * 系统调用号枚举
  * 按功能分组:
@@ -210,6 +224,7 @@ typedef enum {
     HBOS_SYS_RENAME,         /**< rename(old,new,flags), append-only ABI */
     HBOS_SYS_GETSOCKNAME,    /**< getsockname(fd,address,length) */
     HBOS_SYS_GETPEERNAME,    /**< getpeername(fd,address,length) */
+    HBOS_SYS_WEB_FETCH,      /**< browser GET proxy: DNS + HTTP/TLS */
 
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;

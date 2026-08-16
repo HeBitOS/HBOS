@@ -11,7 +11,7 @@
 #include <hax.h>
 
 #define HAX_UI_ABI_MAJOR 1u
-#define HAX_UI_ABI_MINOR 3u
+#define HAX_UI_ABI_MINOR 4u
 #define HAX_UI_MAX_WIDGETS 48
 
 /* 与 src/gui/gui_state.h 的公开窗口按键值保持一致。 */
@@ -58,7 +58,14 @@ typedef enum {
     HAX_WIDGET_MENU,
     HAX_WIDGET_IMAGE,
     HAX_WIDGET_CANVAS,
-    HAX_WIDGET_PANEL
+    HAX_WIDGET_PANEL,
+    /* Toolkit API 1.4 新增。枚举值只追加，保持 1.3 布局兼容。 */
+    HAX_WIDGET_RADIO,
+    HAX_WIDGET_DROPDOWN,
+    HAX_WIDGET_SPINBOX,
+    HAX_WIDGET_TOGGLE,
+    HAX_WIDGET_SEPARATOR,
+    HAX_WIDGET_GROUPBOX
 } hax_widget_type_t;
 
 enum {
@@ -433,6 +440,63 @@ static inline hax_widget_t *hax_ui_add_canvas(
     return w;
 }
 
+static inline hax_widget_t *hax_ui_add_radio(hax_ui_t *ui, hax_widget_id_t id,
+                                             hax_ui_rect_t rect,
+                                             const char *text, int checked) {
+    hax_widget_t *w = hax_ui_add_widget(ui, id, HAX_WIDGET_RADIO, rect, text,
+                                        HAX_WIDGET_ENABLED | HAX_WIDGET_FOCUSABLE);
+    if (w) w->value = checked ? 1 : 0;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_toggle(hax_ui_t *ui, hax_widget_id_t id,
+                                              hax_ui_rect_t rect,
+                                              const char *text, int on) {
+    hax_widget_t *w = hax_ui_add_widget(ui, id, HAX_WIDGET_TOGGLE, rect, text,
+                                        HAX_WIDGET_ENABLED | HAX_WIDGET_FOCUSABLE);
+    if (w) w->value = on ? 1 : 0;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_dropdown(
+        hax_ui_t *ui, hax_widget_id_t id, hax_ui_rect_t rect,
+        const char *const *items, HI32 item_count, HI32 selected) {
+    hax_widget_t *w = hax_ui_add_list(ui, id, rect, items, item_count, selected);
+    if (w) w->type = HAX_WIDGET_DROPDOWN;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_spinbox(hax_ui_t *ui, hax_widget_id_t id,
+                                               hax_ui_rect_t rect,
+                                               HI32 min_value, HI32 max_value,
+                                               HI32 value, HI32 step) {
+    hax_widget_t *w = hax_ui_add_slider(ui, id, rect, min_value, max_value,
+                                        value, step);
+    if (!w) return NULL;
+    w->type = HAX_WIDGET_SPINBOX;
+    /* PgUp/PgDn 的键进量；page_size 复用 SCROLLBAR 字段。 */
+    w->page_size = (step > 0 ? step : 1) * 4;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_separator(hax_ui_t *ui,
+                                                 hax_widget_id_t id,
+                                                 hax_ui_rect_t rect,
+                                                 int vertical) {
+    hax_widget_t *w = hax_ui_add_widget(ui, id, HAX_WIDGET_SEPARATOR, rect, "",
+                                        HAX_WIDGET_ENABLED);
+    if (w && vertical) w->flags |= HAX_WIDGET_VERTICAL;
+    return w;
+}
+
+static inline hax_widget_t *hax_ui_add_groupbox(hax_ui_t *ui,
+                                                hax_widget_id_t id,
+                                                hax_ui_rect_t rect,
+                                                const char *title) {
+    return hax_ui_add_widget(ui, id, HAX_WIDGET_GROUPBOX, rect,
+                             title ? title : "", HAX_WIDGET_ENABLED);
+}
+
 static inline hax_ui_rect_t hax_ui_widget_rect_at(const hax_ui_t *ui,
                                                    HI32 index) {
     if (!ui || index < 0 || index >= ui->widget_count)
@@ -485,7 +549,8 @@ static inline int hax_ui_set_parent(hax_ui_t *ui, hax_widget_id_t child_id,
     if (!child || (parent_id > 0 && !parent) || child == parent) return 0;
     HI32 child_index = (HI32)(child - ui->widgets);
     HI32 parent_index = parent ? (HI32)(parent - ui->widgets) : -1;
-    if (parent && parent->type != HAX_WIDGET_PANEL) return 0;
+    if (parent && parent->type != HAX_WIDGET_PANEL &&
+        parent->type != HAX_WIDGET_GROUPBOX) return 0;
     /* 父控件必须先创建，保证扁平数组的绘制顺序天然是父后代顺序。 */
     if (parent && parent_index > child_index) return 0;
     if (parent && hax_ui_in_subtree(ui, parent_index, child_index)) return 0;
@@ -618,15 +683,16 @@ static inline int hax_ui_set_text(hax_ui_t *ui, hax_widget_id_t id,
 static inline int hax_ui_set_value(hax_ui_t *ui, hax_widget_id_t id, HI32 value) {
     hax_widget_t *w = hax_ui_widget(ui, id);
     if (!w) return 0;
-    if (w->type == HAX_WIDGET_LIST) {
+    if (w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_DROPDOWN) {
         if (value < -1) value = -1;
         if (value >= w->item_count) value = w->item_count - 1;
         w->selected = value;
         return 1;
     }
-    if (w->type == HAX_WIDGET_CHECKBOX) value = value ? 1 : 0;
+    if (w->type == HAX_WIDGET_CHECKBOX || w->type == HAX_WIDGET_RADIO ||
+        w->type == HAX_WIDGET_TOGGLE) value = value ? 1 : 0;
     if (w->type == HAX_WIDGET_PROGRESS || w->type == HAX_WIDGET_SLIDER ||
-        w->type == HAX_WIDGET_SCROLLBAR) {
+        w->type == HAX_WIDGET_SCROLLBAR || w->type == HAX_WIDGET_SPINBOX) {
         if (value < w->min_value) value = w->min_value;
         if (value > w->max_value) value = w->max_value;
     }
@@ -638,7 +704,8 @@ static inline int hax_ui_get_value(const hax_ui_t *ui, hax_widget_id_t id,
                                     HI32 *value) {
     const hax_widget_t *w = hax_ui_widget_const(ui, id);
     if (!w || !value) return 0;
-    *value = (w->type == HAX_WIDGET_LIST) ? w->selected : w->value;
+    *value = (w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_DROPDOWN)
+                 ? w->selected : w->value;
     return 1;
 }
 
@@ -947,13 +1014,24 @@ static inline HI32 hax_ui_scrollbar_value_at(const hax_widget_t *w,
     return value;
 }
 
+/* 选中 index 处的单选钮，并取消同一父容器（含根）下其余单选钮。 */
+static inline void hax_ui_radio_select(hax_ui_t *ui, HI32 index) {
+    if (!ui || index < 0 || index >= ui->widget_count) return;
+    HI32 parent = ui->widgets[index].parent_index;
+    for (HI32 i = 0; i < ui->widget_count; i++) {
+        if (ui->widgets[i].type == HAX_WIDGET_RADIO &&
+            ui->widgets[i].parent_index == parent)
+            ui->widgets[i].value = (i == index);
+    }
+}
+
 static inline int hax_ui_activate(hax_widget_t *w,
                                    const hax_ui_rect_t *absolute_rect,
                                    HI32 mouse_y, hax_ui_event_t *out) {
     if (!hax_ui_focusable(w)) return 0;
     if (w->type == HAX_WIDGET_BUTTON) {
         hax_ui_emit(out, HAX_UI_EVENT_CLICK, w->id, 0);
-    } else if (w->type == HAX_WIDGET_CHECKBOX) {
+    } else if (w->type == HAX_WIDGET_CHECKBOX || w->type == HAX_WIDGET_TOGGLE) {
         w->value = !w->value;
         hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, w->value);
     } else if (w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_MENU) {
@@ -1009,6 +1087,29 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
                     w->cursor = hax_ui_textbox_offset_at(&view, ev4[1]);
                     w->selection_anchor = w->cursor;
                     hax_ui_emit(out, HAX_UI_EVENT_FOCUS, w->id, 0);
+                } else if (w->type == HAX_WIDGET_DROPDOWN) {
+                    /* 点击右半区下一项，左半区上一项，均循环。 */
+                    HI32 next = w->selected +
+                        (ev4[1] >= view.rect.x + view.rect.w / 2 ? 1 : -1);
+                    if (w->item_count > 0) {
+                        if (next < 0) next = w->item_count - 1;
+                        if (next >= w->item_count) next = 0;
+                        if (next != w->selected) {
+                            w->selected = next;
+                            hax_ui_emit(out, HAX_UI_EVENT_SELECT, w->id, next);
+                        }
+                    }
+                } else if (w->type == HAX_WIDGET_SPINBOX) {
+                    HI32 step = w->step > 0 ? w->step : 1;
+                    HI32 value = w->value;
+                    if (ev4[1] >= view.rect.x + view.rect.w - 28) value += step;
+                    else if (ev4[1] < view.rect.x + 28) value -= step;
+                    if (value < w->min_value) value = w->min_value;
+                    if (value > w->max_value) value = w->max_value;
+                    if (value != w->value) {
+                        w->value = value;
+                        hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, value);
+                    }
                 } else {
                     hax_ui_emit(out, HAX_UI_EVENT_FOCUS, w->id, 0);
                 }
@@ -1030,11 +1131,20 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
         } else if (!left && was_left) {
             HI32 pressed = ui->pressed_index;
             ui->pressed_index = -1;
-            if (pressed >= 0 && pressed == hit &&
-                ui->widgets[pressed].type != HAX_WIDGET_SLIDER &&
-                ui->widgets[pressed].type != HAX_WIDGET_SCROLLBAR) {
-                hax_ui_rect_t rect = hax_ui_widget_rect_at(ui, pressed);
-                hax_ui_activate(&ui->widgets[pressed], &rect, ev4[2], out);
+            if (pressed >= 0 && pressed == hit) {
+                hax_widget_t *pw = &ui->widgets[pressed];
+                if (pw->type == HAX_WIDGET_RADIO) {
+                    if (!pw->value) {
+                        hax_ui_radio_select(ui, pressed);
+                        hax_ui_emit(out, HAX_UI_EVENT_CHANGE, pw->id, 1);
+                    }
+                } else if (pw->type != HAX_WIDGET_SLIDER &&
+                           pw->type != HAX_WIDGET_SCROLLBAR &&
+                           pw->type != HAX_WIDGET_DROPDOWN &&
+                           pw->type != HAX_WIDGET_SPINBOX) {
+                    hax_ui_rect_t rect = hax_ui_widget_rect_at(ui, pressed);
+                    hax_ui_activate(pw, &rect, ev4[2], out);
+                }
             }
             if (pressed >= 0 &&
                 ui->widgets[pressed].type == HAX_WIDGET_TEXTBOX &&
@@ -1065,12 +1175,21 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
             return 1;
         }
         if ((key == '\n' || key == '\r' || key == ' ') &&
-            w->type == HAX_WIDGET_CHECKBOX) {
+            (w->type == HAX_WIDGET_CHECKBOX || w->type == HAX_WIDGET_TOGGLE)) {
             w->value = !w->value;
             hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, w->value);
             return 1;
         }
-        if ((w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_MENU) &&
+        if ((key == '\n' || key == '\r' || key == ' ') &&
+            w->type == HAX_WIDGET_RADIO) {
+            if (!w->value) {
+                hax_ui_radio_select(ui, ui->focus_index);
+                hax_ui_emit(out, HAX_UI_EVENT_CHANGE, w->id, 1);
+            }
+            return 1;
+        }
+        if ((w->type == HAX_WIDGET_LIST || w->type == HAX_WIDGET_MENU ||
+             w->type == HAX_WIDGET_DROPDOWN) &&
             (key == HAX_KEY_UP || key == HAX_KEY_DOWN ||
              key == HAX_KEY_PGUP || key == HAX_KEY_PGDOWN)) {
             HI32 next = w->selected;
@@ -1091,7 +1210,8 @@ static inline int hax_ui_dispatch(hax_ui_t *ui, const int ev4[4],
             return 1;
         }
         if ((w->type == HAX_WIDGET_SLIDER ||
-             w->type == HAX_WIDGET_SCROLLBAR) &&
+             w->type == HAX_WIDGET_SCROLLBAR ||
+             w->type == HAX_WIDGET_SPINBOX) &&
             (key == HAX_KEY_LEFT || key == HAX_KEY_DOWN ||
              key == HAX_KEY_RIGHT || key == HAX_KEY_UP ||
              key == HAX_KEY_HOME || key == HAX_KEY_END ||
@@ -1291,6 +1411,77 @@ static inline void hax_ui_draw(const hax_ui_t *ui) {
             hax_win_fill(w->rect.x + 3, w->rect.y + 4 + pos,
                          w->rect.w - 6, 9, knob);
             if (focused) hax_ui_draw_frame(w->rect, ui->theme.focus_ring);
+        } else if (w->type == HAX_WIDGET_RADIO) {
+            hax_ui_rect_t box = hax_ui_rect(w->rect.x, w->rect.y + 2, 18, 18);
+            hax_win_fill(box.x, box.y, box.w, box.h,
+                         pressed ? ui->theme.pressed : ui->theme.panel_bg);
+            hax_ui_draw_frame(box, focused ? ui->theme.focus_ring :
+                              hovered ? ui->theme.hover : ui->theme.border);
+            hax_ui_draw_frame(hax_ui_inset(box, 3), ui->theme.border);
+            if (w->value) {
+                hax_win_fill(box.x + 5, box.y + 5, box.w - 10, box.h - 10,
+                             ui->theme.accent);
+            }
+            hax_win_text(w->rect.x + 26, w->rect.y + 3, w->text, fg);
+        } else if (w->type == HAX_WIDGET_TOGGLE) {
+            int on = w->value != 0;
+            hax_ui_rect_t track = hax_ui_rect(w->rect.x, w->rect.y + 3, 38, 16);
+            hax_win_fill(track.x, track.y, track.w, track.h,
+                         !enabled ? ui->theme.disabled :
+                         on ? ui->theme.accent : ui->theme.panel_alt);
+            hax_ui_draw_frame(track, focused ? ui->theme.focus_ring :
+                              hovered ? ui->theme.hover : ui->theme.border);
+            HI32 knob_x = on ? track.x + track.w - 14 : track.x + 2;
+            hax_win_fill(knob_x, track.y + 2, 12, track.h - 4,
+                         pressed ? ui->theme.pressed : ui->theme.accent_text);
+            hax_win_text(w->rect.x + 46, w->rect.y + 3, w->text, fg);
+        } else if (w->type == HAX_WIDGET_DROPDOWN) {
+            hax_win_fill(w->rect.x, w->rect.y, w->rect.w, w->rect.h,
+                         ui->theme.panel_bg);
+            hax_ui_draw_frame(w->rect, focused ? ui->theme.focus_ring :
+                              hovered ? ui->theme.hover : ui->theme.border);
+            const char *label =
+                w->selected >= 0 && w->selected < w->item_count ?
+                w->items[w->selected] : "";
+            hax_win_text(w->rect.x + 6, w->rect.y + (w->rect.h - 16) / 2,
+                         label, fg);
+            HI32 arrow_x = w->rect.x + w->rect.w - 14;
+            HI32 arrow_y = w->rect.y + w->rect.h / 2 - 4;
+            hax_win_fill(arrow_x, arrow_y, 7, 2, fg);
+            hax_win_fill(arrow_x + 1, arrow_y + 2, 5, 2, fg);
+            hax_win_fill(arrow_x + 2, arrow_y + 4, 3, 2, fg);
+            hax_win_fill(arrow_x + 3, arrow_y + 6, 1, 2, fg);
+        } else if (w->type == HAX_WIDGET_SPINBOX) {
+            hax_win_fill(w->rect.x, w->rect.y, w->rect.w, w->rect.h,
+                         ui->theme.panel_bg);
+            hax_ui_draw_frame(w->rect, focused ? ui->theme.focus_ring :
+                              hovered ? ui->theme.hover : ui->theme.border);
+            char value_text[16];
+            snprintf(value_text, sizeof(value_text), "%d", (int)w->value);
+            HI32 text_w = (HI32)strlen(value_text) * 8;
+            hax_win_text(w->rect.x + (w->rect.w - text_w) / 2,
+                         w->rect.y + (w->rect.h - 16) / 2, value_text, fg);
+            HI32 mid_y = w->rect.y + w->rect.h / 2;
+            hax_win_fill(w->rect.x + 7, mid_y - 1, 8, 2, fg);
+            hax_win_fill(w->rect.x + w->rect.w - 15, mid_y - 1, 8, 2, fg);
+            hax_win_fill(w->rect.x + w->rect.w - 12, mid_y - 4, 2, 8, fg);
+        } else if (w->type == HAX_WIDGET_SEPARATOR) {
+            if (w->flags & HAX_WIDGET_VERTICAL) {
+                hax_win_fill(w->rect.x + w->rect.w / 2, w->rect.y,
+                             1, w->rect.h, ui->theme.border);
+            } else {
+                hax_win_fill(w->rect.x, w->rect.y + w->rect.h / 2,
+                             w->rect.w, 1, ui->theme.border);
+            }
+        } else if (w->type == HAX_WIDGET_GROUPBOX) {
+            hax_win_fill(w->rect.x, w->rect.y, w->rect.w, w->rect.h,
+                         ui->theme.panel_bg);
+            hax_ui_draw_frame(w->rect, ui->theme.border);
+            /* 标题嵌在边框上：先垫背景再写字。 */
+            hax_win_fill(w->rect.x + 8, w->rect.y - 1,
+                         (HI32)strlen(w->text) * 8 + 8, 13,
+                         ui->theme.window_bg);
+            hax_win_text(w->rect.x + 12, w->rect.y + 2, w->text, fg);
         } else if (w->type == HAX_WIDGET_IMAGE) {
             HI32 bw = w->rect.w < w->image_width ? w->rect.w : w->image_width;
             HI32 bh = w->rect.h < w->image_height ? w->rect.h : w->image_height;

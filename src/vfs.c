@@ -80,7 +80,9 @@ static void vfs_notify_node(vfs_node_t *node, uint32_t mask) {
                                 node->type == VFS_NODE_DIR);
 }
 
-#define VFS_STATIC_FILES_MAX 16
+/* 内置 HAX 兼容文件 + TCC runtime/37 个头文件 + web vendor。
+ * 这些资源直接引用内核 incbin 数据，避免启动时复制/写入 HBFS。 */
+#define VFS_STATIC_FILES_MAX 96
 
 typedef struct {
     vfs_node_t node;

@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include "../src/gui/browser_backend.h"
+#include "../src/gui/browser_layout.h"
 
 #define CHECK(expr) do { \
     if (!(expr)) { \
@@ -16,9 +17,11 @@ int main(void) {
     CHECK(hive_browser_backend_valid(lite));
     CHECK(hive_browser_backend_supports(
         lite, hive_browser_level_requirements(HIVE_BROWSER_LEVEL_STATIC)));
-    CHECK(!hive_browser_backend_supports(lite, HIVE_WEB_CAPS_VUE3));
-    CHECK(hive_browser_missing(lite, HIVE_BROWSER_LEVEL_VUE3) &
-          HIVE_WEB_CAP_JAVASCRIPT);
+    CHECK(hive_browser_backend_supports(
+        lite, HIVE_WEB_CAP_JAVASCRIPT | HIVE_WEB_CAP_DOM |
+              HIVE_WEB_CAP_FETCH));
+    CHECK(!(hive_browser_missing(lite, HIVE_BROWSER_LEVEL_VUE3) &
+            HIVE_WEB_CAP_JAVASCRIPT));
     CHECK(hive_browser_missing(lite, HIVE_BROWSER_LEVEL_BILIBILI_VIDEO) &
           HIVE_WEB_CAP_MSE);
     CHECK(hive_browser_level_requirements((hive_browser_level_t)99) ==
@@ -32,7 +35,8 @@ int main(void) {
             vue_page, sizeof(vue_page) - 1);
         CHECK((required & HIVE_WEB_CAPS_VUE3) == HIVE_WEB_CAPS_VUE3);
         CHECK(required & HIVE_WEB_CAP_FETCH);
-        CHECK(hive_browser_missing(lite, HIVE_BROWSER_LEVEL_VUE3) != 0);
+        CHECK(hive_browser_missing(lite, HIVE_BROWSER_LEVEL_VUE3) &
+              (HIVE_WEB_CAP_CSS_LAYOUT | HIVE_WEB_CAP_ES_MODULES));
     }
     {
         const char player[] =
