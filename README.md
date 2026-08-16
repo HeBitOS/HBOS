@@ -2,13 +2,13 @@
 
 > He Bit OS — 面向 x86_64 的轻量实验操作系统
 
-当前版本：`v0.1-beta5-pre5` · 支持 BIOS / UEFI · 正在积极开发
+当前版本：`v0.1-beta5-pre6` · 支持 BIOS / UEFI · 正在积极开发
 
-GUI 版本：`HIVE 0.1-beta5-gui.3`（Toolkit API 1.3）
+GUI 版本：`HIVE 0.1-beta5-gui.4`（Toolkit API 1.4 / TUI Kit 1.0）
 
-![HBOS 桌面截图](photo/v0.1beta3.png)
+![HBOS 桌面截图](docs/screenshots/hive-desktop.jpg)
 
-_截图来自 beta3；beta5 的 HIVE 界面仍在持续迭代。_
+_实机截图来自 beta5 pre6（QEMU，浅色主题）。_
 
 HBOS 从引导、内核、驱动、文件系统、网络栈到桌面环境均以“小而可用”为目标。
 项目优先照顾低配置设备和清晰的模块边界；构建完成后直接运行在裸机或虚拟机，
@@ -126,10 +126,11 @@ hive
 窗口管理器、合成器、桌面 Shell、用户态控件库和应用 SDK；HIVE 内部还递归
 包含必需的 HPT 子模块。
 
-当前 HIVE Toolkit API 1.3 提供：
+当前 HIVE Toolkit API 1.4 提供：
 
-- Label、Button、Textbox、Checkbox、List、Progress、Slider、Scrollbar、
-  Menu、Image、Canvas、Panel；
+- Label、Button、Textbox、Checkbox、Radio、Toggle、List、Dropdown、
+  Progress、Slider、Spinbox、Scrollbar、Menu、Image、Canvas、Panel、
+  Groupbox、Separator；
 - 行布局、网格布局、控件树与窗口尺寸变化后的重新排布；
 - 鼠标悬停、按下、拖动、松开和窗口外释放捕获；
 - Tab 焦点、Enter/Space、方向键、Home/End、PageUp/PageDown；
@@ -303,6 +304,7 @@ HBOS 正在建设轻量级 Linux ABI 兼容层，长期目标是在不修改上�
 
 ## 版本简史
 
+- `beta5 pre6`：HIVE Toolkit API 1.4（Radio/Toggle/Dropdown/Spinbox/Groupbox/Separator）、TUI Kit 1.0 文本控件、浅色省墨控制台。
 - `beta5 pre5`：HIVE Toolkit API 1.3、no-GUI 构建边界、浏览器/TLS 兼容性和模块化路线。
 - `beta4`：新桌面、TinyCC、动态链接、BusyBox、网络栈和真机输入修复。
 - `beta3`：桌面交互、任务栏、日历、字体、终端刷新与虚拟机启动改进。

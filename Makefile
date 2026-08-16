@@ -3,6 +3,7 @@ AS = nasm
 LD = ld
 
 BUILD_DIR ?= build
+PDF_PYTHON ?= python3
 SRC_DIR = src
 APP_DIR ?= app
 HIVE_REPO ?= HIVE
@@ -32,7 +33,7 @@ HBOS_VER_MAJOR ?= 0
 HBOS_VER_MINOR ?= 1
 HBOS_VER_BETA  ?= 4
 HBOS_VER_PRE   ?= 4
-HIVE_GUI_REV   ?= 3
+HIVE_GUI_REV   ?= 4
 
 # 派生的各种格式
 HBOS_VERSION     = v$(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)
@@ -239,6 +240,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/tools/tcc_runtime_seed.c \
 	$(SRC_DIR)/tools/hpt_repo_seed.c \
+	$(SRC_DIR)/tools/web_vendor_seed.c \
 	$(SRC_DIR)/tools/audio.c \
 	$(SRC_DIR)/rtc_tz.c \
 	$(APP_SRCS)
@@ -289,6 +291,7 @@ ASM_SRCS = \
 	$(SRC_DIR)/user/tcc_runtime_blob.asm \
 	$(SRC_DIR)/user/tcc_headers_blob.asm \
 	$(SRC_DIR)/user/hpt_repo_blob.asm \
+	$(SRC_DIR)/user/web_vendor_blob.asm \
 	$(SRC_DIR)/smp_trampoline.asm
 
 ifeq ($(HBOS_ENABLE_GUI),1)
@@ -488,6 +491,19 @@ $(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
+# ── 内置 web vendor 包（Vue 运行时等）───────────────────────────────
+# third_party/web-vendor/ 里的文件打成 blob 经 web_vendor_blob.asm incbin 嵌入
+# 内核，开机由 src/tools/web_vendor_seed.c 解包到 ramfs /system，让浏览器管线
+# 不依赖网络也能拿到 Vue 2 window.Vue（外链 Vue 抓取失败时兜底）。
+WEB_VENDOR_BIN = $(BUILD_DIR)/web-vendor.bin
+
+$(WEB_VENDOR_BIN): tools/genwebblob.py $(wildcard third_party/web-vendor/*)
+	python3 tools/genwebblob.py third_party/web-vendor $@
+
+$(BUILD_DIR)/user/web_vendor_blob.o: $(SRC_DIR)/user/web_vendor_blob.asm $(WEB_VENDOR_BIN) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
+
 # C rules — one generic rule for all subdirectories
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
@@ -644,6 +660,7 @@ chromium-baseline:
 browser-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc/gui \
 		tests/test_browser_backend.c src/gui/browser_backend.c \
+		src/gui/browser_layout.c \
 		-o $(BUILD_DIR)/test_browser_backend
 	$(BUILD_DIR)/test_browser_backend
 
@@ -655,7 +672,7 @@ hive-test: | $(BUILD_DIR)
 		scripts/test_hive_winsrv.c src/gui/winsrv.c \
 		-o $(BUILD_DIR)/test_hive_winsrv
 	$(BUILD_DIR)/test_hive_winsrv
-	@echo "✓ HIVE UI 1.3 event/layout/widget tests"
+	@echo "✓ HIVE UI 1.4 event/layout/widget tests"
 
 hive-sync:
 	@test -x "$(HIVE_REPO)/tools/sync-from-hbos.sh" || \
@@ -1158,6 +1175,7 @@ MUSL_MATH_DIR = third_party/musl-math
 QJS_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
              -mno-red-zone -O2 -Wall -Wextra -MMD -MP \
              -I$(SRC_DIR)/user/libc -I$(QJS_DIR) -I$(MUSL_MATH_DIR) \
+             -I$(BUILD_DIR)/quickjs \
              -DCONFIG_VERSION=\"QuickJS-HBOS\"
 
 QJS_CORE_SRCS = $(QJS_DIR)/quickjs.c $(QJS_DIR)/libregexp.c \
@@ -1177,7 +1195,12 @@ $(BUILD_DIR)/quickjs/math/%.o: $(MUSL_MATH_DIR)/%.c | $(BUILD_DIR)
 	$(CC) -c $(QJS_CFLAGS) -Wno-overflow -Wno-parentheses -Wno-sign-compare \
 		$< -o $@
 
-$(BUILD_DIR)/quickjs/hbos_js.o: $(QJS_DIR)/hbos_js.c | $(BUILD_DIR)
+# hbos_dom.js（DOM 平台）构建期转成 C 字符串嵌入 hbos_js.c
+$(BUILD_DIR)/quickjs/hbos_dom_inc.h: tools/genjsheader.py $(QJS_DIR)/hbos_dom.js | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	python3 tools/genjsheader.py $(QJS_DIR)/hbos_dom.js $@
+
+$(BUILD_DIR)/quickjs/hbos_js.o: $(QJS_DIR)/hbos_js.c $(BUILD_DIR)/quickjs/hbos_dom_inc.h | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(QJS_CFLAGS) $< -o $@
 
@@ -1271,11 +1294,10 @@ $(BUILD_DIR)/user/hax_blob.o: $(SRC_DIR)/user/hax_blob.asm $(HAX_BLOB) | $(BUILD
 hax-apps: $(HAX_ALL_BINS)
 	@echo "✓ All .hax apps built: $(HAX_ALL_BINS)"
 
-# 由 HTML 源经 LibreOffice 无头渲染生成应用开发手册 PDF
+# 由 HTML 源经 WeasyPrint 生成紧凑、省油墨的应用开发手册 PDF
 .PHONY: hax-doc
-hax-doc: docs/HBOS_HAX_API.html
-	soffice --headless --convert-to pdf:writer_web_pdf_Export --outdir docs docs/HBOS_HAX_API.html
-	mv -f docs/HBOS_HAX_API.pdf HBOS_HAX_API.pdf
+hax-doc: docs/HBOS_HAX_API.html tools/genpdf.py
+	$(PDF_PYTHON) tools/genpdf.py docs/HBOS_HAX_API.html -o HBOS_HAX_API.pdf
 	@echo "✓ 应用开发手册: HBOS_HAX_API.pdf"
 
 # ── HBFS file injection ──────────────────────────────────────────
