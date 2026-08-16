@@ -3,6 +3,9 @@
 #include "vfs.h"
 #include "graphics/graphics.h"
 
+/* 任务调度让出，避免 read() 无数据时忙等自旋饿死其他任务。 */
+void task_yield(void);
+
 static tty_t ttys[TTY_MAX];
 static int current_tty = 0;
 
@@ -116,7 +119,7 @@ int tty_read(int n, char *buf, uint32_t len)
     if (n < 0 || n >= TTY_MAX || !buf) return -1;
 
     while (ringbuf_available(&ttys[n].input) == 0) {
-        __asm__ volatile("pause");
+        task_yield();
     }
 
     return ringbuf_read(&ttys[n].input, (uint8_t *)buf, len);

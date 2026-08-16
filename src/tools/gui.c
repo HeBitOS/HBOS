@@ -3246,12 +3246,11 @@ static void console_exec_cmd(gui_state_t *st) {
     } else {
         // Run the REAL shell command and capture its console output into the
         // terminal history — the full command set, no reimplementation.
+        // (sink 常驻，见 cmd_gui；这里仅重置行缓冲，避免异步应用输出串行。)
         g_con_sink_st  = st;
         g_con_sink_pos = 0;
         g_con_sink_esc = 0;
-        console_set_sink(gui_console_sink);
         cmd_execute(st->console_input);
-        console_set_sink(NULL);
         if (g_con_sink_pos > 0) gui_console_flush_line();  // trailing partial line
     }
 
@@ -8699,6 +8698,10 @@ static void cmd_gui(int argc, char **argv) {
     st.console_history_idx = -1;
     console_append_history(&st, "Welcome to the HIVE Console!");
     console_append_history(&st, "Type 'help' to view available commands.");
+    /* 控制台 sink 常驻：异步 spawn 的 .hax 应用输出持续进终端历史，
+     * GUI 主循环得以继续重绘（否则同步运行会冻结桌面）。 */
+    g_con_sink_st = &st;
+    console_set_sink(gui_console_sink);
     wm_set_panel_title(PANEL_FILES, "文件管理器");
     wm_set_panel_title(PANEL_DISK, "磁盘管理器");
     wm_set_panel_title(PANEL_SYS, "资源管理器");

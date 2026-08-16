@@ -126,12 +126,19 @@ static void cmd_run(int argc, char **argv) {
              * 它靠合成器主循环持续跑帧才能把窗口内容合成到屏幕上，同步运行
              * 会卡住调用者、窗口画面永远显示不出来。
              * 其余应用（纯控制台或独占画布风格，即使声明了 HAX_KIND_GUI）
-             * 同步运行：异步启动会让它们在后台永久存活，并和调用者抢键盘
-             * 轮询，可能在退出 GUI 后引发内核 panic。 */
+             * 在图形终端的 sink 常驻期间也改异步 spawn：同步运行会阻塞
+             * 合成器主循环；read(stdin) 已改为 task_yield 等待（见 tty.c），
+             * 不再忙等自旋。纯文本 Shell（无 sink）仍同步运行。 */
             if ((he->kind & HAX_KIND_GUI) && (he->kind & HAX_KIND_GUI_WIN)) {
                 int pid = hax_app_spawn(argv[1], argc - 1, argv + 1);
                 if (pid < 0) console_puts("run: cannot load .hax app\n");
                 else console_puts("run: 已启动 GUI 应用\n");
+                return;
+            }
+            if (console_has_sink()) {
+                int pid = hax_app_spawn(argv[1], argc - 1, argv + 1);
+                if (pid < 0) console_puts("run: cannot load .hax app\n");
+                else console_puts("run: 已启动控制台应用\n");
                 return;
             }
             int hret = hax_app_run(argv[1], argc - 1, argv + 1);
