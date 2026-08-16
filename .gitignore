@@ -16,3 +16,5 @@ tools/__pycache__/
 .reasonix/
 build-compat/
 HPT-server/
+scripts/__pycache__/
+.zcode/
