@@ -303,9 +303,20 @@ endif
 
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
-# ── HAX 应用：./app/*.c 自动编译为 .hax 并打包进内核 ───────────────────
-# “只要 app 里有编译产物，就加入系统”：扫描 app/ 下的源码与预编译 .hax，
-# 由 genhax.py 读取各自的 .haxmeta 段，生成清单与二进制 blob 嵌入内核。
+# ── HAX 应用：多结构模式自动编译并打包进内核 ─────────────────────────
+# “只要 app 里有编译产物，就加入系统”：扫描 $(APP_DIR) 下的三类结构，
+# 由 genhax.py 读取各自 .hax 的 .haxmeta 段，生成清单与二进制 blob 嵌入内核。
+#   1. $(APP_DIR)/<name>.c          单文件应用（原有方式，向后兼容）
+#   2. $(APP_DIR)/<name>/           多文件应用：目录内全部 *.c 编译后链接
+#                                   为一个 build/app/<name>.hax
+#   3. $(APP_DIR)/lib/<lib>/        独立库：编译一次为 build/app/lib/<lib>.o，
+#                                   可被多个应用共享
+# 库依赖声明（应用按需链接，避免把所有库塞进每个应用）：
+#   - 单文件应用 app/<name>.c    → 同名 app/<name>.deps，每行一个库名
+#   - 多文件应用 app/<name>/     → app/<name>/deps，每行一个库名
+#   - 库之间的依赖               → app/lib/<lib>/deps，每行一个库名
+#   （# 开头为注释；库头文件放在 app/lib/<lib>/ 下，按 <lib/xxx.h> 引入，
+#     include 路径已自动加上 $(APP_DIR)/lib）
 HBOS_COMPAT_SMOKE ?= 0
 HBOS_MUSL_SYSROOT ?=
 HBOS_GLIBC_LIBDIR ?=
@@ -313,7 +324,17 @@ ifeq ($(HBOS_BUNDLE_APPS),1)
 HAX_APP_SRCS = $(wildcard $(APP_DIR)/*.c)
 HAX_APP_BINS = $(HAX_APP_SRCS:$(APP_DIR)/%.c=$(BUILD_DIR)/app/%.hax)
 HAX_PREBUILT = $(wildcard $(APP_DIR)/*.hax)
-HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax \
+# 多文件应用：$(APP_DIR) 下除 lib/include 外、含 *.c 的子目录（名字 = 目录名）
+HAX_APP_DIR_NAMES := $(foreach d,$(filter-out lib include,$(notdir $(patsubst %/,%,$(wildcard $(APP_DIR)/*/)))),$(if $(wildcard $(APP_DIR)/$(d)/*.c),$(d)))
+# 独立库：$(APP_DIR)/lib 下含 *.c 的子目录
+HAX_LIB_NAMES := $(foreach l,$(notdir $(patsubst %/,%,$(wildcard $(APP_DIR)/lib/*/))),$(if $(wildcard $(APP_DIR)/lib/$(l)/*.c),$(l)))
+# 名称冲突检查：同一名字不能既单文件又目录
+HAX_CONFLICT_NAMES = $(filter $(HAX_APP_DIR_NAMES),$(patsubst $(APP_DIR)/%.c,%,$(HAX_APP_SRCS)))
+ifneq ($(strip $(HAX_CONFLICT_NAMES)),)
+$(error HAX 应用名冲突（同时存在单文件与同名目录）：$(HAX_CONFLICT_NAMES))
+endif
+HAX_DIR_APP_BINS = $(HAX_APP_DIR_NAMES:%=$(BUILD_DIR)/app/%.hax)
+HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_DIR_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax \
 	$(BUILD_DIR)/app/js.hax $(BUSYBOX_HAX)
 ifeq ($(HBOS_COMPAT_SMOKE),1)
 HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
@@ -1146,16 +1167,55 @@ user-progs-clean:
 	rm -rf $(USER_BUILD_DIR) $(BUILD_DIR)/user
 	@echo "✓ User programs cleaned"
 
-# ── HAX 应用构建（./app/*.c -> build/app/*.hax -> blob + manifest） ──
+# ── HAX 应用构建（多结构：单文件 / 多文件目录 / 独立库） ────────────
 # 每个 app 源码用 HAX 运行时（= 用户态 libc + crt0）链接成标准 ELF64，
-# 扩展名 .hax。SDK 头在 app/include。
-HAX_CFLAGS = $(USER_CFLAGS) -I$(APP_DIR)/include
+# 扩展名 .hax。SDK 头在 $(APP_DIR)/include，库头按 <lib/xxx.h> 引入。
+HAX_CFLAGS = $(USER_CFLAGS) -I$(APP_DIR)/include -I$(APP_DIR)/lib -MMD -MP
 
-$(BUILD_DIR)/app/%.hax: $(APP_DIR)/%.c $(wildcard $(APP_DIR)/include/*.h) $(USER_LIBC_OBJS) | $(BUILD_DIR)
-	@mkdir -p $(@D)
-	$(CC) -c $(HAX_CFLAGS) $< -o $(BUILD_DIR)/app/$*.o
-	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/app/$*.o -o $@
-	@echo "✓ hax app: $@"
+# ── 单文件应用（app/<name>.c -> build/app/<name>.hax） ───────────────
+# 可选同名 app/<name>.deps 声明要链接的独立库（每行一个库名，# 为注释）。
+define HAX_SINGLE_APP_RULE
+HAX_APP_LIBOBJ_$(1) := $$(foreach l,$$(strip $$(shell grep -vE '^[[:space:]]*#' $(APP_DIR)/$(1).deps 2>/dev/null)),$(BUILD_DIR)/app/lib/$$(l).o)
+$(BUILD_DIR)/app/$(1).hax: $(APP_DIR)/$(1).c $$(wildcard $(APP_DIR)/include/*.h) $$(HAX_APP_LIBOBJ_$(1)) $(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $$(@D)
+	$$(CC) -c $$(HAX_CFLAGS) $$< -o $(BUILD_DIR)/app/$(1).o
+	$$(LD) $$(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/app/$(1).o $$(HAX_APP_LIBOBJ_$(1)) -o $$@
+	@echo "✓ hax app: $$@"
+endef
+$(foreach n,$(patsubst $(APP_DIR)/%.c,%,$(HAX_APP_SRCS)),$(eval $(call HAX_SINGLE_APP_RULE,$(n))))
+
+# ── 独立库（app/lib/<lib>/ -> build/app/lib/<lib>.o，ld -r 合并一次） ──
+# 库之间的依赖写在 app/lib/<lib>/deps（每行一个库名），依赖库会被
+# 一并合并进本库的 .o，应用只需声明直接依赖。
+define HAX_LIB_RULE
+HAX_LIB_SRC_$(1) := $$(wildcard $(APP_DIR)/lib/$(1)/*.c)
+HAX_LIB_OBJ_$(1) := $$(patsubst $(APP_DIR)/lib/$(1)/%.c,$(BUILD_DIR)/app/lib/$(1)/%.o,$$(HAX_LIB_SRC_$(1)))
+HAX_LIB_DEPOBJ_$(1) := $$(foreach l,$$(strip $$(shell grep -vE '^[[:space:]]*#' $(APP_DIR)/lib/$(1)/deps 2>/dev/null)),$(BUILD_DIR)/app/lib/$$(l).o)
+$(BUILD_DIR)/app/lib/$(1)/%.o: $(APP_DIR)/lib/$(1)/%.c $$(wildcard $(APP_DIR)/include/*.h) | $(BUILD_DIR)
+	@mkdir -p $$(@D)
+	$$(CC) -c $$(HAX_CFLAGS) $$< -o $$@
+$(BUILD_DIR)/app/lib/$(1).o: $$(HAX_LIB_OBJ_$(1)) $$(HAX_LIB_DEPOBJ_$(1)) | $(BUILD_DIR)
+	@mkdir -p $$(@D)
+	$$(LD) -r $$(HAX_LIB_OBJ_$(1)) $$(HAX_LIB_DEPOBJ_$(1)) -o $$@
+	@echo "✓ hax lib: $$@ ($(1))"
+endef
+$(foreach l,$(HAX_LIB_NAMES),$(eval $(call HAX_LIB_RULE,$(l))))
+
+# ── 多文件应用（app/<name>/*.c -> build/app/<name>.hax） ─────────────
+# 目录内全部 *.c 分别编译后一起链接；库依赖写在 app/<name>/deps。
+define HAX_DIR_APP_RULE
+HAX_DIR_SRC_$(1) := $$(wildcard $(APP_DIR)/$(1)/*.c)
+HAX_DIR_OBJ_$(1) := $$(patsubst $(APP_DIR)/$(1)/%.c,$(BUILD_DIR)/app/$(1)/%.o,$$(HAX_DIR_SRC_$(1)))
+HAX_DIR_DEPOBJ_$(1) := $$(foreach l,$$(strip $$(shell grep -vE '^[[:space:]]*#' $(APP_DIR)/$(1)/deps 2>/dev/null)),$(BUILD_DIR)/app/lib/$$(l).o)
+$(BUILD_DIR)/app/$(1)/%.o: $(APP_DIR)/$(1)/%.c $$(wildcard $(APP_DIR)/include/*.h) | $(BUILD_DIR)
+	@mkdir -p $$(@D)
+	$$(CC) -c $$(HAX_CFLAGS) $$< -o $$@
+$(BUILD_DIR)/app/$(1).hax: $$(HAX_DIR_OBJ_$(1)) $$(HAX_DIR_DEPOBJ_$(1)) $(USER_LIBC_OBJS) | $(BUILD_DIR)
+	@mkdir -p $$(@D)
+	$$(LD) $$(USER_LDFLAGS) $(USER_LIBC_OBJS) $$(HAX_DIR_OBJ_$(1)) $$(HAX_DIR_DEPOBJ_$(1)) -o $$@
+	@echo "✓ hax app: $$@ ($(1), 多文件)"
+endef
+$(foreach d,$(HAX_APP_DIR_NAMES),$(eval $(call HAX_DIR_APP_RULE,$(d))))
 
 # ── TinyCC (vendored third_party/tinycc) — see that dir's README.md ────
 # Builds as a single translation unit (tcc.c #includes everything else,
@@ -1348,3 +1408,5 @@ clean:
 # else uses the new one — silent memory corruption at runtime, not a build
 # error. `-include` so a missing .d (first build) is skipped instead of failing.
 -include $(C_OBJS:.o=.d)
+# 多结构 HAX 应用的依赖文件（单文件在 build/app/*.d，多文件/库在子目录）
+-include $(wildcard $(BUILD_DIR)/app/*.d) $(wildcard $(BUILD_DIR)/app/*/*.d)
