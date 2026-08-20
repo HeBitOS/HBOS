@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 
 #include "../errno.h"
 #include "../fcntl.h"
@@ -59,6 +60,46 @@ static int resolve_user_path(const char *path, char out[256]) {
     if (!path) return set_errno(EFAULT);
     if (vfs_resolve_path(g_posix_cwd, path, out, 256) < 0) return set_errno(EINVAL);
     return 0;
+}
+
+/* Minimal POSIX-style permission check.  Root bypasses read/write; for
+ * execute it still requires at least one execute bit (matching the usual
+ * Unix convention).  Non-root processes are checked against user/group/other
+ * mode bits using euid/egid plus supplementary groups. */
+static int vfs_check_access(vfs_node_t *node, int want_read,
+                            int want_write, int want_exec) {
+    if (!node) return ENOENT;
+    task_t *cur = task_current();
+    if (!cur) return EACCES;
+
+    uint32_t mode = node->mode;
+    if (cur->euid == 0) {
+        if (want_exec && !(mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+            return EACCES;
+        return 0;
+    }
+
+    uint32_t bits;
+    if (cur->euid == node->uid) {
+        bits = (mode >> 6) & 7U;
+    } else {
+        int in_group = cur->egid == node->gid;
+        for (uint32_t i = 0; !in_group && i < cur->group_count; i++)
+            in_group = cur->groups[i] == node->gid;
+        bits = in_group ? (mode >> 3) & 7U : mode & 7U;
+    }
+    if (want_read && !(bits & 4U)) return EACCES;
+    if (want_write && !(bits & 2U)) return EACCES;
+    if (want_exec && !(bits & 1U)) return EACCES;
+    return 0;
+}
+
+static int vfs_path_access(const char *full, int want_read,
+                           int want_write, int want_exec, int follow) {
+    vfs_node_t *node = follow ? vfs_lookup(full) : vfs_lookup_nofollow(full);
+    if (!node) return ENOENT;
+    int error = vfs_check_access(node, want_read, want_write, want_exec);
+    return error ? set_errno(error) : 0;
 }
 
 static int path_in_tree(const char *path, const char *root) {
@@ -332,21 +373,48 @@ int open(const char *path, int flags, ...) {
         return set_errno(EINVAL);
     }
 
+    mode_t create_mode = 0644;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        create_mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+
     vfs_node_t *entry = vfs_lookup_nofollow(full);
     if (entry && entry->type == VFS_NODE_SYMLINK && (flags & O_NOFOLLOW))
         return set_errno(ELOOP);
     if (entry && (flags & O_CREAT) && (flags & O_EXCL))
         return set_errno(EEXIST);
     vfs_node_t *node = vfs_lookup(full);
+    int created = 0;
     if (!node) {
         if (entry && entry->type == VFS_NODE_SYMLINK)
             return set_errno(ENOENT);
         if (!(flags & O_CREAT)) return set_errno(ENOENT);
         node = vfs_create(full);
         if (!node) return set_errno(ENOSPC);
+        created = 1;
     }
     if ((flags & O_DIRECTORY) && node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
     if (node->type == VFS_NODE_DIR && (flags & O_ACCMODE) != O_RDONLY) return set_errno(EISDIR);
+
+    if (created) {
+        task_t *cur = task_current();
+        node->uid = cur ? cur->uid : 0;
+        node->gid = cur ? cur->gid : 0;
+        node->mode = (node->type == VFS_NODE_DIR ? S_IFDIR : S_IFREG) |
+                     (create_mode & 07777);
+    }
+
+    int access_error = 0;
+    if ((flags & O_ACCMODE) == O_RDONLY)
+        access_error = vfs_check_access(node, 1, 0, 0);
+    else if ((flags & O_ACCMODE) == O_WRONLY)
+        access_error = vfs_check_access(node, 0, 1, 0);
+    else
+        access_error = vfs_check_access(node, 1, 1, 0);
+    if (access_error) return set_errno(access_error);
 
     if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
         if (vfs_truncate(node) < 0) return set_errno(EIO);
@@ -371,9 +439,9 @@ int fstat(int fd, struct stat *st) {
     if (!ent) return set_errno(EBADF);
     st->st_dev = 1;
     st->st_ino = (ino_t)(((uintptr_t)ent->node >> 4) | 1U);
-    st->st_mode = (ent->node->type == VFS_NODE_DIR ? S_IFDIR :
-                   ent->node->type == VFS_NODE_CHARDEV ? S_IFCHR : S_IFREG) |
-                  S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+    st->st_mode = ent->node->mode;
+    st->st_uid = ent->node->uid;
+    st->st_gid = ent->node->gid;
     st->st_nlink = 1;
     st->st_size = (off_t)ent->node->size;
     return 0;
@@ -389,10 +457,9 @@ int stat(const char *path, struct stat *st) {
     memset(st, 0, sizeof(*st));
     st->st_dev = 1;
     st->st_ino = (ino_t)(((uintptr_t)node >> 4) | 1U);
-    st->st_mode = (node->type == VFS_NODE_DIR ? S_IFDIR :
-                   node->type == VFS_NODE_CHARDEV ? S_IFCHR :
-                   node->type == VFS_NODE_SYMLINK ? S_IFLNK : S_IFREG) |
-                  S_IRUSR | S_IRGRP | S_IROTH;
+    st->st_mode = node->mode;
+    st->st_uid = node->uid;
+    st->st_gid = node->gid;
     st->st_nlink = 1;
     st->st_size = (off_t)node->size;
     return 0;
@@ -408,10 +475,9 @@ int lstat(const char *path, struct stat *st) {
     memset(st, 0, sizeof(*st));
     st->st_dev = 1;
     st->st_ino = (ino_t)(((uintptr_t)node >> 4) | 1U);
-    st->st_mode = (node->type == VFS_NODE_DIR ? S_IFDIR :
-                   node->type == VFS_NODE_CHARDEV ? S_IFCHR :
-                   node->type == VFS_NODE_SYMLINK ? S_IFLNK : S_IFREG) |
-                  S_IRUSR | S_IRGRP | S_IROTH;
+    st->st_mode = node->mode;
+    st->st_uid = node->uid;
+    st->st_gid = node->gid;
     st->st_nlink = 1;
     st->st_size = (off_t)node->size;
     return 0;
@@ -423,6 +489,7 @@ int unlink(const char *path) {
     vfs_node_t *node = vfs_lookup_nofollow(full);
     if (!node) return set_errno(ENOENT);
     if (node->type == VFS_NODE_DIR) return set_errno(EISDIR);
+    if (vfs_path_access(full, 0, 1, 0, 0) < 0) return -1;
 
     fd_entry_t *fds = fd_table();
     if (!fds) return set_errno(EBADF);
@@ -439,8 +506,13 @@ int access(const char *path, int mode) {
     if (mode & ~(F_OK | R_OK | W_OK | X_OK)) return set_errno(EINVAL);
     char full[256];
     if (resolve_user_path(path, full) < 0) return -1;
-    vfs_node_t *node = vfs_lookup(full);
-    if (!node) return set_errno(ENOENT);
+    if (mode == F_OK) {
+        if (!vfs_lookup(full)) return set_errno(ENOENT);
+        return 0;
+    }
+    if (vfs_path_access(full, !!(mode & R_OK), !!(mode & W_OK),
+                        !!(mode & X_OK), 1) < 0)
+        return -1;
     return 0;
 }
 
@@ -480,11 +552,17 @@ int chdir(const char *path) {
 }
 
 int mkdir(const char *path, mode_t mode) {
-    (void)mode;
     char full[256];
     if (resolve_user_path(path, full) < 0) return -1;
     if (vfs_lookup_nofollow(full)) return set_errno(EEXIST);
     if (vfs_mkdir(full) < 0) return set_errno(ENOSPC);
+    vfs_node_t *node = vfs_lookup(full);
+    if (node) {
+        task_t *cur = task_current();
+        node->uid = cur ? cur->uid : 0;
+        node->gid = cur ? cur->gid : 0;
+        node->mode = S_IFDIR | (mode & 07777);
+    }
     return 0;
 }
 
@@ -494,6 +572,7 @@ int rmdir(const char *path) {
     vfs_node_t *node = vfs_lookup_nofollow(full);
     if (!node) return set_errno(ENOENT);
     if (node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
+    if (vfs_path_access(full, 0, 1, 0, 0) < 0) return -1;
     if (vfs_rmdir(full) < 0) return set_errno(ENOTEMPTY);
     return 0;
 }
@@ -555,21 +634,38 @@ int symlink(const char *target, const char *linkpath) {
     if (strcmp(fs_backend_name(), "ext2") == 0 ||
         strcmp(fs_backend_name(), "fat32") == 0)
         return set_errno(EOPNOTSUPP);
-    if (!vfs_symlink(full, target)) return set_errno(ENOSPC);
+    vfs_node_t *link = vfs_symlink(full, target);
+    if (!link) return set_errno(ENOSPC);
+    task_t *cur = task_current();
+    link->uid = cur ? cur->uid : 0;
+    link->gid = cur ? cur->gid : 0;
+    link->mode = S_IFLNK | 0777;
     return 0;
 }
 
 int chmod(const char *path, mode_t mode) {
-    (void)path;
-    (void)mode;
-    return set_errno(ENOSYS);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup(full);
+    if (!node) return set_errno(ENOENT);
+    task_t *cur = task_current();
+    if (!cur) return set_errno(EPERM);
+    if (cur->euid != 0 && cur->euid != node->uid)
+        return set_errno(EPERM);
+    node->mode = (node->mode & S_IFMT) | (mode & 07777);
+    return 0;
 }
 
 int chown(const char *path, uid_t uid, gid_t gid) {
-    (void)path;
-    (void)uid;
-    (void)gid;
-    return set_errno(ENOSYS);
+    char full[256];
+    if (resolve_user_path(path, full) < 0) return -1;
+    vfs_node_t *node = vfs_lookup(full);
+    if (!node) return set_errno(ENOENT);
+    task_t *cur = task_current();
+    if (!cur || cur->euid != 0) return set_errno(EPERM);
+    if (uid != (uid_t)-1) node->uid = uid;
+    if (gid != (gid_t)-1) node->gid = gid;
+    return 0;
 }
 
 ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
@@ -756,6 +852,84 @@ void _exit(int status) {
 
 void exit(int status) {
     _exit(status);
+}
+
+// ============================================================
+// Multi-user identity
+// ============================================================
+
+uid_t getuid(void) {
+    task_t *cur = task_current();
+    return cur ? cur->uid : 0;
+}
+
+uid_t geteuid(void) {
+    task_t *cur = task_current();
+    return cur ? cur->euid : 0;
+}
+
+gid_t getgid(void) {
+    task_t *cur = task_current();
+    return cur ? cur->gid : 0;
+}
+
+gid_t getegid(void) {
+    task_t *cur = task_current();
+    return cur ? cur->egid : 0;
+}
+
+int setuid(uid_t uid) {
+    task_t *cur = task_current();
+    if (!cur) return set_errno(EPERM);
+    if (cur->euid != 0 && uid != cur->uid)
+        return set_errno(EPERM);
+    cur->uid = uid;
+    cur->euid = uid;
+    return 0;
+}
+
+int setgid(gid_t gid) {
+    task_t *cur = task_current();
+    if (!cur) return set_errno(EPERM);
+    if (cur->euid != 0 && gid != cur->gid)
+        return set_errno(EPERM);
+    cur->gid = gid;
+    cur->egid = gid;
+    return 0;
+}
+
+int getgroups(int size, gid_t list[]) {
+    task_t *cur = task_current();
+    if (!cur) return set_errno(EPERM);
+    if (size == 0) return (int)cur->group_count;
+    if (!list) return set_errno(EFAULT);
+    if (size < (int)cur->group_count) return set_errno(EINVAL);
+    for (uint32_t i = 0; i < cur->group_count; i++)
+        list[i] = cur->groups[i];
+    return (int)cur->group_count;
+}
+
+int setgroups(int size, const gid_t list[]) {
+    task_t *cur = task_current();
+    if (!cur) return set_errno(EPERM);
+    if (cur->euid != 0) return set_errno(EPERM);
+    if (size < 0) return set_errno(EINVAL);
+    if (size > TASK_NGROUPS_MAX) return set_errno(EINVAL);
+    if (size > 0 && !list) return set_errno(EFAULT);
+    for (int i = 0; i < size; i++)
+        cur->groups[i] = list[i];
+    cur->group_count = (uint32_t)size;
+    return 0;
+}
+
+pid_t getpgid(pid_t pid) {
+    if (pid == 0) return (pid_t)task_get_id();
+    const task_t *task = task_get_by_id((uint32_t)pid);
+    if (!task || task->state == TASK_TERMINATED) {
+        set_errno(ESRCH);
+        return -1;
+    }
+    return (pid_t)task->thread_group_id;
 }
 
 void *malloc(size_t size) {

@@ -156,6 +156,31 @@ static void cmd_clear(int argc, char **argv) {
     (void)argc; (void)argv; console_clear();
 }
 
+static void print_uint(uint32_t v);
+
+static void cmd_id(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts("uid=");
+    print_uint(getuid());
+    console_puts(" gid=");
+    print_uint(getgid());
+    console_puts(" euid=");
+    print_uint(geteuid());
+    console_puts(" egid=");
+    print_uint(getegid());
+    console_puts(" groups=");
+    int count = getgroups(0, NULL);
+    if (count > 0) {
+        gid_t list[8];
+        count = getgroups(count, list);
+        for (int i = 0; i < count; i++) {
+            if (i) console_putchar(',');
+            print_uint(list[i]);
+        }
+    }
+    console_putchar('\n');
+}
+
 static void cmd_ps(int argc, char **argv) {
     (void)argc; (void)argv;
     extern void task_list_all(void);
@@ -621,6 +646,7 @@ void tool_system_init(void) {
         {"neofetch",CMD_GROUP_SYSTEM, "Show system logo and info", "neofetch", cmd_neofetch},
         {"about",   CMD_GROUP_SYSTEM, "Show HBOS overview",  "about",   cmd_about},
         {"clear",   CMD_GROUP_SYSTEM, "Clear the screen",    "clear",   cmd_clear},
+        {"id",      CMD_GROUP_SYSTEM, "Show user/group identity", "id", cmd_id},
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},

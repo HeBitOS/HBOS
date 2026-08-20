@@ -2366,12 +2366,10 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_GETEUID:
-            // geteuid: 返回有效用户 ID（当前始终为 root）
-            return 0;
+            return (uint64_t)geteuid();
 
         case HBOS_SYS_GETEGID:
-            // getegid: 返回有效组 ID（当前始终为 root）
-            return 0;
+            return (uint64_t)getegid();
 
         case HBOS_SYS_GETTID:
             // gettid: 返回线程 ID（当前 = 任务 ID）
@@ -2489,16 +2487,13 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_GETUID:
-            return 0;
+            return (uint64_t)getuid();
 
         case HBOS_SYS_GETGID:
-            return 0;
+            return (uint64_t)getgid();
 
-        case HBOS_SYS_SETUID: {
-            uid_t uid = (uid_t)f->a0;
-            if (uid != 0) return (uint64_t)(-EPERM);
-            return 0;
-        }
+        case HBOS_SYS_SETUID:
+            return finish_syscall((long)setuid((uid_t)f->a0));
 
         // ============================================================
         // 信号处理 (39-42)
@@ -2753,11 +2748,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return user_brk((uint64_t)f->a0);
         }
 
-        case HBOS_SYS_SETGID: {
-            gid_t gid = (gid_t)f->a0;
-            if (gid != 0) return (uint64_t)(-EPERM);
-            return 0;
-        }
+        case HBOS_SYS_SETGID:
+            return finish_syscall((long)setgid((gid_t)f->a0));
 
         // ============================================================
         // 文件系统扩展 II (48-49)
@@ -2771,11 +2763,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_CHMOD: {
             const char *path = (const char *)f->a0;
             if (!path) return (uint64_t)(-EFAULT);
-            (void)f->a1;
-            struct stat st;
-            if (stat(path, &st) < 0)
-                return (uint64_t)(-errno);
-            return 0;
+            return finish_syscall((long)chmod(path, (mode_t)f->a1));
         }
 
         // ============================================================
@@ -2784,19 +2772,17 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_CHOWN: {
             const char *path = (const char *)f->a0;
             if (!path) return (uint64_t)(-EFAULT);
-            struct stat st;
-            if (stat(path, &st) < 0)
-                return (uint64_t)(-errno);
-            return 0;
+            return finish_syscall((long)chown(path, (uid_t)f->a1,
+                                              (gid_t)f->a2));
         }
 
-        case HBOS_SYS_GETGROUPS: {
-            return 0;
-        }
+        case HBOS_SYS_GETGROUPS:
+            return finish_syscall((long)getgroups((int)f->a0,
+                                                  (gid_t *)f->a1));
 
-        case HBOS_SYS_SETGROUPS: {
-            return (uint64_t)(-EPERM);
-        }
+        case HBOS_SYS_SETGROUPS:
+            return finish_syscall((long)setgroups((int)f->a0,
+                                                  (const gid_t *)f->a1));
 
         case HBOS_SYS_GETPGID: {
             pid_t pid = (pid_t)f->a0;

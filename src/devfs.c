@@ -15,6 +15,7 @@
 #include "core/task.h"
 #include "core/pmm.h"
 #include "core/vmm.h"
+#include "sys/stat.h"
 #include "smp.h"
 #include "net.h"
 #include "core/heap.h"
@@ -146,7 +147,15 @@ static void proc_append_status(char *buf, int *position,
     proc_append_u64(buf, position, task->id);
     proc_append(buf, position, "\nPPid:\t");
     proc_append_u64(buf, position, task->parent_id);
-    proc_append(buf, position, "\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n");
+    proc_append(buf, position, "\nUid:\t");
+    proc_append_u64(buf, position, task->uid);
+    proc_append(buf, position, "\t");
+    proc_append_u64(buf, position, task->euid);
+    proc_append(buf, position, "\t0\t0\nGid:\t");
+    proc_append_u64(buf, position, task->gid);
+    proc_append(buf, position, "\t");
+    proc_append_u64(buf, position, task->egid);
+    proc_append(buf, position, "\t0\t0\n");
     proc_append(buf, position, "FDSize:\t128\nThreads:\t");
     proc_append_u64(buf, position, threads);
     proc_append(buf, position, "\nVmSize:\t");
@@ -448,6 +457,9 @@ static vfs_node_t *devfs_alloc_node(void) {
     vfs_node_t *n = &devfs_nodes[devfs_node_count++];
     memset(n, 0, sizeof(*n));
     n->capacity = PROC_BUF_SIZE;
+    n->uid = 0;
+    n->gid = 0;
+    n->mode = S_IFCHR | 0666;
     return n;
 }
 
@@ -456,6 +468,7 @@ static void devfs_register_sysfs_dir(const char *path) {
     if (!node) return;
     set_name(node, path);
     node->type = VFS_NODE_DIR;
+    node->mode = S_IFDIR | 0555;
 }
 
 static void devfs_register_sysfs_file(const char *path, const char *content) {
@@ -463,6 +476,7 @@ static void devfs_register_sysfs_file(const char *path, const char *content) {
     if (!node) return;
     set_name(node, path);
     node->type = VFS_NODE_FILE;
+    node->mode = S_IFREG | 0444;
     node->ops = &devfs_sysfs_ops;
     node->private_data = (void *)content;
     node->size = content ? (uint32_t)strlen(content) : 0;
@@ -477,24 +491,28 @@ void devfs_init(void) {
     vfs_node_t *n = devfs_alloc_node();
     set_name(n, "/dev/null");
     n->type = VFS_NODE_CHARDEV;
+    n->mode = S_IFCHR | 0666;
     n->ops = &devfs_null_ops;
 
     // /dev/zero
     n = devfs_alloc_node();
     set_name(n, "/dev/zero");
     n->type = VFS_NODE_CHARDEV;
+    n->mode = S_IFCHR | 0666;
     n->ops = &devfs_zero_ops;
 
     // /dev/console
     n = devfs_alloc_node();
     set_name(n, "/dev/console");
     n->type = VFS_NODE_CHARDEV;
+    n->mode = S_IFCHR | 0666;
     n->ops = &devfs_console_ops;
 
     // /proc/uptime
     n = devfs_alloc_node();
     set_name(n, "/proc/uptime");
     n->type = VFS_NODE_FILE;
+    n->mode = S_IFREG | 0444;
     n->ops = &devfs_proc_ops;
     n->private_data = kmalloc(PROC_BUF_SIZE);
     memset(n->private_data, 0, PROC_BUF_SIZE);
@@ -503,6 +521,7 @@ void devfs_init(void) {
     n = devfs_alloc_node();
     set_name(n, "/proc/meminfo");
     n->type = VFS_NODE_FILE;
+    n->mode = S_IFREG | 0444;
     n->ops = &devfs_proc_ops;
     n->private_data = kmalloc(PROC_BUF_SIZE);
     memset(n->private_data, 0, PROC_BUF_SIZE);
@@ -511,6 +530,7 @@ void devfs_init(void) {
     n = devfs_alloc_node();
     set_name(n, "/proc/cpuinfo");
     n->type = VFS_NODE_FILE;
+    n->mode = S_IFREG | 0444;
     n->ops = &devfs_proc_ops;
     n->private_data = kmalloc(PROC_BUF_SIZE);
     memset(n->private_data, 0, PROC_BUF_SIZE);
@@ -519,12 +539,14 @@ void devfs_init(void) {
     n = devfs_alloc_node();
     set_name(n, "/dev/random");
     n->type = VFS_NODE_CHARDEV;
+    n->mode = S_IFCHR | 0666;
     n->ops = &devfs_random_ops;
 
     // /dev/urandom
     n = devfs_alloc_node();
     set_name(n, "/dev/urandom");
     n->type = VFS_NODE_CHARDEV;
+    n->mode = S_IFCHR | 0666;
     n->ops = &devfs_random_ops;
 
     static const char *sysfs_dirs[] = {

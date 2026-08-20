@@ -9,6 +9,7 @@
 #include "string.h"
 #include "core/task.h"
 #include "fd.h"
+#include "sys/stat.h"
 
 static vfs_node_t vfs_root_node = {
     .name = "/",
@@ -17,15 +18,18 @@ static vfs_node_t vfs_root_node = {
     .capacity = 0,
     .private_data = NULL,
     .ops = NULL,
+    .uid = 0,
+    .gid = 0,
+    .mode = S_IFDIR | 0755,
 };
 
 static vfs_node_t vfs_virtual_dirs[] = {
-    {.name = "/dev",  .type = VFS_NODE_DIR},
-    {.name = "/proc", .type = VFS_NODE_DIR},
-    {.name = "/sys",  .type = VFS_NODE_DIR},
-    {.name = "/home", .type = VFS_NODE_DIR},
-    {.name = "/bin",  .type = VFS_NODE_DIR},
-    {.name = "/tmp",  .type = VFS_NODE_DIR},
+    {.name = "/dev",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0755},
+    {.name = "/proc", .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0555},
+    {.name = "/sys",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0555},
+    {.name = "/home", .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0755},
+    {.name = "/bin",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0755},
+    {.name = "/tmp",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0777},
 };
 static uint32_t vfs_root_readdir_pos;
 static uint32_t vfs_symlink_count;
@@ -227,6 +231,9 @@ vfs_node_t *vfs_register_static_file(const char *path, const void *data,
     file->node.capacity = size;
     file->node.private_data = file;
     file->node.ops = &vfs_static_ops;
+    file->node.uid = 0;
+    file->node.gid = 0;
+    file->node.mode = S_IFREG | 0444;
     file->data = (const uint8_t *)data;
     return &file->node;
 }
@@ -259,6 +266,9 @@ static vfs_node_t *vfs_lookup_raw(const char *path) {
             static vfs_node_t proc_pid_node = {
                 .name = "/proc/pid",
                 .type = VFS_NODE_DIR,
+                .uid = 0,
+                .gid = 0,
+                .mode = S_IFDIR | 0555,
             };
             return &proc_pid_node;
         }

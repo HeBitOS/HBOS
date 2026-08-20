@@ -2,6 +2,7 @@
 #define HBOS_USER_LIBC_UNISTD_H
 
 #include <stddef.h>
+#include "syscall.h"
 
 #define F_OK 0
 #define R_OK 4
@@ -15,10 +16,6 @@
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
-
-typedef int pid_t;
-typedef long ssize_t;
-typedef long off_t;
 
 unsigned int sleep(unsigned int seconds);
 int          usleep(unsigned int useconds);
@@ -55,6 +52,19 @@ int          rename(const char *oldpath, const char *newpath);
  * tools (which, executable_exists()) must ask the kernel directly whether
  * a name is a known app rather than stat()'ing a path. Returns 1 if found,
  * 0 otherwise. */
+/* Multi-user identity.  HBOS now carries per-task uid/gid/euid/egid and
+ * supplementary groups; getuid()/setuid() etc. round-trip through the
+ * kernel's native syscall table. */
+uid_t        getuid(void);
+uid_t        geteuid(void);
+gid_t        getgid(void);
+gid_t        getegid(void);
+int          setuid(uid_t uid);
+int          setgid(gid_t gid);
+int          getgroups(int size, gid_t list[]);
+int          setgroups(int size, const gid_t list[]);
+pid_t        getpgid(pid_t pid);
+
 int          hax_app_exists(const char *name);
 
 #endif

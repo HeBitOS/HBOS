@@ -399,6 +399,14 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->parent_death_signal = 0;
     tcb->dumpable = true;
     tcb->no_new_privs = current_task ? current_task->no_new_privs : false;
+    tcb->uid   = current_task ? current_task->uid   : 0;
+    tcb->euid  = current_task ? current_task->euid  : 0;
+    tcb->gid   = current_task ? current_task->gid   : 0;
+    tcb->egid  = current_task ? current_task->egid  : 0;
+    tcb->group_count = current_task ? current_task->group_count : 0;
+    if (tcb->group_count > TASK_NGROUPS_MAX) tcb->group_count = 0;
+    for (uint32_t gi = 0; gi < tcb->group_count; gi++)
+        tcb->groups[gi] = current_task->groups[gi];
     tcb->clear_child_tid = NULL;
     tcb->robust_list_head = NULL;
     tcb->robust_list_length = 0;
@@ -522,6 +530,14 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     tcb->parent_death_signal = 0;
     tcb->dumpable = true;
     tcb->no_new_privs = current_task ? current_task->no_new_privs : false;
+    tcb->uid   = current_task ? current_task->uid   : 0;
+    tcb->euid  = current_task ? current_task->euid  : 0;
+    tcb->gid   = current_task ? current_task->gid   : 0;
+    tcb->egid  = current_task ? current_task->egid  : 0;
+    tcb->group_count = current_task ? current_task->group_count : 0;
+    if (tcb->group_count > TASK_NGROUPS_MAX) tcb->group_count = 0;
+    for (uint32_t gi = 0; gi < tcb->group_count; gi++)
+        tcb->groups[gi] = current_task->groups[gi];
     tcb->clear_child_tid = NULL;
     tcb->robust_list_head = NULL;
     tcb->robust_list_length = 0;
@@ -965,6 +981,14 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     child->parent_death_signal = current_task->parent_death_signal;
     child->dumpable = current_task->dumpable;
     child->no_new_privs = current_task->no_new_privs;
+    child->uid  = current_task->uid;
+    child->euid = current_task->euid;
+    child->gid  = current_task->gid;
+    child->egid = current_task->egid;
+    child->group_count = current_task->group_count;
+    if (child->group_count > TASK_NGROUPS_MAX) child->group_count = 0;
+    for (uint32_t gi = 0; gi < child->group_count; gi++)
+        child->groups[gi] = current_task->groups[gi];
     child->clear_child_tid = NULL;
     child->robust_list_head = NULL;
     child->robust_list_length = 0;
@@ -1139,6 +1163,14 @@ static int task_clone_thread_common(
     thread->parent_death_signal = current_task->parent_death_signal;
     thread->dumpable = current_task->dumpable;
     thread->no_new_privs = current_task->no_new_privs;
+    thread->uid  = current_task->uid;
+    thread->euid = current_task->euid;
+    thread->gid  = current_task->gid;
+    thread->egid = current_task->egid;
+    thread->group_count = current_task->group_count;
+    if (thread->group_count > TASK_NGROUPS_MAX) thread->group_count = 0;
+    for (uint32_t gi = 0; gi < thread->group_count; gi++)
+        thread->groups[gi] = current_task->groups[gi];
     thread->clear_child_tid =
         (request->flags & CLONE_CHILD_CLEARTID) ?
         (uint32_t *)(uintptr_t)(request->clear_child_tid ?

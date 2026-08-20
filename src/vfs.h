@@ -39,6 +39,9 @@ struct vfs_node {
     uint32_t capacity;          /**< 容量上限（字节） */
     void *private_data;         /**< 指向底层文件系统私有数据的指针 */
     const vfs_ops_t *ops;       /**< 操作接口函数指针表 */
+    uint32_t uid;               /**< 属主用户 ID */
+    uint32_t gid;               /**< 属主组 ID */
+    uint32_t mode;              /**< 权限位（含 S_IFMT 类型位） */
 };
 
 int vfs_init(void);             /**< 初始化 VFS 层 */

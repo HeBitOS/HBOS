@@ -66,10 +66,9 @@ void bb_simple_perror_msg_and_die(const char *s) __attribute__((noreturn));
 int file_is_executable(const char *name);
 char *find_executable(const char *filename, char **PATHp);
 
-/* whoami/id -- HBOS has no real multi-user model (no /etc/passwd, no uid
- * database) -- always report the single implicit "root" user, matching
- * how a single-user embedded OS conventionally behaves. uid_t itself is
- * already declared in src/user/libc/syscall.h (included transitively). */
+/* whoami/id -- HBOS now carries per-task uid/gid/euid/egid.  There is no
+ * /etc/passwd database yet, so non-root UIDs are rendered numerically by
+ * xuid2uname(). uid_t is declared in src/user/libc/syscall.h. */
 uid_t geteuid(void);
 const char *xuid2uname(long uid);
 

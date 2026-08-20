@@ -476,13 +476,20 @@ void bb_perror_nomsg_and_die(void) {
     bb_simple_perror_msg_and_die("");
 }
 
-uid_t geteuid(void) {
-    return 0; /* HBOS has no real multi-user model -- always "root" */
-}
+/* geteuid() is provided by the user-space libc (src/user/libc/unistd.c)
+ * and now reflects the per-task effective UID. */
 
 const char *xuid2uname(long uid) {
-    (void)uid;
-    return "root";
+    if (uid == 0) return "root";
+    static char name[32];
+    char *p = name + sizeof(name) - 1;
+    *p = '\0';
+    unsigned long value = (unsigned long)uid;
+    do {
+        *--p = (char)('0' + (value % 10));
+        value /= 10;
+    } while (value && p > name);
+    return p;
 }
 
 int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags) {

@@ -82,6 +82,7 @@ typedef struct {
 #define TASK_USER_HEAP_START 0x0000002000000000ULL
 #define TASK_USER_HEAP_SIZE  (64ULL * 1024 * 1024)
 #define TASK_DYNAMIC_TLS_MAX 64
+#define TASK_NGROUPS_MAX 8
 
 typedef struct {
     uint32_t module_id;
@@ -125,6 +126,16 @@ typedef struct task {
     struct task *next;
 
     fd_table_t *fd_table;
+
+    /* Multi-user identity.  Threads in the same process share the same
+     * credentials; fork() children inherit them; the kernel initially runs
+     * as root (uid/gid 0). */
+    uid_t uid;
+    uid_t euid;
+    gid_t gid;
+    gid_t egid;
+    gid_t groups[TASK_NGROUPS_MAX];
+    uint32_t group_count;
 
     task_mm_t *mm;
     uint64_t fs_base;

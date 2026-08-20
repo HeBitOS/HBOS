@@ -8,6 +8,7 @@
 #include "fat32.h"
 #include "fs.h"
 #include "string.h"
+#include "sys/stat.h"
 
 #define HBFS_MAGIC 0x3146534248ULL /**< HBFS 魔数，对应 "HBFS1" 的小端标记 */
 #define HBFS_VERSION 1             /**< HBFS 版本号 */
@@ -220,6 +221,9 @@ static void fs_reset_ram(void) {
         f->disk_slot = i;
         f->used = 0;
         f->type = 0;
+        f->node.uid = 0;
+        f->node.gid = 0;
+        f->node.mode = S_IFREG | 0644;
     }
 }
 
@@ -299,6 +303,9 @@ static void hbfs_rebuild_files_from_table(void) {
         f->node.capacity = RAMFS_MAX_FILE_SIZE;
         f->node.private_data = f;
         f->node.ops = &ramfs_ops;
+        f->node.uid = 0;
+        f->node.gid = 0;
+        f->node.mode = (f->type == 1 ? S_IFDIR : S_IFREG) | 0755;
 
         if (f->used) {
             strcpy(f->name, e->name);
@@ -356,6 +363,9 @@ static void ext2_rebuild_files(void) {
         f->node.capacity = f->capacity;
         f->node.private_data = f;
         f->node.ops = &ext2_ops;
+        f->node.uid = inode.i_uid;
+        f->node.gid = inode.i_gid;
+        f->node.mode = inode.i_mode;
         memcpy(f->node.name, f->name, nlen + 1);
         fs.file_count++;
         idx++;
@@ -513,6 +523,9 @@ static void fat32_rebuild_files(void) {
         f->node.capacity = f->capacity;
         f->node.private_data = f;
         f->node.ops = &fat32_ops;
+        f->node.uid = 0;
+        f->node.gid = 0;
+        f->node.mode = (f->type ? S_IFDIR : S_IFREG) | 0755;
         memcpy(f->node.name, f->name, nlen + 1);
         fs.file_count++;
         idx++;
@@ -1344,6 +1357,9 @@ file_t *fs_create_file(const char *name) {
             f->disk_slot = (uint32_t)ino;
             f->used = 1;
             f->type = 0;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFREG | 0644;
             fs.file_count++;
             return f;
         }
@@ -1372,6 +1388,9 @@ file_t *fs_create_file(const char *name) {
             f->disk_slot = cluster;
             f->used = 1;
             f->type = 0;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFREG | 0644;
             fs.file_count++;
             return f;
         }
@@ -1394,6 +1413,9 @@ file_t *fs_create_file(const char *name) {
         f->disk_slot = i;
         f->used = 1;
         f->type = 0;
+        f->node.uid = 0;
+        f->node.gid = 0;
+        f->node.mode = S_IFREG | 0644;
         fs.file_count++;
         if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0) {
             f->used = 0;
@@ -1425,6 +1447,9 @@ file_t *fs_create_symlink(const char *name, const char *target) {
     }
     link->type = 2;
     link->node.type = VFS_NODE_SYMLINK;
+    link->node.uid = 0;
+    link->node.gid = 0;
+    link->node.mode = S_IFLNK | 0777;
     link->size = (uint32_t)length;
     link->node.size = (uint32_t)length;
     if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(link) < 0) {
@@ -1744,6 +1769,9 @@ int fs_mkdir(const char *name) {
             f->disk_slot = (uint32_t)ino;
             f->used = 1;
             f->type = 1;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFDIR | 0755;
             fs.file_count++;
             return 0;
         }
@@ -1773,6 +1801,9 @@ int fs_mkdir(const char *name) {
             f->disk_slot = new_cluster;
             f->used = 1;
             f->type = 1;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFDIR | 0755;
             fs.file_count++;
             return 0;
         }
@@ -1795,6 +1826,9 @@ int fs_mkdir(const char *name) {
         f->disk_slot = i;
         f->used = 1;
         f->type = 1;
+        f->node.uid = 0;
+        f->node.gid = 0;
+        f->node.mode = S_IFDIR | 0755;
         fs.file_count++;
         if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0) {
             f->used = 0;

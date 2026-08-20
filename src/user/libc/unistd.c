@@ -16,6 +16,44 @@ pid_t getpid(void) {
     return (pid_t)__syscall1(HBOS_SYS_GETPID, 0);
 }
 
+uid_t getuid(void) {
+    return (uid_t)__syscall1(HBOS_SYS_GETUID, 0);
+}
+
+uid_t geteuid(void) {
+    return (uid_t)__syscall1(HBOS_SYS_GETEUID, 0);
+}
+
+gid_t getgid(void) {
+    return (gid_t)__syscall1(HBOS_SYS_GETGID, 0);
+}
+
+gid_t getegid(void) {
+    return (gid_t)__syscall1(HBOS_SYS_GETEGID, 0);
+}
+
+int setuid(uid_t uid) {
+    return (int)__syscall_errno(__syscall1(HBOS_SYS_SETUID, (long)uid));
+}
+
+int setgid(gid_t gid) {
+    return (int)__syscall_errno(__syscall1(HBOS_SYS_SETGID, (long)gid));
+}
+
+int getgroups(int size, gid_t list[]) {
+    return (int)__syscall_errno(__syscall3(HBOS_SYS_GETGROUPS,
+                                           size, (long)list, 0));
+}
+
+int setgroups(int size, const gid_t list[]) {
+    return (int)__syscall_errno(__syscall3(HBOS_SYS_SETGROUPS,
+                                           size, (long)list, 0));
+}
+
+pid_t getpgid(pid_t pid) {
+    return (pid_t)__syscall_errno(__syscall1(HBOS_SYS_GETPGID, (long)pid));
+}
+
 char *getcwd(char *buf, size_t size) {
     long ret = __syscall3(HBOS_SYS_GETCWD, (long)buf, (long)size, 0);
     if (__syscall_errno(ret) < 0) return 0;

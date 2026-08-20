@@ -135,7 +135,7 @@
   <div style="height:4.5cm;"></div>
   <div style="background:#14a6e0; color:#fff; padding:22px 18px; font-size:11pt; font-weight:600;">
     HBOS APPLICATION DEVELOPER GUIDE<br>
-    <span style="font-size:9.5pt; font-weight:400;">2026/08/16 &nbsp;·&nbsp; VERSION 1.9 &nbsp;·&nbsp; HBOS v0.1-beta5 &nbsp;·&nbsp; HIVE 0.1-beta5-gui.4（Toolkit API 1.4 / TUI Kit 1.0）</span>
+    <span style="font-size:9.5pt; font-weight:400;">2026/08/19 &nbsp;·&nbsp; VERSION 2.0 &nbsp;·&nbsp; HBOS v0.1-beta5-pre6 &nbsp;·&nbsp; HIVE 0.1-beta5-gui.4（Toolkit API 1.4 / TUI Kit 1.0）</span>
   </div>
 </div>
 
@@ -148,7 +148,7 @@
   <div class="ss">1.2.1 ELF64 结构</div>
   <div class="ss">1.2.2 .haxmeta 元数据段</div>
   <div class="s">1.3 自动导入机制</div>
-  <div class="ss">1.3.1 构建流水线详解</div>
+  <div class="ss">1.3.1 构建流水线详解（多结构 HAX 构建系统）</div>
   <div class="ss">1.3.2 预编译应用的导入</div>
   <div class="s">1.4 编译 HAX 应用</div>
   <div class="ss">1.4.1 Makefile 自动构建</div>
@@ -167,6 +167,11 @@
   <div class="s">2.8 并发窗口接口（推荐）</div>
   <div class="s">2.9 HIVE 标准窗口控件 API</div>
   <div class="s">2.10 TUI 终端控件 API</div>
+  <div class="s">2.11 多用户身份与文件权限</div>
+  <div class="ss">2.11.1 用户/组 ID 系统调用</div>
+  <div class="ss">2.11.2 文件权限</div>
+  <div class="ss">2.11.3 默认元数据</div>
+  <div class="ss">2.11.4 Shell 命令</div>
   <div class="c">第 3 章 — 运行、发现与调试</div>
   <div class="s">3.1 TUI 与 GUI 类型说明</div>
   <div class="s">3.2 apps / run 命令</div>
@@ -217,9 +222,22 @@
 
 <h4>1.3.1 构建流水线详解</h4>
 <p>核心逻辑：<b>只要 <code>./app</code> 目录里存在 <code>.hax</code> 文件（编译产物或预编译），它就会被自动加入系统。</b></p>
+<p>HAX 构建系统支持三种应用结构：</p>
+<ul>
+  <li><b>单文件应用</b>——<code>app/&lt;name&gt;.c</code>，自动编译为 <code>build/app/&lt;name&gt;.hax</code>（向后兼容）</li>
+  <li><b>多文件应用</b>——<code>app/&lt;name&gt;/</code> 目录，目录内全部 <code>*.c</code> 链接为一个 <code>.hax</code></li>
+  <li><b>独立库</b>——<code>app/lib/&lt;lib&gt;/</code> 目录，<code>ld -r</code> 合并一次，供多个应用共享</li>
+</ul>
+<p>库依赖声明：</p>
+<ul>
+  <li>单文件应用 <code>app/&lt;name&gt;.c</code> → 同名 <code>app/&lt;name&gt;.deps</code>，每行一个库名</li>
+  <li>多文件应用 <code>app/&lt;name&gt;/</code> → <code>app/&lt;name&gt;/deps</code>，每行一个库名</li>
+  <li>库之间的依赖 → <code>app/lib/&lt;lib&gt;/deps</code>，每行一个库名</li>
+</ul>
+<p>（<code>#</code> 开头为注释；库头文件放在 <code>app/lib/&lt;lib&gt;/</code> 下，按 <code>&lt;lib/xxx.h&gt;</code> 引入，include 路径已自动加上 <code>$(APP_DIR)/lib</code>）</p>
 <table>
 <tr><th width="8%">步骤</th><th width="22%">触发条件</th><th>具体行为</th></tr>
-<tr><td>① 编译</td><td><code>app/*.c</code> 有更新</td><td>Makefile 用 HAX 工具链把每个 <code>app/foo.c</code> 编译为 <code>build/app/foo.hax</code>（ELF64，含 <code>.haxmeta</code>）</td></tr>
+<tr><td>① 编译</td><td><code>app/**/*.c</code> 有更新</td><td>Makefile 用 HAX 工具链把三类结构的源码编译为 <code>build/app/&lt;name&gt;.hax</code>（ELF64，含 <code>.haxmeta</code>）；独立库先 <code>ld -r</code> 合并，再按 deps 链接到应用</td></tr>
 <tr><td>② 解析</td><td><code>build/app/*.hax</code> 有更新</td><td><code>tools/genhax.py</code> 依次解析每个 ELF 的 <code>.haxmeta</code> 段（magic 校验 → 提取 kind/name/desc），若无合法元数据则以文件名兜底（kind=TUI）</td></tr>
 <tr><td>③ 打包</td><td>同上</td><td>生成器按 16 字节对齐拼接所有 ELF 为 <code>build/hax_blob.bin</code>，并输出 <code>build/hax_manifest.c</code>（含 <code>hax_app_table[]</code> + 计数）</td></tr>
 <tr><td>④ 嵌入</td><td>blob 有更新</td><td><code>src/user/hax_blob.asm</code> 用 <code>incbin</code> 把 blob 嵌入内核只读数据段；manifest 编译进内核</td></tr>
@@ -235,20 +253,24 @@
 <h4>1.4.1 Makefile 自动构建</h4>
 <pre>make                # 构建整个系统，含所有 .hax 自动打包
 make hax-apps       # 仅构建 ./app 下的应用，不重新链接内核</pre>
-<p>把源文件加入 <code>./app</code> 后不需要改任何 Makefile——通配符规则会自动发现新文件。</p>
+<p>把源文件加入 <code>./app</code> 后不需要改任何 Makefile——通配符规则会自动发现新文件。支持多文件应用目录和独立库，详见 <code>Makefile</code> 注释。</p>
 
 <h4>1.4.2 手动编译步骤</h4>
 <p>Makefile 内部等价命令如下，可用于调试或在其他构建系统中集成：</p>
-<pre># 1. 编译目标文件
+<pre># 1. 单文件应用
+# 编译目标文件
 gcc -c -m64 -ffreestanding -fno-stack-protector -fno-pie \
     -mno-red-zone -mno-sse -mno-sse2 \
-    -Iapp/include -Isrc/user -Isrc/user/libc \
+    -Iapp/include -Iapp/lib -Isrc/user -Isrc/user/libc \
     app/myapp.c -o build/app/myapp.o
 
 # 2. 链接为 .hax（ELF64 静态）
 ld -m elf_x86_64 -static -nostdlib -T src/user/user.ld \
    build/user/libc/*.o build/user/crt0.o \
    build/app/myapp.o -o build/app/myapp.hax
+
+# 多文件应用：目录内全部 *.c 分别编译后一起链接
+# 独立库：ld -r 合并一次，应用按 deps 依赖库
 
 # 3. 打包（可选，单独重新打包）
 python3 tools/genhax.py \
@@ -609,6 +631,53 @@ int main(void) {
 <code>\r</code> 回车不换行；HBOS 图形终端会丢弃 <code>\r</code>，此时退化为逐行
 输出（功能不受影响）。<code>app/tui.c</code> 是完整的控件展示应用。</div>
 </div>
+
+<h2>2.11 多用户身份与文件权限</h2>
+<p>从 HBOS v0.1-beta5-pre6 起，内核支持<b>多用户身份</b>：每个进程/线程拥有独立的 <code>uid</code>、<code>euid</code>、<code>gid</code>、<code>egid</code> 以及补充组列表，系统调用 <code>getuid</code>/<code>setuid</code> 等从此返回真实值，而非固定写死的 <code>0</code>（root）。</p>
+
+<h4>2.11.1 用户/组 ID 系统调用</h4>
+<p>以下 POSIX 系统调用已全部实现：</p>
+<table>
+<tr><th>函数</th><th>说明</th></tr>
+<tr><td><code>uid_t getuid(void)</code></td><td>返回实际用户 ID</td></tr>
+<tr><td><code>uid_t geteuid(void)</code></td><td>返回有效用户 ID</td></tr>
+<tr><td><code>gid_t getgid(void)</code></td><td>返回实际组 ID</td></tr>
+<tr><td><code>gid_t getegid(void)</code></td><td>返回有效组 ID</td></tr>
+<tr><td><code>int setuid(uid_t uid)</code></td><td>设置用户 ID（root 可设为任意值；非 root 仅能设为自己的 real uid）</td></tr>
+<tr><td><code>int setgid(gid_t gid)</code></td><td>设置组 ID（规则同上）</td></tr>
+<tr><td><code>int getgroups(int size, gid_t list[])</code></td><td>获取补充组列表</td></tr>
+<tr><td><code>int setgroups(int size, const gid_t list[])</code></td><td>设置补充组列表（仅 root）</td></tr>
+<tr><td><code>pid_t getpgid(pid_t pid)</code></td><td>获取进程组 ID</td></tr>
+</table>
+
+<h4>2.11.2 文件权限</h4>
+<p>每个 VFS 节点（文件、目录、设备、符号链接）都记录了 <code>uid</code>、<code>gid</code> 和 <code>mode</code>（权限位 + 文件类型位）。<code>stat()</code> 和 <code>fstat()</code> 返回真实的 owner 和权限。以下操作会检查权限：</p>
+<ul>
+  <li><code>open()</code>——根据打开模式（读/写）检查读/写权限</li>
+  <li><code>access()</code>——按 <code>R_OK/W_OK/X_OK</code> 检查</li>
+  <li><code>unlink()</code>——检查写权限（简化版）</li>
+  <li><code>rmdir()</code>——检查写权限</li>
+  <li><code>chmod()</code>——修改文件权限（owner 或 root 可改）</li>
+  <li><code>chown()</code>——修改文件属主（仅 root）</li>
+</ul>
+<p>root 绕过读/写权限检查，但 execute 仍要求至少有一个执行位。非 root 进程按 POSIX 规则计算：若 euid 等于文件 uid，则使用用户权限位（rwx 高 3 位）；否则若 egid 或补充组匹配文件 gid，则使用组权限位；否则使用其他权限位。</p>
+
+<h4>2.11.3 默认元数据</h4>
+<p>新建文件时：</p>
+<ul>
+  <li><code>open()</code> 创建的普通文件 owner = 当前进程 uid/gid，mode = 传入 mode（默认 0644）</li>
+  <li><code>mkdir()</code> 创建的目录 owner = 当前进程 uid/gid，mode = 传入 mode（默认 0755）</li>
+  <li><code>symlink()</code> 创建的符号链接 owner = 当前进程 uid/gid，mode = 0777</li>
+  <li>内置文件系统节点（/dev/null、/proc/uptime 等）owner = root，mode 按用途设置</li>
+  <li>EXT2 挂载时从 inode 读取 uid/gid/mode</li>
+</ul>
+
+<h4>2.11.4 Shell 命令</h4>
+<p>新增 <code>id</code> 命令，可查看当前进程的身份信息：</p>
+<pre>HBOS&gt; id
+uid=0 gid=0 euid=0 egid=0 groups=</pre>
+
+<div class="note">当前限制：尚无 <code>/etc/passwd</code> 用户数据库、登录会话管理、setuid/setgid 位，以及 rename 的父目录写权限细化。HBFS 磁盘上的 owner/mode 仅保存在内存，未持久化到磁盘表项。</div>
 
 <!-- ── 第 3 章 ── -->
 <div class="chapter">
@@ -975,7 +1044,7 @@ EOF</pre>
 <tr><td><code>ld: cannot find -lhax</code></td><td>使用了 <code>-lhax</code> 链接标志（HAX SDK 不是共享库）</td><td>删除 <code>-lhax</code>；SDK 通过 <code>#include &lt;hax.h&gt;</code> 内联或编译进 libc 目标文件</td></tr>
 <tr><td>Make grouped target 报错</td><td>GNU Make 版本 &lt; 4.3（<code>&amp;:</code> 语法不支持）</td><td><code>make --version</code> 确认版本；Ubuntu 22.04+ 自带 Make 4.3+</td></tr>
 </table>
-<p class="small" style="margin-top:20px">© 2026 HBOS 项目 · 本手册随 HBOS v0.1-beta5 发布。源文件：<code>docs/HBOS_HAX_API.html</code> · SDK：<code>app/include/hax.h</code> / <code>hive.h</code></p>
+<p class="small" style="margin-top:20px">© 2026 HBOS 项目 · 本手册随 HBOS v0.1-beta5-pre6 发布。源文件：<code>docs/HBOS_HAX_API.html</code> · SDK：<code>app/include/hax.h</code> / <code>hive.h</code></p>
 </div>
 
 </body>
