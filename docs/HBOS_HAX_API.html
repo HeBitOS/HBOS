@@ -734,6 +734,26 @@ HBOS&gt; run leapyear</pre>
 <p>内核通过 <code>task_wait</code> 获取退出码并传回 <code>run</code> 命令；当前 shell 不打印退出码，可用 <code>hax_printf</code> 在退出前自行输出。</p>
 </div>
 
+<h2>3.3 文本编辑器（Nano 风格）</h2>
+<p>HBOS 内置一个 Nano 风格的 TUI 编辑器，通过 <code>edit &lt;文件&gt;</code> 命令启动：</p>
+<pre>HBOS&gt; edit /home/hello.txt</pre>
+<p>快捷键：</p>
+<table>
+<tr><th>快捷键</th><th>功能</th></tr>
+<tr><td><code>^X</code></td><td>退出（未保存会提示是否保存）</td></tr>
+<tr><td><code>^O</code></td><td>保存文件</td></tr>
+<tr><td><code>^W</code></td><td>搜索文本（支持回绕）</td></tr>
+<tr><td><code>^K</code></td><td>剪切当前行（整行存入剪贴板）</td></tr>
+<tr><td><code>^U</code></td><td>粘贴（插入剪贴板内容）</td></tr>
+<tr><td><code>^C</code></td><td>显示光标位置（行/列）</td></tr>
+<tr><td><code>^G</code></td><td>显示帮助</td></tr>
+<tr><td><code>^_</code></td><td>跳转到指定行</td></tr>
+<tr><td>方向键</td><td>移动光标</td></tr>
+<tr><td>Home / End</td><td>行首 / 行尾</td></tr>
+<tr><td>PageUp / PageDown</td><td>翻页</td></tr>
+</table>
+<p>编辑器底部有菜单栏显示常用快捷键，顶部状态栏显示文件名和修改标记（<code>"*"</code>）。支持行号显示、水平滚动和自动换行保持。</p>
+
 <!-- ── 第 4 章 ── -->
 <div class="chapter">
 <h1 style="page-break-before:always;">第 4 章<span class="en">COMPLETE EXAMPLES</span></h1>

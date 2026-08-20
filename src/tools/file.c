@@ -639,7 +639,7 @@ void tool_file_init(void) {
         {"fsck",       CMD_GROUP_FILE, "Check filesystem",       "fsck",                      cmd_fsck},
         {"mount",      CMD_GROUP_FILE, "Mount HBFS ATA disk",    "mount",                     cmd_mount},
         {"mkfs",       CMD_GROUP_FILE, "Format FAT32 ATA disk",  "mkfs",                      cmd_mkfs},
-        {"edit",       CMD_GROUP_FILE, "Edit a file (TUI editor)","edit <file>",               cmd_edit},
+        {"edit",       CMD_GROUP_FILE, "Nano-style TUI editor",     "edit <file>",               cmd_edit},
         {"find",       CMD_GROUP_FILE, "Find files by name",     "find [pattern]",            cmd_find},
         {"wc",         CMD_GROUP_FILE, "Count lines/words/bytes", "wc <file>",                cmd_wc},
         {"sort",       CMD_GROUP_FILE, "Sort file lines",        "sort <file>",              cmd_sort},
