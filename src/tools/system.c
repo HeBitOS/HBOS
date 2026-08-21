@@ -181,6 +181,28 @@ static void cmd_id(int argc, char **argv) {
     console_putchar('\n');
 }
 
+static void cmd_su(int argc, char **argv) {
+    /* 切换用户：`su` 默认切回 root(0)，`su <uid>` 切到指定 uid。
+     * 只有 root（euid==0）能切换到任意用户；普通用户只能切回自己。 */
+    uid_t target = 0;
+    if (argc > 1) {
+        target = 0;
+        const char *s = argv[1];
+        while (*s >= '0' && *s <= '9') { target = target * 10 + (uint32_t)(*s - '0'); s++; }
+    }
+    if (geteuid() != 0 && target != getuid()) {
+        console_puts("su: 需要 root 权限才能切换到该用户\n");
+        return;
+    }
+    if (setuid(target) < 0) {
+        console_puts("su: 切换失败（权限不足）\n");
+        return;
+    }
+    console_puts("su: 已切换用户，当前 euid=");
+    print_uint(geteuid());
+    console_putchar('\n');
+}
+
 static void cmd_ps(int argc, char **argv) {
     (void)argc; (void)argv;
     extern void task_list_all(void);
@@ -647,6 +669,7 @@ void tool_system_init(void) {
         {"about",   CMD_GROUP_SYSTEM, "Show HBOS overview",  "about",   cmd_about},
         {"clear",   CMD_GROUP_SYSTEM, "Clear the screen",    "clear",   cmd_clear},
         {"id",      CMD_GROUP_SYSTEM, "Show user/group identity", "id", cmd_id},
+        {"su",      CMD_GROUP_SYSTEM, "Switch user (root can switch to any uid)", "su [uid]", cmd_su},
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},

@@ -280,12 +280,18 @@ static void kb_set_leds(void) {
 static const char scancode_map[128] = {0,0,'1','2','3','4','5','6','7','8','9','0','-','=','\b',0,'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '};
 static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')','_','+','\b',0,'Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A','S','D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C','V','B','N','M','<','>','?',0,'*',0,' '};
 static int ctrl_pressed = 0; /**< Ctrl键状态 */
+static int alt_pressed = 0;  /**< Alt键状态（左/右） */
 static int ext_scancode = 0;
 
 void kb_clear_modifiers(void) {
     ctrl_pressed = 0;
+    alt_pressed = 0;
     shift_pressed = 0;
     ext_scancode = 0;
+}
+
+int kb_alt_pressed(void) {
+    return alt_pressed;
 }
 
 int kb_poll_key(void) {
@@ -325,6 +331,7 @@ int kb_poll_key(void) {
     if (ext_scancode) {
         ext_scancode = 0;
         if (sc & 0x80) return 0;
+        if (sc == 0x38) { alt_pressed = 1; return 0; }  /* 右 Alt（E0 38） */
         if (sc == 0x47) return KEY_HOME;
         if (sc == 0x48) return shift_pressed ? KEY_SHIFT_UP    : KEY_UP;
         if (sc == 0x4F) return KEY_END;
@@ -341,6 +348,8 @@ int kb_poll_key(void) {
     if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; return 0; }
     if (sc == 0x1D) { ctrl_pressed = 1; return 0; }
     if (sc == 0x9D) { ctrl_pressed = 0; return 0; }
+    if (sc == 0x38) { alt_pressed = 1; return 0; }     /* 左 Alt */
+    if (sc == 0xB8) { alt_pressed = 0; return 0; }     /* Alt 释放 */
     if (sc == 0x3A) { caps_lock = !caps_lock; kb_set_leds(); return 0; }
     if (sc == 0x45) { num_lock = !num_lock; kb_set_leds(); return 0; }
     if (sc & 0x80) return 0;
@@ -370,6 +379,7 @@ int kb_poll_key(void) {
     }
     if (sc == 0x01) {
         ctrl_pressed = 0;
+        alt_pressed = 0;
         shift_pressed = 0;
         ext_scancode = 0;
         return 27;

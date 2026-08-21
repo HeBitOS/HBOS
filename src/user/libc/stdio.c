@@ -221,14 +221,21 @@ int putchar(int c) { return fputc(c, stdout); }
 int puts(const char *s) { return fputs(s, stdout) < 0 ? EOF : fputc('\n', stdout); }
 
 static int _print_num(char *buf, size_t n, unsigned long long val,
-                      int base, int sign, int width, int pad, size_t *pos) {
+                      int base, int sign, int width, int pad, int left, size_t *pos) {
     char tmp[32]; int i = 0; int neg = 0;
     if (sign && (long long)val < 0) { neg = 1; val = (unsigned long long)(-(long long)val); }
     if (val == 0) tmp[i++] = '0';
     while (val > 0) { tmp[i++] = "0123456789abcdef"[val % (unsigned)base]; val /= (unsigned)base; }
     if (neg) tmp[i++] = '-';
-    while (i < width) tmp[i++] = (char)pad;
-    while (i > 0 && *pos < n - 1) buf[(*pos)++] = tmp[--i];
+    int dlen = i;
+    if (left) {
+        /* 左对齐：先输出数字，再用填充符补足宽度 */
+        while (i > 0 && *pos < n - 1) buf[(*pos)++] = tmp[--i];
+        while (dlen < width && *pos < n - 1) { buf[(*pos)++] = (char)pad; dlen++; }
+    } else {
+        while (i < width) tmp[i++] = (char)pad;
+        while (i > 0 && *pos < n - 1) buf[(*pos)++] = tmp[--i];
+    }
     return 0;
 }
 
@@ -237,8 +244,14 @@ static int _vsnprintf_core(char *buf, size_t n, const char *fmt, va_list ap) {
     while (*fmt && pos < n - 1) {
         if (*fmt != '%') { buf[pos++] = *fmt++; continue; }
         fmt++;
-        int width = 0, pad = ' ', precision = -1;
-        if (*fmt == '0') { pad = '0'; fmt++; }
+        int width = 0, pad = ' ', precision = -1, left = 0;
+        /* 解析标志：-（左对齐）、0（零填充）、+、空格、#（后三者消费但不渲染） */
+        for (;;) {
+            if (*fmt == '-') { left = 1; pad = ' '; fmt++; }
+            else if (*fmt == '0') { pad = '0'; fmt++; }
+            else if (*fmt == '+' || *fmt == ' ' || *fmt == '#') fmt++;
+            else break;
+        }
         if (*fmt == '*') { width = va_arg(ap, int); fmt++; }
         else while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
         if (*fmt == '.') {
@@ -265,6 +278,10 @@ static int _vsnprintf_core(char *buf, size_t n, const char *fmt, va_list ap) {
                 buf[pos++] = *s++;
                 count++;
             }
+            /* 左对齐：字符串右侧补空格到宽度 */
+            if (left) {
+                while (count < width && pos < n - 1) { buf[pos++] = ' '; count++; }
+            }
             break;
         }
         case 'c': buf[pos++] = (char)va_arg(ap, int); break;
@@ -283,23 +300,23 @@ static int _vsnprintf_core(char *buf, size_t n, const char *fmt, va_list ap) {
             long long v = lcount >= 2 ? va_arg(ap, long long)
                          : lcount == 1 ? (long long)va_arg(ap, long)
                                        : (long long)va_arg(ap, int);
-            _print_num(buf, n, (unsigned long long)v, 10, 1, width, pad, &pos); break;
+            _print_num(buf, n, (unsigned long long)v, 10, 1, width, pad, left, &pos); break;
         }
         case 'u': {
             unsigned long long v = lcount >= 2 ? va_arg(ap, unsigned long long)
                                   : lcount == 1 ? (unsigned long long)va_arg(ap, unsigned long)
                                                 : (unsigned long long)va_arg(ap, unsigned int);
-            _print_num(buf, n, v, 10, 0, width, pad, &pos); break;
+            _print_num(buf, n, v, 10, 0, width, pad, left, &pos); break;
         }
         case 'x': {
             unsigned long long v = lcount >= 2 ? va_arg(ap, unsigned long long)
                                   : lcount == 1 ? (unsigned long long)va_arg(ap, unsigned long)
                                                 : (unsigned long long)va_arg(ap, unsigned int);
-            _print_num(buf, n, v, 16, 0, width, pad, &pos); break;
+            _print_num(buf, n, v, 16, 0, width, pad, left, &pos); break;
         }
         case 'p':
             buf[pos++] = '0'; buf[pos++] = 'x';
-            _print_num(buf, n, (uintptr_t)va_arg(ap, void *), 16, 0, 0, '0', &pos); break;
+            _print_num(buf, n, (uintptr_t)va_arg(ap, void *), 16, 0, 0, '0', 0, &pos); break;
         case '%': buf[pos++] = '%'; break;
         default: buf[pos++] = '%'; buf[pos++] = *fmt; break;
         }

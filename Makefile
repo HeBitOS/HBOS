@@ -88,9 +88,10 @@ apps:
 	   done; \
 	 fi
 
-# 先询问版本 + 要打包的 app，再完整构建
+# 先询问版本 + 要打包的 app，再完整构建（GUI + no-GUI 都打包）
 ask: ver apps
 	@$(MAKE) --no-print-directory all
+	@$(MAKE) --no-print-directory nogui
 
 # version.mk 缺失时不报错（占位规则）
 version.mk: ;

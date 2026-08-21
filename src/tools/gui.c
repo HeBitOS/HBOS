@@ -8794,10 +8794,16 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
-        /* F4: toggle light/dark theme. */
+        /* F4: plain F4 toggles light/dark theme; Alt+F4 closes the active
+         * application window (standard window-manager behavior). */
         if (key == KB_KEY_F4) {
-            st.theme_light = !st.theme_light;
-            st.status = st.theme_light ? "已切换为浅色主题" : "已切换为深色主题";
+            if (kb_alt_pressed()) {
+                if (st.wm.active_window >= 0)
+                    gui_close_window(&st, st.wm.active_window);
+            } else {
+                st.theme_light = !st.theme_light;
+                st.status = st.theme_light ? "已切换为浅色主题" : "已切换为深色主题";
+            }
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
@@ -9730,6 +9736,10 @@ static void cmd_gui(int argc, char **argv) {
     gui_set_surface(0, 0, 0, 0);
     if (surface_phys) pmm_free_blocks(surface_phys, surface_pages);
     mouse_shutdown();
+    /* 退出 GUI 后必须解除常驻控制台 sink：否则 shell 后续所有输出仍会被
+     * 吞进已退出的 GUI 终端历史，真终端什么都不显示，看起来像卡死。 */
+    g_con_sink_st = NULL;
+    console_set_sink(NULL);
     console_reset_terminal();
     console_puts("HIVE: 已返回 shell\n");
 }

@@ -89,10 +89,6 @@ static void cmd_apps(int argc, char **argv) {
     (void)argv;
     uint32_t count = hbos_app_count();
     uint32_t hcount = hax_app_count();
-    if (count == 0 && hcount == 0) {
-        console_puts("No apps registered\n");
-        return;
-    }
     for (uint32_t i = 0; i < count; i++) {
         const hbos_app_t *app = hbos_app_get(i);
         if (!app) continue;
@@ -110,6 +106,43 @@ static void cmd_apps(int argc, char **argv) {
         console_puts(e->desc ? e->desc : "");
         console_puts((e->kind & HAX_KIND_GUI) ? "  [GUI .hax]\n" : "  [TUI .hax]\n");
     }
+    /* hpt 安装到 /bin 的软件包 */
+    char name[VFS_MAX_NAME];
+    uint32_t type;
+    for (uint32_t i = 0; vfs_readdir_at("/bin", i, name, &type) == 0; i++) {
+        if (type != VFS_NODE_FILE || name[0] == '.') continue;
+        console_puts(name);
+        console_puts(" - installed package  [TUI .hax]\n");
+    }
+}
+
+/* 运行一个 ELF 文件路径（供直接路径和 hpt 安装到 /bin 的软件包使用）。
+ * 返回进程退出码；加载/启动失败返回 -1。 */
+static int run_elf_path(const char *path, const char *display,
+                        int argc, char **argv) {
+    size_t size = 0;
+    int err = read_elf_image(path, &size);
+    if (err < 0) return -1;
+    char *elf_argv[APP_ELF_MAX_ARGS];
+    build_elf_argv(argc, argv, 1, elf_argv);
+    int pid = elf64_load_and_spawn(elf_buf, size, elf_argv, 0,
+                                   display ? display : basename_of(path));
+    if (pid < 0) return -1;
+    int status = 0;
+    if (task_wait((uint32_t)pid, &status) < 0) return -1;
+    return status;
+}
+
+/* 非阻塞启动一个 ELF 文件路径；返回 pid 或 -1 */
+static int spawn_elf_path(const char *path, const char *display,
+                          int argc, char **argv) {
+    size_t size = 0;
+    int err = read_elf_image(path, &size);
+    if (err < 0) return -1;
+    char *elf_argv[APP_ELF_MAX_ARGS];
+    build_elf_argv(argc, argv, 1, elf_argv);
+    return elf64_load_and_spawn(elf_buf, size, elf_argv, 0,
+                                display ? display : basename_of(path));
 }
 
 static void cmd_run(int argc, char **argv) {
@@ -155,32 +188,38 @@ static void cmd_run(int argc, char **argv) {
         }
     }
     if (ret < 0) {
+        /* hpt 安装的软件包在 /bin/<name>，先按应用名查找这里 */
+        char bin_path[256];
+        strcpy(bin_path, "/bin/");
+        strcat(bin_path, argv[1]);
+        int status = run_elf_path(bin_path, argv[1], argc, argv);
+        if (status >= 0) {
+            if (status != 0) {
+                console_puts("run: exit ");
+                print_uint((uint32_t)status);
+                console_putchar('\n');
+            }
+            return;
+        }
+        /* 再按原始参数作为文件路径运行 */
+        status = run_elf_path(argv[1], argv[1], argc, argv);
+        if (status >= 0) {
+            if (status != 0) {
+                console_puts("run: exit ");
+                print_uint((uint32_t)status);
+                console_putchar('\n');
+            }
+            return;
+        }
         size_t size = 0;
         int err = read_elf_image(argv[1], &size);
         if (err < 0) {
             print_elf_read_error("run", err);
             return;
         }
-        char *elf_argv[APP_ELF_MAX_ARGS];
-        build_elf_argv(argc, argv, 1, elf_argv);
-        int pid = elf64_load_and_spawn(elf_buf, size, elf_argv, 0,
-                                       basename_of(argv[1]));
-        if (pid < 0) {
-            console_puts("run: invalid or unsupported ELF: ");
-            console_puts(elf64_last_error());
-            console_putchar('\n');
-            return;
-        }
-        int status = 0;
-        if (task_wait((uint32_t)pid, &status) < 0) {
-            console_puts("run: wait failed\n");
-            return;
-        }
-        if (status != 0) {
-            console_puts("run: exit ");
-            print_uint((uint32_t)status);
-            console_putchar('\n');
-        }
+        console_puts("run: invalid or unsupported ELF: ");
+        console_puts(elf64_last_error());
+        console_putchar('\n');
         return;
     }
     if (ret != 0) {
@@ -223,17 +262,25 @@ static void cmd_spawn(int argc, char **argv) {
             console_puts("spawn: cannot create task\n");
             return;
         }
-        size_t size = 0;
-        int err = read_elf_image(argv[1], &size);
-        if (err < 0) {
-            print_elf_read_error("spawn", err);
-            return;
+        const hax_app_entry_t *he = hax_app_find(argv[1]);
+        if (he) {
+            pid = hax_app_spawn(argv[1], argc - 1, argv + 1);
+        } else {
+            /* hpt 安装的软件包在 /bin/<name>，先按应用名查找这里 */
+            char bin_path[256];
+            strcpy(bin_path, "/bin/");
+            strcat(bin_path, argv[1]);
+            pid = spawn_elf_path(bin_path, argv[1], argc, argv);
+            if (pid < 0)
+                pid = spawn_elf_path(argv[1], argv[1], argc, argv);
         }
-        char *elf_argv[APP_ELF_MAX_ARGS];
-        build_elf_argv(argc, argv, 1, elf_argv);
-        pid = elf64_load_and_spawn(elf_buf, size, elf_argv, 0,
-                                   basename_of(argv[1]));
         if (pid < 0) {
+            size_t size = 0;
+            int err = read_elf_image(argv[1], &size);
+            if (err < 0) {
+                print_elf_read_error("spawn", err);
+                return;
+            }
             console_puts("spawn: invalid or unsupported ELF: ");
             console_puts(elf64_last_error());
             console_putchar('\n');
@@ -351,7 +398,9 @@ static void cmd_wait(int argc, char **argv) {
 
 /* 从本地 HTML 文件提取内联 <script> 交给 ring3 quickjs 执行，把
  * document.title 与脚本输出打到串口——浏览器 script 管线的命令行验证
- * 入口（browser_exec_scripts_core 与浏览器共用同一实现）。 */
+ * 入口（browser_exec_scripts_core 与浏览器共用同一实现）。
+ * 该实现定义在 gui.c（仅 GUI 构建编译），故此处只在 GUI 构建中启用。 */
+#if HBOS_ENABLE_GUI
 extern int browser_exec_scripts_core(const char *body, char *title,
                                      uint32_t title_cap, char *out,
                                      uint32_t out_cap);
@@ -393,6 +442,7 @@ static void cmd_jspage(int argc, char **argv) {
     console_puts(out);
     console_putchar('\n');
 }
+#endif /* HBOS_ENABLE_GUI */
 
 void tool_app_init(void) {
     static const command_t cmds[] = {
@@ -402,8 +452,10 @@ void tool_app_init(void) {
         {"elfinfo", CMD_GROUP_USER, "Show ELF binary info", "elfinfo <file.elf>", cmd_elfinfo},
         {"ps",   CMD_GROUP_USER, "List tasks", "ps", cmd_ps},
         {"wait", CMD_GROUP_USER, "Wait for task", "wait <pid>", cmd_wait},
+#if HBOS_ENABLE_GUI
         {"jspage", CMD_GROUP_USER, "Run inline <script> of an HTML file",
          "jspage <file.html>", cmd_jspage},
+#endif
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

@@ -375,9 +375,10 @@ static void plot_char_scaled_uncanvas(
     if (c->c >= FLANTERM_FB_FONT_GLYPHS) return;   // CJK cell: pixels already correct
 
     uint32_t default_bg = ctx->default_bg;
+    uint32_t default_fg = ctx->default_fg;
 
     uint32_t bg = c->bg == 0xffffffff ? default_bg : c->bg;
-    uint32_t fg = c->fg == 0xffffffff ? default_bg : c->fg;
+    uint32_t fg = c->fg == 0xffffffff ? default_fg : c->fg;
 
     x = ctx->offset_x + x * ctx->glyph_width;
     y = ctx->offset_y + y * ctx->glyph_height;
@@ -438,9 +439,10 @@ static void plot_char_unscaled_uncanvas(
     if (c->c >= FLANTERM_FB_FONT_GLYPHS) return;   // CJK cell: pixels already correct
 
     uint32_t default_bg = ctx->default_bg;
+    uint32_t default_fg = ctx->default_fg;
 
     uint32_t bg = c->bg == 0xffffffff ? default_bg : c->bg;
-    uint32_t fg = c->fg == 0xffffffff ? default_bg : c->fg;
+    uint32_t fg = c->fg == 0xffffffff ? default_fg : c->fg;
 
     x = ctx->offset_x + x * ctx->glyph_width;
     y = ctx->offset_y + y * ctx->glyph_height;
@@ -1010,30 +1012,30 @@ struct flanterm_context *flanterm_fb_init(
     if (default_bg != NULL) {
         ctx->default_bg = convert_colour(_ctx, *default_bg);
     } else {
-        /* 浅色控制台：白底深字，省墨（黑底大面积黑墨）。 */
-        ctx->default_bg = 0x00ffffff;
+        /* 深色控制台：黑底浅字（经典终端外观）。 */
+        ctx->default_bg = 0x00000000; // background (black)
     }
 
     if (default_fg != NULL) {
         ctx->default_fg = convert_colour(_ctx, *default_fg);
     } else {
-        ctx->default_fg = convert_colour(_ctx, 0x00333333); // dark grey
+        ctx->default_fg = convert_colour(_ctx, 0x00aaaaaa); // foreground (grey)
     }
 
     if (default_bg_bright != NULL) {
         ctx->default_bg_bright = convert_colour(_ctx, *default_bg_bright);
     } else {
-        ctx->default_bg_bright = 0x00ffffff;
+        ctx->default_bg_bright = convert_colour(_ctx, 0x00555555);
     }
 
     if (default_fg_bright != NULL) {
         ctx->default_fg_bright = convert_colour(_ctx, *default_fg_bright);
     } else {
-        ctx->default_fg_bright = convert_colour(_ctx, 0x00333333);
+        ctx->default_fg_bright = convert_colour(_ctx, 0x00ffffff);
     }
 
     ctx->text_fg = ctx->default_fg;
-    ctx->text_bg = 0x00ffffff;
+    ctx->text_bg = 0xffffffff;
 
     ctx->framebuffer = (void *)framebuffer;
     ctx->width       = width;

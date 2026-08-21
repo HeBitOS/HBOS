@@ -82,6 +82,7 @@ void          cmd_clear_history(void);
 // 键盘 API（供工具模块使用）
 int kb_get_key(void);
 int kb_poll_key(void);
+int kb_alt_pressed(void);   /* 当前 Alt（左/右）是否被按住 */
 
 // 特殊键码定义（kb_get_key 的返回值）
 #define KB_KEY_UP      0x100
