@@ -49,6 +49,39 @@ int main(void) {
         CHECK(required & HIVE_WEB_CAP_WORKERS);
         CHECK(required & HIVE_WEB_CAP_MSE);
     }
-    puts("HIVE browser backend capability tests passed");
+    {
+        /* LiteJS card grid: 5 cards in an 800px viewport with 190px min
+         * width and 10px gap → 4 columns; rects must not overlap and the
+         * hit test must resolve card coordinates. */
+        hive_browser_grid_t grid;
+        CHECK(hive_browser_grid_layout(&grid, 800, 600, 5, 190, 118, 10) == 0);
+        CHECK(grid.count == 5);
+        CHECK(grid.columns == 4);
+        CHECK(grid.card_w >= 190 && grid.card_w <= 200);
+        size_t a, b;
+        for (a = 0; a < grid.count; a++) {
+            for (b = a + 1; b < grid.count; b++) {
+                const hive_browser_card_rect_t *ra = &grid.cards[a];
+                const hive_browser_card_rect_t *rb = &grid.cards[b];
+                int overlap = ra->x < rb->x + rb->w && rb->x < ra->x + ra->w &&
+                              ra->y < rb->y + rb->h && rb->y < ra->y + ra->h;
+                CHECK(!overlap);
+            }
+        }
+        CHECK(hive_browser_grid_hit_test(&grid, grid.cards[2].x + 2,
+                                         grid.cards[2].y + 2) == 2);
+        CHECK(hive_browser_grid_hit_test(&grid, -5, -5) == SIZE_MAX);
+        /* single card collapses to one column */
+        CHECK(hive_browser_grid_layout(&grid, 800, 600, 1, 190, 118, 10) == 0);
+        CHECK(grid.columns == 1);
+        CHECK(hive_browser_grid_hit_test(&grid, grid.cards[0].x + 1,
+                                         grid.cards[0].y + 1) == 0);
+        /* zero / oversized inputs fail cleanly */
+        CHECK(hive_browser_grid_layout(&grid, 0, 600, 1, 190, 118, 10) != 0);
+        CHECK(hive_browser_grid_layout(&grid, 800, 600,
+                                       HIVE_BROWSER_LAYOUT_MAX_CARDS + 1,
+                                       190, 118, 10) != 0);
+    }
+    puts("HIVE browser backend capability + card grid tests passed");
     return 0;
 }

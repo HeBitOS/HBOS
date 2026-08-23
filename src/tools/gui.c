@@ -33,6 +33,7 @@
 #include "../gui/gui_draw.h"
 #include "../gui/gui_app.h"
 #include "../gui/browser_backend.h"
+#include "../gui/browser_layout.h"
 
 /* app_imgview.c / app_hexview.c 各自路径 setter，供 gui_open_selected_file()
  * 打开对应查看器前写入要打开的文件路径 */
@@ -3477,7 +3478,7 @@ void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
 #define BR_IMG_SLOTS 8
 #define BR_IMG_MAX_W 260
 #define BR_IMG_MAX_H 200
-#define BR_IMG_FETCH_MAX 2 /* 每页最多实际拉两张；其余保留占位，避免串行 TLS/软件解码拖住 UI */
+#define BR_IMG_FETCH_MAX 6 /* 每页最多实际拉 6 张；其余保留占位，避免串行 TLS/软件解码拖住 UI */
 static uint8_t g_br_img_rgb[BR_IMG_SLOTS][BR_IMG_MAX_W * BR_IMG_MAX_H * 3];
 static int g_br_img_w[BR_IMG_SLOTS];
 static int g_br_img_h[BR_IMG_SLOTS];
@@ -3582,6 +3583,10 @@ enum {
     BRK_LI_NUM = 'n', /* <ol> 里的 <li>：编号是当普通文字写进去的（"1. "），
                         * 不是靠 browser_style_get 的 bullet 标志画点——所以
                         * 这个类型不带 bullet，缩进倒是跟 BRK_LI 一样 */
+    BRK_GRID   = 'g', /* <hb-grid>：LiteJS 卡片网格容器，后随连续 BRK_CARD 块
+                        * （不输出闭合标记，遇到非 BRK_CARD 块即网格结束） */
+    BRK_CARD   = 'c', /* <hb-card>：卡片块。载荷：[0x10|slot][标题][0x04 元数据]
+                        * [0x05 时长]\n；链接走标准 BR_META（link_idx） */
 };
 #define BR_STACK_MAX 8
 
@@ -3617,6 +3622,11 @@ enum {
  * 最后一列）。正文里的原始控制字节在发射端就被过滤，不会撞车。 */
 #define BR_CELL_MARK 0x03
 #define BR_TBL_COLS  8
+/* 卡片载荷分隔字节（BRK_CARD 块内）——正文里的原始控制字节在发射端就被
+ * 过滤，不会撞车。 */
+#define BR_CARD_META 0x04
+#define BR_CARD_DUR  0x05
+#define BR_CARD_CAP  1024 /* 单张卡片捕获缓冲上限 */
 
 static int br_is_inline_type(int t) {
     return t == BRK_LINK || t == BRK_STRONG || t == BRK_EM;
@@ -4192,7 +4202,7 @@ static const char *browser_skipped_tag_close(const char *name, int len) {
  * 30 秒——用户实测百度首页正是这个数。对策：同一次加载内 DNS 结果缓存
  * （失败也记，负缓存让同域名后续资源直接跳过），累计失败 2 次就放弃余下
  * 全部子资源。 */
-#define BR_SUB_HOSTS 4
+#define BR_SUB_HOSTS 8
 static char g_br_dns_host[BR_SUB_HOSTS][96];
 static uint32_t g_br_dns_ip[BR_SUB_HOSTS];
 static int g_br_dns_n;
@@ -4224,6 +4234,132 @@ static int br_sub_resolve(const char *host, uint32_t *ip, int *cached) {
     return ok;
 }
 
+/* 图床变换后缀改写（定义于下方 browser_fetch_images 前）。在图片槽
+ * 注册阶段就调用它：把 bilibili 的 `@...webp` 封面改写成 `@240w_180h`，
+ * 否则注册阶段的 .webp 过滤会把封面直接丢掉。 */
+static void br_img_url_rewrite(char *url, uint32_t cap);
+
+/* ── LiteJS 卡片：<hb-card> 原始内部 HTML → BRK_CARD 块 ──────────────
+ * 载荷格式：[0x10|slot][标题][0x04 元数据][0x05 时长]\n；链接走标准
+ * BR_META（link_idx），图片复用 g_br_img_* 槽位。发射端在
+ * browser_render_from_html 里捕获 <hb-card> 内部原始 HTML 后调用这里。 */
+
+/* 剥标签 + 解实体 + 折叠空白，得到卡片标题/纯文本 */
+static void br_card_plain_text(const char *html, uint32_t len, char *out, uint32_t cap) {
+    uint32_t o = 0;
+    int sp = 1;
+    for (uint32_t i = 0; i < len && o + 2 < cap; i++) {
+        char ch = html[i];
+        if (ch == '<') {
+            while (i < len && html[i] != '>') i++;
+            continue;
+        }
+        if (ch == '&') {
+            uint32_t consumed;
+            char dec = br_decode_entity(html + i, &consumed);
+            if (dec) { ch = dec; i += consumed; }
+        }
+        if (ch == '\n' || ch == '\t' || ch == ' ') {
+            if (sp) continue;
+            sp = 1;
+        } else {
+            sp = 0;
+        }
+        if ((unsigned char)ch >= 0x20) out[o++] = ch;
+    }
+    while (o > 0 && out[o - 1] == ' ') o--;
+    out[o] = 0;
+}
+
+/* 提取卡片内第一张 <img> 的 src（data-src/data-original/src 优先序），
+ * 登记进图片槽位；不可解码格式/无源返回 0（占位）。 */
+static int br_card_img_slot(const char *inner, uint32_t len) {
+    const char *im = body_strcasestr(inner, "<img");
+    if (!im || (uint32_t)(im - inner) >= len) return 0;
+    uint32_t start = (uint32_t)(im - inner);
+    uint32_t j = start;
+    while (j < len && inner[j] != '>') j++;
+    if (j >= len) return 0;
+    char src[160];
+    int has_src = br_attr_value(inner + start, j - start, "data-src", src, sizeof(src)) ||
+                  br_attr_value(inner + start, j - start, "data-original", src, sizeof(src)) ||
+                  br_attr_value(inner + start, j - start, "src", src, sizeof(src));
+    if (!has_src || !src[0]) return 0;
+    /* bilibili 封面是 `@...webp`，先改写成 jpg 缩放参数，避免被过滤 */
+    br_img_url_rewrite(src, sizeof(src));
+    uint32_t sl0 = (uint32_t)strlen(src);
+    if ((sl0 >= 4 && (tag_ci_eq(src + sl0 - 4, 4, ".svg") ||
+                      tag_ci_eq(src + sl0 - 4, 4, ".gif"))) ||
+        (sl0 >= 5 && (tag_ci_eq(src + sl0 - 5, 5, ".webp") ||
+                      tag_ci_eq(src + sl0 - 5, 5, ".avif"))) ||
+        strncmp(src, "data:", 5) == 0)
+        return 0;
+    if (g_br_img_count >= BR_IMG_SLOTS) return 0;
+    int s = g_br_img_count++;
+    uint32_t sl = (uint32_t)strlen(src);
+    if (sl >= sizeof(g_br_img_src[0])) sl = sizeof(g_br_img_src[0]) - 1;
+    memcpy(g_br_img_src[s], src, sl);
+    g_br_img_src[s][sl] = 0;
+    g_br_img_w[s] = 0;
+    g_br_img_h[s] = 0;
+    return s + 1;
+}
+
+/* 提取卡片内第一个 <a href>，登记为浏览器链接，返回 link_idx（-1 无） */
+static int br_card_link(gui_state_t *st, const char *inner, uint32_t len) {
+    const char *a = body_strcasestr(inner, "<a");
+    if (!a || (uint32_t)(a - inner) >= len) return -1;
+    uint32_t start = (uint32_t)(a - inner);
+    uint32_t j = start;
+    while (j < len && inner[j] != '>') j++;
+    if (j >= len) return -1;
+    char href[96];
+    if (!br_attr_value(inner + start, j - start, "href", href, sizeof(href)) ||
+        !href[0])
+        return -1;
+    if (st->browser_link_count >= BROWSER_LINK_MAX) return -1;
+    int idx = st->browser_link_count;
+    uint32_t hl = (uint32_t)strlen(href);
+    if (hl >= sizeof(st->browser_link_href[0])) hl = sizeof(st->browser_link_href[0]) - 1;
+    memcpy(st->browser_link_href[idx], href, hl);
+    st->browser_link_href[idx][hl] = 0;
+    st->browser_link_count++;
+    return idx;
+}
+
+/* 把一段字符串写入渲染流，控制字节折叠成空格（与正文发射端一致，防止
+ * 卡片载荷里混入 0x01-0x05 流标记） */
+static void br_card_text_emit(char *out, uint32_t cap, uint32_t *pos,
+                              const char *text) {
+    for (const char *p = text; *p && *pos + 1 < cap; p++) {
+        char ch = *p;
+        if ((unsigned char)ch < 0x20) ch = ' ';
+        out[(*pos)++] = ch;
+    }
+}
+
+/* 组装并输出一个 BRK_CARD 块 */
+static void br_emit_card(gui_state_t *st, char *out, uint32_t cap, uint32_t *pos,
+                         const char *inner, uint32_t inner_len,
+                         const char *meta, const char *dur) {
+    char title[96];
+    br_card_plain_text(inner, inner_len, title, sizeof(title));
+    if (!title[0] || *pos + 2 >= cap) return;
+    int slot = br_card_img_slot(inner, inner_len);
+    int link_idx = br_card_link(st, inner, inner_len);
+    css_decl_t ov;
+    memset(&ov, 0, sizeof(ov));
+    out[(*pos)++] = (char)BRK_CARD;
+    br_emit_meta(out, cap, pos, link_idx, &ov);
+    out[(*pos)++] = (char)(0x10 | slot);
+    br_card_text_emit(out, cap, pos, title);
+    out[(*pos)++] = (char)BR_CARD_META;
+    br_card_text_emit(out, cap, pos, meta ? meta : "");
+    out[(*pos)++] = (char)BR_CARD_DUR;
+    br_card_text_emit(out, cap, pos, dur ? dur : "");
+    out[(*pos)++] = '\n';
+}
+
 static void browser_render_from_html(gui_state_t *st, const char *html, char *out, uint32_t cap, uint32_t *out_len) {
     uint32_t pos = 0;
     int space = 1;
@@ -4243,6 +4379,12 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     const char *skip_close = "";
     int in_style_block = 0;
     int in_title_block = 0;
+    /* LiteJS 卡片捕获：<hb-card> 的原始内部 HTML 暂存，闭合时统一提取 */
+    int card_capture = 0;
+    static char card_buf[BR_CARD_CAP];
+    uint32_t card_len = 0;
+    static char card_meta[64];
+    static char card_dur[32];
     static char style_buf[4096];
     uint32_t style_buf_len = 0;
     /* 表格：不做真正的列宽计算/对齐（这是行文本渲染器，没有真正的表格
@@ -4345,6 +4487,25 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
         }
 
         if (c == '<') {
+            /* 卡片捕获模式：除 </hb-card> 闭合外，整个 <...> 原样进缓冲
+             * （内层 <a>/<img> 等标签也要保留，闭合时才统一提取）。 */
+            if (card_capture) {
+                int tclosing = (html[i + 1] == '/');
+                uint32_t tj = i + 1 + (tclosing ? 1 : 0);
+                char tn[16]; int tl = 0;
+                while (html[tj] && html[tj] != '>' && html[tj] != ' ' &&
+                       html[tj] != '\t' && html[tj] != '\n' &&
+                       html[tj] != '/' && tl < 15)
+                    tn[tl++] = html[tj++];
+                while (html[tj] && html[tj] != '>') tj++;
+                if (!(tclosing && tag_ci_eq(tn, tl, "hb-card"))) {
+                    for (uint32_t k = i; k <= tj && card_len + 1 < sizeof(card_buf); k++)
+                        card_buf[card_len++] = html[k];
+                    i = tj;
+                    continue;
+                }
+                /* </hb-card>：落到下面的 hb-card 闭合分支 */
+            }
             /* HTML 注释 <!--...--> 及 Vue SSR 分隔注释 <!--[--><!--]--> ——
              * 直接跳到 --> 结束符，不输出任何内容。 */
             if (html[i + 1] == '!' && html[i + 2] == '-' && html[i + 3] == '-') {
@@ -4477,6 +4638,10 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                               br_attr_value(html + attr_start, attr_len, "data-original", src, sizeof(src)) ||
                               br_attr_value(html + attr_start, attr_len, "src", src, sizeof(src));
                 if (has_src && src[0]) {
+                    /* bilibili 封面常见 `xxx.jpg@672w_378h_1c_1s.webp`：先改写
+                     * 成 jpg 缩放参数再检查扩展名，否则 .webp 过滤会把封面
+                     * 直接丢掉，页面「一张图都没有」。 */
+                    br_img_url_rewrite(src, sizeof(src));
                     uint32_t sl0 = (uint32_t)strlen(src);
                     if ((sl0 >= 4 && (tag_ci_eq(src + sl0 - 4, 4, ".svg") ||
                                       tag_ci_eq(src + sl0 - 4, 4, ".gif"))) ||
@@ -4586,6 +4751,36 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                 i = j;
                 continue;
             }
+            /* LiteJS 卡片/网格语义：<hb-grid> 开网格，<hb-card> 捕获内容 */
+            if (!closing && tag_ci_eq(nm, nl, "hb-grid")) {
+                BRFLUSH();
+                BREMIT(BRK_GRID); BREMIT('\n');
+                need_prefix = 1; space = 1;
+                i = j;
+                continue;
+            }
+            if (!closing && tag_ci_eq(nm, nl, "hb-card")) {
+                BRFLUSH();
+                card_capture = 1;
+                card_len = 0;
+                card_meta[0] = 0;
+                card_dur[0] = 0;
+                br_attr_value(html + attr_start, attr_len, "data-meta",
+                              card_meta, sizeof(card_meta));
+                br_attr_value(html + attr_start, attr_len, "data-dur",
+                              card_dur, sizeof(card_dur));
+                i = j;
+                continue;
+            }
+            if (closing && tag_ci_eq(nm, nl, "hb-card")) {
+                card_capture = 0;
+                if (card_len > 0)
+                    br_emit_card(st, out, cap, &pos, card_buf, card_len,
+                                 card_meta, card_dur);
+                need_prefix = 1; space = 1;
+                i = j;
+                continue;
+            }
             int st_type = browser_style_for_tag(nm, nl);
             int old_style = cur_style;
             int new_style = cur_style;
@@ -4687,6 +4882,12 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
             cur_link_idx = new_link_idx;
             cur_override = new_override;
             i = j;
+            continue;
+        }
+
+        /* 卡片捕获：普通字符（非 '<'）原样进缓冲，实体保持原始形式 */
+        if (card_capture) {
+            if (card_len + 1 < sizeof(card_buf)) card_buf[card_len++] = c;
             continue;
         }
 
@@ -5869,6 +6070,182 @@ static int br_draw_table_row(int x, int *cy, int row_unit, int scroll, int max_l
     return row_unit;
 }
 
+/* ── LiteJS 卡片渲染：BRK_GRID/BRK_CARD 块的 2D 网格布局 ─────────────
+ * 载荷格式见 br_emit_card： [0x10|slot][标题][0x04 元数据][0x05 时长]\n */
+
+typedef struct {
+    int slot;              /* 1..BR_IMG_SLOTS 已登记图片槽，0 无图占位 */
+    int link_idx;          /* -1 无链接（BR_META 解析出来） */
+    uint32_t title_start, title_len;
+    uint32_t meta_start, meta_len;
+    uint32_t dur_start, dur_len;
+    uint32_t end;          /* 块结束位置（'\n' 之后） */
+} br_card_t;
+
+/* 解析 BRK_CARD 载荷（i 指向 slot 字节），返回 end */
+static uint32_t br_card_read(const char *buf, uint32_t len, uint32_t i, br_card_t *c) {
+    memset(c, 0, sizeof(*c));
+    c->link_idx = -1;
+    if (i < len) c->slot = (unsigned char)buf[i] & 0x0F;
+    i++;
+    c->title_start = i;
+    while (i < len && (unsigned char)buf[i] != BR_CARD_META && buf[i] != '\n') i++;
+    c->title_len = i - c->title_start;
+    if (i < len && (unsigned char)buf[i] == BR_CARD_META) {
+        i++;
+        c->meta_start = i;
+        while (i < len && (unsigned char)buf[i] != BR_CARD_DUR && buf[i] != '\n') i++;
+        c->meta_len = i - c->meta_start;
+        if (i < len && (unsigned char)buf[i] == BR_CARD_DUR) {
+            i++;
+            c->dur_start = i;
+            while (i < len && buf[i] != '\n') i++;
+            c->dur_len = i - c->dur_start;
+        }
+    }
+    if (i < len) i++; /* 跳过 '\n' */
+    c->end = i;
+    return i;
+}
+
+/* 拷贝卡片载荷里的文本段（控制字节折叠成空格） */
+static void br_card_text_copy(const char *buf, uint32_t start, uint32_t len,
+                              char *out, uint32_t cap) {
+    uint32_t o = 0;
+    for (uint32_t i = 0; i < len && o + 1 < cap; i++) {
+        char ch = buf[start + i];
+        if ((unsigned char)ch < 0x20) ch = ' ';
+        out[o++] = ch;
+    }
+    while (o > 0 && out[o - 1] == ' ') o--;
+    out[o] = 0;
+}
+
+/* 一组 BRK_CARD 画成响应式二维网格（hive_browser_grid_layout），整卡
+ * 注册点击命中区。返回更新后的 row_unit。 */
+static int browser_draw_card_grid(int x, int w, int *cy, int row_unit, int scroll,
+                                  int max_lines, int *drawn_rows,
+                                  const char *buf, const br_card_t *cards, int ncards) {
+    hive_browser_grid_t grid;
+    const int card_h = 118;
+    const int gap = 10;
+    const int min_card_w = 190;
+    int rh = gui_font_line_height() + 3;
+    if (hive_browser_grid_layout(&grid, w, 9999, (size_t)ncards, min_card_w,
+                                 card_h, gap) < 0)
+        return row_unit;
+    int rows = (int)((grid.count + (size_t)grid.columns - 1) / (size_t)grid.columns);
+    int total_h = rows * card_h + (rows > 0 ? (rows - 1) * gap : 0);
+    int unit_h = (total_h + rh - 1) / rh;
+    if (row_unit >= scroll && *drawn_rows < max_lines) {
+        for (size_t c = 0; c < grid.count; c++) {
+            const hive_browser_card_rect_t *r = &grid.cards[c];
+            const br_card_t *card = &cards[c];
+            int cx = x + r->x;
+            int ccy = *cy + r->y;
+            uint32_t bg = rgb(250, 251, 252);
+            uint32_t border = rgb(225, 229, 234);
+            rect(cx, ccy, r->w, r->h, bg);
+            rect(cx, ccy, r->w, 1, border);
+            rect(cx, ccy + r->h - 1, r->w, 1, border);
+            rect(cx + r->w - 1, ccy, 1, r->h, border);
+            int cover_h = (r->w * 9) / 16;
+            if (cover_h > r->h - 44) cover_h = r->h - 44;
+            if (card->slot >= 1 && card->slot <= BR_IMG_SLOTS &&
+                g_br_img_w[card->slot - 1] > 0) {
+                gui_blit_rgb888(cx, ccy, g_br_img_rgb[card->slot - 1],
+                                g_br_img_w[card->slot - 1], g_br_img_h[card->slot - 1],
+                                cx, ccy, r->w, cover_h);
+            } else {
+                rect(cx, ccy, r->w, cover_h, rgb(234, 237, 241));
+                text(cx + (r->w - 16) / 2, ccy + cover_h / 2 - 8, "图",
+                     rgb(168, 174, 180), 1);
+            }
+            char title[96];
+            br_card_text_copy(buf, card->title_start, card->title_len,
+                              title, sizeof(title));
+            text_clipped(cx + 6, ccy + cover_h + 5, cx + r->w - 6,
+                         title[0] ? title : " ", rgb(32, 33, 36), 1);
+            char meta[96];
+            br_card_text_copy(buf, card->meta_start, card->meta_len,
+                              meta, sizeof(meta));
+            text_clipped(cx + 6, ccy + r->h - 20, cx + r->w - 6,
+                         meta[0] ? meta : " ", rgb(122, 128, 136), 1);
+            if (card->dur_len > 0) {
+                char dur[32];
+                br_card_text_copy(buf, card->dur_start, card->dur_len,
+                                  dur, sizeof(dur));
+                int dw = text_width(dur, 1) + 10;
+                int bx = cx + r->w - dw - 4;
+                if (dw < r->w - 8) {
+                    rect(bx, ccy + cover_h - 19, dw, 16, rgb(18, 20, 24));
+                    text(bx + 5, ccy + cover_h - 17, dur, rgb(255, 255, 255), 1);
+                }
+            }
+            if (card->link_idx >= 0)
+                browser_add_link_rect(cx, ccy, r->w, r->h, card->link_idx);
+        }
+        *cy += total_h;
+        *drawn_rows += unit_h;
+    }
+    row_unit += unit_h + 1;
+    return row_unit;
+}
+
+/* 单独一张 BRK_CARD（未包 <hb-grid>）：全宽 hero 卡片 */
+static int browser_draw_hero_card(int x, int w, int *cy, int row_unit, int scroll,
+                                  int max_lines, int *drawn_rows,
+                                  const char *buf, const br_card_t *card) {
+    int rh = gui_font_line_height() + 3;
+    int img_w = 0, img_h = 0;
+    if (card->slot >= 1 && card->slot <= BR_IMG_SLOTS &&
+        g_br_img_w[card->slot - 1] > 0) {
+        img_w = g_br_img_w[card->slot - 1];
+        img_h = g_br_img_h[card->slot - 1];
+    }
+    int cover_w = 0, cover_h = 0;
+    if (img_h > 0) {
+        cover_h = 120;
+        cover_w = (cover_h * img_w) / img_h;
+        if (cover_w > 220) { cover_w = 220; cover_h = (cover_w * img_h) / img_w; }
+    }
+    int card_h = 96;
+    if (img_h > 0) card_h = cover_h + 28;
+    int units = (card_h + rh - 1) / rh;
+    if (row_unit >= scroll && *drawn_rows < max_lines) {
+        uint32_t border = rgb(225, 229, 234);
+        rect(x, *cy, w, card_h, rgb(250, 251, 252));
+        rect(x, *cy, w, 1, border);
+        rect(x + w - 1, *cy, 1, card_h, border);
+        rect(x, *cy + card_h - 1, w, 1, border);
+        int tx = x + 10;
+        if (img_h > 0) {
+            gui_blit_rgb888(x + 8, *cy + 8, g_br_img_rgb[card->slot - 1],
+                            img_w, img_h, x + 8, *cy + 8, cover_w, cover_h);
+            tx = x + 8 + cover_w + 12;
+        }
+        char title[96], meta[96], dur[32];
+        br_card_text_copy(buf, card->title_start, card->title_len,
+                          title, sizeof(title));
+        br_card_text_copy(buf, card->meta_start, card->meta_len,
+                          meta, sizeof(meta));
+        br_card_text_copy(buf, card->dur_start, card->dur_len,
+                          dur, sizeof(dur));
+        text_clipped(tx, *cy + 10, x + w - 10, title[0] ? title : " ",
+                     rgb(32, 33, 36), 1);
+        if (meta[0])
+            text_clipped(tx, *cy + 36, x + w - 10, meta, rgb(122, 128, 136), 1);
+        if (dur[0])
+            text_clipped(tx, *cy + 58, x + w - 10, dur, rgb(90, 96, 102), 1);
+        if (card->link_idx >= 0)
+            browser_add_link_rect(x, *cy, w, card_h, card->link_idx);
+        *cy += card_h;
+        *drawn_rows += units;
+    }
+    row_unit += units + 1;
+    return row_unit;
+}
+
 // 按块类型渲染标记流（见 browser_render_from_html）：标题更大更亮、链接带
 // 下划线、列表带圆点、代码用等宽字体、<hr> 画分隔线——而非纯文本平铺。
 // 先把一个块解成运行数组（[type][meta?] 文本 { 0x02 [type][meta?] 文本 }*），
@@ -5970,6 +6347,41 @@ static int draw_rendered_page(int x, int y, int w, int h, const char *buf, uint3
                 row_unit = browser_draw_segment(x, w, &cy, row_unit, scroll, max_lines,
                                                 &drawn_rows, buf, alt_start, alt_len, &ph, -1);
             }
+            continue;
+        }
+        if (type == BRK_GRID) {
+            /* 收集后续连续 BRK_CARD 块，交给 hive_browser_grid_layout 画成
+             * 响应式二维网格；非 BRK_CARD 块出现即网格结束。 */
+            static br_card_t gcards[64];
+            int ncards = 0;
+            uint32_t ci = i; /* 指向第一个卡片的类型字节 */
+            while (ci < len && (unsigned char)buf[ci] == BRK_CARD &&
+                   ncards < 64) {
+                browser_style_t cbs;
+                int clink;
+                ci = br_read_style(buf, len, ci + 1, BRK_CARD, &cbs, &clink);
+                ci = br_card_read(buf, len, ci, &gcards[ncards]);
+                gcards[ncards].link_idx = clink;
+                ncards++;
+            }
+            if (ncards > 0)
+                row_unit = browser_draw_card_grid(x, w, &cy, row_unit, scroll,
+                                                  max_lines, &drawn_rows,
+                                                  buf, gcards, ncards);
+            i = ci;
+            continue;
+        }
+        if (type == BRK_CARD) {
+            /* 单独一张卡片（未包 <hb-grid>）：全宽 hero 卡片 */
+            browser_style_t cbs;
+            int clink;
+            i = br_read_style(buf, len, i, BRK_CARD, &cbs, &clink);
+            br_card_t card;
+            i = br_card_read(buf, len, i, &card);
+            card.link_idx = clink;
+            row_unit = browser_draw_hero_card(x, w, &cy, row_unit, scroll,
+                                              max_lines, &drawn_rows,
+                                              buf, &card);
             continue;
         }
         if (type == BRK_TROW) {

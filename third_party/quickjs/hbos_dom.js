@@ -1303,6 +1303,16 @@ HBOS.enhanceBilibiliVideo = function () {
         if (n >= 10000) return (n / 10000).toFixed(1) + '万';
         return String(n);
     }
+    /* 秒数 → mm:ss / h:mm:ss（B 站相关推荐 duration 单位是秒） */
+    function fmtDur(s) {
+        s = Number(s) || 0;
+        var h = Math.floor(s / 3600);
+        var m = Math.floor((s % 3600) / 60);
+        var sec = s % 60;
+        var mm = (m < 10 ? '0' : '') + m;
+        var ss = (sec < 10 ? '0' : '') + sec;
+        return h > 0 ? h + ':' + mm + ':' + ss : mm + ':' + ss;
+    }
     function add(parent, tag, text, cls) {
         var el = document.createElement(tag);
         if (cls) el.className = cls;
@@ -1370,15 +1380,29 @@ HBOS.enhanceBilibiliVideo = function () {
     }
     if (state.related && state.related.length) {
         add(root, 'h2', '相关推荐');
-        var list = add(root, 'ul', null, 'related');
+        /* LiteJS 卡片网格：内核浏览器按 hb-grid/hb-card 语义做 2D 布局，
+         * 而不是 <ul><li> 纵向文字列表。 */
+        var gridEl = document.createElement('hb-grid');
+        root.appendChild(gridEl);
         for (var j = 0; j < state.related.length && j < 12; j++) {
             var item = state.related[j];
             if (!item || !item.title) continue;
-            var li = add(list, 'li');
-            var a = add(li, 'a', item.title);
-            if (item.bvid) a.setAttribute('href', 'https://www.bilibili.com/video/' + item.bvid);
-            var views = item.stat && item.stat.view;
-            if (views !== undefined) li.appendChild(document.createTextNode('  播放 ' + fmt(views)));
+            var cardEl = document.createElement('hb-card');
+            var metaTxt = '播放 ' + (item.stat && item.stat.view !== undefined ? fmt(item.stat.view) : '—');
+            if (item.stat && item.stat.danmaku !== undefined)
+                metaTxt += '  ·  弹幕 ' + fmt(item.stat.danmaku);
+            cardEl.setAttribute('data-meta', metaTxt);
+            if (item.duration) cardEl.setAttribute('data-dur', fmtDur(item.duration));
+            if (item.pic) {
+                var cimg = document.createElement('img');
+                cimg.setAttribute('src', String(item.pic).replace(/^http:/, 'https:'));
+                cardEl.appendChild(cimg);
+            }
+            var ca = document.createElement('a');
+            if (item.bvid) ca.setAttribute('href', 'https://www.bilibili.com/video/' + item.bvid);
+            ca.textContent = item.title;
+            cardEl.appendChild(ca);
+            gridEl.appendChild(cardEl);
         }
     }
     document.title = v.title + '_哔哩哔哩_bilibili';
@@ -1512,6 +1536,25 @@ HBOS.renderPage = function () {
             out.push(blockOpen(otag, el));
             walkChildren(el);
             out.push('</' + otag + '>');
+            return;
+        }
+        /* LiteJS 卡片语义：<hb-grid>/<hb-card> 原样输出（内核浏览器按 2D
+         * 网格渲染；普通标签在这里会被剥掉，必须显式保留）。 */
+        if (tag === 'hb-grid') {
+            out.push('<hb-grid>');
+            walkChildren(el);
+            out.push('</hb-grid>');
+            return;
+        }
+        if (tag === 'hb-card') {
+            var mm = el._attrs['data-meta'];
+            var dd = el._attrs['data-dur'];
+            var cs = '<hb-card';
+            if (mm) cs += ' data-meta="' + hb_esc(mm) + '"';
+            if (dd) cs += ' data-dur="' + hb_esc(dd) + '"';
+            out.push(cs + '>');
+            walkChildren(el);
+            out.push('</hb-card>');
             return;
         }
         /* 其他未知块级/行内标签：按文本处理 */

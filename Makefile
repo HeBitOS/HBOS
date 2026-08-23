@@ -260,6 +260,7 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gui/gui_dirty.c \
 	$(SRC_DIR)/gui/browser_backend.c \
+	$(SRC_DIR)/gui/browser_layout.c \
 	$(SRC_DIR)/gui/gui_apps.c \
 	$(SRC_DIR)/gui/apps/app_calc.c \
 	$(SRC_DIR)/gui/apps/app_clock.c \
