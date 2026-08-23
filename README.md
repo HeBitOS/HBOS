@@ -213,7 +213,7 @@ graph TD
 | ATA PIO | 可用 | AHCI 不可用时回退 |
 | Intel E1000 | 可用 | 当前主要网络路径 |
 | RTL8139 | 可用 | 轮询收发、DHCP/协议栈已接通 |
-| VirtIO-net | 仅检测 | 数据收发尚未实现 |
+| VirtIO-net | 可用 | virtio 1.0 PCI 轮询收发，DHCP/协议栈已接通（QEMU 默认 0x1000/0x1041） |
 | AC97 | 基础可用 | 依设备和虚拟机配置而定 |
 
 发现真机问题时，请附上 `drivers`、`status` 和串口日志，并注明 CPU、主板、

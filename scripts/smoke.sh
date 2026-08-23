@@ -133,6 +133,12 @@ run_network_guest "e1000-dhcp" "$tmpdir/e1000-dhcp.log" "Intel E1000" \
     -netdev user,id=net0 -device e1000,netdev=net0 \
     -serial stdio -monitor none -display none -no-reboot
 
+run_network_guest "virtio-dhcp" "$tmpdir/virtio-dhcp.log" "VirtIO net" \
+    "$QEMU" -m 512M \
+    -cdrom "$BUILD/hbos-bios.iso" -boot d \
+    -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+    -serial stdio -monitor none -display none -no-reboot
+
 run_guest "uefi-iso" "$tmpdir/uefi-iso.log" \
     "$QEMU" -machine q35 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \

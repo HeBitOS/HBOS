@@ -190,6 +190,7 @@ C_SRCS = \
 	$(SRC_DIR)/ipc.c \
 	$(SRC_DIR)/pci.c \
 	$(SRC_DIR)/net.c \
+	$(SRC_DIR)/net_virtio.c \
 	$(SRC_DIR)/tls.c \
 	$(SRC_DIR)/block.c \
 	$(SRC_DIR)/ahci.c \

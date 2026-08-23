@@ -1,9 +1,11 @@
 /**
  * @file net.c
- * @brief 网络子系统实现，基于 Intel E1000 网卡，支持 DHCP、ARP、ICMP ping、DNS、TCP、HTTP 等协议
+ * @brief 网络子系统实现：Intel E1000 / Realtek RTL8139 / AMD PCnet / VirtIO-net
+ *        多驱动轮询收发，支持 DHCP、ARP、ICMP ping、DNS、TCP、HTTP 等协议
  */
 
 #include "net.h"
+#include "net_virtio.h"
 #include "pci.h"
 #include "string.h"
 #include "core/cpu.h"
@@ -455,12 +457,34 @@ static int e1000_poll(packet_cb_t cb, void *arg, uint32_t spins) {
 
 static int pcnet_poll(packet_cb_t cb, void *arg, uint32_t spins);
 static int rtl8139_poll(packet_cb_t cb, void *arg, uint32_t spins);
+static int virtio_poll(packet_cb_t cb, void *arg, uint32_t spins);
+
+/** @brief VirtIO-net send wrapper: keeps primary.* statistics in net.c. */
+static int virtio_send(const void *frame, uint16_t len) {
+    int r = virtio_net_send(frame, len);
+    if (r == 0) {
+        primary.tx_packets++;
+        primary.tx_bytes += len;
+    } else {
+        primary.tx_errors++;
+        set_error("virtio tx busy");
+    }
+    return r;
+}
+
+/** @brief VirtIO-net poll wrapper: forwards rx statistics to primary. */
+static int virtio_poll(packet_cb_t cb, void *arg, uint32_t spins) {
+    return virtio_net_poll(cb, arg, spins,
+                           &primary.rx_packets, &primary.rx_bytes,
+                           &primary.rx_dropped);
+}
 
 static int net_poll(packet_cb_t cb, void *arg, uint32_t spins) {
     switch (primary.driver) {
     case NET_DRIVER_E1000:  return e1000_poll(cb, arg, spins);
     case NET_DRIVER_RTL8139: return rtl8139_poll(cb, arg, spins);
     case NET_DRIVER_PCNET:  return pcnet_poll(cb, arg, spins);
+    case NET_DRIVER_VIRTIO_NET: return virtio_poll(cb, arg, spins);
     default: return -1;
     }
 }
@@ -1276,6 +1300,13 @@ void net_init(void) {
     } else if (primary.driver == NET_DRIVER_PCNET) {
         primary.send = pcnet_send;
         if (pcnet_init_hw(&dev) < 0) primary.send = 0;
+    } else if (primary.driver == NET_DRIVER_VIRTIO_NET) {
+        primary.send = virtio_send;
+        if (virtio_net_init_hw(&dev, primary.mac, &primary.mac_valid,
+                               &primary.link_ready) < 0) {
+            set_error("virtio-net init failed");
+            primary.send = 0;
+        }
     } else {
         set_error("no driver for this NIC");
         return;

@@ -75,7 +75,7 @@ make uefi-run     # 用 QEMU 跑 UEFI
 | **显示** | ✅ Framebuffer | VESA 1024x768, 24bpp, CJK 位图字体 |
 | **GUI** | ⚠️ 基础可用 | 桌面 + 窗口管理 + 开始菜单 + **C/Python GUI 脚本** |
 | **文件系统** | ⚠️ 部分 | ramfs (默认), ext2 只读, fat32 只读, devfs |
-| **网络** | ⚠️ 部分 | E1000 ✅, **PCnet ✅ (刚加的)**, RTL8139/VirtIO 未实现 |
+| **网络** | ⚠️ 部分 | E1000 ✅, **PCnet ✅ (刚加的)**, RTL8139 ✅, **VirtIO-net ✅ (刚加的, virtio 1.0 轮询收发)** |
 | **TCP/IP** | ✅ 基础可用 | DHCP, ARP, ICMP ping, DNS, TCP, HTTP GET |
 | **USB** | ✅ 控制器+设备实现 | 已实现 xHCI 驱动，并支持 USB 键盘、鼠标以及 USB 大容量存储 (MSC) |
 | **SATA** | ⚠️ AHCI 框架 | ATA PIO 模式与 USB 存储可用, AHCI 未完成 |
