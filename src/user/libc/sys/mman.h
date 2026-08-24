@@ -17,6 +17,12 @@
 #define MAP_FIXED_NOREPLACE  0x100000
 #define MAP_FAILED ((void *)-1)
 
+#define MREMAP_MAYMOVE 0x1
+#define MREMAP_FIXED   0x2
+
+void *mremap(void *old_address, size_t old_size, size_t new_size,
+             int flags, ...);
+
 void *mmap(void *address, size_t length, int protection, int flags,
            int fd, long offset);
 int munmap(void *address, size_t length);

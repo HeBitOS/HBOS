@@ -149,6 +149,17 @@ int memfd_create(const char *name, unsigned int flags) {
     return (int)__syscall_errno(ret);
 }
 
+void *mremap(void *old_address, size_t old_size, size_t new_size,
+             int flags, ...) {
+    /* MREMAP_FIXED 的第 5 参数（新地址）用可变参数取；v1 只支持
+     * MAYMOVE 或原地扩展，FIXED 忽略（内核侧同样受限） */
+    long r = __syscall_errno(__syscall6(
+        HBOS_SYS_MREMAP, (long)old_address, (long)old_size,
+        (long)new_size, flags, 0, 0));
+    if (r < 0) return (void *)-1;
+    return (void *)r;
+}
+
 void *mmap(void *address, size_t length, int protection, int flags,
            int fd, long offset) {
     long ret = __syscall6(
@@ -340,6 +351,7 @@ static syscall_translation_t translate_linux_syscall(long number) {
         case SYS_sched_getaffinity: return (syscall_translation_t){HBOS_SYS_SCHED_GETAFFINITY, 3};
         case SYS_signalfd:          return (syscall_translation_t){HBOS_SYS_SIGNALFD, 3};
         case SYS_signalfd4:         return (syscall_translation_t){HBOS_SYS_SIGNALFD, 4};
+        case SYS_mremap:            return (syscall_translation_t){HBOS_SYS_MREMAP, 5};
         case SYS_fcntl:           return (syscall_translation_t){HBOS_SYS_FCNTL, 3};
         case SYS_ftruncate:       return (syscall_translation_t){HBOS_SYS_FTRUNCATE, 2};
         case SYS_getcwd:          return (syscall_translation_t){HBOS_SYS_GETCWD, 2};

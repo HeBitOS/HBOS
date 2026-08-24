@@ -2778,6 +2778,118 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return 0;
         }
 
+        case HBOS_SYS_MREMAP: {
+            /* mremap(old_addr, old_size, new_size, flags, new_addr) */
+            uint64_t old_addr = (uint64_t)f->a0;
+            size_t old_size = (size_t)f->a1;
+            size_t new_size = (size_t)f->a2;
+            int mr_flags = (int)f->a3;
+            uint64_t new_addr = (uint64_t)f->a4;
+            task_t *cur = task_current();
+            if (!cur || !cur->mm) return (uint64_t)(-ESRCH);
+            if ((old_addr & (PAGE_SIZE - 1)) || old_size == 0 ||
+                new_size == 0)
+                return (uint64_t)(-EINVAL);
+            if (mr_flags & ~(0x1 /* MREMAP_MAYMOVE */ | 0x2 /* FIXED */))
+                return (uint64_t)(-EINVAL);
+            if ((mr_flags & 0x2) && !(mr_flags & 0x1))
+                return (uint64_t)(-EINVAL); /* FIXED 需要 MAYMOVE */
+            vm_area_t *vma = NULL;
+            for (vm_area_t *a = cur->mm->areas; a; a = a->next) {
+                if (old_addr >= a->start && old_addr < a->end) {
+                    vma = a;
+                    break;
+                }
+            }
+            if (!vma || old_addr != vma->start)
+                return (uint64_t)(-EFAULT);
+            size_t old_pages = (size_t)((vma->end - vma->start) / PAGE_SIZE);
+            if (old_size != vma->end - vma->start)
+                return (uint64_t)(-EFAULT);
+            size_t new_pages = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            uint64_t old_flags = vmm_get_page_flags(old_addr);
+            if (!old_flags) old_flags = VMM_P | VMM_U | VMM_W;
+            uint32_t mv_backing_type = vma->backing_type;
+            uint32_t mv_backing_id = vma->backing_id;
+            uint64_t mv_backing_offset = vma->backing_offset;
+            vfs_node_t *mv_backing_node = vma->backing_node;
+
+            if (new_pages <= old_pages) {
+                /* 收缩：释放尾部页 */
+                for (size_t i = new_pages; i < old_pages; i++)
+                    vmm_release_page(old_addr + i * PAGE_SIZE);
+                vma->end = old_addr + new_pages * PAGE_SIZE;
+                return old_addr;
+            }
+
+            uint64_t old_end = vma->end;
+            uint64_t grow_bytes =
+                (new_pages - old_pages) * PAGE_SIZE;
+            int can_extend = 1;
+            if (!(mr_flags & 0x2)) {
+                for (uint64_t va = old_end;
+                     va < old_end + grow_bytes; va += PAGE_SIZE) {
+                    if (vmm_get_phys(va) != 0) { can_extend = 0; break; }
+                }
+                if (can_extend &&
+                    vm_allocate_owned_pages(old_end,
+                                            new_pages - old_pages) < 0)
+                    can_extend = 0;
+                if (can_extend) {
+                    vma->end = old_addr + new_pages * PAGE_SIZE;
+                    return old_addr;
+                }
+            }
+            if (!(mr_flags & 0x1)) return (uint64_t)(-ENOMEM);
+
+            /* 移动：目标地址 */
+            uint64_t dst;
+            if (mr_flags & 0x2) {
+                if (new_addr & (PAGE_SIZE - 1))
+                    return (uint64_t)(-EINVAL);
+                dst = new_addr;
+                (void)vm_unmap_area_range(cur->mm, dst,
+                                          dst + new_pages * PAGE_SIZE);
+            } else {
+                dst = 0;
+                for (uint64_t va = 0x0000100000000000ULL;
+                     va <= 0x0000200000000000ULL -
+                          new_pages * PAGE_SIZE; va += PAGE_SIZE) {
+                    int free = 1;
+                    for (uint64_t v = va;
+                         v < va + new_pages * PAGE_SIZE; v += PAGE_SIZE) {
+                        if (vmm_get_phys(v) != 0) { free = 0; break; }
+                    }
+                    if (free) { dst = va; break; }
+                }
+                if (!dst) return (uint64_t)(-ENOMEM);
+            }
+            if (vm_allocate_owned_pages(dst, new_pages) < 0)
+                return (uint64_t)(-ENOMEM);
+            for (size_t i = 0; i < old_pages; i++) {
+                uint64_t sp = vmm_get_phys(old_addr + i * PAGE_SIZE);
+                uint64_t dp = vmm_get_phys(dst + i * PAGE_SIZE);
+                if (sp && dp)
+                    memcpy((void *)(uintptr_t)dp,
+                           (void *)(uintptr_t)sp, PAGE_SIZE);
+            }
+            /* 解除旧映射（会释放 vma 与旧页） */
+            (void)vm_unmap_area_range(cur->mm, old_addr, old_end);
+            /* 新建 vma 记录移动后的区域 */
+            vm_area_t *nv = (vm_area_t *)kmalloc(sizeof(*nv));
+            if (!nv) return (uint64_t)(-ENOMEM);
+            memset(nv, 0, sizeof(*nv));
+            nv->start = dst;
+            nv->end = dst + new_pages * PAGE_SIZE;
+            nv->backing_type = mv_backing_type;
+            nv->backing_id = mv_backing_id;
+            nv->backing_offset = mv_backing_offset;
+            nv->backing_node = mv_backing_node;
+            nv->next = cur->mm->areas;
+            cur->mm->areas = nv;
+            return dst;
+        }
+
         case HBOS_SYS_MPROTECT: {
             return (uint64_t)protect_user_range(
                 (uint64_t)f->a0, (size_t)f->a1, (int)f->a2);

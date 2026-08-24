@@ -348,6 +348,7 @@ HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
 	$(BUILD_DIR)/tests/linux_timerfd.hax \
 	$(BUILD_DIR)/tests/linux_sysinfo2.hax \
 	$(BUILD_DIR)/tests/linux_signalfd.hax \
+	$(BUILD_DIR)/tests/linux_mremap.hax \
 	$(BUILD_DIR)/tests/linux_clone3.hax \
 	$(BUILD_DIR)/tests/linux_inotify.hax \
 	$(BUILD_DIR)/tests/linux_syscall.hax \
@@ -967,6 +968,12 @@ $(BUILD_DIR)/tests/linux_signalfd.hax: tests/linux_signalfd.c $(USER_LIBC_OBJS) 
 	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_signalfd.o
 	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_signalfd.o $(USER_LINUX_COMPAT_LIB) -o $@
 	@echo "✓ Linux signalfd test binary: $@"
+
+$(BUILD_DIR)/tests/linux_mremap.hax: tests/linux_mremap.c $(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_mremap.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_mremap.o $(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ Linux mremap test binary: $@"
 
 $(BUILD_DIR)/tests/linux_clone3.hax: tests/linux_clone3.c tests/linux_clone3.asm \
 		$(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)

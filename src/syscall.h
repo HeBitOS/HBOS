@@ -233,6 +233,7 @@ typedef enum {
     HBOS_SYS_FSTATFS,          /**< fstatfs(fd, buf) */
     HBOS_SYS_SCHED_GETAFFINITY,/**< sched_getaffinity(pid, len, mask) */
     HBOS_SYS_SIGNALFD,         /**< signalfd(fd, sigset, flags) */
+    HBOS_SYS_MREMAP,           /**< mremap(old, oldsz, newsz, flags, new) */
 
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;
