@@ -638,11 +638,22 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
         return ready;
     }
 
+    if (entry->type == FD_SOCKET) {
+        /* AF_INET：真实非消费式就绪（net.c 多连接 TCP 槽状态）。
+         * 未 connect 的 socket 可写（可发起 connect）；已连接则按
+         * 接收缓冲/FIN/打开状态报告 POLLIN/POLLOUT。 */
+        extern int net_tcp_rx_available(const void *conn);
+        extern int net_tcp_conn_open(const void *conn);
+        const void *conn = entry->node;
+        if (!conn) return LINUX_POLLOUT;
+        uint32_t ready = 0;
+        if (net_tcp_conn_open(conn)) ready |= LINUX_POLLOUT;
+        if (net_tcp_rx_available(conn)) ready |= LINUX_POLLIN;
+        return ready;
+    }
+
     /*
-     * Regular files are always immediately ready.  The current socket
-     * backend is polling based and exposes no non-consuming readiness probe,
-     * so keep the existing select() contract for sockets until that hook is
-     * added: a valid socket may be attempted for either direction.
+     * Regular files are always immediately ready.
      */
     return LINUX_POLLIN | LINUX_POLLOUT;
 }
@@ -906,6 +917,10 @@ int linux_compat_poll(linux_pollfd_t *fds, uint32_t count, int timeout_ms) {
         }
         if (ready_count || timeout_expired(timeout_ms, deadline))
             return ready_count;
+        /* 泵网络收包分发：AF_INET socket 的数据要经分发器落进槽，
+         * poll 等待期间不泵的话永远等不到就绪 */
+        extern void net_pump(void);
+        net_pump();
         task_yield();
     }
 }
@@ -1035,6 +1050,9 @@ int linux_compat_epoll_wait(int epfd, linux_epoll_event_t *events,
                 watch->oneshot_done = 1;
         }
         if (count || timeout_expired(timeout_ms, deadline)) return count;
+        /* 同 poll：等待期间泵网络，AF_INET 收包才能落槽并反映到就绪位 */
+        extern void net_pump(void);
+        net_pump();
         task_yield();
     }
 }

@@ -2189,6 +2189,32 @@ void net_tcp_close(net_tcp_conn_t *conn) {
     conn->tcp_slot = -1;
 }
 
+/* 非消费式就绪查询（Linux poll/epoll 用）：数据可读 = 槽 rx_len > 0
+ * 或收到 FIN（EOF 可读）。连接未登记槽时回退到 conn 自带缓冲。 */
+int net_tcp_rx_available(const net_tcp_conn_t *conn) {
+    if (!conn) return 0;
+    int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
+                   ? conn->tcp_slot : -1;
+    if (slot >= 0 && tcp_conns[slot].used)
+        return tcp_conns[slot].rx_len > 0 || tcp_conns[slot].fin;
+    return conn->rx_len > 0;
+}
+
+int net_tcp_conn_open(const net_tcp_conn_t *conn) {
+    if (!conn) return 0;
+    int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
+                   ? conn->tcp_slot : -1;
+    if (slot >= 0 && tcp_conns[slot].used) return tcp_conns[slot].open;
+    return conn->open;
+}
+
+/* 泵一轮网络收包分发：把 NIC 收到的 TCP 帧交给分发器落进各连接槽。
+ * poll/epoll 等待循环靠它让 AF_INET socket 的就绪状态推进（回环帧在
+ * 发送时已同步注入，不需要）。 */
+void net_pump(void) {
+    net_poll(tcp_dispatch_cb, 0, 64);
+}
+
 /**
  * @brief 一次性完成 TCP 连接、发送请求、接收响应、关闭连接的完整交互
  * @param ip 目标 IP 地址（网络字节序）

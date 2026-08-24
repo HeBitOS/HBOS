@@ -135,6 +135,24 @@ void net_tcp_close(net_tcp_conn_t *conn);
 /** @brief 在指定端口上开始 TCP 监听 */
 int net_tcp_listen(uint16_t port);
 
+/** @brief 非消费式查询：连接接收缓冲是否有数据可读（含 FIN/EOF） */
+int net_tcp_rx_available(const net_tcp_conn_t *conn);
+
+/** @brief 非消费式查询：连接是否仍打开（可写） */
+int net_tcp_conn_open(const net_tcp_conn_t *conn);
+
+/** @brief 泵一次网络收包分发（供 poll/epoll 等待循环处理 AF_INET 收包） */
+void net_pump(void);
+
+/** @brief 非消费式查询：连接接收缓冲是否有数据可读（含 FIN/EOF） */
+int net_tcp_rx_available(const net_tcp_conn_t *conn);
+
+/** @brief 非消费式查询：连接是否仍打开（可写） */
+int net_tcp_conn_open(const net_tcp_conn_t *conn);
+
+/** @brief 泵一次网络收包分发（供 poll/epoll 等待循环处理 AF_INET 收包） */
+void net_pump(void);
+
 /** @brief 接受一个 TCP 客户端连接 */
 int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn, uint32_t timeout_ms);
 
