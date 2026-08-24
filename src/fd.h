@@ -15,6 +15,7 @@
 #define FD_UNIX    6
 #define FD_MEMFD   7
 #define FD_INOTIFY 8
+#define FD_TIMER   9
 
 #define PIPE_BUF_SIZE 4096
 

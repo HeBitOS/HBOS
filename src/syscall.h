@@ -226,6 +226,9 @@ typedef enum {
     HBOS_SYS_GETPEERNAME,    /**< getpeername(fd,address,length) */
     HBOS_SYS_WEB_FETCH,      /**< browser GET proxy: DNS + HTTP/TLS */
     HBOS_SYS_DNS_RESOLVE,    /**< 域名解析：net_dns_resolve(name, ip4) */
+    HBOS_SYS_TIMERFD_CREATE,  /**< timerfd_create(clockid, flags) */
+    HBOS_SYS_TIMERFD_SETTIME, /**< timerfd_settime(fd, flags, new, old) */
+    HBOS_SYS_TIMERFD_GETTIME, /**< timerfd_gettime(fd, curr) */
 
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;

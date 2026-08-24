@@ -223,6 +223,134 @@ static int compat_fd_alloc(task_t *task, int type, uint32_t slot, int flags) {
     return compat_set_errno(EMFILE);
 }
 
+/* ── timerfd：Chromium MessagePump 定时器依赖 ── */
+#define LINUX_TIMERFD_SLOTS 16
+#define LINUX_TFD_NONBLOCK     0x800
+#define LINUX_TFD_CLOEXEC      0x80000
+#define LINUX_TFD_TIMER_ABSTIME 1
+
+typedef struct {
+    int used;
+    int refs;
+    uint32_t flags;
+    uint64_t deadline_ticks;   /* 0 = 未武装 */
+    uint64_t interval_ticks;   /* 0 = 一次性 */
+} timerfd_slot_t;
+static timerfd_slot_t timerfd_slots[LINUX_TIMERFD_SLOTS];
+
+static timerfd_slot_t *timerfd_for_fd(task_t *task, int fd) {
+    fd_entry_t *entry = compat_fd(task, fd);
+    if (!entry || entry->type != FD_TIMER ||
+        entry->compat_id >= LINUX_TIMERFD_SLOTS)
+        return NULL;
+    timerfd_slot_t *slot = &timerfd_slots[entry->compat_id];
+    return slot->used ? slot : NULL;
+}
+
+/* itimerspec：两个 timespec（it_interval, it_value），各 16 字节 */
+static uint64_t timerfd_timespec_to_ticks(const int64_t v[2]) {
+    uint32_t freq = pit_get_frequency_hz();
+    if (!freq) return 0;
+    uint64_t sec = (uint64_t)(v[0] > 0 ? v[0] : 0);
+    uint64_t nsec = (uint64_t)(v[1] > 0 ? v[1] : 0);
+    return sec * freq + nsec * freq / 1000000000ULL;
+}
+
+int linux_compat_timerfd_create(int clockid, int flags) {
+    if (flags & ~(LINUX_TFD_NONBLOCK | LINUX_TFD_CLOEXEC))
+        return compat_set_errno(EINVAL);
+    if (clockid != 0 && clockid != 1)
+        return compat_set_errno(EINVAL);
+    for (uint32_t i = 0; i < LINUX_TIMERFD_SLOTS; i++) {
+        if (timerfd_slots[i].used) continue;
+        memset(&timerfd_slots[i], 0, sizeof(timerfd_slots[i]));
+        timerfd_slots[i].used = 1;
+        timerfd_slots[i].refs = 1;
+        timerfd_slots[i].flags = (uint32_t)flags;
+        int fd = compat_fd_alloc(compat_task(), FD_TIMER, i, flags | O_RDWR);
+        if (fd < 0) memset(&timerfd_slots[i], 0, sizeof(timerfd_slots[i]));
+        return fd;
+    }
+    return compat_set_errno(ENFILE);
+}
+
+int linux_compat_timerfd_settime(int fd, int flags,
+                                 const void *new_value, void *old_value) {
+    task_t *task = compat_task();
+    timerfd_slot_t *slot = timerfd_for_fd(task, fd);
+    if (!slot) return compat_set_errno(EBADF);
+    if (flags & ~LINUX_TFD_TIMER_ABSTIME) return compat_set_errno(EINVAL);
+    if (!new_value) return compat_set_errno(EFAULT);
+
+    if (old_value) {
+        int64_t *out = (int64_t *)old_value;
+        uint64_t now = pit_get_ticks();
+        uint32_t freq = pit_get_frequency_hz();
+        uint64_t rem = slot->deadline_ticks && now < slot->deadline_ticks
+                           ? slot->deadline_ticks - now : 0;
+        out[0] = freq ? (int64_t)(slot->interval_ticks / freq) : 0;
+        out[1] = freq ? (int64_t)((slot->interval_ticks % freq) *
+                                  1000000000ULL / freq) : 0;
+        out[2] = freq ? (int64_t)(rem / freq) : 0;
+        out[3] = freq ? (int64_t)((rem % freq) * 1000000000ULL / freq) : 0;
+    }
+
+    const int64_t *nv = (const int64_t *)new_value;
+    uint64_t value_ticks = timerfd_timespec_to_ticks(nv + 2);
+    uint64_t interval_ticks = timerfd_timespec_to_ticks(nv);
+    uint64_t now = pit_get_ticks();
+    if (value_ticks == 0) {
+        slot->deadline_ticks = 0;
+    } else if (flags & LINUX_TFD_TIMER_ABSTIME) {
+        slot->deadline_ticks = value_ticks;
+    } else {
+        slot->deadline_ticks = now + value_ticks;
+    }
+    slot->interval_ticks = interval_ticks;
+    return 0;
+}
+
+int linux_compat_timerfd_gettime(int fd, void *curr_value) {
+    task_t *task = compat_task();
+    timerfd_slot_t *slot = timerfd_for_fd(task, fd);
+    if (!slot) return compat_set_errno(EBADF);
+    if (!curr_value) return compat_set_errno(EFAULT);
+    int64_t *out = (int64_t *)curr_value;
+    uint64_t now = pit_get_ticks();
+    uint32_t freq = pit_get_frequency_hz();
+    uint64_t rem = slot->deadline_ticks && now < slot->deadline_ticks
+                       ? slot->deadline_ticks - now : 0;
+    out[0] = freq ? (int64_t)(slot->interval_ticks / freq) : 0;
+    out[1] = freq ? (int64_t)((slot->interval_ticks % freq) *
+                              1000000000ULL / freq) : 0;
+    out[2] = freq ? (int64_t)(rem / freq) : 0;
+    out[3] = freq ? (int64_t)((rem % freq) * 1000000000ULL / freq) : 0;
+    return 0;
+}
+
+/* 计算自上次消费以来的到期次数（推进一次性/周期 deadline） */
+static uint64_t timerfd_tick_expired(timerfd_slot_t *slot) {
+    if (!slot->deadline_ticks) return 0;
+    uint64_t now = pit_get_ticks();
+    uint64_t exp = 0;
+    while ((int64_t)(now - slot->deadline_ticks) >= 0) {
+        exp++;
+        if (slot->interval_ticks) {
+            slot->deadline_ticks += slot->interval_ticks;
+        } else {
+            slot->deadline_ticks = 0;
+            break;
+        }
+    }
+    return exp;
+}
+
+/* 非消费式：是否有到期未读（poll/epoll 用） */
+static int timerfd_ready(const timerfd_slot_t *slot) {
+    if (!slot->deadline_ticks) return 0;
+    return (int64_t)(pit_get_ticks() - slot->deadline_ticks) >= 0;
+}
+
 static event_slot_t *event_for_fd(task_t *task, int fd) {
     fd_entry_t *entry = compat_fd(task, fd);
     if (!entry || entry->type != FD_EVENT ||
@@ -475,6 +603,11 @@ static void compat_entry_release(const fd_entry_t *entry) {
                entry->compat_id < LINUX_INOTIFY_SLOTS) {
         inotify_slot_t *slot = &inotify_slots[entry->compat_id];
         inotify_slot_release(slot);
+    } else if (entry->type == FD_TIMER &&
+               entry->compat_id < LINUX_TIMERFD_SLOTS) {
+        timerfd_slot_t *slot = &timerfd_slots[entry->compat_id];
+        if (slot->used && slot->refs && --slot->refs == 0)
+            memset(slot, 0, sizeof(*slot));
     } else if (entry->type == FD_PIPE && entry->pipe) {
         if (--entry->pipe->ref_count <= 0) kfree(entry->pipe);
     }
@@ -613,6 +746,12 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
 
     if (entry->type == FD_EPOLL) return LINUX_POLLIN;
 
+    if (entry->type == FD_TIMER) {
+        timerfd_slot_t *slot = timerfd_for_fd(task, fd);
+        if (!slot) return LINUX_POLLERR;
+        return timerfd_ready(slot) ? LINUX_POLLIN : 0;
+    }
+
     if (entry->type == FD_INOTIFY) {
         inotify_slot_t *slot = inotify_for_fd(task, fd);
         if (!slot) return LINUX_POLLERR;
@@ -677,6 +816,26 @@ static int timeout_expired(int timeout_ms, uint64_t deadline) {
 long linux_compat_read(int fd, void *buffer, size_t count) {
     task_t *task = compat_task();
     if (inotify_for_fd(task, fd)) return inotify_read(fd, buffer, count);
+    timerfd_slot_t *tfd = timerfd_for_fd(task, fd);
+    if (tfd) {
+        if (!buffer) return -EFAULT;
+        if (count < sizeof(uint64_t)) return -EINVAL;
+        uint64_t exp = timerfd_tick_expired(tfd);
+        if (exp == 0) {
+            if (tfd->flags & LINUX_TFD_NONBLOCK) return -EAGAIN;
+            /* v1：阻塞读退化——让出几次后仍无到期则 EAGAIN（Chromium
+             * 用非阻塞 + poll/epoll，不走这里） */
+            for (int i = 0; i < 4; i++) {
+                task_yield();
+                exp = timerfd_tick_expired(tfd);
+                if (exp) break;
+            }
+            if (exp == 0) return -EAGAIN;
+        }
+        uint64_t value = exp;
+        memcpy(buffer, &value, sizeof(value));
+        return (long)sizeof(value);
+    }
     event_slot_t *slot = event_for_fd(task, fd);
     if (!slot) {
         if (unix_for_fd(task, fd))

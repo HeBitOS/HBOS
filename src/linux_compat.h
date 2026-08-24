@@ -130,4 +130,9 @@ int linux_compat_memfd_map(int fd, uint64_t address, size_t length,
 void linux_compat_memfd_unmap(uint32_t backing_id);
 int linux_compat_memfd_retain_map(uint32_t backing_id);
 
+int linux_compat_timerfd_create(int clockid, int flags);
+int linux_compat_timerfd_settime(int fd, int flags,
+                                 const void *new_value, void *old_value);
+int linux_compat_timerfd_gettime(int fd, void *curr_value);
+
 #endif /* HBOS_LINUX_COMPAT_H */
