@@ -69,7 +69,7 @@ HBOS 原生 fd / task / VFS / socket / HIVE
 | AF_UNIX / D-Bus 传输底座 | 可用初版 | stream、pathname/abstract address、peer credentials、`getsockname/getpeername`、`sendmsg/recvmsg`、`SCM_RIGHTS`；地址截断仍回报完整所需长度，accept 返回真实连接方地址 |
 | Wayland 共享缓冲底座 | 可用初版 | `memfd_create`、非零 `ftruncate`、零复制 `MAP_SHARED` 与 fd 传递 |
 | fork 后兼容 fd 引用 | 可用 | eventfd/epoll/socket/memfd 引用随 fd 表与映射生命周期回收 |
-| AF_INET 多连接 TCP | 可用初版 | 内核 TCP 改为 8 槽连接表 + 按 (对端 IP, 本端源端口) 全局分发：轮询任一连接时其余连接的收包缓冲进各自槽，不再互相丢弃。`linux_socket2` QEMU 用例开两个并发 AF_INET 流 socket 各发 GET，先读第二个——第一个连接的响应在轮询第二个期间被分发器缓冲，双连接均收到完整响应（`LINUX_SOCKET2: PASS`）。同时修复 `HBOS_SYS_SOCKET` 从 fd 0 分配（0/1/2 是隐式控制台，第一个 socket 会抢占 stdout）——现与 `open()`/`compat_fd_alloc` 一致从 fd 3 开始。**回环（连本机 IP/127.0.0.1）与 listen 并发仍待实现** |
+| AF_INET 多连接 TCP + 回环 | 可用初版 | 内核 TCP 改为 8 槽连接表 + 按 (对端 IP, 本端源端口) 全局分发：轮询任一连接时其余连接的收包缓冲进各自槽，不再互相丢弃；轮询循环统一 `tcp_drain_acks()` 补发各槽待确认 ACK（否则并发时对端等 ACK 卡死）。`linux_socket2` QEMU 用例开两个并发 AF_INET 流 socket 各发 GET，先读第二个——第一个连接的响应在轮询第二个期间被分发器缓冲，双连接均收到完整响应（`LINUX_SOCKET2: PASS`）。同时修复 `HBOS_SYS_SOCKET` 从 fd 0 分配（0/1/2 是隐式控制台，第一个 socket 会抢占 stdout）——现与 `open()`/`compat_fd_alloc` 一致从 fd 3 开始。**回环已实现**：发往本机 IP 或 127.0.0.1 的 TCP 帧在 `send_tcp` 处直接注入接收侧（客户端槽分发 → 监听端口入站），免 ARP/NIC，内核 wget→httpd 与 Linux 双 socket→httpd 均通过（含 127.0.0.1）。listen 并发与 AF_INET 非阻塞 connect 仍待实现 |
 
 “原生 syscall 入口可用”表示专门构建的静态 Linux ELF 已经可以直接运行；
 由于完整 TLS ABI、pthread 取消/异常恢复和复杂 glibc 依赖尚未完成，不能
@@ -277,7 +277,7 @@ KWin → Plasma` 顺序建立持续集成。所有适配补丁只进入 HBOS、�
   `mprotect` 尚未维护细粒度 VMA protection 元数据，空的中间页表只在进程退出
   时裁剪；大型 Qt/Chromium/KDE 负载前仍需跨核 TLB shootdown、可写共享文件
   页缓存和并发/OOM 压力验证。
-- AF_INET socket 已有并发连接基线（多连接 TCP 分发 + `linux_socket2` 用例），但非阻塞 connect、精确的非消费式就绪查询与回环仍未完成；AF_UNIX 已有真实 readiness。
+- AF_INET socket 已有并发连接基线 + 回环（多连接 TCP 分发 + `linux_socket2` 用例，本机 IP 与 127.0.0.1 均通过），但非阻塞 connect、精确的非消费式就绪查询与 listen 并发仍未完成；AF_UNIX 已有真实 readiness。
 - `epoll` 已支持 level-triggered 与 edge-triggered（EPOLLET）、one-shot
   （EPOLLONESHOT）语义，由 `tests/linux_epoll_et.c` 覆盖（宿主 Linux
   参考实现 12/12 PASS；HBOS QEMU 验证见 `scripts/test_linux_compat_smoke.sh`）。

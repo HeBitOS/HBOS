@@ -84,6 +84,8 @@
 /** @brief 默认公共 DNS 服务器（8.8.8.8），当链路未提供 DNS 时兜底使用。
  *  四个八位组都是 8，网络字节序与主机字节序相同，可直接用字面量。 */
 #define DNS_FALLBACK_SERVER 0x08080808u
+/* 127.0.0.1 的网络字节序表示（字节 7F 00 00 01 → u32 LE） */
+#define NET_LOOPBACK_V4 0x0100007Fu
 /** @brief DHCP 报文固定部分长度（含选项前缀） */
 #define DHCP_FIXED_LEN 240
 /** @brief 邻居缓存（ARP 表）条目数 */
@@ -1843,6 +1845,10 @@ static void tcp_conn_free(int slot) {
         tcp_conns[slot].used = false;
 }
 
+static int  tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg);
+static int  tcp_accept_ingress(const uint8_t *pkt, uint16_t len);
+static void tcp_loopback_rx(const uint8_t *frame, uint16_t len);
+
 /**
  * @brief 构造并发送一个 TCP 数据包
  * @param mac 下一跳 MAC 地址
@@ -1866,10 +1872,18 @@ static int send_tcp(const uint8_t mac[6], uint32_t dst_ip, uint16_t sport, uint1
     if (dlen) memcpy(payload, data, dlen);
     ip->ver_ihl = 0x45; ip->tos = 0; ip->len = htons((uint16_t)(20 + 20 + dlen));
     ip->id = htons(ip_id++); ip->frag = htons(0x4000); ip->ttl = 64; ip->proto = IP_PROTO_TCP;
-    ip->src = primary.ip; ip->dst = dst_ip; ip->csum = 0; ip->csum = checksum(ip, 20);
+    /* 回环到 127.0.0.1 时源也写 127.0.0.1，否则接收侧按 (peer==src) 匹配
+     * 连接槽会失配（槽的 peer 是 127.0.0.1，而 src 是网卡 IP） */
+    ip->src = (dst_ip == NET_LOOPBACK_V4) ? NET_LOOPBACK_V4 : primary.ip;
+    ip->dst = dst_ip; ip->csum = 0; ip->csum = checksum(ip, 20);
     tcp->src = htons(sport); tcp->dst = htons(dport); tcp->seq = htonl(seq); tcp->ack = htonl(ack);
     tcp->off_flags_hi = 5 << 4; tcp->flags = flags; tcp->win = htons(4096);
     tcp->csum = 0; tcp->urg = 0; tcp->csum = tcp_checksum(ip, tcp, payload, dlen);
+    if (dst_ip == primary.ip || dst_ip == NET_LOOPBACK_V4) {
+        /* 回环：直接注入接收侧，不走网卡（NIC 不会把发出的帧再收回来） */
+        tcp_loopback_rx(frame, (uint16_t)(sizeof(eth_hdr_t) + 20 + 20 + dlen));
+        return 0;
+    }
     return primary.send(frame, (uint16_t)(sizeof(eth_hdr_t) + 20 + 20 + dlen));
 }
 
@@ -1885,7 +1899,8 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
     const eth_hdr_t *eth = (const eth_hdr_t *)pkt;
     if (ntohs(eth->type) != ETH_TYPE_IP) return 0;
     const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(pkt + sizeof(eth_hdr_t));
-    if (ip->proto != IP_PROTO_TCP || ip->dst != primary.ip) return 0;
+    if (ip->proto != IP_PROTO_TCP ||
+        (ip->dst != primary.ip && ip->dst != NET_LOOPBACK_V4)) return 0;
     uint32_t ihl = (ip->ver_ihl & 0x0F) * 4;
     const tcp_hdr_t *tcp = (const tcp_hdr_t *)((const uint8_t *)ip + ihl);
     uint16_t dport = ntohs(tcp->dst);
@@ -1937,6 +1952,28 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
     return 0;
 }
 
+/* 回环接收：本机发往自身（本机 IP 或 127.0.0.1）的 TCP 帧不经过网卡，
+ * 发送时直接同步交给接收侧——先按客户端连接槽分发，再试监听端口入站。
+ * 回环不存在 ARP/MAC 语义，帧头 MAC 无意义。 */
+static void tcp_loopback_rx(const uint8_t *frame, uint16_t len) {
+    if (tcp_dispatch_cb(frame, len, 0)) return;
+    tcp_accept_ingress(frame, len);
+}
+
+/* 轮询循环通用收尾：把各槽里待发的 ACK 发出去。并发/回环时其他连接
+ * 的数据可能已由分发器缓冲进自己的槽，当前任务（可能在 connect 或
+ * 轮询别的连接）不补 ACK 的话，对端会一直等 ACK 卡死。 */
+static void tcp_drain_acks(void) {
+    for (int i = 0; i < NET_TCP_CONNS; i++) {
+        tcp_conn_t *c = &tcp_conns[i];
+        if (c->used && c->need_ack) {
+            c->need_ack = 0;
+            send_tcp(c->mac, c->peer, c->sport, c->dport,
+                     c->seq, c->ack, 0x10, 0, 0);
+        }
+    }
+}
+
 /**
  * @brief 发起 TCP 三次握手，建立到指定 IP:port 的连接
  * @param ip 目标 IP 地址（网络字节序）
@@ -1951,9 +1988,15 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
     }
     memset(conn, 0, sizeof(*conn));
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
+    int loopback = (ip == primary.ip) || (ip == NET_LOOPBACK_V4);
     uint32_t next_hop;
-    if (net_route_next_hop(ip, &next_hop) < 0) return -1;
-    if (arp_resolve(next_hop, conn->mac) < 0) return -1;
+    if (!loopback) {
+        if (net_route_next_hop(ip, &next_hop) < 0) return -1;
+        if (arp_resolve(next_hop, conn->mac) < 0) return -1;
+    } else {
+        /* 回环无 ARP：帧头 MAC 在注入路径中无意义，用自身 MAC 占位 */
+        memcpy(conn->mac, primary.mac, 6);
+    }
     if (next_port < 49152) next_port = 49152;
     conn->sport = next_port++;
     conn->dport = port;
@@ -1979,6 +2022,7 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!c->synack && !c->rst && net_before_deadline(deadline)) {
             net_poll(tcp_dispatch_cb, 0, 4096);
+            tcp_drain_acks();
             task_yield();
         }
     }
@@ -2029,12 +2073,8 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!c->acked && !c->rst && net_before_deadline(deadline)) {
             net_poll(tcp_dispatch_cb, 0, 4096);
+            tcp_drain_acks();
             task_yield();
-            if (c->need_ack) {
-                c->need_ack = 0;
-                send_tcp(c->mac, c->peer, c->sport, c->dport,
-                         c->seq + len, c->ack, 0x10, 0, 0);
-            }
         }
     }
     if (c->rst) {
@@ -2099,13 +2139,8 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
     }
     for (uint32_t i = 0; i < poll_rounds && !c->fin && !c->rst; i++) {
         net_poll(tcp_dispatch_cb, 0, 80000);
+        tcp_drain_acks();
         task_yield();
-        if (c->need_ack) {
-            c->need_ack = 0;
-            send_tcp(c->mac, c->peer, c->sport, c->dport,
-                     c->seq, c->ack, 0x10, 0, 0);
-            if (c->rx_len) break;
-        }
         if (c->rx_len) break;
     }
     if (c->rst) {
@@ -2345,13 +2380,16 @@ static int tcp_pending_alloc(void) {
     return -1;
 }
 
-static int accept_cb(const uint8_t *pkt, uint16_t len, void *arg) {
-    (void)arg;
+/* 监听端口入站处理：SYN 登记 pending、ACK 完成握手、捎带数据接进
+ * rx_stage、RST 清槽。回环（本机对自身）也走这里，所以从 accept_cb
+ * 抽成独立函数供 tcp_dispatch_cb 共用。 */
+static int tcp_accept_ingress(const uint8_t *pkt, uint16_t len) {
     if (len < sizeof(eth_hdr_t) + 40) return 0;
     const eth_hdr_t *eth = (const eth_hdr_t *)pkt;
     if (ntohs(eth->type) != ETH_TYPE_IP) return 0;
     const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(pkt + sizeof(eth_hdr_t));
-    if (ip->proto != IP_PROTO_TCP || ip->dst != primary.ip) return 0;
+    if (ip->proto != IP_PROTO_TCP ||
+        (ip->dst != primary.ip && ip->dst != NET_LOOPBACK_V4)) return 0;
     uint32_t ihl = (ip->ver_ihl & 0x0F) * 4;
     const tcp_hdr_t *tcp = (const tcp_hdr_t *)((const uint8_t *)ip + ihl);
     if (ntohs(tcp->dst) != listen_port) return 0;
@@ -2416,6 +2454,12 @@ static int accept_cb(const uint8_t *pkt, uint16_t len, void *arg) {
     }
 
     return 0;
+}
+
+/* 网卡路径的监听回调：直接转发给 tcp_accept_ingress */
+static int accept_cb(const uint8_t *pkt, uint16_t len, void *arg) {
+    (void)arg;
+    return tcp_accept_ingress(pkt, len);
 }
 
 int net_tcp_listen(uint16_t port) {
