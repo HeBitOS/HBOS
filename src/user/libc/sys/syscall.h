@@ -57,6 +57,8 @@
 #define SYS_statfs           137
 #define SYS_fstatfs          138
 #define SYS_sched_getaffinity 204
+#define SYS_signalfd          282
+#define SYS_signalfd4         289
 #define SYS_chdir            80
 #define SYS_rename           82
 #define SYS_mkdir            83

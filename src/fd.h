@@ -16,6 +16,7 @@
 #define FD_MEMFD   7
 #define FD_INOTIFY 8
 #define FD_TIMER   9
+#define FD_SIGNALFD 10
 
 #define PIPE_BUF_SIZE 4096
 

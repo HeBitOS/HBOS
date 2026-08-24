@@ -70,6 +70,7 @@ HBOS 原生 fd / task / VFS / socket / HIVE
 | Wayland 共享缓冲底座 | 可用初版 | `memfd_create`、非零 `ftruncate`、零复制 `MAP_SHARED` 与 fd 传递 |
 | timerfd | 可用初版 | `timerfd_create/settime/gettime`（CLOCK_MONOTONIC/REALTIME，TFD_NONBLOCK/CLOEXEC/ABSTIME）；一次性与周期定时、poll/epoll POLLIN 就绪、read 到期计数、一次性后自动 disarm。Chromium MessagePump 定时器依赖。`linux_timerfd` QEMU 用例（100ms 一次性 + 50ms 周期）通过 |
 | statfs/fstatfs + sched_getaffinity + AF_INET socket 选项 | 可用初版 | `statfs/fstatfs`（RAMFS_MAGIC、4096 块大小）、`sched_getaffinity`（按 SMP CPU 数填位图）、AF_INET `getsockopt` 的 SO_TYPE/SO_ERROR/SO_SNDBUF/SO_RCVBUF 与 `setsockopt` 的 SO_REUSEADDR/SO_KEEPALIVE/TCP_NODELAY（no-op 成功）。Chromium base 层启动早期即调用。`linux_sysinfo2` QEMU 用例通过 |
+| signalfd | 可用初版 | `signalfd`（SYS 282/289 → HBOS_SYS_SIGNALFD，SFD_NONBLOCK/CLOEXEC）：task_sig_deliver 对被阻塞且 signalfd 关注的信号消费进 128 字节 siginfo 队列，poll/epoll POLLIN 就绪、read 返回 ssi_signo 等。Chromium 信号处理（SIGCHLD/TERM）依赖。`linux_signalfd` QEMU 用例（阻塞 SIGUSR1 → kill → poll → read）通过 |
 | DNS（getaddrinfo/gethostbyname） | 可用初版 | 新 syscall `HBOS_SYS_DNS_RESOLVE` → 内核 `net_dns_resolve`；libc 提供 `getaddrinfo`（数字/常见服务端口、`EAI_NONAME`）、`gethostbyname`、`freeaddrinfo`。`linux_dns` QEMU 用例解析真实域名（gethostbyname + getaddrinfo 端口校验 + 未知域名 EAI_NONAME）通过。**UDP 收包队列**：驱动层把 UDP 包入全局队列、UDP 等待者（DHCP/DNS/NTP）轮询循环排空——修复了 httpd 等 TCP 轮询任务把 DNS 响应从网卡描述符消费丢弃导致域名解析偶发失败的 bug |
 | fork 后兼容 fd 引用 | 可用 | eventfd/epoll/socket/memfd 引用随 fd 表与映射生命周期回收 |
 | AF_INET 多连接 TCP + 回环 + 就绪查询 + 非阻塞 connect | 可用初版 | 内核 TCP 改为 8 槽连接表 + 按 (对端 IP, 本端源端口) 全局分发：轮询任一连接时其余连接的收包缓冲进各自槽，不再互相丢弃；轮询循环统一 `tcp_drain_acks()` 补发各槽待确认 ACK。**回环**：发往本机 IP/127.0.0.1 的 TCP 帧在 `send_tcp` 直接注入接收侧，免 ARP/NIC。**就绪查询**：`net_tcp_rx_available/net_tcp_conn_open` 非消费式探测 + `net_pump()` 在 poll/epoll 等待循环泵收包分发——AF_INET socket 的 poll/epoll 返回真实 POLLIN/POLLOUT（旧实现一律“双向就绪”）。**非阻塞 connect**：`net_tcp_connect_start`（发 SYN 即返）+ `net_tcp_finish_connect`（SYN+ACK 到时补最终 ACK）；SOCK_NONBLOCK 的 connect 返回 EINPROGRESS，poll(POLLOUT) 在完成时触发，getsockopt(SO_ERROR) 报告进展。`linux_socket2`/`linux_sockpoll`/`linux_nbconnect` QEMU 用例通过。修复 `HBOS_SYS_SOCKET` 从 fd 0 分配（抢占 stdout）bug。listen 并发仍待实现 |
@@ -280,7 +281,7 @@ KWin → Plasma` 顺序建立持续集成。所有适配补丁只进入 HBOS、�
   `mprotect` 尚未维护细粒度 VMA protection 元数据，空的中间页表只在进程退出
   时裁剪；大型 Qt/Chromium/KDE 负载前仍需跨核 TLB shootdown、可写共享文件
   页缓存和并发/OOM 压力验证。
-- AF_INET socket 已有并发连接基线 + 回环 + poll/epoll 真实就绪 + 非阻塞 connect + DNS + timerfd + statfs/affinity/sockopt（`linux_socket2`/`linux_sockpoll`/`linux_nbconnect`/`linux_dns`/`linux_timerfd`/`linux_sysinfo2` 用例），listen 并发、signalfd、mremap、IPv6 仍未完成。
+- AF_INET socket 已有并发连接基线 + 回环 + poll/epoll 真实就绪 + 非阻塞 connect + DNS + timerfd + statfs/affinity/sockopt + signalfd（`linux_socket2`/`linux_sockpoll`/`linux_nbconnect`/`linux_dns`/`linux_timerfd`/`linux_sysinfo2`/`linux_signalfd` 用例），listen 并发、mremap、IPv6 仍未完成。
 - `epoll` 已支持 level-triggered 与 edge-triggered（EPOLLET）、one-shot
   （EPOLLONESHOT）语义，由 `tests/linux_epoll_et.c` 覆盖（宿主 Linux
   参考实现 12/12 PASS；HBOS QEMU 验证见 `scripts/test_linux_compat_smoke.sh`）。

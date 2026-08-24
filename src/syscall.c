@@ -2135,7 +2135,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                  task_current()->fd_table->entries[(int)f->a0].type == FD_UNIX ||
                  task_current()->fd_table->entries[(int)f->a0].type == FD_MEMFD ||
                  task_current()->fd_table->entries[(int)f->a0].type == FD_INOTIFY ||
-                 task_current()->fd_table->entries[(int)f->a0].type == FD_TIMER))
+                 task_current()->fd_table->entries[(int)f->a0].type == FD_TIMER ||
+                 task_current()->fd_table->entries[(int)f->a0].type == FD_SIGNALFD))
                 return (uint64_t)linux_compat_read(
                     (int)f->a0, (void *)f->a1, (size_t)f->a2);
             return finish_syscall((long)read((int)f->a0, (void *)f->a1, (size_t)f->a2));
@@ -2304,6 +2305,10 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             buf[8] = 255;              /* f_namelen */
             return 0;
         }
+
+        case HBOS_SYS_SIGNALFD:
+            return finish_syscall(linux_compat_signalfd(
+                (int)f->a0, (const void *)f->a1, (int)f->a3));
 
         case HBOS_SYS_SCHED_GETAFFINITY: {
             int pid = (int)f->a0;

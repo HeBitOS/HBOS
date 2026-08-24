@@ -338,6 +338,8 @@ static syscall_translation_t translate_linux_syscall(long number) {
         case SYS_statfs:          return (syscall_translation_t){HBOS_SYS_STATFS, 2};
         case SYS_fstatfs:         return (syscall_translation_t){HBOS_SYS_FSTATFS, 2};
         case SYS_sched_getaffinity: return (syscall_translation_t){HBOS_SYS_SCHED_GETAFFINITY, 3};
+        case SYS_signalfd:          return (syscall_translation_t){HBOS_SYS_SIGNALFD, 3};
+        case SYS_signalfd4:         return (syscall_translation_t){HBOS_SYS_SIGNALFD, 4};
         case SYS_fcntl:           return (syscall_translation_t){HBOS_SYS_FCNTL, 3};
         case SYS_ftruncate:       return (syscall_translation_t){HBOS_SYS_FTRUNCATE, 2};
         case SYS_getcwd:          return (syscall_translation_t){HBOS_SYS_GETCWD, 2};

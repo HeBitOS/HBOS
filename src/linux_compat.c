@@ -351,6 +351,92 @@ static int timerfd_ready(const timerfd_slot_t *slot) {
     return (int64_t)(pit_get_ticks() - slot->deadline_ticks) >= 0;
 }
 
+/* ── signalfd：Chromium 信号处理依赖（SIGCHLD/SIGTERM 等） ── */
+#define LINUX_SIGNALFD_SLOTS 8
+#define LINUX_SFD_NONBLOCK   0x800
+#define LINUX_SFD_CLOEXEC    0x80000
+#define LINUX_SIGNALFD_QUEUE 8
+
+typedef struct {
+    int used;
+    int refs;
+    uint32_t flags;
+    uint32_t owner_pid;
+    uint64_t sigmask;              /* 关注信号位图（bit sig-1） */
+    uint32_t pending_signo[LINUX_SIGNALFD_QUEUE];
+    int pending_count;
+} signalfd_slot_t;
+static signalfd_slot_t signalfd_slots[LINUX_SIGNALFD_SLOTS];
+
+static signalfd_slot_t *signalfd_for_fd(task_t *task, int fd) {
+    fd_entry_t *entry = compat_fd(task, fd);
+    if (!entry || entry->type != FD_SIGNALFD ||
+        entry->compat_id >= LINUX_SIGNALFD_SLOTS)
+        return NULL;
+    signalfd_slot_t *slot = &signalfd_slots[entry->compat_id];
+    return slot->used ? slot : NULL;
+}
+
+int linux_compat_signalfd(int fd, const void *sigset_ptr, int flags) {
+    if (!sigset_ptr) return compat_set_errno(EFAULT);
+    if (flags & ~(LINUX_SFD_NONBLOCK | LINUX_SFD_CLOEXEC))
+        return compat_set_errno(EINVAL);
+    uint64_t mask = 0;
+    memcpy(&mask, sigset_ptr, sizeof(mask));
+    if (fd == -1) {
+        for (uint32_t i = 0; i < LINUX_SIGNALFD_SLOTS; i++) {
+            if (signalfd_slots[i].used) continue;
+            memset(&signalfd_slots[i], 0, sizeof(signalfd_slots[i]));
+            signalfd_slots[i].used = 1;
+            signalfd_slots[i].refs = 1;
+            signalfd_slots[i].flags = (uint32_t)flags;
+            signalfd_slots[i].owner_pid = task_get_process_id();
+            signalfd_slots[i].sigmask = mask;
+            int nfd = compat_fd_alloc(compat_task(), FD_SIGNALFD, i,
+                                      flags | O_RDWR);
+            if (nfd < 0) memset(&signalfd_slots[i], 0, sizeof(signalfd_slots[i]));
+            return nfd;
+        }
+        return compat_set_errno(ENFILE);
+    }
+    task_t *task = compat_task();
+    signalfd_slot_t *slot = signalfd_for_fd(task, fd);
+    if (!slot) return compat_set_errno(EBADF);
+    slot->sigmask = mask;
+    return 0;
+}
+
+/* task_sig_deliver 钩子：信号进 signalfd 队列则返回 1（不再走默认/handler） */
+int linux_compat_signalfd_consume(task_t *task, int sig) {
+    if (!task || sig <= 0 || sig >= 64) return 0;
+    uint32_t pid = task_get_process_id();
+    uint64_t bit = 1ULL << (unsigned)(sig - 1);
+    for (uint32_t i = 0; i < LINUX_SIGNALFD_SLOTS; i++) {
+        signalfd_slot_t *slot = &signalfd_slots[i];
+        if (!slot->used || slot->owner_pid != pid) continue;
+        if (!(slot->sigmask & bit)) continue;
+        if (slot->pending_count < LINUX_SIGNALFD_QUEUE)
+            slot->pending_signo[slot->pending_count++] = (uint32_t)sig;
+        return 1;
+    }
+    return 0;
+}
+
+/* 128 字节 signalfd_siginfo（glibc 布局） */
+static void signalfd_fill_info(uint8_t *out, int sig, uint32_t sender_pid) {
+    memset(out, 0, 128);
+    uint32_t *u = (uint32_t *)out;
+    u[0] = (uint32_t)sig;          /* ssi_signo */
+    u[1] = 0;                      /* ssi_errno */
+    u[2] = 0;                      /* ssi_code = SI_USER */
+    u[3] = sender_pid;             /* ssi_pid */
+    u[4] = 0;                      /* ssi_uid */
+}
+
+static int signalfd_ready(const signalfd_slot_t *slot) {
+    return slot->pending_count > 0;
+}
+
 static event_slot_t *event_for_fd(task_t *task, int fd) {
     fd_entry_t *entry = compat_fd(task, fd);
     if (!entry || entry->type != FD_EVENT ||
@@ -608,6 +694,11 @@ static void compat_entry_release(const fd_entry_t *entry) {
         timerfd_slot_t *slot = &timerfd_slots[entry->compat_id];
         if (slot->used && slot->refs && --slot->refs == 0)
             memset(slot, 0, sizeof(*slot));
+    } else if (entry->type == FD_SIGNALFD &&
+               entry->compat_id < LINUX_SIGNALFD_SLOTS) {
+        signalfd_slot_t *slot = &signalfd_slots[entry->compat_id];
+        if (slot->used && slot->refs && --slot->refs == 0)
+            memset(slot, 0, sizeof(*slot));
     } else if (entry->type == FD_PIPE && entry->pipe) {
         if (--entry->pipe->ref_count <= 0) kfree(entry->pipe);
     }
@@ -752,6 +843,12 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
         return timerfd_ready(slot) ? LINUX_POLLIN : 0;
     }
 
+    if (entry->type == FD_SIGNALFD) {
+        signalfd_slot_t *slot = signalfd_for_fd(task, fd);
+        if (!slot) return LINUX_POLLERR;
+        return signalfd_ready(slot) ? LINUX_POLLIN : 0;
+    }
+
     if (entry->type == FD_INOTIFY) {
         inotify_slot_t *slot = inotify_for_fd(task, fd);
         if (!slot) return LINUX_POLLERR;
@@ -816,6 +913,22 @@ static int timeout_expired(int timeout_ms, uint64_t deadline) {
 long linux_compat_read(int fd, void *buffer, size_t count) {
     task_t *task = compat_task();
     if (inotify_for_fd(task, fd)) return inotify_read(fd, buffer, count);
+    signalfd_slot_t *sfd = signalfd_for_fd(task, fd);
+    if (sfd) {
+        if (!buffer) return -EFAULT;
+        if (count < 128) return -EINVAL;
+        if (sfd->pending_count == 0) {
+            if (sfd->flags & LINUX_SFD_NONBLOCK) return -EAGAIN;
+            return -EAGAIN; /* v1：阻塞读退化为 EAGAIN（Chromium 用非阻塞） */
+        }
+        int sig = (int)sfd->pending_signo[0];
+        memmove(sfd->pending_signo, sfd->pending_signo + 1,
+                (size_t)(sfd->pending_count - 1) * sizeof(uint32_t));
+        sfd->pending_count--;
+        signalfd_fill_info((uint8_t *)buffer, sig,
+                           task ? task->sig_last_sender_pid : 0);
+        return 128;
+    }
     timerfd_slot_t *tfd = timerfd_for_fd(task, fd);
     if (tfd) {
         if (!buffer) return -EFAULT;

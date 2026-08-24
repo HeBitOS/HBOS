@@ -135,4 +135,7 @@ int linux_compat_timerfd_settime(int fd, int flags,
                                  const void *new_value, void *old_value);
 int linux_compat_timerfd_gettime(int fd, void *curr_value);
 
+int linux_compat_signalfd(int fd, const void *sigset_ptr, int flags);
+int linux_compat_signalfd_consume(struct task *task, int sig);
+
 #endif /* HBOS_LINUX_COMPAT_H */

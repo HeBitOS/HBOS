@@ -1383,7 +1383,14 @@ void task_sig_deliver(task_t *task) {
         int word = (sig - 1) / 64;
         int bit = (sig - 1) % 64;
         if (!(task->sig_pending.sig[word] & (1ULL << bit))) continue;
-        if (task->sig_blocked.sig[word] & (1ULL << bit)) continue;
+        if (task->sig_blocked.sig[word] & (1ULL << bit)) {
+            /* 被阻塞的信号：若进程注册了关注该信号的 signalfd，消费进
+             * 队列（Linux 语义：signalfd 接收被阻塞的信号）。 */
+            extern int linux_compat_signalfd_consume(task_t *task, int sig);
+            if (linux_compat_signalfd_consume(task, sig))
+                task->sig_pending.sig[word] &= ~(1ULL << bit);
+            continue;
+        }
 
         if (sig == SIGKILL || sig == SIGSTOP || sig == SIGCONT) {
             task->sig_pending.sig[word] &= ~(1ULL << bit);
