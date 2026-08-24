@@ -2836,8 +2836,11 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (domain != 2) return (uint64_t)(-EAFNOSUPPORT);
             task_t *cur = task_current();
             if (!cur || !cur->fd_table) return (uint64_t)(-ESRCH);
+            /* 0/1/2 是隐式控制台 fd（posix.c fd_get 对 fd<3 返回 NULL），
+             * 从 3 开始分配，否则第一个 socket 会抢占 stdout 导致后续
+             * write(1) 写进 socket。open()/compat_fd_alloc 都从 3 开始。 */
             int fd = -1;
-            for (int i = 0; i < POSIX_MAX_FDS; i++) {
+            for (int i = 3; i < POSIX_MAX_FDS; i++) {
                 if (!cur->fd_table->entries[i].used) { fd = i; break; }
             }
             if (fd < 0) return (uint64_t)(-EMFILE);

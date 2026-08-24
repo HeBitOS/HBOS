@@ -1797,23 +1797,51 @@ int net_ntp_sync(const char *server) {
 }
 
 /**
- * @brief TCP 连接等待上下文，用于三次握手和数据收发过程中的状态跟踪
+ * @brief 多连接 TCP 槽：每个活动连接一个状态槽，接收分发回调按
+ * (对端 IP, 本端源端口) 路由，任意连接轮询时其余连接的数据也会落进
+ * 各自的 rx_buf，不再互相丢弃（Chromium/Linux AF_INET socket 需要
+ * 并发连接）。
  */
+#define NET_TCP_CONNS 8
+
 typedef struct {
-    uint32_t peer;                 /**< 对端 IP 地址 */
-    uint32_t ack;                  /**< 期望接收的确认号 */
-    uint32_t seq_seen;             /**< 最近一次看到的对端序列号 */
+    bool used;                     /**< 槽是否被占用 */
+    bool open;                     /**< 连接已建立（非握手期） */
+    int connecting;                /**< 等待 SYN+ACK */
+    int synack;                    /**< 收到 SYN+ACK */
+    int rst;                       /**< 收到 RST */
+    int fin;                       /**< 收到对端 FIN */
+    int need_ack;                  /**< 收到数据待回 ACK */
+    int acked;                     /**< 发送数据已被确认 */
     uint32_t want_ack;             /**< 发送后期望收到的 ACK 序号 */
+    uint8_t mac[6];                /**< 下一跳 MAC */
+    uint32_t peer;                 /**< 对端 IP（网络字节序） */
     uint16_t sport;                /**< 本端源端口 */
-    int synack;                    /**< 是否收到 SYN+ACK */
-    int done;                      /**< 对端是否发送 FIN（连接结束） */
-    int rst;                       /**< 是否收到 RST */
-    int need_ack;                  /**< 是否需要发送 ACK */
-    int acked;                     /**< 发送的数据是否已被确认 */
-    char *out;                     /**< 接收数据输出缓冲区 */
-    uint32_t cap;                  /**< 输出缓冲区容量 */
-    uint32_t len;                  /**< 已接收数据长度 */
-} tcp_wait_t;
+    uint16_t dport;                /**< 对端端口 */
+    uint32_t seq;                  /**< 本端发送序列号（下一个要发的） */
+    uint32_t ack;                  /**< 期望接收的对端序列号 */
+    uint8_t rx_buf[NET_TCP_RXBUF_SIZE]; /**< 该连接接收缓冲 */
+    uint32_t rx_len;               /**< 缓冲中未读字节数 */
+} tcp_conn_t;
+
+static tcp_conn_t tcp_conns[NET_TCP_CONNS];
+
+/* 找一个空闲槽，找不到返回 -1 */
+static int tcp_conn_alloc(void) {
+    for (int i = 0; i < NET_TCP_CONNS; i++) {
+        if (!tcp_conns[i].used) {
+            memset(&tcp_conns[i], 0, sizeof(tcp_conns[i]));
+            tcp_conns[i].used = true;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void tcp_conn_free(int slot) {
+    if (slot >= 0 && slot < NET_TCP_CONNS)
+        tcp_conns[slot].used = false;
+}
 
 /**
  * @brief 构造并发送一个 TCP 数据包
@@ -1846,54 +1874,66 @@ static int send_tcp(const uint8_t mac[6], uint32_t dst_ip, uint16_t sport, uint1
 }
 
 /**
- * @brief TCP 数据包接收回调，处理 SYN+ACK、数据段、FIN、RST 等
- * @param pkt 接收到的原始数据包
- * @param len 数据包长度
- * @param arg 指向 tcp_wait_t 的指针
+ * @brief TCP 数据包接收分发回调：按 (对端 IP, 本端源端口) 路由到对应
+ * 连接槽，处理 SYN+ACK、数据段、FIN、RST 与 ACK 确认。arg 保留兼容
+ * 不用（所有活动连接共享一个槽表）。
  * @return 1 有意义的包已处理，0 继续轮询
  */
-static int tcp_cb(const uint8_t *pkt, uint16_t len, void *arg) {
-    tcp_wait_t *w = arg;
+static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
+    (void)arg;
     if (len < sizeof(eth_hdr_t) + 40) return 0;
     const eth_hdr_t *eth = (const eth_hdr_t *)pkt;
     if (ntohs(eth->type) != ETH_TYPE_IP) return 0;
     const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(pkt + sizeof(eth_hdr_t));
-    if (ip->proto != IP_PROTO_TCP || ip->src != w->peer || ip->dst != primary.ip) return 0;
+    if (ip->proto != IP_PROTO_TCP || ip->dst != primary.ip) return 0;
     uint32_t ihl = (ip->ver_ihl & 0x0F) * 4;
     const tcp_hdr_t *tcp = (const tcp_hdr_t *)((const uint8_t *)ip + ihl);
-    if (ntohs(tcp->dst) != w->sport) return 0;
+    uint16_t dport = ntohs(tcp->dst);
+    tcp_conn_t *c = 0;
+    for (int i = 0; i < NET_TCP_CONNS; i++) {
+        if (tcp_conns[i].used && tcp_conns[i].sport == dport &&
+            tcp_conns[i].peer == ip->src) {
+            c = &tcp_conns[i];
+            break;
+        }
+    }
+    if (!c) return 0; /* 不是活动客户端连接（listen/accept 走自己的回调） */
     uint8_t flags = tcp->flags;
     uint32_t seq = ntohl(tcp->seq);
     uint32_t ip_len = ntohs(ip->len);
     uint32_t thl = (tcp->off_flags_hi >> 4) * 4;
     const uint8_t *data = (const uint8_t *)tcp + thl;
     uint32_t dlen = ip_len > ihl + thl ? ip_len - ihl - thl : 0;
-    if (flags & 0x04) { w->rst = 1; return 1; }
-    if ((flags & 0x12) == 0x12 && !w->synack) {
-        w->ack = seq + 1; w->synack = 1; return 1;
+    if (flags & 0x04) { c->rst = 1; return 1; }
+    if (c->connecting && (flags & 0x12) == 0x12 && !c->synack) {
+        c->ack = seq + 1;
+        c->synack = 1;
+        return 1;
     }
-    if ((flags & 0x10) && !dlen && (!w->want_ack || ntohl(tcp->ack) >= w->want_ack)) {
-        w->acked = 1;
+    if ((flags & 0x10) && ntohl(tcp->ack) >= c->want_ack && c->want_ack) {
+        c->acked = 1;
     }
-    if (dlen && seq == w->ack) {
-        w->seq_seen = seq;
+    if (dlen && seq == c->ack) {
         uint32_t copy = dlen;
-        if (w->len + copy > w->cap) copy = w->cap - w->len;
-        if (copy) memcpy(w->out + w->len, data, copy);
-        w->len += copy;
-        w->ack += dlen;
-        w->need_ack = 1;
+        if (c->rx_len + copy > NET_TCP_RXBUF_SIZE)
+            copy = NET_TCP_RXBUF_SIZE - c->rx_len;
+        if (copy) {
+            memcpy(c->rx_buf + c->rx_len, data, copy);
+            c->rx_len += copy;
+        }
+        c->ack += dlen;
+        c->need_ack = 1;
         if (flags & 0x01) {
-            w->ack++;
-            w->done = 1;
+            c->ack++;
+            c->fin = 1;
         }
         return 1;
     }
-    if (dlen && seq < w->ack) {
-        w->need_ack = 1;
+    if (dlen && seq < c->ack) {
+        c->need_ack = 1;
         return 1;
     }
-    if (flags & 0x01) { w->ack = seq + 1; w->done = 1; return 1; }
+    if (flags & 0x01) { c->ack = seq + 1; c->fin = 1; c->need_ack = 1; return 1; }
     return 0;
 }
 
@@ -1920,27 +1960,43 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
     conn->peer = ip;
     conn->seq = 0x10000000U + conn->sport;
 
-    tcp_wait_t w;
-    memset(&w, 0, sizeof(w));
-    w.peer = ip;
-    w.sport = conn->sport;
-    for (int attempt = 0; attempt < 3 && !w.synack && !w.rst; attempt++) {
-        send_tcp(conn->mac, ip, conn->sport, port, conn->seq, 0, 0x02, 0, 0);
+    int slot = tcp_conn_alloc();
+    if (slot < 0) {
+        set_error("tcp slots full");
+        return -1;
+    }
+    tcp_conn_t *c = &tcp_conns[slot];
+    c->connecting = 1;
+    c->synack = 0;
+    c->rst = 0;
+    c->peer = ip;
+    c->sport = conn->sport;
+    c->dport = port;
+    c->seq = conn->seq;
+    memcpy(c->mac, conn->mac, 6);
+    for (int attempt = 0; attempt < 3 && !c->synack && !c->rst; attempt++) {
+        send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02, 0, 0);
         uint64_t deadline = net_deadline_after_ms(1000);
-        while (!w.synack && !w.rst && net_before_deadline(deadline)) {
-            net_poll(tcp_cb, &w, 4096);
+        while (!c->synack && !c->rst && net_before_deadline(deadline)) {
+            net_poll(tcp_dispatch_cb, 0, 4096);
             task_yield();
         }
     }
-    if (!w.synack || w.rst) {
-        set_error(w.rst ? "tcp reset" : "tcp connect timeout");
+    if (!c->synack || c->rst) {
+        tcp_conn_free(slot);
+        set_error(c->rst ? "tcp reset" : "tcp connect timeout");
         return -1;
     }
-    conn->seq++;
-    conn->ack = w.ack;
-    if (send_tcp(conn->mac, ip, conn->sport, port, conn->seq, conn->ack, 0x10, 0, 0) < 0)
+    c->seq++;
+    if (send_tcp(c->mac, ip, c->sport, port, c->seq, c->ack, 0x10, 0, 0) < 0) {
+        tcp_conn_free(slot);
         return -1;
+    }
+    c->connecting = 0;
+    c->open = true;
+    conn->tcp_slot = slot;
     conn->open = true;
+    conn->ack = c->ack;
     return 0;
 }
 
@@ -1956,53 +2012,41 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
         set_error("bad tcp send");
         return -1;
     }
-    for (int attempt = 0; attempt < 3; attempt++) {
-        tcp_wait_t w;
-        memset(&w, 0, sizeof(w));
-        w.peer = conn->peer;
-        w.sport = conn->sport;
-        w.want_ack = conn->seq + len;
-        /* 让 send 等待 ACK 期间顺带到达的对端数据包也能被 tcp_cb
-         * 按 seq == w->ack 匹配并收入 rx_buf，否则这批数据会被丢弃，
-         * 之后 recv 永远等不到。 */
-        w.ack = conn->ack;
-        if (conn->rx_len < NET_TCP_RXBUF_SIZE) {
-            w.out = (char *)conn->rx_buf + conn->rx_len;
-            w.cap = NET_TCP_RXBUF_SIZE - conn->rx_len;
-        }
-        if (send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
-                     conn->seq, conn->ack, 0x18, data, (uint16_t)len) < 0)
+    int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
+                   ? conn->tcp_slot : -1;
+    tcp_conn_t *c = (slot >= 0) ? &tcp_conns[slot] : 0;
+    if (!c || !c->used) {
+        set_error("tcp slot lost");
+        return -1;
+    }
+    /* 槽为单一事实源：conn 字段在 connect/accept 时同步过，这里回读 */
+    c->want_ack = c->seq + len;
+    c->acked = 0;
+    for (int attempt = 0; attempt < 3 && !c->acked && !c->rst; attempt++) {
+        if (send_tcp(c->mac, c->peer, c->sport, c->dport,
+                     c->seq, c->ack, 0x18, data, (uint16_t)len) < 0)
             return -1;
         uint64_t deadline = net_deadline_after_ms(1000);
-        while (!w.rst && net_before_deadline(deadline)) {
-            net_poll(tcp_cb, &w, 4096);
+        while (!c->acked && !c->rst && net_before_deadline(deadline)) {
+            net_poll(tcp_dispatch_cb, 0, 4096);
             task_yield();
-            if (w.acked) {
-                /* ACK 与对端数据可能同时到达：数据已由 tcp_cb 写入
-                 * w.out（即 conn->rx_buf），必须先累加 rx_len，否则
-                 * 后续 recv 看不到这批数据直接返回 0；同时若本轮还
-                 * 收到数据，必须把 conn->ack 推进到下一个期待序列，
-                 * 否则后续数据包会因 seq 不匹配被 tcp_cb 丢弃。 */
-                if (w.len) conn->rx_len += w.len;
-                if (w.need_ack) conn->ack = w.ack;
-                conn->seq += len;
-                return 0;
+            if (c->need_ack) {
+                c->need_ack = 0;
+                send_tcp(c->mac, c->peer, c->sport, c->dport,
+                         c->seq + len, c->ack, 0x10, 0, 0);
             }
-            if (w.need_ack) {
-                conn->ack = w.ack;
-                send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
-                         conn->seq + len, conn->ack, 0x10, 0, 0);
-                w.need_ack = 0;
-            }
-        }
-        if (w.len) conn->rx_len += w.len;
-        if (w.rst) {
-            set_error("tcp reset");
-            conn->open = false;
-            return -1;
         }
     }
-    conn->seq += len;
+    if (c->rst) {
+        set_error("tcp reset");
+        c->open = false;
+        conn->open = false;
+        return -1;
+    }
+    c->seq += len;
+    conn->seq = c->seq;
+    conn->ack = c->ack;
+    conn->rx_len = c->rx_len;
     return 0;
 }
 
@@ -2020,58 +2064,70 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
         set_error("bad tcp recv");
         return -1;
     }
-    if (conn->rx_len) {
-        uint32_t copy = conn->rx_len;
-        if (copy > cap) copy = cap;
-        memcpy(buf, conn->rx_buf, copy);
-        if (copy < conn->rx_len) memmove(conn->rx_buf, conn->rx_buf + copy, conn->rx_len - copy);
-        conn->rx_len -= copy;
-        *len = copy;
-        return 0;
-    }
-    if (!conn->open) {
+    int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
+                   ? conn->tcp_slot : -1;
+    tcp_conn_t *c = (slot >= 0) ? &tcp_conns[slot] : 0;
+    if (!c || !c->used) {
+        /* 未登记槽（理论不发生）：退回读 conn 自带缓冲 */
+        if (conn->rx_len) {
+            uint32_t copy = conn->rx_len;
+            if (copy > cap) copy = cap;
+            memcpy(buf, conn->rx_buf, copy);
+            if (copy < conn->rx_len)
+                memmove(conn->rx_buf, conn->rx_buf + copy, conn->rx_len - copy);
+            conn->rx_len -= copy;
+            *len = copy;
+            return 0;
+        }
         *len = 0;
         return 0;
     }
-    tcp_wait_t w;
-    uint8_t tmp[1536];
-    memset(&w, 0, sizeof(w));
-    w.peer = conn->peer;
-    w.sport = conn->sport;
-    w.ack = conn->ack;
-    w.out = (char *)tmp;
-    w.cap = sizeof(tmp);
-    for (uint32_t i = 0; i < poll_rounds && !w.done && !w.rst; i++) {
-        net_poll(tcp_cb, &w, 80000);
-        task_yield();
-        if (w.need_ack) {
-            conn->ack = w.ack;
-            send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
-                     conn->seq, conn->ack, 0x10, 0, 0);
-            w.need_ack = 0;
-            if (w.len) break;
-        }
+    if (c->rx_len) {
+        uint32_t copy = c->rx_len;
+        if (copy > cap) copy = cap;
+        memcpy(buf, c->rx_buf, copy);
+        if (copy < c->rx_len)
+            memmove(c->rx_buf, c->rx_buf + copy, c->rx_len - copy);
+        c->rx_len -= copy;
+        conn->rx_len = c->rx_len;
+        *len = copy;
+        return 0;
     }
-    if (w.rst) {
+    if (!c->open) {
+        *len = 0;
+        return 0;
+    }
+    for (uint32_t i = 0; i < poll_rounds && !c->fin && !c->rst; i++) {
+        net_poll(tcp_dispatch_cb, 0, 80000);
+        task_yield();
+        if (c->need_ack) {
+            c->need_ack = 0;
+            send_tcp(c->mac, c->peer, c->sport, c->dport,
+                     c->seq, c->ack, 0x10, 0, 0);
+            if (c->rx_len) break;
+        }
+        if (c->rx_len) break;
+    }
+    if (c->rst) {
+        c->open = false;
         conn->open = false;
         set_error("tcp reset");
         return -1;
     }
-    if (w.done) {
-        conn->ack = w.ack;
-        send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
-                 conn->seq, conn->ack, 0x10, 0, 0);
+    if (c->fin && !c->rx_len) {
+        c->open = false;
         conn->open = false;
     }
-    uint32_t copy = w.len;
+    uint32_t copy = c->rx_len;
     if (copy > cap) copy = cap;
-    if (copy) memcpy(buf, tmp, copy);
-    if (w.len > copy) {
-        uint32_t rest = w.len - copy;
-        if (rest > NET_TCP_RXBUF_SIZE) rest = NET_TCP_RXBUF_SIZE;
-        memcpy(conn->rx_buf, tmp + copy, rest);
-        conn->rx_len = rest;
+    if (copy) {
+        memcpy(buf, c->rx_buf, copy);
+        if (copy < c->rx_len)
+            memmove(c->rx_buf, c->rx_buf + copy, c->rx_len - copy);
+        c->rx_len -= copy;
     }
+    conn->rx_len = c->rx_len;
+    conn->ack = c->ack;
     *len = copy;
     return 0;
 }
@@ -2082,10 +2138,20 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
  */
 void net_tcp_close(net_tcp_conn_t *conn) {
     if (!conn || !conn->open) return;
-    send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
-             conn->seq, conn->ack, 0x11, 0, 0);
+    int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
+                   ? conn->tcp_slot : -1;
+    tcp_conn_t *c = (slot >= 0) ? &tcp_conns[slot] : 0;
+    if (c && c->used)
+        send_tcp(c->mac, c->peer, c->sport, c->dport,
+                 c->seq, c->ack, 0x11, 0, 0);
+    else
+        send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
+                 conn->seq, conn->ack, 0x11, 0, 0);
+    if (c) c->seq++;
     conn->seq++;
     conn->open = false;
+    if (slot >= 0) tcp_conn_free(slot);
+    conn->tcp_slot = -1;
 }
 
 /**
@@ -2418,15 +2484,30 @@ int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn,
     memcpy(conn->mac, p->peer_mac, 6);
     conn->open  = true;
 
-    /* 握手阶段就已经被 accept_cb 捎带收下的数据（见 tcp_pending_t 定义处
-     * 的注释）搬进 conn->rx_buf——net_tcp_recv() 一进来就会先看这里有没
-     * 有现成数据，不用重新等网络。 */
+    /* 接受连接也登记进多连接槽表：之后 recv/send 统一走槽位（含并发
+     * 连接的数据分发）。握手阶段由 accept_cb 捎带收下的数据搬进槽。 */
+    int aslot = tcp_conn_alloc();
+    if (aslot < 0) {
+        p->in_use = 0;
+        set_error("tcp slots full");
+        return -1;
+    }
+    tcp_conn_t *ac = &tcp_conns[aslot];
+    ac->open = true;
+    ac->peer = p->peer;
+    ac->sport = port;
+    ac->dport = p->peer_port;
+    ac->seq = p->isn + 1;
+    ac->ack = p->peer_seq;
+    memcpy(ac->mac, p->peer_mac, 6);
     if (p->rx_stage_len) {
         uint32_t copy = p->rx_stage_len;
         if (copy > NET_TCP_RXBUF_SIZE) copy = NET_TCP_RXBUF_SIZE;
-        memcpy(conn->rx_buf, p->rx_stage, copy);
-        conn->rx_len = copy;
+        memcpy(ac->rx_buf, p->rx_stage, copy);
+        ac->rx_len = copy;
     }
+    conn->tcp_slot = aslot;
+    conn->rx_len = ac->rx_len;
 
     p->in_use = 0;
     return 0;

@@ -341,6 +341,7 @@ HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_DIR_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/
 	$(BUILD_DIR)/app/js.hax $(BUSYBOX_HAX)
 ifeq ($(HBOS_COMPAT_SMOKE),1)
 HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
+	$(BUILD_DIR)/tests/linux_socket2.hax \
 	$(BUILD_DIR)/tests/linux_clone3.hax \
 	$(BUILD_DIR)/tests/linux_inotify.hax \
 	$(BUILD_DIR)/tests/linux_syscall.hax \
@@ -914,6 +915,12 @@ $(BUILD_DIR)/tests/linux_compat_thread.hax: tests/linux_compat_thread.c $(USER_L
 	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_compat_thread.o
 	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_compat_thread.o $(USER_LINUX_COMPAT_LIB) -o $@
 	@echo "✓ Linux thread test binary: $@"
+
+$(BUILD_DIR)/tests/linux_socket2.hax: tests/linux_socket2.c $(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_socket2.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_socket2.o $(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ Linux AF_INET dual-socket test binary: $@"
 
 $(BUILD_DIR)/tests/linux_clone3.hax: tests/linux_clone3.c tests/linux_clone3.asm \
 		$(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)

@@ -73,6 +73,7 @@ typedef struct {
     uint8_t mac[6];                /**< 对端 MAC 地址 */
     uint8_t rx_buf[NET_TCP_RXBUF_SIZE]; /**< 接收缓冲区 */
     uint32_t rx_len;               /**< 接收缓冲区中未读取的数据长度 */
+    int tcp_slot;                  /**< net.c 多连接 TCP 槽索引（-1 未登记） */
 } net_tcp_conn_t;
 
 /** Raw Ethernet frame callback used by protocol-stack adapters. */
