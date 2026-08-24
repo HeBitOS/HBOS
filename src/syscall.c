@@ -2290,6 +2290,39 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return 0;
         }
 
+        case HBOS_SYS_STATFS:
+        case HBOS_SYS_FSTATFS: {
+            /* Linux x86-64 struct statfs：12 个 long + 4 long spare = 128 字节 */
+            long *buf = (long *)f->a1;
+            if (!buf) return (uint64_t)(-EFAULT);
+            memset(buf, 0, 128);
+            buf[0] = 0x01021994L;      /* RAMFS_MAGIC */
+            buf[1] = 4096;             /* f_bsize */
+            buf[2] = 1;                /* f_blocks */
+            buf[3] = 1;                /* f_bfree */
+            buf[4] = 1;                /* f_bavail */
+            buf[8] = 255;              /* f_namelen */
+            return 0;
+        }
+
+        case HBOS_SYS_SCHED_GETAFFINITY: {
+            int pid = (int)f->a0;
+            size_t len = (size_t)f->a1;
+            unsigned long *mask = (unsigned long *)f->a2;
+            if (!mask || !len) return (uint64_t)(-EINVAL);
+            if (pid != 0) return (uint64_t)(-ESRCH);
+            extern int smp_cpu_count(void);
+            int ncpu = smp_cpu_count();
+            if (ncpu < 1) ncpu = 1;
+            memset(mask, 0, len);
+            for (int i = 0; i < ncpu; i++) {
+                if ((size_t)(i / (int)(sizeof(long) * 8)) * sizeof(long) < len)
+                    mask[i / (int)(sizeof(long) * 8)] |=
+                        1UL << (i % (int)(sizeof(long) * 8));
+            }
+            return (uint64_t)(len < (size_t)sizeof(long) * 8 ? len : (size_t)sizeof(long) * 8);
+        }
+
         case HBOS_SYS_GETTOD: {
             struct timeval {
                 uint64_t tv_sec;
@@ -3489,22 +3522,35 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 return (uint64_t)(-ENOPROTOOPT);
             uint32_t *length = (uint32_t *)f->a4;
             if (*length < sizeof(int)) return (uint64_t)(-EINVAL);
-            if ((int)f->a2 != 3 && (int)f->a2 != 4)
-                return (uint64_t)(-ENOPROTOOPT);
-            if ((int)f->a2 == 4) {
-                /* SO_ERROR：非阻塞 connect 完成报告（EINPROGRESS 直到成功） */
-                net_tcp_conn_t *conn = (net_tcp_conn_t *)
-                    cur->fd_table->entries[fd].node;
-                int err = 0;
-                if (conn) {
-                    int fc = net_tcp_finish_connect(conn);
-                    err = (fc == 1) ? EINPROGRESS : 0;
+            /* Chromium 会查询这些选项来定尺寸；TCP_NODELAY 在 level 6 */
+            switch ((int)f->a2) {
+                case 3: /* SO_TYPE */
+                    *(int *)f->a3 = 1;
+                    break;
+                case 4: { /* SO_ERROR：非阻塞 connect 完成报告 */
+                    net_tcp_conn_t *conn = (net_tcp_conn_t *)
+                        cur->fd_table->entries[fd].node;
+                    int err = 0;
+                    if (conn) {
+                        int fc = net_tcp_finish_connect(conn);
+                        err = (fc == 1) ? EINPROGRESS : 0;
+                    }
+                    *(int *)f->a3 = err;
+                    break;
                 }
-                *(int *)f->a3 = err;
-                *length = sizeof(int);
-                return 0;
+                case 7: /* SO_SNDBUF */
+                    *(int *)f->a3 = 16384;
+                    break;
+                case 8: /* SO_RCVBUF */
+                    *(int *)f->a3 = 8192;
+                    break;
+                case 2:  /* SO_REUSEADDR */
+                case 9:  /* SO_KEEPALIVE */
+                case 13: /* SO_OOBINLINE */
+                default:
+                    *(int *)f->a3 = 0;
+                    break;
             }
-            *(int *)f->a3 = 1; /* SO_TYPE */
             *length = sizeof(int);
             return 0;
         }
@@ -3520,6 +3566,9 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 return finish_syscall(linux_compat_unix_setsockopt(
                     fd, (int)f->a1, (int)f->a2,
                     (const void *)f->a3, (uint32_t)f->a4));
+            /* AF_INET：SO_REUSEADDR/SO_KEEPALIVE/SO_SNDBUF/SO_RCVBUF
+             * (level 1) 与 TCP_NODELAY (level 6) 接受为 no-op 成功 */
+            if (!f->a3) return (uint64_t)(-EFAULT);
             return 0;
         }
 

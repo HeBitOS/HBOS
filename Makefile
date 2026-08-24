@@ -346,6 +346,7 @@ HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
 	$(BUILD_DIR)/tests/linux_nbconnect.hax \
 	$(BUILD_DIR)/tests/linux_dns.hax \
 	$(BUILD_DIR)/tests/linux_timerfd.hax \
+	$(BUILD_DIR)/tests/linux_sysinfo2.hax \
 	$(BUILD_DIR)/tests/linux_clone3.hax \
 	$(BUILD_DIR)/tests/linux_inotify.hax \
 	$(BUILD_DIR)/tests/linux_syscall.hax \
@@ -900,7 +901,8 @@ USER_LIBC_SRCS = \
 	$(USER_LIBC_DIR)/wait.c \
 	$(USER_LIBC_DIR)/getopt.c \
 	$(USER_LIBC_DIR)/netdb.c \
-	$(USER_LIBC_DIR)/timerfd.c
+	$(USER_LIBC_DIR)/timerfd.c \
+	$(USER_LIBC_DIR)/statfs.c
 
 USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o) $(BUILD_DIR)/user/libc/setjmp.o
 USER_LINUX_COMPAT_OBJ = $(BUILD_DIR)/user/libc/linux.o
@@ -951,6 +953,12 @@ $(BUILD_DIR)/tests/linux_timerfd.hax: tests/linux_timerfd.c $(USER_LIBC_OBJS) $(
 	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_timerfd.o
 	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_timerfd.o $(USER_LINUX_COMPAT_LIB) -o $@
 	@echo "✓ Linux timerfd test binary: $@"
+
+$(BUILD_DIR)/tests/linux_sysinfo2.hax: tests/linux_sysinfo2.c $(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $< -o $(BUILD_DIR)/tests/linux_sysinfo2.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/tests/linux_sysinfo2.o $(USER_LINUX_COMPAT_LIB) -o $@
+	@echo "✓ Linux sysinfo/sockopt test binary: $@"
 
 $(BUILD_DIR)/tests/linux_clone3.hax: tests/linux_clone3.c tests/linux_clone3.asm \
 		$(USER_LIBC_OBJS) $(USER_LINUX_COMPAT_LIB) | $(BUILD_DIR)

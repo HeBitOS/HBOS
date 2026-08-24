@@ -54,6 +54,9 @@
 #define SYS_fcntl            72
 #define SYS_ftruncate        77
 #define SYS_getcwd           79
+#define SYS_statfs           137
+#define SYS_fstatfs          138
+#define SYS_sched_getaffinity 204
 #define SYS_chdir            80
 #define SYS_rename           82
 #define SYS_mkdir            83

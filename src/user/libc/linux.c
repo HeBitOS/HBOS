@@ -127,6 +127,11 @@ int epoll_wait(int epfd, struct epoll_event *events,
     return (int)__syscall_errno(ret);
 }
 
+int sched_getaffinity(int pid, size_t cpusetsize, unsigned long *mask) {
+    return (int)__syscall_errno(__syscall3(
+        HBOS_SYS_SCHED_GETAFFINITY, pid, (long)cpusetsize, (long)mask));
+}
+
 int sched_yield(void) {
     long ret = __syscall1(HBOS_SYS_SCHED_YIELD, 0);
     return (int)__syscall_errno(ret);
@@ -330,6 +335,9 @@ static syscall_translation_t translate_linux_syscall(long number) {
         case SYS_wait4:           return (syscall_translation_t){HBOS_SYS_WAITPID, 3};
         case SYS_kill:            return (syscall_translation_t){HBOS_SYS_KILL, 2};
         case SYS_uname:           return (syscall_translation_t){HBOS_SYS_UNAME, 1};
+        case SYS_statfs:          return (syscall_translation_t){HBOS_SYS_STATFS, 2};
+        case SYS_fstatfs:         return (syscall_translation_t){HBOS_SYS_FSTATFS, 2};
+        case SYS_sched_getaffinity: return (syscall_translation_t){HBOS_SYS_SCHED_GETAFFINITY, 3};
         case SYS_fcntl:           return (syscall_translation_t){HBOS_SYS_FCNTL, 3};
         case SYS_ftruncate:       return (syscall_translation_t){HBOS_SYS_FTRUNCATE, 2};
         case SYS_getcwd:          return (syscall_translation_t){HBOS_SYS_GETCWD, 2};

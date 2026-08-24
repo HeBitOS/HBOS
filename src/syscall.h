@@ -229,6 +229,9 @@ typedef enum {
     HBOS_SYS_TIMERFD_CREATE,  /**< timerfd_create(clockid, flags) */
     HBOS_SYS_TIMERFD_SETTIME, /**< timerfd_settime(fd, flags, new, old) */
     HBOS_SYS_TIMERFD_GETTIME, /**< timerfd_gettime(fd, curr) */
+    HBOS_SYS_STATFS,           /**< statfs(path, buf) */
+    HBOS_SYS_FSTATFS,          /**< fstatfs(fd, buf) */
+    HBOS_SYS_SCHED_GETAFFINITY,/**< sched_getaffinity(pid, len, mask) */
 
     HBOS_SYS_MAX             /**< 系统调用总数 */
 } hbos_syscall_no_t;
