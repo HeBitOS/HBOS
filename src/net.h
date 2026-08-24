@@ -153,14 +153,14 @@ int net_tcp_conn_open(const net_tcp_conn_t *conn);
 /** @brief 泵一次网络收包分发（供 poll/epoll 等待循环处理 AF_INET 收包） */
 void net_pump(void);
 
-/** @brief 非消费式查询：连接接收缓冲是否有数据可读（含 FIN/EOF） */
-int net_tcp_rx_available(const net_tcp_conn_t *conn);
+/** @brief 驱动层调用：UDP 收包入全局队列（避免被 TCP 轮询丢弃） */
+void net_udp_queue(const uint8_t *pkt, uint16_t len);
 
-/** @brief 非消费式查询：连接是否仍打开（可写） */
-int net_tcp_conn_open(const net_tcp_conn_t *conn);
+/** @brief UDP 等待者调用：排空全局 UDP 队列交给自己的回调 */
+void net_udp_drain(int (*cb)(const uint8_t *, uint16_t, void *), void *arg);
 
-/** @brief 泵一次网络收包分发（供 poll/epoll 等待循环处理 AF_INET 收包） */
-void net_pump(void);
+/** @brief 判断帧是否为 IPv4 UDP */
+int net_pkt_is_udp(const uint8_t *pkt, uint16_t len);
 
 /** @brief 接受一个 TCP 客户端连接 */
 int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn, uint32_t timeout_ms);

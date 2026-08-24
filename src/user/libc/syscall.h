@@ -205,6 +205,7 @@ enum {
     HBOS_SYS_GETSOCKNAME,
     HBOS_SYS_GETPEERNAME,
     HBOS_SYS_WEB_FETCH,
+    HBOS_SYS_DNS_RESOLVE,
 };
 
 long __syscall6(long nr, long a0, long a1, long a2, long a3, long a4, long a5);

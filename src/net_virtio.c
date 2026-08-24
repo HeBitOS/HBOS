@@ -457,7 +457,15 @@ int virtio_net_poll(int (*cb)(const uint8_t *pkt, uint16_t len, void *arg),
         } else if (cb) {
             if (rx_packets) (*rx_packets)++;
             if (rx_bytes) (*rx_bytes) += frame_len;
-            result = cb(frame, (uint16_t)frame_len, arg);
+            /* UDP 入全局队列（net.c），避免被 TCP 分发的轮询丢弃 */
+            extern int net_pkt_is_udp(const uint8_t *, uint16_t);
+            extern void net_udp_queue(const uint8_t *, uint16_t);
+            if (net_pkt_is_udp(frame, (uint16_t)frame_len)) {
+                net_udp_queue(frame, (uint16_t)frame_len);
+                result = 1;
+            } else {
+                result = cb(frame, (uint16_t)frame_len, arg);
+            }
         } else {
             if (rx_dropped) (*rx_dropped)++;
         }

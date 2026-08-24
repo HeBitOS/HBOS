@@ -446,7 +446,13 @@ static int e1000_poll(packet_cb_t cb, void *arg, uint32_t spins) {
         if (len >= sizeof(eth_hdr_t) && len <= PKT_SIZE && cb) {
             primary.rx_packets++;
             primary.rx_bytes += len;
-            ret = cb(rx_buf[idx], len, arg);
+            if (net_pkt_is_udp(rx_buf[idx], len)) {
+                /* UDP 入全局队列，不喂给当前（很可能不是 UDP 消费者）的回调 */
+                net_udp_queue(rx_buf[idx], len);
+                ret = 1;
+            } else {
+                ret = cb(rx_buf[idx], len, arg);
+            }
         } else {
             primary.rx_dropped++;
         }
@@ -1019,7 +1025,13 @@ static int rtl8139_poll(packet_cb_t cb, void *arg, uint32_t spins) {
         uint16_t frame_len = (uint16_t)(rx_len - 4U); /* strip Ethernet CRC */
         primary.rx_packets++;
         primary.rx_bytes += frame_len;
-        int ret = cb ? cb(packet + 4, frame_len, arg) : 0;
+        int ret;
+        if (cb && net_pkt_is_udp(packet + 4, frame_len)) {
+            net_udp_queue(packet + 4, frame_len);
+            ret = 1;
+        } else {
+            ret = cb ? cb(packet + 4, frame_len, arg) : 0;
+        }
 
         rtl8139_rx_offset = (rtl8139_rx_offset + rx_len + 4U + 3U) & ~3U;
         rtl8139_rx_offset %= RTL8139_RX_RING_SIZE;
@@ -1260,7 +1272,14 @@ static int pcnet_poll(packet_cb_t cb, void *arg, uint32_t spins) {
                 rlen = (uint16_t)(rlen - 4U); /* strip Ethernet CRC */
                 primary.rx_packets++;
                 primary.rx_bytes += rlen;
-                if (cb) ret = cb(pcnet_rx_buf[i], rlen, arg);
+                if (cb) {
+                    if (net_pkt_is_udp(pcnet_rx_buf[i], rlen)) {
+                        net_udp_queue(pcnet_rx_buf[i], rlen);
+                        ret = 1;
+                    } else {
+                        ret = cb(pcnet_rx_buf[i], rlen, arg);
+                    }
+                }
             } else {
                 primary.rx_errors++;
                 primary.rx_dropped++;
@@ -1420,6 +1439,8 @@ int net_dhcp(void) {
         if (send_dhcp(1, xid, 0, 0) < 0) break;
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!w.found && net_before_deadline(deadline)) {
+            net_udp_drain(dhcp_cb, &w);
+            net_udp_drain(dhcp_cb, &w);
             net_poll(dhcp_cb, &w, 4096);
             task_yield();
         }
@@ -1434,6 +1455,8 @@ int net_dhcp(void) {
         if (send_dhcp(3, xid, offer, server) < 0) break;
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!w.found && net_before_deadline(deadline)) {
+            net_udp_drain(dhcp_cb, &w);
+            net_udp_drain(dhcp_cb, &w);
             net_poll(dhcp_cb, &w, 4096);
             task_yield();
         }
@@ -1525,6 +1548,7 @@ int net_ping(uint32_t ip, uint32_t timeout_ms) {
     if (send_ip(mac, ip, IP_PROTO_ICMP, icmp, sizeof(icmp)) < 0) return -1;
     uint64_t deadline = net_deadline_after_ms(timeout_ms ? timeout_ms : 1000U);
     while (!w.ok && net_before_deadline(deadline)) {
+        net_udp_drain(ping_cb, &w);
         net_poll(ping_cb, &w, 4096);
         task_yield();
     }
@@ -1684,6 +1708,7 @@ static int net_dns_query(const char *name, uint16_t query_type,
                          msg, (uint16_t)len) < 0) break;
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!w.completed && net_before_deadline(deadline)) {
+            net_udp_drain(dns_cb, &w);
             net_poll(dns_cb, &w, 4096);
             task_yield();
         }
@@ -1785,6 +1810,7 @@ int net_ntp_sync(const char *server) {
                          req, sizeof(req)) < 0) break;
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!w.found && net_before_deadline(deadline)) {
+            net_udp_drain(ntp_cb, &w);
             net_poll(ntp_cb, &w, 4096);
             task_yield();
         }
@@ -2257,6 +2283,41 @@ int net_tcp_conn_open(const net_tcp_conn_t *conn) {
  * 发送时已同步注入，不需要）。 */
 void net_pump(void) {
     net_poll(tcp_dispatch_cb, 0, 64);
+}
+
+/* UDP 收包队列：UDP(DNS/NTP/DHCP)响应到达时，任何在轮询的任务
+ * （httpd 的 accept_cb、poll/epoll 的 tcp_dispatch_cb）都会把包从网卡
+ * 描述符消费掉并丢弃——驱动回调后无条件回收 RX 描述符。对策：驱动层
+ * 认出 UDP 包就入全局队列（不调用当前回调），UDP 等待者（dns_cb/
+ * ntp_cb/dhcp_cb）在自己的轮询循环里显式排空队列。 */
+#define NET_UDP_QUEUE 8
+typedef struct { uint8_t pkt[1514]; uint16_t len; } udp_queue_ent_t;
+static udp_queue_ent_t g_udp_queue[NET_UDP_QUEUE];
+static int g_udp_head;
+static int g_udp_tail;
+
+void net_udp_queue(const uint8_t *pkt, uint16_t len) {
+    int next = (g_udp_tail + 1) % NET_UDP_QUEUE;
+    if (next == g_udp_head || len > sizeof(g_udp_queue[0].pkt)) return;
+    memcpy(g_udp_queue[g_udp_tail].pkt, pkt, len);
+    g_udp_queue[g_udp_tail].len = len;
+    g_udp_tail = next;
+}
+
+void net_udp_drain(int (*cb)(const uint8_t *, uint16_t, void *), void *arg) {
+    while (g_udp_head != g_udp_tail) {
+        int h = g_udp_head;
+        (void)cb(g_udp_queue[h].pkt, g_udp_queue[h].len, arg);
+        g_udp_head = (g_udp_head + 1) % NET_UDP_QUEUE;
+    }
+}
+
+int net_pkt_is_udp(const uint8_t *pkt, uint16_t len) {
+    if (len < sizeof(eth_hdr_t) + 20) return 0;
+    const eth_hdr_t *eth = (const eth_hdr_t *)pkt;
+    if (ntohs(eth->type) != ETH_TYPE_IP) return 0;
+    const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(pkt + sizeof(eth_hdr_t));
+    return ip->proto == IP_PROTO_UDP;
 }
 
 /**

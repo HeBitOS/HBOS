@@ -3586,6 +3586,17 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return status < 0 ? (uint64_t)(-EIO) : (uint64_t)out_len;
         }
 
+        case HBOS_SYS_DNS_RESOLVE: {
+            /* getaddrinfo/gethostbyname 的底层：net_dns_resolve(name, ip4) */
+            const char *name = (const char *)f->a0;
+            uint32_t *out_ip = (uint32_t *)f->a1;
+            if (!name || !out_ip) return (uint64_t)(-EINVAL);
+            if (strnlen(name, 256) >= 256) return (uint64_t)(-EINVAL);
+            if (net_dns_resolve(name, out_ip) < 0)
+                return (uint64_t)(-EHOSTUNREACH);
+            return 0;
+        }
+
         case HBOS_SYS_MEMFD_CREATE: {
             int fd = linux_compat_memfd_create(
                 (const char *)f->a0, (unsigned int)f->a1);
