@@ -123,6 +123,15 @@ int net_ntp_sync(const char *server);
 /** @brief 发起 TCP 三次握手，建立到指定 IP:port 的连接 */
 int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn);
 
+/** @brief 非阻塞 connect：只发 SYN 立即返回（连接状态在槽里推进） */
+int net_tcp_connect_start(uint32_t ip, uint16_t port, net_tcp_conn_t *conn);
+
+/**
+ * @brief 推进非阻塞 connect：收到 SYN+ACK 时补发最终 ACK 并置 open。
+ * @return 0 完成，-1 失败（RST/槽丢失），1 仍在进行（EINPROGRESS）
+ */
+int net_tcp_finish_connect(net_tcp_conn_t *conn);
+
 /** @brief 通过已建立的 TCP 连接发送数据 */
 int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len);
 

@@ -1981,11 +1981,9 @@ static void tcp_drain_acks(void) {
  * @param conn 输出 TCP 连接结构体
  * @return 0 成功，-1 失败（超时或被 RST）
  */
-int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
-    if (!conn || port == 0) {
-        set_error("bad tcp connect");
-        return -1;
-    }
+/* 连接准备（阻塞/非阻塞共用）：路由/ARP、分配槽、发 SYN */
+static int net_tcp_connect_prepare(uint32_t ip, uint16_t port,
+                                   net_tcp_conn_t *conn) {
     memset(conn, 0, sizeof(*conn));
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
     int loopback = (ip == primary.ip) || (ip == NET_LOOPBACK_V4);
@@ -2017,30 +2015,76 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
     c->dport = port;
     c->seq = conn->seq;
     memcpy(c->mac, conn->mac, 6);
+    if (send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02, 0, 0) < 0) {
+        tcp_conn_free(slot);
+        return -1;
+    }
+    conn->tcp_slot = slot;
+    return 0;
+}
+
+/* 非阻塞 connect：发 SYN 立即返回，连接在槽里推进（finish 完成） */
+int net_tcp_connect_start(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
+    if (!conn || port == 0) {
+        set_error("bad tcp connect");
+        return -1;
+    }
+    return net_tcp_connect_prepare(ip, port, conn);
+}
+
+/* 推进非阻塞 connect：SYN+ACK 已到则补最终 ACK 并置 open。
+ * 返回 0 完成 / -1 失败 / 1 仍在进行 */
+int net_tcp_finish_connect(net_tcp_conn_t *conn) {
+    if (!conn) return -1;
+    int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
+                   ? conn->tcp_slot : -1;
+    tcp_conn_t *c = (slot >= 0) ? &tcp_conns[slot] : 0;
+    if (!c || !c->used) return -1;
+    if (!c->connecting) return c->open ? 0 : -1;
+    if (c->rst) {
+        c->connecting = 0;
+        c->open = false;
+        conn->open = false;
+        set_error("tcp reset");
+        return -1;
+    }
+    if (!c->synack) return 1;
+    c->seq++;
+    if (send_tcp(c->mac, c->peer, c->sport, c->dport,
+                 c->seq, c->ack, 0x10, 0, 0) < 0)
+        return -1;
+    c->connecting = 0;
+    c->open = true;
+    conn->open = true;
+    conn->seq = c->seq;
+    conn->ack = c->ack;
+    return 0;
+}
+
+/* 阻塞 connect：prepare + 等待 SYN+ACK + finish */
+int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
+    if (!conn || port == 0) {
+        set_error("bad tcp connect");
+        return -1;
+    }
+    if (net_tcp_connect_prepare(ip, port, conn) < 0) return -1;
+    tcp_conn_t *c = &tcp_conns[conn->tcp_slot];
     for (int attempt = 0; attempt < 3 && !c->synack && !c->rst; attempt++) {
-        send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02, 0, 0);
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!c->synack && !c->rst && net_before_deadline(deadline)) {
             net_poll(tcp_dispatch_cb, 0, 4096);
             tcp_drain_acks();
             task_yield();
         }
+        if (!c->synack && !c->rst)
+            send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02, 0, 0);
     }
-    if (!c->synack || c->rst) {
-        tcp_conn_free(slot);
+    if (net_tcp_finish_connect(conn) != 0) {
+        tcp_conn_free(conn->tcp_slot);
+        conn->tcp_slot = -1;
         set_error(c->rst ? "tcp reset" : "tcp connect timeout");
         return -1;
     }
-    c->seq++;
-    if (send_tcp(c->mac, ip, c->sport, port, c->seq, c->ack, 0x10, 0, 0) < 0) {
-        tcp_conn_free(slot);
-        return -1;
-    }
-    c->connecting = 0;
-    c->open = true;
-    conn->tcp_slot = slot;
-    conn->open = true;
-    conn->ack = c->ack;
     return 0;
 }
 

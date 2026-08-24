@@ -2847,7 +2847,9 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             cur->fd_table->entries[fd].used = true;
             cur->fd_table->entries[fd].node = NULL;
             cur->fd_table->entries[fd].offset = 0;
-            cur->fd_table->entries[fd].flags = O_RDWR;
+            /* SOCK_NONBLOCK(0x800)=O_NONBLOCK：非阻塞 connect 用 */
+            cur->fd_table->entries[fd].flags = O_RDWR |
+                ((type & 0x800) ? O_NONBLOCK : 0);
             cur->fd_table->entries[fd].type = FD_SOCKET;
             cur->fd_table->entries[fd].local_port = 0;
             return (uint64_t)fd;
@@ -2945,6 +2947,18 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             uint16_t port = ((uint16_t)addr_bytes[2] << 8) | addr_bytes[3];
             net_tcp_conn_t *conn = (net_tcp_conn_t *)kmalloc(sizeof(net_tcp_conn_t));
             if (!conn) return (uint64_t)(-ENOMEM);
+            if (cur->fd_table->entries[sockfd].flags & O_NONBLOCK) {
+                /* 非阻塞 connect：发 SYN 立即返回 EINPROGRESS，连接在
+                 * 槽里推进；poll POLLOUT / getsockopt(SO_ERROR) / send 会
+                 * 调 net_tcp_finish_connect 完成收尾。 */
+                int r2 = net_tcp_connect_start(ip, port, conn);
+                if (r2 < 0) {
+                    kfree(conn);
+                    return (uint64_t)(-ECONNREFUSED);
+                }
+                cur->fd_table->entries[sockfd].node = (vfs_node_t *)conn;
+                return (uint64_t)(-EINPROGRESS);
+            }
             int ret = net_tcp_connect(ip, port, conn);
             if (ret < 0) {
                 kfree(conn);
@@ -2980,6 +2994,9 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
              * raw status code here made every successful send() look like
              * "0 bytes sent" to callers, which breaks the common
              * `while (total<len) total += send(...)` retry pattern. */
+            /* 非阻塞 connect 未完成时：先推进握手，仍进行则 EINPROGRESS */
+            if (net_tcp_finish_connect(conn) == 1)
+                return (uint64_t)(-EINPROGRESS);
             int ret = net_tcp_send(conn, (const uint8_t *)buf, (uint32_t)len);
             if (ret < 0) return (uint64_t)(-ECONNRESET);
             return (uint64_t)len;
@@ -3002,6 +3019,9 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                     sockfd, buf, len, flags);
             net_tcp_conn_t *conn = (net_tcp_conn_t *)cur->fd_table->entries[sockfd].node;
             if (!conn) return (uint64_t)(-ENOTCONN);
+            /* 非阻塞 connect 未完成时：先推进握手，仍进行则 EINPROGRESS */
+            if (net_tcp_finish_connect(conn) == 1)
+                return (uint64_t)(-EINPROGRESS);
             uint32_t recv_len = 0;
             int ret = net_tcp_recv(conn, (uint8_t *)buf, (uint32_t)len, &recv_len, 10);
             if (ret < 0) return (uint64_t)(-ECONNRESET);
@@ -3470,7 +3490,20 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (*length < sizeof(int)) return (uint64_t)(-EINVAL);
             if ((int)f->a2 != 3 && (int)f->a2 != 4)
                 return (uint64_t)(-ENOPROTOOPT);
-            *(int *)f->a3 = (int)f->a2 == 3 ? 1 : 0;
+            if ((int)f->a2 == 4) {
+                /* SO_ERROR：非阻塞 connect 完成报告（EINPROGRESS 直到成功） */
+                net_tcp_conn_t *conn = (net_tcp_conn_t *)
+                    cur->fd_table->entries[fd].node;
+                int err = 0;
+                if (conn) {
+                    int fc = net_tcp_finish_connect(conn);
+                    err = (fc == 1) ? EINPROGRESS : 0;
+                }
+                *(int *)f->a3 = err;
+                *length = sizeof(int);
+                return 0;
+            }
+            *(int *)f->a3 = 1; /* SO_TYPE */
             *length = sizeof(int);
             return 0;
         }

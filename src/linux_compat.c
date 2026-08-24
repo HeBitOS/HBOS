@@ -640,12 +640,15 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
 
     if (entry->type == FD_SOCKET) {
         /* AF_INET：真实非消费式就绪（net.c 多连接 TCP 槽状态）。
-         * 未 connect 的 socket 可写（可发起 connect）；已连接则按
-         * 接收缓冲/FIN/打开状态报告 POLLIN/POLLOUT。 */
+         * 未 connect 的 socket 可写（可发起 connect）；非阻塞 connect
+         * 进行中先推进握手（SYN+ACK 到时补最终 ACK），完成后 POLLOUT
+         * 才就绪；已连接按接收缓冲/FIN/打开状态报告 POLLIN/POLLOUT。 */
+        extern int net_tcp_finish_connect(const void *conn);
         extern int net_tcp_rx_available(const void *conn);
         extern int net_tcp_conn_open(const void *conn);
         const void *conn = entry->node;
         if (!conn) return LINUX_POLLOUT;
+        (void)net_tcp_finish_connect((void *)conn);
         uint32_t ready = 0;
         if (net_tcp_conn_open(conn)) ready |= LINUX_POLLOUT;
         if (net_tcp_rx_available(conn)) ready |= LINUX_POLLIN;
