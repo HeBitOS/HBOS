@@ -25,6 +25,28 @@ int main(int argc, char **argv) {
 完整 API 见根目录的《HBOS 应用开发手册》（HBOS_HAX_API.pdf）。
 SDK 头文件：[`app/include/hax.h`](include/hax.h)。
 
+## 应用图标（GUI 应用可选）
+
+GUI 类应用（`HAX_KIND_GUI` / `HAX_KIND_BOTH`）可以给自己配一个图标，
+HIVE 桌面启动器会显示它而不是默认的占位图标：
+
+- 单文件应用：`app/<名字>.png`（与 `app/<名字>.c` 同名同目录）
+- 多文件应用：`app/<名字>/icon.png`
+
+```sh
+# 示例：给 app/myapp.c 配图标
+cp 我的图标.png app/myapp.png
+make            # 图标以 .haxicon 段内嵌进 .hax，重新打包进内核
+```
+
+支持任意尺寸 PNG（推荐 64×64 或更大，建议保留透明背景），构建时自动缩放。
+图标内嵌在 `.hax` 文件里随应用走，无图标的应用行为不变。
+
+> 编译/打包工具链（多结构规则、`genhax.py`、内嵌图标注入）已模块化迁移到
+> [HAX-Compile](https://github.com/HeBitOS/HAX-Compile) 仓库（`mk/hax-apps.mk` +
+> `tools/genhax.py`），HBOS 构建时自动内嵌集成（`HAX_COMPILE_DIR` 指向子模块
+> `HAX-Compile/` 或兄弟目录 `../HAX-Compile`），此目录用法不变。
+
 ## 直接放预编译的 .hax
 
 如果你已经有别处编译好的 `.hax`（标准 ELF64 + `.haxmeta` 段），直接丢进

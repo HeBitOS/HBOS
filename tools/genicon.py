@@ -21,9 +21,9 @@ Binary format ("ICN1", little-endian)
 The icon at index i lives at offset 0x10 + i*tile*tile*4. Index order = ICONS[].
 """
 
+import argparse
 import os
 import struct
-import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -227,26 +227,69 @@ def render_icon(color, glyph):
     return img.resize((TILE, TILE), Image.LANCZOS)
 
 
+def load_override(path):
+    """Load a build-time custom icon: RGBA, scaled to the baked tile size."""
+    im = Image.open(path).convert("RGBA")
+    if im.size != (TILE, TILE):
+        im = im.resize((TILE, TILE), Image.LANCZOS)
+    return im
+
+
+def find_overrides(overrides_dir):
+    """Map icon name -> custom tile image for every <name>.png in the dir."""
+    if not overrides_dir or not os.path.isdir(overrides_dir):
+        return {}
+    found = {}
+    for name, _, _ in ICONS:
+        path = os.path.join(overrides_dir, name + ".png")
+        if os.path.isfile(path):
+            found[name] = load_override(path)
+    return found
+
+
+def pack_tile(im):
+    px = im.load()
+    tile = bytearray()
+    for y in range(TILE):
+        for x in range(TILE):
+            r, g, b, a = px[x, y]
+            tile += struct.pack("<I", (a << 24) | (r << 16) | (g << 8) | b)
+    return tile
+
+
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "build/gui_icons.bin"
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    parser = argparse.ArgumentParser(
+        description="HBOS GUI icon atlas generator. Custom icons: pass "
+                    "--overrides DIR with <name>.png files (name = ICONS "
+                    "entry) to replace the built-in tiles at build time.")
+    parser.add_argument("--overrides", metavar="DIR",
+                        help="directory of <name>.png custom icons")
+    parser.add_argument("out", nargs="?", default="build/gui_icons.bin")
+    args = parser.parse_args()
 
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+
+    overrides = find_overrides(args.overrides)
     payload = bytearray()
+    custom = []
     for name, color, glyph in ICONS:
-        im = render_icon(color, glyph)
-        px = im.load()
-        for y in range(TILE):
-            for x in range(TILE):
-                r, g, b, a = px[x, y]
-                payload += struct.pack("<I", (a << 24) | (r << 16) | (g << 8) | b)
+        if name in overrides:
+            im = overrides[name]
+            custom.append(name)
+        else:
+            im = render_icon(color, glyph)
+        payload += pack_tile(im)
 
-    with open(out, "wb") as f:
+    with open(args.out, "wb") as f:
         f.write(b"ICN1")
         f.write(struct.pack("<III", len(ICONS), TILE, 0))
         f.write(payload)
 
-    print(f"[genicon] Output: {out} ({os.path.getsize(out):,} bytes, "
-          f"{len(ICONS)} icons @ {TILE}x{TILE})")
+    note = ""
+    if custom:
+        note = f", custom: {', '.join(custom)}"
+    print(f"[genicon] Output: {args.out} ({os.path.getsize(args.out):,} bytes, "
+          f"{len(ICONS)} icons @ {TILE}x{TILE}{note})")
 
 
 if __name__ == "__main__":

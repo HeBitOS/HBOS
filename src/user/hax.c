@@ -33,6 +33,14 @@ const hax_app_entry_t *hax_app_find(const char *name) {
     return 0;
 }
 
+const uint32_t *hax_app_icon_at(uint32_t index, int *tile) {
+    if (index >= hax_app_table_count) return 0;
+    const hax_app_entry_t *e = &hax_app_table[index];
+    if (!e->icon_off || !e->icon_size) return 0;
+    if (tile) *tile = 64;
+    return (const uint32_t *)(_binary_build_hax_blob_bin_start + e->icon_off);
+}
+
 int hax_seed_embedded_file(const char *name, const char *path) {
     const hax_app_entry_t *entry = hax_app_find(name);
     if (!entry) return 0;

@@ -29,6 +29,8 @@ typedef struct {
     uint32_t    kind;     /**< HAX_KIND_* */
     uint32_t    offset;   /**< 在 blob 中的偏移 */
     uint32_t    size;     /**< ELF 字节数 */
+    uint32_t    icon_off; /**< 内嵌图标在 blob 中的偏移（0 = 无） */
+    uint32_t    icon_size;/**< 图标瓦片字节数（64x64x4 = 16384，0 = 无） */
 } hax_app_entry_t;
 
 /* 由生成的 hax_manifest.c 提供 */
@@ -43,6 +45,17 @@ const hax_app_entry_t *hax_app_at(uint32_t index);
 
 /** 按名称查找应用表项，找不到返回 NULL */
 const hax_app_entry_t *hax_app_find(const char *name);
+
+/**
+ * @brief 返回应用内嵌图标瓦片（64x64 RGBA，0xAARRGGBB 行主序）。
+ * @param index 应用表索引（与 hax_app_at 一致）
+ * @param tile  成功时写入瓦片边长（64）
+ * @return 瓦片像素指针；该应用未内嵌图标或索引越界时返回 NULL
+ *
+ * 由构建期 tools/genhax.py 从 .hax 的 .haxicon 段（PNG）解码生成，
+ * 追加在 hax blob 末尾；HIVE 桌面启动器用它替换默认图集图标。
+ */
+const uint32_t *hax_app_icon_at(uint32_t index, int *tile);
 
 /**
  * @brief 运行一个 .hax 应用（在新任务中加载其 ELF 并等待结束）

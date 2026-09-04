@@ -779,13 +779,12 @@ static void blit_mono_glyph(int x, int y, const uint8_t *glyph, uint32_t color, 
     }
 }
 
-// Blit a flat icon tile (RGBA, from the atlas), bilinearly scaled to sz×sz and
-// alpha-blended onto the surface. Premultiplied-alpha bilinear keeps the edges
-// smooth when downscaling the 64px master to taskbar/launcher sizes. Replaces
+// Blit a flat icon tile (RGBA), bilinearly scaled to sz×sz and alpha-blended
+// onto the surface. Premultiplied-alpha bilinear keeps the edges smooth when
+// downscaling the 64px master to taskbar/launcher sizes. Works for both atlas
+// tiles and per-app embedded HAX icon tiles (any square source size). Replaces
 // the old hand-drawn rect motifs + their colored backing square.
-static void blit_icon(int x, int y, int sz, int id) {
-    int tile = 0;
-    const uint32_t *src = gui_icon_tile(id, &tile);
+static void blit_icon_rgba(int x, int y, int sz, const uint32_t *src, int tile) {
     if (!src || tile <= 0 || sz <= 0 || !g_gui_surface) return;
     int cx = x, cy = y, cw = sz, ch = sz;
     if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
@@ -853,6 +852,13 @@ static void blit_icon(int x, int y, int sz, int id) {
             drow[xx] = 0xFF000000 | (orr << 16) | (og << 8) | ob;
         }
     }
+}
+
+// Blit an atlas icon tile by id (see blit_icon_rgba for the shared renderer).
+static void blit_icon(int x, int y, int sz, int id) {
+    int tile = 0;
+    const uint32_t *src = gui_icon_tile(id, &tile);
+    blit_icon_rgba(x, y, sz, src, tile);
 }
 
 // Map an app mode / panel id to its atlas icon id.
@@ -1749,6 +1755,9 @@ static void files_panel_layout(int win_w, int win_h, files_layout_t *L) {
 
 static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_state_t *st) {
     char line[96];
+    /* 盘晚就绪/启动时未检测到时，打开文件面板顺手重试探测+挂载 */
+    (void)block_init();
+    (void)fs_retry_mount();
     gui_state_t *mst = (gui_state_t *)st;
     files_layout_t L;
     files_panel_layout(win_w, win_h, &L);
@@ -1953,6 +1962,9 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
 
 static void draw_disk_panel(int tx, int ty, int win_w) {
     char line[96];
+    /* 磁盘面板自愈：重扫块设备并尝试重挂载（不重置 ramfs） */
+    (void)block_init();
+    (void)fs_retry_mount();
     text(tx, ty, "磁盘管理器", rgb(244, 194, 82), 1);
     line2(line, sizeof(line), "块设备: ", block_backend_name());
     text(tx, ty + 38, line, rgb(210, 221, 230), 1);
@@ -6556,11 +6568,42 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     uint64_t missing_caps = st->browser_required_caps &
                             ~browser_backend->capabilities;
     if (missing_caps) {
-        uint64_t first = missing_caps & (~missing_caps + 1ULL);
+        /* 列出全部缺失能力（用 “ · ” 连接），而不是只显示第一个。
+         * 信号给用户：页面渲染到此为止，其余能力需要完整引擎。 */
+        char caps_list[192];
+        size_t off = 0;
+        int sep_pending = 0, truncated = 0;
+        for (uint64_t bit = 1; bit; bit <<= 1) {
+            if (!(missing_caps & bit)) continue;
+            const char *nm = hive_browser_capability_name(bit);
+            size_t nm_len = strlen(nm);
+            size_t need = (sep_pending ? 4 : 0) + nm_len + 1; /* " · "=4B */
+            if (off + need + 5 > sizeof(caps_list)) {         /* 留 “ …” */
+                truncated = 1;
+                break;
+            }
+            if (sep_pending) {
+                memcpy(caps_list + off, " · ", 4);
+                off += 4;
+            }
+            memcpy(caps_list + off, nm, nm_len + 1);
+            off += nm_len;
+            sep_pending = 1;
+        }
+        if (truncated) {
+            static const char dots[] = " …"; /* " …" */
+            size_t dlen = sizeof(dots) - 1;
+            if (off + dlen + 1 <= sizeof(caps_list)) {
+                memcpy(caps_list + off, dots, dlen + 1);
+                off += dlen;
+            } else {
+                caps_list[off] = 0;
+            }
+        }
         rect(wx, page_y, ww, 26, rgb(255, 244, 204));
         text(wx + 12, page_y + 5, "Lite 未执行页面能力:", rgb(112, 78, 12), 1);
-        text_clipped(wx + 160, page_y + 5, wx + ww - 12,
-                     hive_browser_capability_name(first), rgb(112, 78, 12), 1);
+        text_clipped(wx + 160, page_y + 5, wx + ww - 12, caps_list,
+                     rgb(112, 78, 12), 1);
         page_y += 26;
         page_h -= 26;
         if (page_h < 54) page_h = 54;
@@ -8862,7 +8905,22 @@ static void draw_start_menu(gui_state_t *st) {
         int isz = ui_s(36);
         int ix = cx - isz / 2;
         int iy = cy + ui_s(4);
-        blit_icon(ix, iy, isz, e.icon);
+        if (e.kind == SM_K_HAX) {
+            /* 自做的 .hax 可内嵌图标（.haxicon 段，构建期由 genhax.py
+             * 解码成 64x64 RGBA 瓦片）；有则优先显示，否则回退默认图集图标。 */
+            const hax_app_entry_t *he = gui_hax_at(e.mode);
+            if (he) {
+                int tsz = 0;
+                const uint32_t *tic = hax_app_icon_at(
+                    (uint32_t)(he - hax_app_table), &tsz);
+                if (tic) blit_icon_rgba(ix, iy, isz, tic, tsz);
+                else blit_icon(ix, iy, isz, e.icon);
+            } else {
+                blit_icon(ix, iy, isz, e.icon);
+            }
+        } else {
+            blit_icon(ix, iy, isz, e.icon);
+        }
         int tw = text_width(e.name, 1);
         int lx = cx - tw / 2;
         if (lx < ox + SM_PAD) lx = ox + SM_PAD;

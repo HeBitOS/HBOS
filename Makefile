@@ -7,6 +7,9 @@ PDF_PYTHON ?= python3
 SRC_DIR = src
 APP_DIR ?= app
 HIVE_REPO ?= HIVE
+# HAX 编译模块（HAX-Compile）：.hax 应用构建规则与 genhax.py 打包器。
+# 子模块方式放在 HAX-Compile/，或作为兄弟目录 ../HAX-Compile。
+HAX_COMPILE_DIR ?= $(if $(wildcard HAX-Compile/mk/hax-apps.mk),HAX-Compile,$(if $(wildcard ../HAX-Compile/mk/hax-apps.mk),../HAX-Compile,HAX-Compile))
 
 # 可拆分构建开关：
 #   HBOS_ENABLE_GUI=0   不链接桌面、窗口管理器和 GUI 内置应用
@@ -168,7 +171,12 @@ GUI_FONT_BIN = $(BUILD_DIR)/gui_font.bin
 GUI_WALL_IMG = photo/wallpaper.jpg
 GUI_WALL_BIN = $(BUILD_DIR)/gui_wall.bin
 # Flat anti-aliased GUI icons. Designs live in tools/genicon.py.
+# Build-time customization: drop <name>.png (name = ICONS[] entry in
+# tools/genicon.py) into $(GUI_ICON_OVERRIDE_DIR) to replace that tile; the
+# HIVE desktop (launcher / taskbar / desktop shortcuts) picks it up
+# automatically because it renders the embedded atlas by icon id.
 GUI_ICON_BIN = $(BUILD_DIR)/gui_icons.bin
+GUI_ICON_OVERRIDE_DIR = icon-overrides
 
 # 注册式内建应用与 .hax 应用使用同一总开关。关闭时内核仍保留应用加载 ABI，
 # 但不反向依赖任何具体应用实现。
@@ -307,91 +315,19 @@ endif
 ASM_OBJS = $(ASM_SRCS:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
 
 # ── HAX 应用：多结构模式自动编译并打包进内核 ─────────────────────────
-# “只要 app 里有编译产物，就加入系统”：扫描 $(APP_DIR) 下的三类结构，
-# 由 genhax.py 读取各自 .hax 的 .haxmeta 段，生成清单与二进制 blob 嵌入内核。
-#   1. $(APP_DIR)/<name>.c          单文件应用（原有方式，向后兼容）
-#   2. $(APP_DIR)/<name>/           多文件应用：目录内全部 *.c 编译后链接
-#                                   为一个 build/app/<name>.hax
-#   3. $(APP_DIR)/lib/<lib>/        独立库：编译一次为 build/app/lib/<lib>.o，
-#                                   可被多个应用共享
-# 库依赖声明（应用按需链接，避免把所有库塞进每个应用）：
-#   - 单文件应用 app/<name>.c    → 同名 app/<name>.deps，每行一个库名
-#   - 多文件应用 app/<name>/     → app/<name>/deps，每行一个库名
-#   - 库之间的依赖               → app/lib/<lib>/deps，每行一个库名
-#   （# 开头为注释；库头文件放在 app/lib/<lib>/ 下，按 <lib/xxx.h> 引入，
-#     include 路径已自动加上 $(APP_DIR)/lib）
-HBOS_COMPAT_SMOKE ?= 0
-HBOS_MUSL_SYSROOT ?=
-HBOS_GLIBC_LIBDIR ?=
-ifeq ($(HBOS_BUNDLE_APPS),1)
-HAX_APP_SRCS = $(wildcard $(APP_DIR)/*.c)
-HAX_APP_BINS = $(HAX_APP_SRCS:$(APP_DIR)/%.c=$(BUILD_DIR)/app/%.hax)
-HAX_PREBUILT = $(wildcard $(APP_DIR)/*.hax)
-# 多文件应用：$(APP_DIR) 下除 lib/include 外、含 *.c 的子目录（名字 = 目录名）
-HAX_APP_DIR_NAMES := $(foreach d,$(filter-out lib include,$(notdir $(patsubst %/,%,$(wildcard $(APP_DIR)/*/)))),$(if $(wildcard $(APP_DIR)/$(d)/*.c),$(d)))
-# 独立库：$(APP_DIR)/lib 下含 *.c 的子目录
-HAX_LIB_NAMES := $(foreach l,$(notdir $(patsubst %/,%,$(wildcard $(APP_DIR)/lib/*/))),$(if $(wildcard $(APP_DIR)/lib/$(l)/*.c),$(l)))
-# 名称冲突检查：同一名字不能既单文件又目录
-HAX_CONFLICT_NAMES = $(filter $(HAX_APP_DIR_NAMES),$(patsubst $(APP_DIR)/%.c,%,$(HAX_APP_SRCS)))
-ifneq ($(strip $(HAX_CONFLICT_NAMES)),)
-$(error HAX 应用名冲突（同时存在单文件与同名目录）：$(HAX_CONFLICT_NAMES))
-endif
-HAX_DIR_APP_BINS = $(HAX_APP_DIR_NAMES:%=$(BUILD_DIR)/app/%.hax)
-HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_DIR_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax \
-	$(BUILD_DIR)/app/js.hax $(BUSYBOX_HAX)
-ifeq ($(HBOS_COMPAT_SMOKE),1)
-HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
-	$(BUILD_DIR)/tests/linux_socket2.hax \
-	$(BUILD_DIR)/tests/linux_sockpoll.hax \
-	$(BUILD_DIR)/tests/linux_nbconnect.hax \
-	$(BUILD_DIR)/tests/linux_dns.hax \
-	$(BUILD_DIR)/tests/linux_timerfd.hax \
-	$(BUILD_DIR)/tests/linux_sysinfo2.hax \
-	$(BUILD_DIR)/tests/linux_signalfd.hax \
-	$(BUILD_DIR)/tests/linux_mremap.hax \
-	$(BUILD_DIR)/tests/linux_clone3.hax \
-	$(BUILD_DIR)/tests/linux_inotify.hax \
-	$(BUILD_DIR)/tests/linux_syscall.hax \
-	$(BUILD_DIR)/tests/linux_pie.hax \
-	$(BUILD_DIR)/tests/linux_dynamic.hax \
-	$(BUILD_DIR)/tests/linux_interp.hax \
-	$(BUILD_DIR)/tests/linux_abi.hax \
-	$(BUILD_DIR)/tests/linux_signal.hax \
-	$(BUILD_DIR)/tests/linux_signal_siginfo.hax \
-	$(BUILD_DIR)/tests/linux_mprotect.hax \
-	$(BUILD_DIR)/tests/linux_mmap_reclaim.hax \
-	$(BUILD_DIR)/tests/linux_file_mmap.hax \
-	$(BUILD_DIR)/tests/linux_process_abi.hax \
-	$(BUILD_DIR)/tests/linux_dlopen.hax \
-	$(BUILD_DIR)/tests/linux_dlopen_lib.hax \
-	$(BUILD_DIR)/tests/linux_dlopen_deps.hax \
-	$(BUILD_DIR)/tests/linux_dlopen_dep_root.hax \
-	$(BUILD_DIR)/tests/linux_dlopen_dep_leaf.hax \
-	$(BUILD_DIR)/tests/linux_epoll_et.hax
-ifneq ($(strip $(HBOS_MUSL_SYSROOT)),)
-HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_musl.hax \
-	$(BUILD_DIR)/tests/linux_musl_pthread.hax \
-	$(BUILD_DIR)/tests/linux_musl_loader.hax \
-	$(BUILD_DIR)/tests/linux_musl_stream.hax
-endif
-ifneq ($(strip $(HBOS_GLIBC_LIBDIR)),)
-HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_glibc.hax \
-	$(BUILD_DIR)/tests/linux_glibc_loader.hax \
-	$(BUILD_DIR)/tests/linux_glibc_libc.hax
-endif
-endif
-else
-HAX_APP_SRCS =
-HAX_APP_BINS =
-HAX_PREBUILT =
-HAX_ALL_BINS =
-endif
+# 编译规则模块（HAX-Compile 的 mk/hax-apps.mk，含 .hax 内嵌图标）在下方
+# user-progs 之后 include——需要 USER_CFLAGS / USER_LDFLAGS / USER_LIBC_OBJS
+# 等宿主变量已定义，规则前置条件才能正确展开。
+
+include mk/secure_net.mk
+
+# HAX 输出对象必须在 $(KERNEL_BIOS) 链接规则之前定义：规则前置条件在读取
+# 时立即展开，靠后的递归定义来不及生效（其余 HAX 变量只被更后面的规则
+# 引用，可以留在下方 include 处）。
 HAX_BLOB     = $(BUILD_DIR)/hax_blob.bin
 HAX_MANIFEST = $(BUILD_DIR)/hax_manifest.c
 HAX_MODE_STAMP = $(BUILD_DIR)/.hax-mode-$(HBOS_COMPAT_SMOKE)-$(if $(strip $(HBOS_MUSL_SYSROOT)),musl,nomusl)-$(if $(strip $(HBOS_GLIBC_LIBDIR)),glibc,noglibc)
 HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
-
-include mk/secure_net.mk
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
@@ -457,9 +393,9 @@ $(GUI_WALL_BIN): $(GUI_WALL_IMG) tools/genwall.py
 	python3 tools/genwall.py "$(GUI_WALL_IMG)" $(GUI_WALL_BIN)
 	@echo "[MAKE] Wallpaper: $(GUI_WALL_BIN)"
 
-$(GUI_ICON_BIN): tools/genicon.py
+$(GUI_ICON_BIN): tools/genicon.py $(wildcard $(GUI_ICON_OVERRIDE_DIR)/*.png)
 	@echo "[MAKE] Generating flat GUI icons..."
-	python3 tools/genicon.py $(GUI_ICON_BIN)
+	python3 tools/genicon.py --overrides "$(GUI_ICON_OVERRIDE_DIR)" $(GUI_ICON_BIN)
 	@echo "[MAKE] Icons: $(GUI_ICON_BIN)"
 
 # NASM (.asm) — various directories
@@ -498,28 +434,6 @@ $(BUILD_DIR)/tcc/headers.bin: tools/genheaders.py $(wildcard $(SRC_DIR)/user/lib
 	python3 tools/genheaders.py $(SRC_DIR)/user/libc $(TCC_DIR)/include $@
 
 $(BUILD_DIR)/user/tcc_headers_blob.o: $(SRC_DIR)/user/tcc_headers_blob.asm $(BUILD_DIR)/tcc/headers.bin | $(BUILD_DIR)
-	@mkdir -p $(@D)
-	$(AS) $(ASFLAGS) $< -o $@
-
-# ── 内置 HPT 软件仓库 ─────────────────────────────────────────────────
-# 把打包在镜像里的 HAX 应用生成一份 HPT 仓库（Packages + pool/），打成 blob
-# 经 hpt_repo_blob.asm incbin 嵌入内核，开机由 src/tools/hpt_repo_seed.c
-# 解包到 ramfs /packages，让 `run hpt list/install/remove` 开箱可用。
-HPT_REPO_DIR       = $(BUILD_DIR)/hpt-repo
-HPT_REPO_PACKAGES  = $(HPT_REPO_DIR)/Packages
-HPT_REPO_BIN       = $(BUILD_DIR)/hpt-repo.bin
-
-$(BUILD_DIR)/hpt-repo:
-	mkdir -p $@
-
-$(HPT_REPO_PACKAGES): tools/genhpt_repo.py $(HAX_ALL_BINS) | $(BUILD_DIR)/hpt-repo
-	rm -f $(HPT_REPO_DIR)/*.hax
-	python3 tools/genhpt_repo.py $(BUILD_DIR)/app $(HPT_REPO_DIR)
-
-$(HPT_REPO_BIN): tools/genhptblob.py $(HPT_REPO_PACKAGES)
-	python3 tools/genhptblob.py $(HPT_REPO_DIR) $@
-
-$(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_BIN) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -908,6 +822,97 @@ USER_LIBC_SRCS = \
 	$(USER_LIBC_DIR)/signalfd.c
 
 USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o) $(BUILD_DIR)/user/libc/setjmp.o
+# ── HAX 应用：多结构模式自动编译并打包进内核 ─────────────────────────
+# 编译规则已模块化迁移到 HAX-Compile 仓库（mk/hax-apps.mk，含 .hax 内嵌
+# 图标支持），这里负责：启用时 include 该模块、汇总 HAX_ALL_BINS、
+# 调用 genhax.py 生成清单与二进制 blob 嵌入内核（incbin 进 hax_blob.asm）。
+# 布局（详见 HAX-Compile/README.md）：
+#   1. $(APP_DIR)/<name>.c          单文件应用
+#   2. $(APP_DIR)/<name>/           多文件应用
+#   3. $(APP_DIR)/lib/<lib>/        独立库
+HBOS_COMPAT_SMOKE ?= 0
+HBOS_MUSL_SYSROOT ?=
+HBOS_GLIBC_LIBDIR ?=
+ifeq ($(HBOS_BUNDLE_APPS),1)
+HAX_APPS_MK := $(wildcard $(HAX_COMPILE_DIR)/mk/hax-apps.mk)
+ifneq ($(strip $(HAX_APPS_MK)),)
+include $(HAX_APPS_MK)
+else
+$(error HAX-Compile 模块缺失：找不到 $(HAX_COMPILE_DIR)/mk/hax-apps.mk。请 clone 到 HAX-Compile/ 子模块或 ../HAX-Compile 兄弟目录（https://github.com/HeBitOS/HAX-Compile.git）)
+endif
+HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_DIR_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax \
+	$(BUILD_DIR)/app/js.hax $(BUSYBOX_HAX)
+ifeq ($(HBOS_COMPAT_SMOKE),1)
+HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
+	$(BUILD_DIR)/tests/linux_socket2.hax \
+	$(BUILD_DIR)/tests/linux_sockpoll.hax \
+	$(BUILD_DIR)/tests/linux_nbconnect.hax \
+	$(BUILD_DIR)/tests/linux_dns.hax \
+	$(BUILD_DIR)/tests/linux_timerfd.hax \
+	$(BUILD_DIR)/tests/linux_sysinfo2.hax \
+	$(BUILD_DIR)/tests/linux_signalfd.hax \
+	$(BUILD_DIR)/tests/linux_mremap.hax \
+	$(BUILD_DIR)/tests/linux_clone3.hax \
+	$(BUILD_DIR)/tests/linux_inotify.hax \
+	$(BUILD_DIR)/tests/linux_syscall.hax \
+	$(BUILD_DIR)/tests/linux_pie.hax \
+	$(BUILD_DIR)/tests/linux_dynamic.hax \
+	$(BUILD_DIR)/tests/linux_interp.hax \
+	$(BUILD_DIR)/tests/linux_abi.hax \
+	$(BUILD_DIR)/tests/linux_signal.hax \
+	$(BUILD_DIR)/tests/linux_signal_siginfo.hax \
+	$(BUILD_DIR)/tests/linux_mprotect.hax \
+	$(BUILD_DIR)/tests/linux_mmap_reclaim.hax \
+	$(BUILD_DIR)/tests/linux_file_mmap.hax \
+	$(BUILD_DIR)/tests/linux_process_abi.hax \
+	$(BUILD_DIR)/tests/linux_dlopen.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_lib.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_deps.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_dep_root.hax \
+	$(BUILD_DIR)/tests/linux_dlopen_dep_leaf.hax \
+	$(BUILD_DIR)/tests/linux_epoll_et.hax
+ifneq ($(strip $(HBOS_MUSL_SYSROOT)),)
+HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_musl.hax \
+	$(BUILD_DIR)/tests/linux_musl_pthread.hax \
+	$(BUILD_DIR)/tests/linux_musl_loader.hax \
+	$(BUILD_DIR)/tests/linux_musl_stream.hax
+endif
+ifneq ($(strip $(HBOS_GLIBC_LIBDIR)),)
+HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_glibc.hax \
+	$(BUILD_DIR)/tests/linux_glibc_loader.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libc.hax
+endif
+endif
+else
+HAX_APP_SRCS =
+HAX_APP_BINS =
+HAX_PREBUILT =
+HAX_ALL_BINS =
+endif
+# （HAX_BLOB/HAX_MANIFEST/HAX_MODE_STAMP/HAX_OBJS 定义见上方 mk/secure_net.mk
+#   include 之后——必须先于 $(KERNEL_BIOS) 链接规则出现。）
+# ── 内置 HPT 软件仓库 ─────────────────────────────────────────────────
+# 把打包在镜像里的 HAX 应用生成一份 HPT 仓库（Packages + pool/），打成 blob
+# 经 hpt_repo_blob.asm incbin 嵌入内核，开机由 src/tools/hpt_repo_seed.c
+# 解包到 ramfs /packages，让 `run hpt list/install/remove` 开箱可用。
+# （放在 HAX 模块之后：$(HPT_REPO_PACKAGES) 依赖 $(HAX_ALL_BINS)）
+HPT_REPO_DIR       = $(BUILD_DIR)/hpt-repo
+HPT_REPO_PACKAGES  = $(HPT_REPO_DIR)/Packages
+HPT_REPO_BIN       = $(BUILD_DIR)/hpt-repo.bin
+
+$(BUILD_DIR)/hpt-repo:
+	mkdir -p $@
+
+$(HPT_REPO_PACKAGES): tools/genhpt_repo.py $(HAX_ALL_BINS) | $(BUILD_DIR)/hpt-repo
+	rm -f $(HPT_REPO_DIR)/*.hax
+	python3 tools/genhpt_repo.py $(BUILD_DIR)/app $(HPT_REPO_DIR)
+
+$(HPT_REPO_BIN): tools/genhptblob.py $(HPT_REPO_PACKAGES)
+	python3 tools/genhptblob.py $(HPT_REPO_DIR) $@
+
+$(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_BIN) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
 USER_LINUX_COMPAT_OBJ = $(BUILD_DIR)/user/libc/linux.o
 USER_LINUX_COMPAT_LIB = $(BUILD_DIR)/user/libhboslinux.a
 
@@ -1230,55 +1235,9 @@ user-progs-clean:
 	rm -rf $(USER_BUILD_DIR) $(BUILD_DIR)/user
 	@echo "✓ User programs cleaned"
 
-# ── HAX 应用构建（多结构：单文件 / 多文件目录 / 独立库） ────────────
-# 每个 app 源码用 HAX 运行时（= 用户态 libc + crt0）链接成标准 ELF64，
-# 扩展名 .hax。SDK 头在 $(APP_DIR)/include，库头按 <lib/xxx.h> 引入。
-HAX_CFLAGS = $(USER_CFLAGS) -I$(APP_DIR)/include -I$(APP_DIR)/lib -MMD -MP
-
-# ── 单文件应用（app/<name>.c -> build/app/<name>.hax） ───────────────
-# 可选同名 app/<name>.deps 声明要链接的独立库（每行一个库名，# 为注释）。
-define HAX_SINGLE_APP_RULE
-HAX_APP_LIBOBJ_$(1) := $$(foreach l,$$(strip $$(shell grep -vE '^[[:space:]]*#' $(APP_DIR)/$(1).deps 2>/dev/null)),$(BUILD_DIR)/app/lib/$$(l).o)
-$(BUILD_DIR)/app/$(1).hax: $(APP_DIR)/$(1).c $$(wildcard $(APP_DIR)/include/*.h) $$(HAX_APP_LIBOBJ_$(1)) $(USER_LIBC_OBJS) | $(BUILD_DIR)
-	@mkdir -p $$(@D)
-	$$(CC) -c $$(HAX_CFLAGS) $$< -o $(BUILD_DIR)/app/$(1).o
-	$$(LD) $$(USER_LDFLAGS) $(USER_LIBC_OBJS) $(BUILD_DIR)/app/$(1).o $$(HAX_APP_LIBOBJ_$(1)) -o $$@
-	@echo "✓ hax app: $$@"
-endef
-$(foreach n,$(patsubst $(APP_DIR)/%.c,%,$(HAX_APP_SRCS)),$(eval $(call HAX_SINGLE_APP_RULE,$(n))))
-
-# ── 独立库（app/lib/<lib>/ -> build/app/lib/<lib>.o，ld -r 合并一次） ──
-# 库之间的依赖写在 app/lib/<lib>/deps（每行一个库名），依赖库会被
-# 一并合并进本库的 .o，应用只需声明直接依赖。
-define HAX_LIB_RULE
-HAX_LIB_SRC_$(1) := $$(wildcard $(APP_DIR)/lib/$(1)/*.c)
-HAX_LIB_OBJ_$(1) := $$(patsubst $(APP_DIR)/lib/$(1)/%.c,$(BUILD_DIR)/app/lib/$(1)/%.o,$$(HAX_LIB_SRC_$(1)))
-HAX_LIB_DEPOBJ_$(1) := $$(foreach l,$$(strip $$(shell grep -vE '^[[:space:]]*#' $(APP_DIR)/lib/$(1)/deps 2>/dev/null)),$(BUILD_DIR)/app/lib/$$(l).o)
-$(BUILD_DIR)/app/lib/$(1)/%.o: $(APP_DIR)/lib/$(1)/%.c $$(wildcard $(APP_DIR)/include/*.h) | $(BUILD_DIR)
-	@mkdir -p $$(@D)
-	$$(CC) -c $$(HAX_CFLAGS) $$< -o $$@
-$(BUILD_DIR)/app/lib/$(1).o: $$(HAX_LIB_OBJ_$(1)) $$(HAX_LIB_DEPOBJ_$(1)) | $(BUILD_DIR)
-	@mkdir -p $$(@D)
-	$$(LD) -r $$(HAX_LIB_OBJ_$(1)) $$(HAX_LIB_DEPOBJ_$(1)) -o $$@
-	@echo "✓ hax lib: $$@ ($(1))"
-endef
-$(foreach l,$(HAX_LIB_NAMES),$(eval $(call HAX_LIB_RULE,$(l))))
-
-# ── 多文件应用（app/<name>/*.c -> build/app/<name>.hax） ─────────────
-# 目录内全部 *.c 分别编译后一起链接；库依赖写在 app/<name>/deps。
-define HAX_DIR_APP_RULE
-HAX_DIR_SRC_$(1) := $$(wildcard $(APP_DIR)/$(1)/*.c)
-HAX_DIR_OBJ_$(1) := $$(patsubst $(APP_DIR)/$(1)/%.c,$(BUILD_DIR)/app/$(1)/%.o,$$(HAX_DIR_SRC_$(1)))
-HAX_DIR_DEPOBJ_$(1) := $$(foreach l,$$(strip $$(shell grep -vE '^[[:space:]]*#' $(APP_DIR)/$(1)/deps 2>/dev/null)),$(BUILD_DIR)/app/lib/$$(l).o)
-$(BUILD_DIR)/app/$(1)/%.o: $(APP_DIR)/$(1)/%.c $$(wildcard $(APP_DIR)/include/*.h) | $(BUILD_DIR)
-	@mkdir -p $$(@D)
-	$$(CC) -c $$(HAX_CFLAGS) $$< -o $$@
-$(BUILD_DIR)/app/$(1).hax: $$(HAX_DIR_OBJ_$(1)) $$(HAX_DIR_DEPOBJ_$(1)) $(USER_LIBC_OBJS) | $(BUILD_DIR)
-	@mkdir -p $$(@D)
-	$$(LD) $$(USER_LDFLAGS) $(USER_LIBC_OBJS) $$(HAX_DIR_OBJ_$(1)) $$(HAX_DIR_DEPOBJ_$(1)) -o $$@
-	@echo "✓ hax app: $$@ ($(1), 多文件)"
-endef
-$(foreach d,$(HAX_APP_DIR_NAMES),$(eval $(call HAX_DIR_APP_RULE,$(d))))
+# ── HAX 应用构建规则 ───────────────────────────────────────────────
+# 已模块化迁移至 HAX-Compile 仓库（mk/hax-apps.mk，上方 include 引入）：
+# 单文件 / 多文件 / 独立库编译、deps 库依赖、app/<name>.png 内嵌图标。
 
 # ── TinyCC (vendored third_party/tinycc) — see that dir's README.md ────
 # Builds as a single translation unit (tcc.c #includes everything else,
@@ -1401,8 +1360,8 @@ $(HAX_MODE_STAMP): | $(BUILD_DIR)
 	@rm -f $(BUILD_DIR)/.hax-mode-0 $(BUILD_DIR)/.hax-mode-1
 	@touch $@
 
-$(HAX_BLOB) $(HAX_MANIFEST) &: $(HAX_ALL_BINS) tools/genhax.py $(HAX_MODE_STAMP) | $(BUILD_DIR)
-	python3 tools/genhax.py --blob $(HAX_BLOB) --manifest $(HAX_MANIFEST) $(HAX_ALL_BINS)
+$(HAX_BLOB) $(HAX_MANIFEST) &: $(HAX_ALL_BINS) $(HAX_COMPILE_DIR)/tools/genhax.py $(HAX_MODE_STAMP) | $(BUILD_DIR)
+	python3 $(HAX_COMPILE_DIR)/tools/genhax.py --blob $(HAX_BLOB) --manifest $(HAX_MANIFEST) $(HAX_ALL_BINS)
 
 # 编译生成的清单 C（位于 build/，需显式规则）
 $(BUILD_DIR)/hax_manifest.o: $(HAX_MANIFEST) | $(BUILD_DIR)
@@ -1440,7 +1399,7 @@ hbfs-list: $(INSTALL_IMG_BIOS)
 # Create standalone HBFS data disk:  make hbfs-disk
 hbfs-disk: $(DISK_IMG)
 $(DISK_IMG): tools/mkhbfs.py | $(BUILD_DIR)
-	python3 tools/mkhbfs.py $@ --size-mib 16
+	python3 tools/mkhbfs.py $@ --size-mib 32
 
 # ── FAT32 file injection (beta5: new installs default to FAT32) ─────
 # Unlike HBFS, FAT32 is a real, standard format -- no custom Python writer
