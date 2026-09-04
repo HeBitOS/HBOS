@@ -2242,20 +2242,27 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
  * @param conn TCP 连接结构体
  */
 void net_tcp_close(net_tcp_conn_t *conn) {
-    if (!conn || !conn->open) return;
+    if (!conn) return;
     int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
                    ? conn->tcp_slot : -1;
     tcp_conn_t *c = (slot >= 0) ? &tcp_conns[slot] : 0;
-    if (c && c->used)
-        send_tcp(c->mac, c->peer, c->sport, c->dport,
-                 c->seq, c->ack, 0x11, 0, 0);
-    else
-        send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
-                 conn->seq, conn->ack, 0x11, 0, 0);
-    if (c) c->seq++;
-    conn->seq++;
-    conn->open = false;
-    if (slot >= 0) tcp_conn_free(slot);
+    if (conn->open) {
+        /* 只在对端还没关的时候发 FIN；对端已经 FIN（服务端主动关、
+         * Connection: close 等）就不必再发，但槽位必须照样释放。 */
+        if (c && c->used)
+            send_tcp(c->mac, c->peer, c->sport, c->dport,
+                     c->seq, c->ack, 0x11, 0, 0);
+        else
+            send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
+                     conn->seq, conn->ack, 0x11, 0, 0);
+        if (c) c->seq++;
+        conn->seq++;
+        conn->open = false;
+    }
+    /* 槽位释放不依赖 open 状态：net_tcp_recv 收到对端 FIN 时会把
+     * conn->open 置 false，旧代码在这里提前 return，导致槽永久泄漏，
+     * 8 个连接槽被几次请求耗光后所有新连接报 "tcp slots full"。 */
+    if (slot >= 0 && c && c->used) tcp_conn_free(slot);
     conn->tcp_slot = -1;
 }
 
@@ -2304,12 +2311,24 @@ void net_udp_queue(const uint8_t *pkt, uint16_t len) {
     g_udp_tail = next;
 }
 
+/* 只消费回调认领（返回非 0）的包：多个 UDP 等待者（DNS/NTP/DHCP）并发时，
+ * 某个等待者排空队列不能把别人的响应也一起丢掉——否则后到的响应永远等不到
+ * 认领者，DNS 就会超时。回调不认领的包留在队列里等对应的等待者来取。
+ * 认领语义由各回调实现：dns_cb/dhcp_cb/ntp_cb 只在 ID/XID 匹配时返回 1。 */
 void net_udp_drain(int (*cb)(const uint8_t *, uint16_t, void *), void *arg) {
-    while (g_udp_head != g_udp_tail) {
-        int h = g_udp_head;
-        (void)cb(g_udp_queue[h].pkt, g_udp_queue[h].len, arg);
-        g_udp_head = (g_udp_head + 1) % NET_UDP_QUEUE;
+    if (g_udp_head == g_udp_tail) return;
+    int head = g_udp_head, tail = g_udp_tail;
+    int w = head, r = head;
+    while (r != tail) {
+        if (cb(g_udp_queue[r].pkt, g_udp_queue[r].len, arg)) {
+            r = (r + 1) % NET_UDP_QUEUE;      /* 认领：跳过 */
+        } else {
+            if (w != r) g_udp_queue[w] = g_udp_queue[r];
+            w = (w + 1) % NET_UDP_QUEUE;
+            r = (r + 1) % NET_UDP_QUEUE;
+        }
     }
+    g_udp_tail = w;                            /* 全认领时 head==tail==w，队列空 */
 }
 
 int net_pkt_is_udp(const uint8_t *pkt, uint16_t len) {
@@ -2493,7 +2512,17 @@ typedef struct {
     uint32_t rx_stage_len;
 } tcp_pending_t;
 
-static uint16_t listen_port;
+/* 多监听端口：内容引擎（Chromium 本地服务）常同时监听多个端口 */
+#define NET_LISTEN_MAX 4
+static uint16_t listen_ports[NET_LISTEN_MAX];
+static int listen_port_count;
+
+static int net_listen_has(uint16_t port) {
+    for (int i = 0; i < listen_port_count; i++)
+        if (listen_ports[i] == port) return 1;
+    return 0;
+}
+
 static tcp_pending_t g_pending[TCP_PENDING_MAX];
 
 static int tcp_pending_find(uint32_t peer, uint16_t peer_port) {
@@ -2523,7 +2552,7 @@ static int tcp_accept_ingress(const uint8_t *pkt, uint16_t len) {
         (ip->dst != primary.ip && ip->dst != NET_LOOPBACK_V4)) return 0;
     uint32_t ihl = (ip->ver_ihl & 0x0F) * 4;
     const tcp_hdr_t *tcp = (const tcp_hdr_t *)((const uint8_t *)ip + ihl);
-    if (ntohs(tcp->dst) != listen_port) return 0;
+    if (!net_listen_has(ntohs(tcp->dst))) return 0;
     uint8_t flags = tcp->flags;
     uint32_t seq = ntohl(tcp->seq);
     uint32_t peer = ip->src;
@@ -2540,7 +2569,7 @@ static int tcp_accept_ingress(const uint8_t *pkt, uint16_t len) {
             tcp_pending_t *p = &g_pending[slot];
             memset(p, 0, sizeof(*p));
             p->in_use = 1;
-            p->port = listen_port;
+            p->port = ntohs(tcp->dst);
             p->peer = peer;
             p->peer_port = peer_port;
             p->peer_seq = seq + 1;
@@ -2596,8 +2625,13 @@ static int accept_cb(const uint8_t *pkt, uint16_t len, void *arg) {
 int net_tcp_listen(uint16_t port) {
     if (port == 0) return -1;
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
-    listen_port = port;
-    memset(g_pending, 0, sizeof(g_pending));
+    if (!net_listen_has(port)) {
+        if (listen_port_count >= NET_LISTEN_MAX) return -1;
+        listen_ports[listen_port_count++] = port;
+    }
+    /* 只清一次：第一张表刚建好时清掉可能残留的旧 pending；之后多端口
+     * 共存时不能再整体清空，否则会把别的监听端口正在排队的握手也抹掉。 */
+    if (listen_port_count == 1) memset(g_pending, 0, sizeof(g_pending));
     return 0;
 }
 
@@ -2609,7 +2643,7 @@ int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn,
     }
     memset(conn, 0, sizeof(*conn));
     if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
-    if (listen_port != port) return -1;
+    if (!net_listen_has(port)) return -1;
 
     uint32_t elapsed = 0;
     int slot = -1;
