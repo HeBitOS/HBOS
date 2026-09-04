@@ -912,18 +912,30 @@ static int hbfs_format_range(uint32_t start, uint32_t sectors) {
 // 文件系统初始化
 int fs_init(void) {
     fs_reset_ram();
-    if (fs_mount_disk() < 0) {
-        if (ext2_try_mount() == 0) {
-            fs_backend = FS_BACKEND_EXT2;
-            ext2_rebuild_files();
-            fs.total_sectors = block_sector_count();
-        } else if (fat32_try_mount() == 0) {
-            fs_backend = FS_BACKEND_FAT32;
-            fat32_rebuild_files();
-            fs.total_sectors = block_sector_count();
-        }
-    }
+    (void)fs_retry_mount();
     return 1;
+}
+
+/* 惰性重挂载：启动后盘才就绪（AHCI 链路晚 up、热插拔、或首次扫描失败）
+ * 时，重新探测块设备并挂载，但不重置 ramfs（保留 startup.cfg 等种子文件）。
+ * 已有磁盘后端时直接返回，不重复扫描。 */
+int fs_retry_mount(void) {
+    if (fs_is_disk()) return 0;
+    if (block_init() < 0) return -1;
+    if (fs_mount_disk() == 0) return 0;
+    if (ext2_try_mount() == 0) {
+        fs_backend = FS_BACKEND_EXT2;
+        ext2_rebuild_files();
+        fs.total_sectors = block_sector_count();
+        return 0;
+    }
+    if (fat32_try_mount() == 0) {
+        fs_backend = FS_BACKEND_FAT32;
+        fat32_rebuild_files();
+        fs.total_sectors = block_sector_count();
+        return 0;
+    }
+    return -1;
 }
 
 /**

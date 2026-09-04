@@ -501,7 +501,10 @@ static int ahci_identify(void) {
  * @return 成功返回 0，失败返回 -1
  */
 int ahci_init(void) {
-    if (initialized) return active_port ? 0 : -1;
+    /* 只有成功持有活动端口才短路：上次扫描失败（例如启动早期 AHCI 链路
+     * 尚未就绪、SSTS 还是 0）不能永久缓存失败，否则之后盘接上了也永远
+     * 检测不到（block_init/fs 的重试全被这个门挡死）。 */
+    if (initialized && active_port) return 0;
     initialized = 1;
 
     pci_device_t dev;

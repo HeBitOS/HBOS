@@ -135,6 +135,7 @@ static void cmd_diskmgr(int argc, char **argv) {
     (void)argv;
 
     (void)block_init();
+    (void)fs_retry_mount();
     console_puts("\n\x1b[33mHBOS Disk Manager\x1b[0m\n");
     console_puts("backend: \x1b[36m");
     console_puts(block_backend_name());
