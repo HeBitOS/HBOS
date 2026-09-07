@@ -277,7 +277,12 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/apps/app_taskmgr.c \
 	$(SRC_DIR)/gui/apps/app_shortcuts.c \
 	$(SRC_DIR)/gui/apps/app_imgview.c \
-	$(SRC_DIR)/gui/apps/app_hexview.c
+	$(SRC_DIR)/gui/apps/app_hexview.c \
+	$(SRC_DIR)/gui/apps/app_snake.c \
+	$(SRC_DIR)/gui/apps/app_uwc.c \
+	$(SRC_DIR)/gui/apps/app_diag.c \
+	$(SRC_DIR)/gui/apps/app_notes.c \
+	$(SRC_DIR)/gui/apps/app_code.c
 
 ifeq ($(HBOS_ENABLE_GUI),1)
 C_SRCS += $(GUI_C_SRCS)

@@ -32,6 +32,7 @@
 #include "../gui/gui_dirty.h"
 #include "../gui/gui_draw.h"
 #include "../gui/gui_app.h"
+#include "../gui/gui_panel.h"
 #include "../gui/browser_backend.h"
 #include "../gui/browser_layout.h"
 
@@ -39,6 +40,26 @@
  * 打开对应查看器前写入要打开的文件路径 */
 void app_imgview_set_path(gui_state_t *st, const char *path);
 void app_hexview_set_path(gui_state_t *st, const char *path);
+void app_snake_reset(gui_state_t *st);
+int  gui_has_code_suffix(const char *path);
+void app_code_set_path(gui_state_t *st, const char *path);
+void app_code_load(gui_state_t *st);
+void app_code_clamp_scroll(gui_state_t *st);
+void app_code_ensure_visible(gui_state_t *st);
+void app_code_open_selected(gui_state_t *st);
+void app_code_gui_run(gui_state_t *st, const fb_info_t *fb);
+void app_code_command(gui_state_t *st, int cmd);
+int  app_code_hit_command(int w, int h, const gui_state_t *st, int mx, int my);
+int  app_code_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off);
+int  app_code_hit_file(int w, int h, const gui_state_t *st, int mx, int my);
+int  app_code_wheel(gui_state_t *st, int steps);
+void app_notes_create(gui_state_t *st);
+void app_notes_append(gui_state_t *st);
+int app_notes_hit_file(int w, int h, const gui_state_t *st, int mx, int my);
+int app_notes_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off);
+void app_diag_welcome(gui_state_t *st);
+void app_diag_install_sink(gui_state_t *st);
+void app_diag_remove_sink(void);
 #include "../rtc_tz.h"
 #include "../shell/shell.h"
 #include "tool.h"
@@ -71,18 +92,12 @@ int ui_s(int v) { return v * g_ui_scale / 100; }
  * gui_state.h（上面已 include）——这里以前有一份重复定义，用的是旧的
  * 更小的值，会把 gui_state.h 的实际值静默盖掉（宏后定义生效），不要
  * 再在这里重复定义。 */
-#define CODE_OUTPUT_CAP 256
 #define CODE_VIEW_ROWS 10
-#define SNAKE_W 16
-#define SNAKE_H 10
+#define MONO_GLYPH_W GUI_MONO_GLYPH_W
+#define MONO_GLYPH_H GUI_MONO_GLYPH_H
 #define GUI_PAGE_SIZE 4096ULL
 #define FILE_LIST_ROWS 8
-#define FILE_ROW_H 30
 #define NOTE_FILE_ROWS 7
-#define CODE_CMD_SAVE    1
-#define CODE_CMD_RUN     2
-#define CODE_CMD_OPEN    3
-#define CODE_CMD_GUI_RUN 4
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b);
 
@@ -100,24 +115,6 @@ static inline uint32_t cyber_text_muted(int light) { return light ? rgb(110, 116
 static inline uint32_t cyber_border(int light) { return light ? rgb(188, 192, 196) : rgb(60, 64, 69); }
 static inline uint32_t cyber_card_bg_top(int light) { return light ? rgb(252, 252, 252) : rgb(49, 54, 59); }
 static inline uint32_t cyber_card_bg_bot(int light) { return light ? rgb(239, 240, 241) : rgb(42, 46, 50); }
-
-static char g_code_buf[CODE_EDIT_CAP];
-static char g_code_output[CODE_OUTPUT_CAP];
-
-typedef struct {
-    int content_w;
-    int side_w;
-    int editor_x;
-    int editor_y;
-    int editor_w;
-    int editor_h;
-    int bottom_y;
-    int bottom_h;
-    int row_h;
-    int line_no_w;
-    int view_rows;
-    int file_rows;
-} code_layout_t;
 
 typedef struct {
     const char *name;
@@ -159,14 +156,14 @@ static uint32_t gui_app_count(void) {
 }
 
 static file_t *selected_file(gui_state_t *st);
-static void gui_select_file(gui_state_t *st, int index);
+void gui_select_file(gui_state_t *st, int index);
 static int gui_select_path(gui_state_t *st, const char *path);
 static void draw_desktop(int w, int h, gui_state_t *st);
 static void draw_start_menu(gui_state_t *st);
 static void draw_context_menu(gui_state_t *st);
 static void draw_calendar_popup(int w, int h, gui_state_t *st);
 static void draw_window_switcher(int w, int h, gui_state_t *st);
-static void gui_sync_focus(gui_state_t *st);
+void gui_sync_focus(gui_state_t *st);
 
 static void clamp_window(gui_state_t *st, int w, int h, int win_w, int win_h) {
     if (st->win_x < 4) st->win_x = 4;
@@ -185,13 +182,13 @@ static const char *gui_window_title(const wm_window_t *win) {
     return wm_window_title((wm_window_t *)win);
 }
 
-static void gui_window_metrics(gui_state_t *st, int w, int h, const wm_window_t *win, int idx,
+void gui_window_metrics(gui_state_t *st, int w, int h, const wm_window_t *win, int idx,
                                int *win_x, int *win_y, int *win_w, int *win_h) {
     wm_get_window_rect(&st->wm, idx, win_x, win_y, win_w, win_h);
     (void)w; (void)h; (void)win;
 }
 
-static void gui_sync_focus(gui_state_t *st) {
+void gui_sync_focus(gui_state_t *st) {
     wm_window_t *win = gui_active_window(st);
     if (!win) {
         st->app_mode = GUI_APP_NONE;
@@ -731,8 +728,6 @@ static void blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int s
 // font the TUI uses). No anti-aliasing — solid foreground pixels — so the code
 // editor reads like a real terminal instead of the soft proportional GUI font.
 extern const uint8_t *fb_console_glyph(uint32_t cp);
-#define MONO_GLYPH_W 8
-#define MONO_GLYPH_H 16
 static void blit_mono_glyph(int x, int y, const uint8_t *glyph, uint32_t color, int scale) {
     if (!glyph) return;
     if (scale < 1) scale = 1;
@@ -924,7 +919,7 @@ static int gui_resolve_glyph(uint32_t cp, int scale, gui_glyph_t *g,
     return 0;
 }
 
-static int gui_cp_advance(uint32_t cp, int scale) {
+int gui_cp_advance(uint32_t cp, int scale) {
     gui_glyph_t g;
     int idx, sub;
     if (!gui_resolve_glyph(cp, scale, &g, &idx, &sub)) return 6 * scale;
@@ -1100,7 +1095,7 @@ static void append_sci(char *buf, uint32_t cap, uint32_t *pos, long long mant, i
     append_uint(buf, cap, pos, (uint32_t)e);
 }
 
-static const char *gui_file_path(gui_state_t *st) {
+const char *gui_file_path(gui_state_t *st) {
     if (!st->file_path[0]) {
         st->file_path[0] = '/';
         st->file_path[1] = 0;
@@ -1108,7 +1103,7 @@ static const char *gui_file_path(gui_state_t *st) {
     return st->file_path;
 }
 
-static void gui_set_file_path(gui_state_t *st, const char *path) {
+void gui_set_file_path(gui_state_t *st, const char *path) {
     uint32_t i = 0;
     while (path && path[i] && i + 1 < sizeof(st->file_path)) {
         st->file_path[i] = path[i];
@@ -1127,7 +1122,7 @@ static int gui_path_join(const char *base, const char *name, char *out, uint32_t
     return vfs_resolve_path(base, name, out, cap);
 }
 
-static uint32_t gui_file_count(gui_state_t *st) {
+uint32_t gui_file_count(gui_state_t *st) {
     char name[VFS_MAX_NAME];
     uint32_t type;
     uint32_t count = 0;
@@ -1136,7 +1131,7 @@ static uint32_t gui_file_count(gui_state_t *st) {
     return count;
 }
 
-static int gui_file_entry(gui_state_t *st, uint32_t index, char *name,
+int gui_file_entry(gui_state_t *st, uint32_t index, char *name,
                           uint32_t *type, vfs_node_t **node, char *full,
                           uint32_t full_cap) {
     const char *path = gui_file_path(st);
@@ -1149,7 +1144,7 @@ static int gui_file_entry(gui_state_t *st, uint32_t index, char *name,
     return 0;
 }
 
-static int gui_selected_entry(gui_state_t *st, char *name, uint32_t *type,
+int gui_selected_entry(gui_state_t *st, char *name, uint32_t *type,
                               vfs_node_t **node, char *full, uint32_t full_cap) {
     uint32_t count = gui_file_count(st);
     if (count == 0) {
@@ -1161,7 +1156,7 @@ static int gui_selected_entry(gui_state_t *st, char *name, uint32_t *type,
     return gui_file_entry(st, (uint32_t)st->selected_file, name, type, node, full, full_cap);
 }
 
-static file_t *gui_selected_regular_file(gui_state_t *st) {
+file_t *gui_selected_regular_file(gui_state_t *st) {
     char name[VFS_MAX_NAME], full[GUI_PATH_MAX];
     uint32_t type;
     vfs_node_t *node = 0;
@@ -1214,7 +1209,7 @@ static void gui_make_note_name(char *out, uint32_t cap, uint32_t index) {
     }
 }
 
-static void gui_set_note_name(gui_state_t *st, const char *name) {
+void gui_set_note_name(gui_state_t *st, const char *name) {
     uint32_t i = 0;
     while (name && name[i] && i + 1 < sizeof(st->note_name)) {
         st->note_name[i] = name[i];
@@ -1225,7 +1220,7 @@ static void gui_set_note_name(gui_state_t *st, const char *name) {
     st->note_sel_active = 0;
 }
 
-static const char *gui_note_name(gui_state_t *st) {
+const char *gui_note_name(gui_state_t *st) {
     if (!st->note_name[0]) gui_set_note_name(st, "gui-note");
     return st->note_name;
 }
@@ -2123,315 +2118,8 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
          rgb(200, 206, 212), 1);
 }
 
-static uint32_t count_file_lines(file_t *f) {
-    if (!f) return 0;
-    uint32_t lines = 0;
-    char buf[128];
-    uint32_t off = 0;
-    while (off < f->size) {
-        uint32_t n = fs_read_file_data(f, off, buf, sizeof(buf));
-        if (!n) break;
-        for (uint32_t i = 0; i < n; i++) {
-            if (buf[i] == '\n') lines++;
-        }
-        off += n;
-    }
-    return lines;
-}
 
-static void note_load(gui_state_t *st) {
-    if (st->note_loaded) return;
-    st->note_len = 0;
-    st->note_buf[0] = 0;
-    file_t *f = fs_find_file(gui_note_name(st));
-    if (f) {
-        uint32_t n = f->size;
-        if (n >= NOTE_EDIT_CAP) n = NOTE_EDIT_CAP - 1;
-        st->note_len = fs_read_file_data(f, 0, st->note_buf, n);
-        st->note_buf[st->note_len] = 0;
-    }
-    st->note_cursor = st->note_len;
-    st->note_dirty = 0;
-    st->note_loaded = 1;
-}
 
-static void note_save(gui_state_t *st) {
-    const char *name = gui_note_name(st);
-    file_t *f = fs_find_file(name);
-    if (!f) f = fs_create_file(name);
-    if (!f) {
-        st->status = "笔记创建失败";
-        return;
-    }
-    if (fs_truncate_file(f) < 0 ||
-        fs_write_file_data(f, 0, st->note_buf, st->note_len) < 0) {
-        st->status = "笔记保存失败";
-        return;
-    }
-    (void)fs_sync();
-    st->note_dirty = 0;
-    st->status = "笔记已保存";
-}
-
-// Ctrl+A 全选后，Backspace/Delete/输入字符 都应先清空整篇笔记（相当于替换选区）
-// 删除 [start,end) 字节范围（Shift+方向键选区 或 Ctrl+A 全选后，输入/退格替换选中内容）
-static void note_delete_range(gui_state_t *st, uint32_t start, uint32_t end) {
-    if (end > st->note_len) end = st->note_len;
-    st->note_sel_active = 0;
-    if (start >= end) { st->note_cursor = start; return; }
-    uint32_t removed = end - start;
-    for (uint32_t i = start; i + removed <= st->note_len; i++)
-        st->note_buf[i] = st->note_buf[i + removed];
-    st->note_len -= removed;
-    st->note_cursor = start;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
-    st->status = "编辑中（Ctrl+S 保存）";
-}
-
-// 选区范围 [*start,*end)；anchor==cursor 时无实际选中内容
-static void note_sel_range(const gui_state_t *st, uint32_t *start, uint32_t *end) {
-    uint32_t a = st->note_sel_anchor, b = st->note_cursor;
-    *start = a < b ? a : b;
-    *end   = a < b ? b : a;
-}
-
-// 在光标处插入一个字节，仅修改内存缓冲，标记 dirty（Ctrl+S 才落盘）
-static void note_insert(gui_state_t *st, char c) {
-    if (st->note_len + 1 >= NOTE_EDIT_CAP) {
-        st->status = "笔记已满";
-        return;
-    }
-    if (st->note_cursor > st->note_len) st->note_cursor = st->note_len;
-    for (uint32_t i = st->note_len; i > st->note_cursor; i--)
-        st->note_buf[i] = st->note_buf[i - 1];
-    st->note_buf[st->note_cursor] = c;
-    st->note_len++;
-    st->note_cursor++;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
-    st->status = "编辑中（Ctrl+S 保存）";
-}
-
-// 删除光标前的一个 UTF-8 字符
-static void note_backspace(gui_state_t *st) {
-    if (st->note_cursor == 0) return;
-    uint32_t start = st->note_cursor - 1;
-    while (start > 0 && ((uint8_t)st->note_buf[start] & 0xC0) == 0x80) start--;
-    uint32_t removed = st->note_cursor - start;
-    for (uint32_t i = start; i + removed <= st->note_len; i++)
-        st->note_buf[i] = st->note_buf[i + removed];
-    st->note_len -= removed;
-    st->note_cursor = start;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
-    st->status = "编辑中（Ctrl+S 保存）";
-}
-
-// 删除光标后的一个 UTF-8 字符
-static void note_delete_forward(gui_state_t *st) {
-    if (st->note_cursor >= st->note_len) return;
-    uint32_t end = st->note_cursor + 1;
-    while (end < st->note_len && ((uint8_t)st->note_buf[end] & 0xC0) == 0x80) end++;
-    uint32_t removed = end - st->note_cursor;
-    for (uint32_t i = st->note_cursor; i + removed <= st->note_len; i++)
-        st->note_buf[i] = st->note_buf[i + removed];
-    st->note_len -= removed;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
-    st->status = "编辑中（Ctrl+S 保存）";
-}
-
-// 光标按 UTF-8 边界左移
-static void note_cursor_left(gui_state_t *st) {
-    if (st->note_cursor == 0) return;
-    st->note_cursor--;
-    while (st->note_cursor > 0 &&
-           ((uint8_t)st->note_buf[st->note_cursor] & 0xC0) == 0x80)
-        st->note_cursor--;
-}
-
-// 光标按 UTF-8 边界右移
-static void note_cursor_right(gui_state_t *st) {
-    if (st->note_cursor >= st->note_len) return;
-    st->note_cursor++;
-    while (st->note_cursor < st->note_len &&
-           ((uint8_t)st->note_buf[st->note_cursor] & 0xC0) == 0x80)
-        st->note_cursor++;
-}
-
-// 返回光标所在行的起始偏移
-static uint32_t note_line_start(gui_state_t *st, uint32_t off) {
-    while (off > 0 && st->note_buf[off - 1] != '\n') off--;
-    return off;
-}
-
-static void note_cursor_home(gui_state_t *st) {
-    st->note_cursor = note_line_start(st, st->note_cursor);
-}
-
-static void note_cursor_end(gui_state_t *st) {
-    while (st->note_cursor < st->note_len && st->note_buf[st->note_cursor] != '\n')
-        st->note_cursor++;
-}
-
-// 上/下移动光标，尽量保持当前列
-static void note_cursor_vertical(gui_state_t *st, int dir) {
-    uint32_t ls = note_line_start(st, st->note_cursor);
-    uint32_t col = st->note_cursor - ls;
-    if (dir < 0) {
-        if (ls == 0) { st->note_cursor = 0; return; }
-        uint32_t prev = note_line_start(st, ls - 1);
-        uint32_t prev_len = (ls - 1) - prev;
-        st->note_cursor = prev + (col < prev_len ? col : prev_len);
-    } else {
-        uint32_t nl = st->note_cursor;
-        while (nl < st->note_len && st->note_buf[nl] != '\n') nl++;
-        if (nl >= st->note_len) { st->note_cursor = st->note_len; return; }
-        uint32_t next = nl + 1;
-        uint32_t next_end = next;
-        while (next_end < st->note_len && st->note_buf[next_end] != '\n') next_end++;
-        uint32_t next_len = next_end - next;
-        st->note_cursor = next + (col < next_len ? col : next_len);
-    }
-}
-
-static void draw_notes_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
-    note_load(st);
-    int list_w = 150;
-    int edit_x = tx + list_w + 18;
-    int edit_w = win_w - list_w - 86;
-    if (edit_w < 260) edit_w = 260;
-    /* 文件列表框和编辑框的底边跟着 win_h 走（之前固定 222/174，窗口拉高
-     * 也不会多显示内容/多留编辑空间）。win_h - 138 在默认窗口高度 430 下
-     * 正好等于原来硬编码用的 292（ty+292 是两个框原来共同的底边），保证
-     * 默认尺寸下和改动前像素级一致，只有真正调整窗口大小时才会变化。 */
-    int content_bottom_off = win_h - 138;
-    if (content_bottom_off < 200) content_bottom_off = 200;
-    int list_h = content_bottom_off - 70;
-    int edit_h = content_bottom_off - 118;
-    text(tx, ty, "记事本", rgb(124, 220, 154), 1);
-    text(tx, ty + 40, "选择左侧文件后编辑", rgb(148, 162, 174), 1);
-    char line[96];
-
-    vgradient(tx, ty + 70, list_w, list_h, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, ty + 70, list_w, list_h, rgb(46, 66, 84));
-    rect(tx, ty + 70, list_w, 1, rgb(58, 86, 110));
-    text(tx + 12, ty + 82, "文件", rgb(194, 226, 242), 1);
-    rect(tx + 12, ty + 100, list_w - 24, 1, rgb(50, 72, 92));
-    uint32_t count = gui_file_count(st);
-    if (count == 0) {
-        text(tx + 12, ty + 112, "暂无文件", rgb(148, 162, 174), 1);
-        text(tx + 12, ty + 134, "按 N 新建", rgb(148, 162, 174), 1);
-    } else {
-        int selected = st->selected_file;
-        if (selected < 0) selected = 0;
-        if ((uint32_t)selected >= count) selected = (int)count - 1;
-        uint32_t start = selected >= NOTE_FILE_ROWS ? (uint32_t)selected - (NOTE_FILE_ROWS - 1) : 0;
-        uint32_t max = count - start;
-        if (max > NOTE_FILE_ROWS) max = NOTE_FILE_ROWS;
-        for (uint32_t i = 0; i < max; i++) {
-            uint32_t file_idx = start + i;
-            char name[VFS_MAX_NAME], full[GUI_PATH_MAX];
-            uint32_t type = 0;
-            vfs_node_t *node = 0;
-            if (gui_file_entry(st, file_idx, name, &type, &node, full, sizeof(full)) < 0)
-                continue;
-            int y = ty + 112 + (int)i * FILE_ROW_H;
-            if ((int)file_idx == selected) {
-                vgradient(tx + 8, y - 6, list_w - 16, 24, rgb(28, 80, 116), rgb(16, 50, 78));
-                rect(tx + 8, y - 6, 3, 24, rgb(124, 220, 154));
-            }
-            if (node && node->type == VFS_NODE_DIR) rect(tx + 14, y + 3, 5, 5, rgb(244, 194, 82));
-            text_clipped(tx + 24, y, tx + list_w - 12, name,
-                         (int)file_idx == selected ? rgb(252, 254, 255) : rgb(210, 222, 234), 1);
-        }
-    }
-
-    line2(line, sizeof(line), "文件: ", gui_note_name(st));
-    text_clipped(edit_x, ty + 70, edit_x + edit_w, line, rgb(210, 221, 230), 1);
-    {
-        uint32_t pos = 0;
-        line[0] = 0;
-        append_str(line, sizeof(line), &pos, "大小: ");
-        append_uint(line, sizeof(line), &pos, st->note_len);
-        append_str(line, sizeof(line), &pos, "B");
-        if (st->note_dirty) append_str(line, sizeof(line), &pos, "  ●未保存");
-        else append_str(line, sizeof(line), &pos, "  已保存");
-    }
-    text(edit_x, ty + 92, line, st->note_dirty ? rgb(244, 194, 82) : rgb(150, 200, 160), 1);
-    text_clipped(edit_x, ty + 50, edit_x + edit_w,
-                 "方向键移动  Ctrl+S 保存  Ctrl+A 全选",
-                 rgb(120, 150, 168), 1);
-    vgradient(edit_x, ty + 118, edit_w, edit_h, rgb(8, 14, 22), rgb(2, 6, 12));
-    rect(edit_x, ty + 118, edit_w, 1, rgb(28, 56, 36));
-    rect(edit_x, ty + 118 + edit_h - 1, edit_w, 1, rgb(8, 14, 22));
-    border(edit_x, ty + 118, edit_w, edit_h, rgb(85, 180, 120));
-    int x = edit_x + 8;
-    int y = ty + 126;
-    int cursor_x = x;
-    int cursor_y = y;
-    int cursor_drawn = 0;
-    uint32_t sel_start = 0, sel_end = 0;
-    if (st->note_sel_active) note_sel_range(st, &sel_start, &sel_end);
-    utf8_state_t utf8;
-    utf8_init(&utf8);
-    for (uint32_t i = 0; i < st->note_len && y < ty + content_bottom_off - 12; i++) {
-        if (i == st->note_cursor) {
-            cursor_x = x;
-            cursor_y = y;
-            cursor_drawn = 1;
-        }
-        int in_sel = st->note_sel_active && i >= sel_start && i < sel_end;
-        if (st->note_buf[i] == '\n') {
-            if (in_sel) rect(x, y, 6, 16, rgb(40, 92, 132));
-            x = edit_x + 8;
-            y += 18;
-            utf8_init(&utf8);
-            continue;
-        }
-
-        uint32_t cp = 0;
-        int ok = utf8_feed(&utf8, (uint8_t)st->note_buf[i], &cp);
-        if (ok < 0) continue;
-        if (ok == 0) cp = '?';
-
-        if (in_sel) rect(x, y, gui_cp_advance(cp, 1), 16, rgb(40, 92, 132));
-        int advance = draw_text_codepoint(x, y, cp, rgb(228, 238, 246), 1);
-        x += advance;
-        if (x > edit_x + edit_w - 16) {
-            x = edit_x + 8;
-            y += 18;
-        }
-    }
-    if (!cursor_drawn) {
-        cursor_x = x;
-        cursor_y = y;
-    }
-    // 在光标实际位置绘制闪烁竖线光标（每 15 帧切一次显隐，跟控制台/网址栏一致）
-    static uint32_t note_caret_ticks = 0;
-    note_caret_ticks++;
-    if (cursor_y < ty + content_bottom_off - 12 && (note_caret_ticks / 15) % 2) {
-        rect(cursor_x, cursor_y, 2, 14, rgb(124, 220, 154));
-    }
-}
-
-static void draw_uwc_app(int tx, int ty, gui_state_t *st) {
-    char line[96];
-    file_t *f = selected_file(st);
-    text(tx, ty, "文件统计", rgb(244, 194, 82), 1);
-    if (!f) {
-        text(tx, ty + 42, "未选择文件", rgb(148, 162, 174), 1);
-        text(tx, ty + 64, "先在文件管理器中选择或创建文件", rgb(148, 162, 174), 1);
-        return;
-    }
-    line2(line, sizeof(line), "文件: ", f->name);
-    text(tx, ty + 42, line, rgb(210, 221, 230), 1);
-    line_u32(line, sizeof(line), "字节: ", f->size, "");
-    text(tx, ty + 64, line, rgb(210, 221, 230), 1);
-    line_u32(line, sizeof(line), "行数: ", count_file_lines(f), "");
-    text(tx, ty + 86, line, rgb(210, 221, 230), 1);
-}
 
 static char gui_ascii_lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
 
@@ -2450,12 +2138,6 @@ static int gui_has_suffix(const char *path, const char *suffix) {
     return 1;
 }
 
-static int gui_has_code_suffix(const char *path) {
-    return gui_has_suffix(path, ".c") || gui_has_suffix(path, ".h") ||
-           gui_has_suffix(path, ".cc") || gui_has_suffix(path, ".cpp") ||
-           gui_has_suffix(path, ".hpp") || gui_has_suffix(path, ".asm") ||
-           gui_has_suffix(path, ".S");
-}
 
 /* 内容嗅探兜底：没有 .bmp/代码后缀时，读文件开头一小段看像不像文本——
  * 含 NUL 字节，或控制字符占比过高，就当成二进制交给十六进制查看器，
@@ -2475,958 +2157,9 @@ static int gui_looks_binary(vfs_node_t *node) {
     return suspicious * 4 > got;
 }
 
-static void code_set_output(const char *msg) {
-    uint32_t i = 0;
-    while (msg && msg[i] && i + 1 < CODE_OUTPUT_CAP) {
-        g_code_output[i] = msg[i];
-        i++;
-    }
-    g_code_output[i] = 0;
-}
 
-static void code_append_sanitized(char *buf, uint32_t cap, uint32_t *pos, const char *s) {
-    int space = 0;
-    while (s && *s && *pos + 1 < cap) {
-        char c = *s++;
-        if (c == '\r' || c == '\n' || c == '\t') c = ' ';
-        if (c == ' ') {
-            if (space) continue;
-            space = 1;
-        } else {
-            space = 0;
-        }
-        append_char(buf, cap, pos, c);
-    }
-}
 
-static void code_set_path(gui_state_t *st, const char *path) {
-    uint32_t i = 0;
-    while (path && path[i] && i + 1 < sizeof(st->code_path)) {
-        st->code_path[i] = path[i];
-        i++;
-    }
-    if (i == 0) {
-        strcpy(st->code_path, "/home/main.c");
-    } else {
-        st->code_path[i] = 0;
-    }
-    st->code_loaded = 0;
-    st->code_modified = 0;
-    st->code_scroll = 0;
-    st->code_cursor = 0;
-    st->code_sel_active = 0;
-    st->code_error_line = 0;
-    st->code_view_rows = 0;
-}
 
-static const char *code_path(gui_state_t *st) {
-    if (!st->code_path[0]) code_set_path(st, "/home/main.c");
-    return st->code_path;
-}
-
-static void code_insert_template(void) {
-    const char *tpl =
-        "#include <stdio.h>\n"
-        "\n"
-        "int main() {\n"
-        "    puts(\"HBOS Code Workspace\");\n"
-        "    printf(\"answer=%d\\n\", 40 + 2);\n"
-        "    return 0;\n"
-        "}\n";
-    uint32_t len = (uint32_t)strlen(tpl);
-    if (len >= CODE_EDIT_CAP) len = CODE_EDIT_CAP - 1;
-    memcpy(g_code_buf, tpl, len);
-    g_code_buf[len] = 0;
-}
-
-static int code_save(gui_state_t *st) {
-    const char *path = code_path(st);
-    vfs_node_t *node = vfs_lookup(path);
-    if (!node) node = vfs_create(path);
-    if (!node || node->type != VFS_NODE_FILE) {
-        code_set_output("Save failed: cannot create file");
-        st->status = "代码保存失败";
-        return -1;
-    }
-    if (vfs_truncate(node) < 0 ||
-        vfs_write(node, 0, g_code_buf, st->code_len) < 0) {
-        code_set_output("Save failed: VFS write error");
-        st->status = "代码保存失败";
-        return -1;
-    }
-    (void)fs_sync();
-    st->code_modified = 0;
-    st->code_error_line = 0;
-    code_set_output("Saved");
-    st->status = "代码已保存";
-    return 0;
-}
-
-static void code_load(gui_state_t *st) {
-    if (st->code_loaded) return;
-    const char *path = code_path(st);
-    g_code_buf[0] = 0;
-    st->code_len = 0;
-    st->code_cursor = 0;
-    st->code_scroll = 0;
-    st->code_modified = 0;
-    st->code_error_line = 0;
-    vfs_node_t *node = vfs_lookup(path);
-    if (!node) {
-        code_insert_template();
-        st->code_len = (uint32_t)strlen(g_code_buf);
-        st->code_cursor = st->code_len;
-        st->code_modified = 1;
-        code_set_output("New C file template");
-        (void)code_save(st);
-        st->code_loaded = 1;
-        return;
-    }
-    if (node->type != VFS_NODE_FILE) {
-        code_set_output("Open failed: selected path is not a file");
-        st->code_loaded = 1;
-        return;
-    }
-    uint32_t n = node->size;
-    if (n >= CODE_EDIT_CAP) n = CODE_EDIT_CAP - 1;
-    int got = vfs_read(node, 0, g_code_buf, n);
-    if (got < 0) {
-        g_code_buf[0] = 0;
-        code_set_output("Open failed: VFS read error");
-        st->code_loaded = 1;
-        return;
-    }
-    st->code_len = (uint32_t)got;
-    g_code_buf[st->code_len] = 0;
-    st->code_cursor = 0;
-    code_set_output(node->size >= CODE_EDIT_CAP ? "Opened with truncation" : "Opened");
-    st->code_loaded = 1;
-}
-
-static void code_open_selected(gui_state_t *st) {
-    char name[VFS_MAX_NAME], full[GUI_PATH_MAX];
-    uint32_t type = 0;
-    vfs_node_t *node = 0;
-    if (gui_selected_entry(st, name, &type, &node, full, sizeof(full)) < 0 || !node) {
-        code_set_output("Open failed: no selected file");
-        st->status = "未选择代码文件";
-        return;
-    }
-    if (node->type == VFS_NODE_DIR) {
-        gui_set_file_path(st, full);
-        st->status = "已进入目录";
-        return;
-    }
-    if (node->type != VFS_NODE_FILE) {
-        code_set_output("Open failed: device node");
-        st->status = "设备节点不能打开";
-        return;
-    }
-    code_set_path(st, full);
-    code_load(st);
-    st->status = "代码文件已打开";
-}
-
-static void code_line_col(gui_state_t *st, uint32_t off, uint32_t *line, uint32_t *col) {
-    if (off > st->code_len) off = st->code_len;
-    uint32_t l = 0, c = 0;
-    for (uint32_t i = 0; i < off; i++) {
-        if (g_code_buf[i] == '\n') {
-            l++;
-            c = 0;
-        } else {
-            c++;
-        }
-    }
-    if (line) *line = l;
-    if (col) *col = c;
-}
-
-static uint32_t code_line_count(gui_state_t *st) {
-    uint32_t lines = 1;
-    for (uint32_t i = 0; i < st->code_len; i++) {
-        if (g_code_buf[i] == '\n') lines++;
-    }
-    return lines;
-}
-
-static int code_visible_rows(gui_state_t *st) {
-    return st->code_view_rows > 0 ? st->code_view_rows : CODE_VIEW_ROWS;
-}
-
-static void code_clamp_scroll(gui_state_t *st) {
-    int max_scroll = (int)code_line_count(st) - code_visible_rows(st);
-    if (max_scroll < 0) max_scroll = 0;
-    if (st->code_scroll < 0) st->code_scroll = 0;
-    if (st->code_scroll > max_scroll) st->code_scroll = max_scroll;
-}
-
-static uint32_t code_find_line_start(gui_state_t *st, uint32_t target_line) {
-    uint32_t line = 0;
-    for (uint32_t i = 0; i < st->code_len; i++) {
-        if (line == target_line) return i;
-        if (g_code_buf[i] == '\n') line++;
-    }
-    return line == target_line ? st->code_len : st->code_len;
-}
-
-static uint32_t code_line_len_at(gui_state_t *st, uint32_t start) {
-    uint32_t len = 0;
-    while (start + len < st->code_len && g_code_buf[start + len] != '\n') len++;
-    return len;
-}
-
-static uint32_t code_offset_for_line_col(gui_state_t *st, uint32_t line, uint32_t col) {
-    uint32_t start = code_find_line_start(st, line);
-    uint32_t len = code_line_len_at(st, start);
-    if (col > len) col = len;
-    return start + col;
-}
-
-static void code_jump_to_line(gui_state_t *st, int one_based_line) {
-    if (one_based_line <= 0) return;
-    uint32_t line = (uint32_t)(one_based_line - 1);
-    st->code_cursor = code_offset_for_line_col(st, line, 0);
-    if ((int)line < st->code_scroll) st->code_scroll = (int)line;
-    if ((int)line >= st->code_scroll + code_visible_rows(st))
-        st->code_scroll = (int)line - code_visible_rows(st) + 1;
-    code_clamp_scroll(st);
-}
-
-static void code_ensure_visible(gui_state_t *st) {
-    uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
-    (void)col;
-    if ((int)line < st->code_scroll) st->code_scroll = (int)line;
-    if ((int)line >= st->code_scroll + code_visible_rows(st))
-        st->code_scroll = (int)line - code_visible_rows(st) + 1;
-    code_clamp_scroll(st);
-}
-
-static void code_move_vertical(gui_state_t *st, int dir) {
-    uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
-    if (dir < 0 && line == 0) return;
-    uint32_t lines = code_line_count(st);
-    if (dir > 0 && line + 1 >= lines) return;
-    if (dir > 0) line++;
-    else line--;
-    st->code_cursor = code_offset_for_line_col(st, line, col);
-    code_ensure_visible(st);
-}
-
-static void code_move_line_edge(gui_state_t *st, int end) {
-    uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
-    (void)col;
-    uint32_t start = code_find_line_start(st, line);
-    st->code_cursor = start + (end ? code_line_len_at(st, start) : 0);
-    code_ensure_visible(st);
-}
-
-static void code_move_page(gui_state_t *st, int dir) {
-    uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
-    int target = (int)line + dir * code_visible_rows(st);
-    int max_line = (int)code_line_count(st) - 1;
-    if (target < 0) target = 0;
-    if (target > max_line) target = max_line;
-    st->code_cursor = code_offset_for_line_col(st, (uint32_t)target, col);
-    code_ensure_visible(st);
-}
-
-// 删除 [start,end) 字节范围（Shift+方向键选区 或 Ctrl+A 全选后，输入/退格替换选中内容）
-static void code_delete_range(gui_state_t *st, uint32_t start, uint32_t end) {
-    if (end > st->code_len) end = st->code_len;
-    st->code_sel_active = 0;
-    if (start >= end) { st->code_cursor = start; code_ensure_visible(st); return; }
-    memmove(g_code_buf + start, g_code_buf + end, st->code_len - end + 1);
-    st->code_len -= (end - start);
-    st->code_cursor = start;
-    st->code_modified = 1;
-    st->code_error_line = 0;
-    code_ensure_visible(st);
-}
-
-// 选区范围 [*start,*end)；anchor==cursor 时无实际选中内容
-static void code_sel_range(const gui_state_t *st, uint32_t *start, uint32_t *end) {
-    uint32_t a = st->code_sel_anchor, b = st->code_cursor;
-    *start = a < b ? a : b;
-    *end   = a < b ? b : a;
-}
-
-static void code_insert_char(gui_state_t *st, char c) {
-    if (st->code_len + 1 >= CODE_EDIT_CAP) {
-        code_set_output("Buffer full");
-        st->status = "代码缓冲已满";
-        return;
-    }
-    if (st->code_cursor > st->code_len) st->code_cursor = st->code_len;
-    memmove(g_code_buf + st->code_cursor + 1,
-            g_code_buf + st->code_cursor,
-            st->code_len - st->code_cursor + 1);
-    g_code_buf[st->code_cursor++] = c;
-    st->code_len++;
-    st->code_modified = 1;
-    st->code_error_line = 0;
-    code_ensure_visible(st);
-}
-
-static void code_insert_newline(gui_state_t *st) {
-    uint32_t start = st->code_cursor;
-    char indent_buf[32];
-    while (start > 0 && g_code_buf[start - 1] != '\n') start--;
-    uint32_t indent = 0;
-    while (start + indent < st->code_len &&
-           (g_code_buf[start + indent] == ' ' || g_code_buf[start + indent] == '\t') &&
-           indent < 32) {
-        indent_buf[indent] = g_code_buf[start + indent];
-        indent++;
-    }
-    int block_indent = st->code_cursor > 0 && g_code_buf[st->code_cursor - 1] == '{';
-    code_insert_char(st, '\n');
-    for (uint32_t i = 0; i < indent; i++) code_insert_char(st, indent_buf[i]);
-    if (block_indent) {
-        for (int i = 0; i < 4; i++) code_insert_char(st, ' ');
-    }
-}
-
-static void code_backspace(gui_state_t *st) {
-    if (st->code_cursor == 0 || st->code_len == 0) return;
-    memmove(g_code_buf + st->code_cursor - 1,
-            g_code_buf + st->code_cursor,
-            st->code_len - st->code_cursor + 1);
-    st->code_cursor--;
-    st->code_len--;
-    st->code_modified = 1;
-    st->code_error_line = 0;
-    code_ensure_visible(st);
-}
-
-static void code_delete_forward(gui_state_t *st) {
-    if (st->code_cursor >= st->code_len || st->code_len == 0) return;
-    memmove(g_code_buf + st->code_cursor,
-            g_code_buf + st->code_cursor + 1,
-            st->code_len - st->code_cursor);
-    st->code_len--;
-    st->code_modified = 1;
-    st->code_error_line = 0;
-    code_ensure_visible(st);
-}
-
-static void code_run_current(gui_state_t *st) {
-    code_load(st);
-    if (code_save(st) < 0) return;
-    char run_out[CODE_OUTPUT_CAP];
-    int rc = hbos_gcc_run_file_capture(code_path(st), run_out, sizeof(run_out));
-    if (rc == 0) {
-        char line[CODE_OUTPUT_CAP];
-        uint32_t pos = 0;
-        line[0] = 0;
-        append_str(line, sizeof(line), &pos, "Run OK");
-        if (run_out[0]) {
-            append_str(line, sizeof(line), &pos, ": ");
-            code_append_sanitized(line, sizeof(line), &pos, run_out);
-        } else {
-            append_str(line, sizeof(line), &pos, " return ");
-            append_int(line, sizeof(line), &pos, hbos_gcc_last_return());
-        }
-        st->code_error_line = 0;
-        code_set_output(line);
-        st->status = "代码运行成功";
-    } else {
-        int err_line = hbos_gcc_last_error_line();
-        const char *err = hbos_gcc_last_error();
-        char line[CODE_OUTPUT_CAP];
-        uint32_t pos = 0;
-        line[0] = 0;
-        if (err_line > 0) {
-            append_str(line, sizeof(line), &pos, "Line ");
-            append_uint(line, sizeof(line), &pos, (uint32_t)err_line);
-            append_str(line, sizeof(line), &pos, ": ");
-            st->code_error_line = err_line;
-            code_jump_to_line(st, err_line);
-        } else {
-            append_str(line, sizeof(line), &pos, "GCC failed: ");
-            st->code_error_line = 0;
-        }
-        append_str(line, sizeof(line), &pos, err && err[0] ? err : "unknown error");
-        code_set_output(line);
-        st->status = "代码运行失败";
-    }
-}
-
-static int code_command_rect(int content_w, int cmd, int *x, int *y, int *bw) {
-    int idx = cmd - 1;
-    if (idx < 0 || idx > 3 || content_w <= 0) return 0;
-    int gap = 6;
-    int width = 68;
-    int total = width * 4 + gap * 3;
-    int left = content_w - total;
-    if (left < 0) left = 0;
-    if (x) *x = left + idx * (width + gap);
-    if (y) *y = 22;
-    if (bw) *bw = width;
-    return 1;
-}
-
-static void code_make_layout(int tx, int ty, int win_w, int win_h, code_layout_t *l) {
-    l->content_w = win_w - 60;
-    if (l->content_w < 320) l->content_w = 320;
-    int body_h = win_h - 82;
-    if (body_h < 290) body_h = 290;
-    l->row_h = 18;
-    l->line_no_w = 42;
-    l->side_w = l->content_w / 7;
-    if (l->side_w < 154) l->side_w = 154;
-    if (l->side_w > 220) l->side_w = 220;
-    l->editor_x = tx + l->side_w + 14;
-    l->editor_y = ty + 82;
-    l->editor_w = l->content_w - l->side_w - 14;
-    if (l->editor_w < 300) {
-        l->side_w -= 300 - l->editor_w;
-        if (l->side_w < 118) l->side_w = 118;
-        l->editor_x = tx + l->side_w + 14;
-        l->editor_w = l->content_w - l->side_w - 14;
-    }
-
-    int output_min_h = 62;
-    int editor_bottom = ty + body_h - output_min_h - 12;
-    l->editor_h = editor_bottom - l->editor_y;
-    if (l->editor_h < 120) l->editor_h = 120;
-    l->view_rows = (l->editor_h - 12) / l->row_h;
-    if (l->view_rows < 5) l->view_rows = 5;
-    l->editor_h = l->view_rows * l->row_h + 12;
-    l->bottom_y = l->editor_y + l->editor_h + 12;
-    l->bottom_h = ty + body_h - l->bottom_y;
-    if (l->bottom_h < output_min_h) l->bottom_h = output_min_h;
-    l->file_rows = (l->editor_h - 62) / FILE_ROW_H;
-    if (l->file_rows < 3) l->file_rows = 3;
-}
-
-static void code_gui_run(gui_state_t *st, const fb_info_t *fb) {
-    code_load(st);
-    if (code_save(st) < 0) return;
-    g_script_fb = fb;
-    /* clear screen */
-    rect(0, 0, g_gui_surface_w, g_gui_surface_h, rgb(10, 13, 18));
-    gui_present_surface(fb);
-    cc_set_gfx(&g_sgfx);
-    int rc = hbos_gcc_run_file(code_path(st), 0);
-    cc_set_gfx(0);
-    if (rc != 0) {
-        char line[128]; uint32_t pos = 0; line[0] = 0;
-        int el = hbos_gcc_last_error_line();
-        if (el > 0) { append_str(line,sizeof(line),&pos,"Line "); append_uint(line,sizeof(line),&pos,(uint32_t)el); append_str(line,sizeof(line),&pos,": "); }
-        const char *em = hbos_gcc_last_error();
-        append_str(line,sizeof(line),&pos,em&&em[0]?em:"error");
-        code_set_output(line);
-        st->code_error_line = el;
-        st->status = "GUI 脚本错误";
-    } else {
-        code_set_output("GUI OK");
-        st->status = "GUI 脚本运行完成";
-    }
-    g_script_fb = 0;
-}
-
-static void handle_code_command(gui_state_t *st, int cmd) {
-    if (cmd == CODE_CMD_SAVE) {
-        code_load(st);
-        (void)code_save(st);
-    } else if (cmd == CODE_CMD_RUN) {
-        code_run_current(st);
-    } else if (cmd == CODE_CMD_OPEN) {
-        code_open_selected(st);
-    }
-    /* CODE_CMD_GUI_RUN is handled separately (needs fb pointer) */
-}
-
-static int code_ident_start(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-}
-
-static int code_ident_char(char c) {
-    return code_ident_start(c) || (c >= '0' && c <= '9');
-}
-
-static int code_word_eq(const char *s, uint32_t len, const char *word) {
-    uint32_t i = 0;
-    while (word[i]) i++;
-    if (i != len) return 0;
-    for (i = 0; i < len; i++)
-        if (s[i] != word[i]) return 0;
-    return 1;
-}
-
-static int code_is_keyword(const char *s, uint32_t len) {
-    return code_word_eq(s, len, "int") || code_word_eq(s, len, "char") ||
-           code_word_eq(s, len, "void") || code_word_eq(s, len, "return") ||
-           code_word_eq(s, len, "if") || code_word_eq(s, len, "else") ||
-           code_word_eq(s, len, "while") || code_word_eq(s, len, "for") ||
-           code_word_eq(s, len, "break") || code_word_eq(s, len, "continue") ||
-           code_word_eq(s, len, "class") || code_word_eq(s, len, "public") ||
-           code_word_eq(s, len, "private") || code_word_eq(s, len, "new") ||
-           code_word_eq(s, len, "delete");
-}
-
-// The code editor renders source in the classic 8x16 mono console font (same as
-// the TUI), so the cell width is the fixed glyph width. Column-based positioning
-// (cursor, click-to-column) all key off this.
-static int code_cell_w(void) { return MONO_GLYPH_W; }
-
-// Draw a syntax span in fixed monospace cells using the crisp console bitmap
-// font. One byte per cell keeps the column math byte-aligned with the editor's
-// offset model (code_offset_for_line_col counts bytes).
-static int code_draw_span(int x, int y, int max_x, const char *s,
-                          uint32_t start, uint32_t len, uint32_t color) {
-    for (uint32_t k = 0; k < len && x < max_x; k++) {
-        draw_mono_char(x, y, s[start + k], color);
-        x += MONO_GLYPH_W;
-    }
-    return x;
-}
-
-static void code_draw_highlighted_line(int x, int y, int max_x, const char *line, uint32_t len) {
-    uint32_t i = 0;
-    if (len > 0 && line[0] == '#') {
-        (void)code_draw_span(x, y, max_x, line, 0, len, rgb(190, 168, 238));
-        return;
-    }
-    while (i < len && x < max_x) {
-        char c = line[i];
-        if (c == '/' && i + 1 < len && line[i + 1] == '/') {
-            x = code_draw_span(x, y, max_x, line, i, len - i, rgb(116, 170, 130));
-            break;
-        }
-        if (c == '/' && i + 1 < len && line[i + 1] == '*') {
-            uint32_t j = i + 2;
-            while (j + 1 < len && !(line[j] == '*' && line[j + 1] == '/')) j++;
-            if (j + 1 < len) j += 2;
-            else j = len;
-            x = code_draw_span(x, y, max_x, line, i, j - i, rgb(116, 170, 130));
-            i = j;
-            continue;
-        }
-        if (c == '"' || c == '\'') {
-            char quote = c;
-            uint32_t j = i + 1;
-            while (j < len) {
-                if (line[j] == '\\' && j + 1 < len) {
-                    j += 2;
-                    continue;
-                }
-                if (line[j++] == quote) break;
-            }
-            x = code_draw_span(x, y, max_x, line, i, j - i, rgb(236, 192, 116));
-            i = j;
-            continue;
-        }
-        if (c >= '0' && c <= '9') {
-            uint32_t j = i + 1;
-            while (j < len && ((line[j] >= '0' && line[j] <= '9') ||
-                   (line[j] >= 'a' && line[j] <= 'f') ||
-                   (line[j] >= 'A' && line[j] <= 'F') || line[j] == 'x' || line[j] == 'X'))
-                j++;
-            x = code_draw_span(x, y, max_x, line, i, j - i, rgb(122, 218, 210));
-            i = j;
-            continue;
-        }
-        if (code_ident_start(c)) {
-            uint32_t j = i + 1;
-            while (j < len && code_ident_char(line[j])) j++;
-            uint32_t color = rgb(228, 238, 246);
-            if (code_is_keyword(line + i, j - i)) {
-                color = rgb(132, 190, 255);
-            } else {
-                uint32_t k = j;
-                while (k < len && (line[k] == ' ' || line[k] == '\t')) k++;
-                if (k < len && line[k] == '(') color = rgb(150, 220, 182);
-            }
-            x = code_draw_span(x, y, max_x, line, i, j - i, color);
-            i = j;
-            continue;
-        }
-        x = code_draw_span(x, y, max_x, line, i, 1,
-                           (c == '{' || c == '}' || c == '(' || c == ')' ||
-                            c == '[' || c == ']') ? rgb(250, 224, 142) : rgb(196, 208, 218));
-        i++;
-    }
-}
-
-static void draw_code_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
-    code_load(st);
-    char line[128];
-    code_layout_t l;
-    code_make_layout(tx, ty, win_w, win_h, &l);
-    st->code_view_rows = l.view_rows;
-    code_clamp_scroll(st);
-
-    text(tx, ty, "代码工作台", rgb(102, 214, 255), 1);
-    int bx, by, bw;
-    if (code_command_rect(l.content_w, CODE_CMD_SAVE, &bx, &by, &bw))
-        draw_small_button(tx + bx, ty + by, bw, "保存", rgb(85, 180, 120));
-    if (code_command_rect(l.content_w, CODE_CMD_RUN, &bx, &by, &bw))
-        draw_small_button(tx + bx, ty + by, bw, "运行", rgb(23, 147, 209));
-    if (code_command_rect(l.content_w, CODE_CMD_OPEN, &bx, &by, &bw))
-        draw_small_button(tx + bx, ty + by, bw, "打开", rgb(244, 194, 82));
-    if (code_command_rect(l.content_w, CODE_CMD_GUI_RUN, &bx, &by, &bw))
-        draw_small_button(tx + bx, ty + by, bw, "GUI运行", rgb(215, 100, 244));
-
-    vgradient(tx, ty + 54, l.content_w, 24, rgb(34, 48, 64), rgb(18, 28, 40));
-    border(tx, ty + 54, l.content_w, 24, rgb(48, 72, 94));
-    line2(line, sizeof(line), "文件 ", code_path(st));
-    text_clipped(tx + 10, ty + 62, tx + l.content_w - 90, line,
-                 st->code_modified ? rgb(255, 226, 150) : rgb(232, 242, 248), 1);
-    text(tx + l.content_w - 78, ty + 62, st->code_modified ? "未保存" : "已保存",
-         st->code_modified ? rgb(255, 190, 110) : rgb(124, 220, 154), 1);
-
-    vgradient(tx, l.editor_y, l.side_w, l.editor_h, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, l.editor_y, l.side_w, l.editor_h, rgb(46, 66, 84));
-    text(tx + 12, l.editor_y + 12, "资源管理器", rgb(194, 226, 242), 1);
-    text_clipped(tx + 12, l.editor_y + 34, tx + l.side_w - 10, gui_file_path(st), rgb(132, 196, 232), 1);
-
-    uint32_t count = gui_file_count(st);
-    int selected = st->selected_file;
-    if (selected < 0) selected = 0;
-    if ((uint32_t)selected >= count && count) selected = (int)count - 1;
-    uint32_t start = selected >= l.file_rows ? (uint32_t)selected - (uint32_t)(l.file_rows - 1) : 0;
-    uint32_t max = count > start ? count - start : 0;
-    if (max > (uint32_t)l.file_rows) max = (uint32_t)l.file_rows;
-    for (uint32_t i = 0; i < max; i++) {
-        uint32_t file_idx = start + i;
-        char name[VFS_MAX_NAME], full[GUI_PATH_MAX];
-        uint32_t type = 0;
-        vfs_node_t *node = 0;
-        if (gui_file_entry(st, file_idx, name, &type, &node, full, sizeof(full)) < 0) continue;
-        int y = l.editor_y + 62 + (int)i * FILE_ROW_H;
-        if ((int)file_idx == selected) {
-            vgradient(tx + 8, y - 6, l.side_w - 16, 24, rgb(28, 80, 116), rgb(16, 50, 78));
-            rect(tx + 8, y - 6, 3, 24, rgb(102, 214, 255));
-        }
-        uint32_t icon = type == VFS_NODE_DIR ? rgb(244, 194, 82) :
-                        gui_has_code_suffix(name) ? rgb(102, 214, 255) : rgb(124, 220, 154);
-        rect(tx + 14, y + 3, 6, 6, icon);
-        text_clipped(tx + 26, y, tx + l.side_w - 10, name,
-                     (int)file_idx == selected ? rgb(252, 254, 255) : rgb(210, 222, 234), 1);
-    }
-
-    vgradient(l.editor_x, l.editor_y, l.editor_w, l.editor_h, rgb(8, 14, 22), rgb(2, 6, 12));
-    border(l.editor_x, l.editor_y, l.editor_w, l.editor_h, rgb(48, 132, 196));
-    rect(l.editor_x + l.line_no_w, l.editor_y + 1, 1, l.editor_h - 2, rgb(28, 48, 62));
-
-    uint32_t cursor_line = 0, cursor_col = 0;
-    code_line_col(st, st->code_cursor, &cursor_line, &cursor_col);
-    uint32_t total_lines = code_line_count(st);
-    uint32_t sel_start = 0, sel_end = 0;
-    if (st->code_sel_active) code_sel_range(st, &sel_start, &sel_end);
-    for (int row = 0; row < l.view_rows; row++) {
-        uint32_t line_idx = (uint32_t)(st->code_scroll + row);
-        if (line_idx >= total_lines) break;
-        uint32_t off = code_find_line_start(st, line_idx);
-        uint32_t len = code_line_len_at(st, off);
-        if (off > st->code_len) break;
-        uint32_t n = len;
-        if (n >= sizeof(line)) n = sizeof(line) - 1;
-        memcpy(line, g_code_buf + off, n);
-        line[n] = 0;
-
-        char num[16];
-        uint32_t pos = 0;
-        num[0] = 0;
-        append_uint(num, sizeof(num), &pos, line_idx + 1);
-        int y = l.editor_y + 10 + row * l.row_h;
-        if (st->code_sel_active && sel_end > off && sel_start < off + len) {
-            uint32_t line_sel_start = sel_start > off ? sel_start - off : 0;
-            uint32_t line_sel_end = sel_end < off + len ? sel_end - off : len;
-            int hl_x = l.editor_x + l.line_no_w + 10 + (int)line_sel_start * code_cell_w();
-            int hl_w = (int)(line_sel_end - line_sel_start) * code_cell_w();
-            if (sel_end > off + len) hl_w += code_cell_w();  // 选区跨行，把换行处也画出来
-            if (hl_w < 1) hl_w = 1;
-            rect(hl_x, y - 3, hl_w, l.row_h, rgb(40, 92, 132));
-        } else if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
-            rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(70, 24, 30));
-            rect(l.editor_x + l.line_no_w + 1, y - 3, 3, l.row_h, rgb(232, 86, 92));
-        } else if (line_idx == cursor_line) {
-            rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, rgb(16, 28, 38));
-        }
-        text(l.editor_x + 8, y, num, rgb(102, 134, 154), 1);
-        code_draw_highlighted_line(l.editor_x + l.line_no_w + 10, y,
-                                   l.editor_x + l.editor_w - 10, line, n);
-    }
-    static uint32_t code_caret_ticks = 0;
-    code_caret_ticks++;
-    if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + l.view_rows &&
-        (code_caret_ticks / 15) % 2) {
-        int cx = l.editor_x + l.line_no_w + 10 + (int)cursor_col * code_cell_w();
-        int cy = l.editor_y + 10 + ((int)cursor_line - st->code_scroll) * l.row_h;
-        if (cx > l.editor_x + l.editor_w - 12) cx = l.editor_x + l.editor_w - 12;
-        rect(cx, cy - 2, 2, 14, rgb(102, 214, 255));
-    }
-
-    vgradient(tx, l.bottom_y, l.content_w, l.bottom_h, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, l.bottom_y, l.content_w, l.bottom_h, st->code_error_line > 0 ? rgb(176, 62, 72) : rgb(46, 66, 84));
-    text(tx + 12, l.bottom_y + 12, "输出", rgb(194, 226, 242), 1);
-    text_clipped(tx + 62, l.bottom_y + 12, tx + l.content_w - 12,
-                 g_code_output[0] ? g_code_output : "Ready",
-                 st->code_error_line > 0 ? rgb(255, 188, 190) : rgb(210, 221, 230), 1);
-    uint32_t pos = 0;
-    line[0] = 0;
-    append_str(line, sizeof(line), &pos, "Ln ");
-    append_uint(line, sizeof(line), &pos, cursor_line + 1);
-    append_str(line, sizeof(line), &pos, ", Col ");
-    append_uint(line, sizeof(line), &pos, cursor_col + 1);
-    append_str(line, sizeof(line), &pos, "  Bytes ");
-    append_uint(line, sizeof(line), &pos, st->code_len);
-    text(tx + 12, l.bottom_y + 34, line, rgb(148, 168, 180), 1);
-}
-
-
-
-#define GUI_CON_ROWS 64
-#define GUI_CON_COLS 120
-
-static void console_append_history(gui_state_t *st, const char *line) {
-    if (st->console_line_count < GUI_CON_ROWS) {
-        strncpy(st->console_history[st->console_line_count], line, GUI_CON_COLS - 1);
-        st->console_history[st->console_line_count][GUI_CON_COLS - 1] = 0;
-        st->console_line_count++;
-    } else {
-        for (int i = 0; i < GUI_CON_ROWS - 1; i++) {
-            strcpy(st->console_history[i], st->console_history[i + 1]);
-        }
-        strncpy(st->console_history[GUI_CON_ROWS - 1], line, GUI_CON_COLS - 1);
-        st->console_history[GUI_CON_ROWS - 1][GUI_CON_COLS - 1] = 0;
-    }
-}
-
-// ── Real shell output capture ───────────────────────────────
-// The GUI terminal runs the actual shell (cmd_execute) and captures its console
-// output here, instead of reimplementing a handful of commands. The sink strips
-// ANSI escape sequences and splits on newlines into history lines.
-static gui_state_t *g_con_sink_st;
-static char         g_con_sink_line[GUI_CON_COLS];
-static uint32_t     g_con_sink_pos;
-static int          g_con_sink_esc;     // inside an ESC [...] sequence
-
-static void gui_console_flush_line(void) {
-    g_con_sink_line[g_con_sink_pos] = 0;
-    console_append_history(g_con_sink_st, g_con_sink_line);
-    g_con_sink_pos = 0;
-}
-
-static void gui_console_sink(char c) {
-    if (g_con_sink_esc) {                       // swallow ESC [ ... <final>
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) g_con_sink_esc = 0;
-        return;
-    }
-    if (c == 0x1B) { g_con_sink_esc = 1; return; }
-    if (c == '\r') return;
-    if (c == '\n') { gui_console_flush_line(); return; }
-    if (c == '\t') {
-        do {
-            if (g_con_sink_pos < GUI_CON_COLS - 1) g_con_sink_line[g_con_sink_pos++] = ' ';
-        } while (g_con_sink_pos % 4 && g_con_sink_pos < GUI_CON_COLS - 1);
-        return;
-    }
-    if ((unsigned char)c < 0x20) return;        // drop other control bytes
-    g_con_sink_line[g_con_sink_pos++] = c;
-    if (g_con_sink_pos >= GUI_CON_COLS - 1) gui_console_flush_line();
-}
-
-static void console_exec_cmd(gui_state_t *st) {
-    // Echo the prompt + typed command. The "hbos_gui_shell:/# " prefix (18 chars)
-    // is also what the up-arrow history search keys off, so keep it exact.
-    char cmd_line[GUI_CON_COLS];
-    uint32_t cpos = 0;
-    cmd_line[0] = 0;
-    append_str(cmd_line, sizeof(cmd_line), &cpos, "hbos_gui_shell:/# ");
-    append_str(cmd_line, sizeof(cmd_line), &cpos, st->console_input);
-    console_append_history(st, cmd_line);
-
-    char *cmd = st->console_input;
-    while (*cmd == ' ') cmd++;
-
-    if (*cmd == 0) {
-        // empty line — just a fresh prompt
-    } else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "cls") == 0) {
-        st->console_line_count = 0;
-    } else if (strcmp(cmd, "gui") == 0 || strcmp(cmd, "startx") == 0 ||
-               strcmp(cmd, "exit") == 0 || strcmp(cmd, "reboot") == 0 ||
-               strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) {
-        // Block commands that would recurse into the GUI or end the session.
-        console_append_history(st, "（该命令在图形终端中不可用）");
-    } else {
-        // Run the REAL shell command and capture its console output into the
-        // terminal history — the full command set, no reimplementation.
-        // (sink 常驻，见 cmd_gui；这里仅重置行缓冲，避免异步应用输出串行。)
-        g_con_sink_st  = st;
-        g_con_sink_pos = 0;
-        g_con_sink_esc = 0;
-        cmd_execute(st->console_input);
-        if (g_con_sink_pos > 0) gui_console_flush_line();  // trailing partial line
-    }
-
-    st->console_input_len = 0;
-    st->console_input[0] = 0;
-    st->console_cursor = 0;
-    st->console_history_idx = -1;
-}
-
-static void draw_diag_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
-    int sb_w = 10;                          // scrollbar width
-    int box_x = tx - 20;
-    int box_y = ty - 4;
-    int box_w = win_w - 20 - sb_w - 4;
-    int box_h = win_h - 74;
-
-    // Flat Breeze terminal surface. 跟随浅色/深色主题。
-    int light = st->theme_light;
-    uint32_t term_bg  = light ? rgb(243, 245, 248) : rgb(27, 30, 33);
-    uint32_t term_bd  = light ? rgb(188, 194, 202) : rgb(60, 64, 69);
-    uint32_t term_fg  = light ? rgb(38, 44, 52)    : rgb(220, 226, 232);
-    uint32_t term_dim = light ? rgb(118, 128, 140) : rgb(160, 167, 173);
-    uint32_t term_prompt = light ? rgb(16, 110, 60) : rgb(39, 174, 96);
-    rect(box_x, box_y, box_w, box_h, term_bg);
-    border(box_x, box_y, box_w, box_h, term_bd);
-
-    int row_h = MONO_GLYPH_H + 2;          // 8x16 console font + 2px leading
-    int input_y = box_y + box_h - 24;
-    int max_x = box_x + box_w - 12;
-
-    // 自动根据可用高度计算最多绘制的历史记录行数，防止重叠
-    int max_lines = (input_y - (box_y + 12)) / row_h;
-    if (max_lines < 1) max_lines = 1;
-
-    // clamp scroll offset
-    int total = (int)st->console_line_count;
-    int max_scroll = total - max_lines;
-    if (max_scroll < 0) max_scroll = 0;
-    if (st->console_scroll > max_scroll) st->console_scroll = max_scroll;
-    if (st->console_scroll < 0) st->console_scroll = 0;
-
-    uint32_t start_idx = 0;
-    if (total > max_lines) {
-        int bottom_start = total - max_lines;
-        start_idx = (uint32_t)(bottom_start - st->console_scroll);
-    }
-
-    // 绘制命令历史（控制台位图字体，与真 TUI 一致）
-    int start_y = box_y + 12;
-    for (uint32_t i = start_idx; i < st->console_line_count && start_y < input_y; i++) {
-        const char *line = st->console_history[i];
-        uint32_t color = term_fg;
-        if (strncmp(line, "hbos_gui_shell:", 15) == 0) {
-            color = term_prompt;
-        } else if (strncmp(line, "hbos_shell:", 11) == 0) {
-            color = light ? rgb(176, 48, 58) : rgb(218, 68, 83);
-        } else if (strncmp(line, "  ", 2) == 0) {
-            color = term_dim;
-        }
-        text_mono(box_x + 12, start_y, max_x, line, color);
-        start_y += row_h;
-    }
-
-    // 绘制当前输入行（固定 8px 等宽 cell，光标按 cell 对齐）
-    const char *prompt = "hbos_gui_shell:/# ";
-    int px = text_mono(box_x + 12, input_y, max_x, prompt, term_prompt);
-    text_mono(px, input_y, max_x, st->console_input, term_fg);
-
-    // 闪烁光标（细竖线 caret）
-    static uint32_t cursor_ticks = 0;
-    cursor_ticks++;
-    if ((cursor_ticks / 15) % 2) {
-        int cursor_x = px + (int)st->console_cursor * MONO_GLYPH_W;
-        rect(cursor_x, input_y, 2, MONO_GLYPH_H - 2, term_prompt);
-    }
-
-    // 垂直滚动条
-    int sb_x = box_x + box_w + 4;
-    int sb_y = box_y;
-    int sb_h = box_h;
-    rect(sb_x, sb_y, sb_w, sb_h, light ? rgb(232, 236, 241) : rgb(22, 26, 30));
-    border(sb_x, sb_y, sb_w, sb_h, light ? rgb(196, 202, 210) : rgb(50, 58, 65));
-    if (max_scroll > 0) {
-        int thumb_h = sb_h * max_lines / (total > 0 ? total : 1);
-        if (thumb_h < 16) thumb_h = 16;
-        if (thumb_h > sb_h) thumb_h = sb_h;
-        int thumb_range = sb_h - thumb_h;
-        int thumb_y = sb_y + thumb_range - (thumb_range * st->console_scroll / max_scroll);
-        rect(sb_x + 2, thumb_y + 1, sb_w - 4, thumb_h - 2, light ? rgb(70, 150, 215) : rgb(61, 174, 233));
-    }
-}
-
-static void snake_place_food(gui_state_t *st) {
-    for (int step = 0; step < SNAKE_MAX; step++) {
-        int x = (st->snake_tx + 5 + step * 3) % SNAKE_W;
-        int y = (st->snake_ty + 3 + step * 2) % SNAKE_H;
-        int hit = 0;
-        for (int i = 0; i < st->snake_len; i++) {
-            if (st->snake_body_x[i] == x && st->snake_body_y[i] == y) {
-                hit = 1;
-                break;
-            }
-        }
-        if (!hit) {
-            st->snake_tx = x;
-            st->snake_ty = y;
-            return;
-        }
-    }
-}
-
-static void snake_reset(gui_state_t *st) {
-    st->snake_len = 4;
-    st->snake_dx = 1;
-    st->snake_dy = 0;
-    st->snake_alive = 1;
-    st->snake_score = 0;
-    st->snake_body_x[0] = 5;
-    st->snake_body_y[0] = 4;
-    st->snake_body_x[1] = 4;
-    st->snake_body_y[1] = 4;
-    st->snake_body_x[2] = 3;
-    st->snake_body_y[2] = 4;
-    st->snake_body_x[3] = 2;
-    st->snake_body_y[3] = 4;
-    st->snake_x = st->snake_body_x[0];
-    st->snake_y = st->snake_body_y[0];
-    st->snake_tx = 10;
-    st->snake_ty = 4;
-    st->snake_last_sec = cmos_second();
-    snake_place_food(st);
-    st->status = "贪吃蛇已开始";
-}
-
-static void snake_turn(gui_state_t *st, int dx, int dy) {
-    if (st->snake_len <= 0) snake_reset(st);
-    if (!st->snake_alive) return;
-    if (st->snake_len <= 1 || dx != -st->snake_dx || dy != -st->snake_dy) {
-        st->snake_dx = dx;
-        st->snake_dy = dy;
-    }
-    st->status = "贪吃蛇已转向";
-}
-
-static void draw_snake_app(int tx, int ty, gui_state_t *st) {
-    if (st->snake_len <= 0) snake_reset(st);
-    char line[96];
-    text(tx, ty, "贪吃蛇", rgb(85, 180, 120), 1);
-    line_u32(line, sizeof(line), "分数: ", (uint32_t)st->snake_score, "");
-    text(tx, ty + 34, line, rgb(210, 221, 230), 1);
-    text(tx, ty + 56, st->snake_alive ? "方向键移动  吃掉蓝色食物" : "游戏结束  Enter 重新开始", rgb(148, 162, 174), 1);
-    int bx = tx;
-    int by = ty + 84;
-    int cell = 16;
-    rect(bx, by, cell * SNAKE_W, cell * SNAKE_H, rgb(5, 10, 16));
-    border(bx, by, cell * SNAKE_W, cell * SNAKE_H, rgb(85, 180, 120));
-    rect(bx + st->snake_tx * cell + 4, by + st->snake_ty * cell + 4, cell - 8, cell - 8, rgb(23, 147, 209));
-    for (int i = st->snake_len - 1; i >= 0; i--) {
-        uint32_t color = i == 0 ? rgb(160, 245, 170) : rgb(84, 190, 116);
-        rect(bx + st->snake_body_x[i] * cell + 2, by + st->snake_body_y[i] * cell + 2,
-             cell - 4, cell - 4, color);
-    }
-}
 
 static const char *gui_parse_url(const char *url, int *https, char *host, uint32_t host_cap,
                                  uint16_t *port, const char **path) {
@@ -6704,12 +5437,7 @@ static void draw_panel_window(int tx, int ty, int win_w, int win_h, int w, int h
 
 static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state_t *st, int mode) {
     if (gui_app_draw(st, mode, tx, ty, win_w, win_h)) return;
-    if (mode == GUI_APP_NOTES) draw_notes_app(tx, ty, win_w, win_h, st);
-    else if (mode == GUI_APP_UWC) draw_uwc_app(tx, ty, st);
-    else if (mode == GUI_APP_SNAKE) draw_snake_app(tx, ty, st);
     else if (mode == GUI_APP_BROWSER) draw_browser_app(tx, ty, win_w, win_h, st);
-    else if (mode == GUI_APP_CODE) draw_code_app(tx, ty, win_w, win_h, st);
-    else if (mode == GUI_APP_DIAG) draw_diag_app(tx, ty, win_w, win_h, st);
 }
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
@@ -7229,7 +5957,7 @@ static int gui_select_path(gui_state_t *st, const char *path) {
     return 0;
 }
 
-static void gui_select_file(gui_state_t *st, int index) {
+void gui_select_file(gui_state_t *st, int index) {
     uint32_t count = gui_file_count(st);
     if (count == 0) {
         st->selected_file = 0;
@@ -7249,56 +5977,6 @@ static void gui_select_file(gui_state_t *st, int index) {
     if (f) gui_set_note_name(st, f->name);
 }
 
-static void gui_create_note(gui_state_t *st) {
-    char base[MAX_FILENAME];
-    char full[GUI_PATH_MAX];
-    file_t *f = 0;
-    uint32_t index = 0;
-    for (; index < MAX_FILES; index++) {
-        gui_make_note_name(base, sizeof(base), index);
-        if (gui_path_join(gui_file_path(st), base, full, sizeof(full)) < 0) continue;
-        if (fs_find_file(full)) continue;
-        f = fs_create_file(full);
-        break;
-    }
-    if (!f) {
-        st->status = "创建失败";
-        return;
-    }
-    const char msg[] = "来自 HBOS 图形桌面的笔记\n";
-    if (fs_write_file_data(f, 0, msg, sizeof(msg) - 1) < 0) st->status = "写入失败";
-    else {
-        st->status = "已创建新笔记";
-        uint32_t len = sizeof(msg) - 1;
-        if (len >= NOTE_EDIT_CAP) len = NOTE_EDIT_CAP - 1;
-        for (uint32_t i = 0; i < len; i++) st->note_buf[i] = msg[i];
-        st->note_buf[len] = 0;
-        st->note_len = len;
-        st->note_cursor = len;
-        st->note_dirty = 0;
-        st->note_loaded = 1;
-        gui_set_note_name(st, f->name);
-        st->note_loaded = 1;
-    }
-    (void)fs_sync();
-    (void)gui_select_path(st, f->name);
-}
-
-static void gui_append_note(gui_state_t *st) {
-    st->delete_confirm_index = -1;
-    file_t *f = selected_file(st);
-    if (!f) {
-        gui_create_note(st);
-        return;
-    }
-    const char msg[] = "从图形桌面追加一行\n";
-    if (fs_write_file_data(f, f->size, msg, sizeof(msg) - 1) < 0) st->status = "追加失败";
-    else {
-        st->status = "已追加内容";
-        st->note_loaded = 0;
-    }
-    (void)fs_sync();
-}
 
 static void gui_delete_selected(gui_state_t *st) {
     char name[VFS_MAX_NAME], full[GUI_PATH_MAX];
@@ -7518,9 +6196,7 @@ static void gui_open_selected_app(gui_state_t *st) {
         return;
     }
     if (gui_open_window(st, WM_WIN_APP, app->mode, 0) < 0) return;
-    if (app->mode == GUI_APP_SNAKE) {
-        snake_reset(st);
-    }
+    if (app->mode == GUI_APP_SNAKE) app_snake_reset(st);
     st->status = "应用已打开";
 }
 
@@ -7542,7 +6218,7 @@ static void gui_open_selected_file(gui_state_t *st) {
         return;
     }
     if (gui_has_code_suffix(full)) {
-        code_set_path(st, full);
+        app_code_set_path(st, full);
         if (gui_open_window(st, WM_WIN_APP, GUI_APP_CODE, 0) >= 0)
             st->status = "已用代码工作台打开";
         return;
@@ -7586,11 +6262,6 @@ static void handle_wheel(gui_state_t *st, int dz) {
     } else if (st->app_mode == GUI_APP_NONE && st->active == PANEL_APPS) {
         st->selected_app = gui_step_selection(st->selected_app, gui_app_count(), steps);
         st->status = "滚轮选择应用";
-    } else if (st->app_mode == GUI_APP_CODE) {
-        code_load(st);
-        st->code_scroll += steps;
-        code_clamp_scroll(st);
-        st->status = "滚动代码";
     } else if (st->app_mode == GUI_APP_BROWSER) {
         /* 注意方向和上面几个分支相反（是 -= steps 不是 += steps）：这几个
          * 分支原本的 +steps 语义是"steps 为正=列表下一项/编辑器视图下移"，
@@ -7605,9 +6276,9 @@ static void handle_wheel(gui_state_t *st, int dz) {
 }
 
 static void handle_action(gui_state_t *st, int action) {
-    if (action == 0) gui_create_note(st);
+    if (action == 0) app_notes_create(st);
     else if (action == 1) gui_open_selected_file(st);
-    else if (action == 2) gui_append_note(st);
+    else if (action == 2) app_notes_append(st);
     else if (action == 3) gui_truncate_selected(st);
     else if (action == 4) gui_delete_selected(st);
     else if (action == 5) gui_install(st);
@@ -7683,89 +6354,6 @@ static int hit_action(int w, int h, const gui_state_t *st, int mx, int my) {
     return -1;
 }
 
-static int hit_note_file(int w, int h, const gui_state_t *st, int mx, int my) {
-    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return -1;
-    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
-    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_NOTES) return -1;
-
-    int win_x, win_y, win_w, win_h;
-    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    (void)win_w;
-    (void)win_h;
-    int tx = win_x + 30;
-    int ty = win_y + 42;
-    int list_w = 150;
-    int list_y = ty + 112;
-    if (mx < tx || mx >= tx + list_w || my < list_y - 8) return -1;
-
-    uint32_t count = gui_file_count((gui_state_t *)st);
-    if (count == 0) return -1;
-    int selected = st->selected_file;
-    if (selected < 0) selected = 0;
-    if ((uint32_t)selected >= count) selected = (int)count - 1;
-    uint32_t start = selected >= NOTE_FILE_ROWS ? (uint32_t)selected - (NOTE_FILE_ROWS - 1) : 0;
-    int idx = (my - (list_y - 8)) / FILE_ROW_H;
-    uint32_t file_idx = start + (uint32_t)idx;
-    if (idx >= 0 && idx < NOTE_FILE_ROWS && file_idx < count) return (int)file_idx;
-    return -1;
-}
-
-// 记事本正文区点击定位：笔记是变宽比例字体（非等宽网格），逐字符重演
-// draw_notes_app 的排版循环来反推 (mx,my) 落在哪个字节偏移上，保证跟渲染
-// 完全一致。命中正文框返回 1 并写 *off；否则返回 0（不动光标）。
-static int hit_note_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off) {
-    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
-    const wm_window_t *win = wm_get_window(&st->wm, st->wm.active_window);
-    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_NOTES) return 0;
-
-    int win_x, win_y, win_w, win_h;
-    gui_window_metrics(st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    int tx = win_x + 30;
-    int ty = win_y + 42;
-    int list_w = 150;
-    int edit_x = tx + list_w + 18;
-    int edit_w = win_w - list_w - 86;
-    if (edit_w < 260) edit_w = 260;
-    /* 和 draw_notes_app 里的 content_bottom_off 用同一个公式：编辑框底边
-     * 跟着窗口高度变化，命中测试必须跟渲染算的是同一条边界，否则窗口
-     * 拉高之后点击位置和光标显示的地方会对不上。 */
-    int content_bottom_off = win_h - 138;
-    if (content_bottom_off < 200) content_bottom_off = 200;
-    if (mx < edit_x || mx >= edit_x + edit_w || my < ty + 118 || my >= ty + content_bottom_off - 1)
-        return 0;
-
-    int x = edit_x + 8;
-    int y = ty + 126;
-    utf8_state_t utf8;
-    utf8_init(&utf8);
-    uint32_t i;
-    for (i = 0; i < st->note_len && y < ty + content_bottom_off - 12; i++) {
-        int row_top = y, row_bot = y + 18;
-        if (st->note_buf[i] == '\n') {
-            if (my >= row_top && my < row_bot) { if (off) *off = i; return 1; }
-            x = edit_x + 8;
-            y += 18;
-            utf8_init(&utf8);
-            continue;
-        }
-        uint32_t cp = 0;
-        int ok = utf8_feed(&utf8, (uint8_t)st->note_buf[i], &cp);
-        if (ok < 0) continue;
-        if (ok == 0) cp = '?';
-        int advance = gui_cp_advance(cp, 1);
-        if (my >= row_top && my < row_bot && mx < x + advance) {
-            if (off) *off = (mx < x + advance / 2) ? i : i + 1;
-            return 1;
-        }
-        x += advance;
-        if (x > edit_x + edit_w - 16) {
-            x = edit_x + 8;
-            y += 18;
-        }
-    }
-    if (off) *off = i;  // 点在最后一行之后：光标放到末尾
-    return 1;
-}
 
 /* 重新加载（⟳）按钮命中测试：Chrome 式工具栏的第三个圆形按钮，圆心/半径
  * 与 draw_browser_app 的 BR_RELOAD_CX/BR_BTN_CY/BR_BTN_R 保持一致。 */
@@ -7816,139 +6404,6 @@ static int hit_browser_link(int w, int h, const gui_state_t *st, int mx, int my)
     return -1;
 }
 
-static int hit_code_command(int w, int h, const gui_state_t *st, int mx, int my) {
-    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
-    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
-    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_CODE) return 0;
-
-    int win_x, win_y, win_w, win_h;
-    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    int tx = win_x + 30;
-    int ty = win_y + 42;
-    code_layout_t l;
-    code_make_layout(tx, ty, win_w, win_h, &l);
-    for (int cmd = CODE_CMD_SAVE; cmd <= CODE_CMD_GUI_RUN; cmd++) {
-        int x, y, bw;
-        if (!code_command_rect(l.content_w, cmd, &x, &y, &bw)) continue;
-        if (mx >= tx + x && mx < tx + x + bw &&
-            my >= ty + y && my < ty + y + ACTION_H)
-            return cmd;
-    }
-    return 0;
-}
-
-static int hit_code_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off) {
-    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return 0;
-    const wm_window_t *win = wm_get_window(&st->wm, st->wm.active_window);
-    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_CODE) return 0;
-
-    int win_x, win_y, win_w, win_h;
-    gui_window_metrics(st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    int tx = win_x + 30;
-    int ty = win_y + 42;
-    code_layout_t l;
-    code_make_layout(tx, ty, win_w, win_h, &l);
-    if (mx < l.editor_x + l.line_no_w || mx >= l.editor_x + l.editor_w ||
-        my < l.editor_y || my >= l.editor_y + l.editor_h)
-        return 0;
-
-    int row = (my - (l.editor_y + 10)) / l.row_h;
-    if (row < 0) row = 0;
-    if (row >= l.view_rows) row = l.view_rows - 1;
-    uint32_t line = (uint32_t)(st->code_scroll + row);
-    uint32_t total = code_line_count(st);
-    if (line >= total) line = total ? total - 1 : 0;
-    int col = (mx - (l.editor_x + l.line_no_w + 10)) / code_cell_w();
-    if (col < 0) col = 0;
-    if (off) *off = code_offset_for_line_col(st, line, (uint32_t)col);
-    return 1;
-}
-
-static int hit_code_file(int w, int h, const gui_state_t *st, int mx, int my) {
-    if (st->wm.active_window < 0 || st->wm.active_window >= st->wm.window_count) return -1;
-    const wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, st->wm.active_window);
-    if (!win || win->kind != WM_WIN_APP || win->mode != GUI_APP_CODE) return -1;
-
-    int win_x, win_y, win_w, win_h;
-    gui_window_metrics((gui_state_t *)st, w, h, win, st->wm.active_window, &win_x, &win_y, &win_w, &win_h);
-    int tx = win_x + 30;
-    int ty = win_y + 42;
-    code_layout_t l;
-    code_make_layout(tx, ty, win_w, win_h, &l);
-    int list_y = l.editor_y + 62;
-    if (mx < tx || mx >= tx + l.side_w || my < list_y - 8) return -1;
-
-    uint32_t count = gui_file_count((gui_state_t *)st);
-    if (count == 0) return -1;
-    int selected = st->selected_file;
-    if (selected < 0) selected = 0;
-    if ((uint32_t)selected >= count) selected = (int)count - 1;
-    uint32_t start = selected >= l.file_rows ? (uint32_t)selected - (uint32_t)(l.file_rows - 1) : 0;
-    int idx = (my - (list_y - 8)) / FILE_ROW_H;
-    uint32_t file_idx = start + (uint32_t)idx;
-    if (idx >= 0 && idx < l.file_rows && file_idx < count) return (int)file_idx;
-    return -1;
-}
-
-static void snake_move(gui_state_t *st, int dx, int dy) {
-    if (st->snake_len <= 0) snake_reset(st);
-    if (!st->snake_alive) return;
-
-    if (dx != 0 || dy != 0) {
-        if (st->snake_len <= 1 || dx != -st->snake_dx || dy != -st->snake_dy) {
-            st->snake_dx = dx;
-            st->snake_dy = dy;
-        }
-    }
-
-    int nx = st->snake_body_x[0] + st->snake_dx;
-    int ny = st->snake_body_y[0] + st->snake_dy;
-    if (nx < 0 || nx >= SNAKE_W || ny < 0 || ny >= SNAKE_H) {
-        st->snake_alive = 0;
-        st->status = "贪吃蛇撞墙";
-        return;
-    }
-
-    int grow = (nx == st->snake_tx && ny == st->snake_ty);
-    int check_len = grow ? st->snake_len : st->snake_len - 1;
-    for (int i = 0; i < check_len; i++) {
-        if (st->snake_body_x[i] == nx && st->snake_body_y[i] == ny) {
-            st->snake_alive = 0;
-            st->status = "贪吃蛇撞到自己";
-            return;
-        }
-    }
-
-    int new_len = st->snake_len + (grow && st->snake_len < SNAKE_MAX ? 1 : 0);
-    for (int i = new_len - 1; i > 0; i--) {
-        st->snake_body_x[i] = st->snake_body_x[i - 1];
-        st->snake_body_y[i] = st->snake_body_y[i - 1];
-    }
-    st->snake_body_x[0] = nx;
-    st->snake_body_y[0] = ny;
-    st->snake_len = new_len;
-    st->snake_x = nx;
-    st->snake_y = ny;
-
-    if (grow) {
-        st->snake_score++;
-        snake_place_food(st);
-        st->status = "吃到食物";
-    } else {
-        st->status = "贪吃蛇移动";
-    }
-}
-
-static int snake_auto_tick(gui_state_t *st) {
-    gui_sync_focus(st);
-    if (st->app_mode != GUI_APP_SNAKE) return 0;
-    if (st->snake_len <= 0) snake_reset(st);
-    uint8_t sec = cmos_second();
-    if (sec == st->snake_last_sec) return 0;
-    st->snake_last_sec = sec;
-    snake_move(st, 0, 0);
-    return 1;
-}
 
 static void handle_app_key(gui_state_t *st, int key) {
     if (key == KB_KEY_F6) {
@@ -7958,75 +6413,7 @@ static void handle_app_key(gui_state_t *st, int key) {
     }
     gui_sync_focus(st);
     if (gui_app_handle_key(st, key)) return;
-    if (st->app_mode == GUI_APP_NOTES) {
-        note_load(st);
-        if (key == 1) {  // Ctrl+A：全选
-            if (st->note_len > 0) {
-                st->note_sel_anchor = 0;
-                st->note_cursor = st->note_len;
-                st->note_sel_active = 1;
-                st->status = "已全选（Backspace/输入 可替换）";
-            } else {
-                st->note_sel_active = 0;
-                st->status = "笔记为空";
-            }
-            return;
-        }
-        int had_sel = st->note_sel_active;
-        uint32_t sel_start = 0, sel_end = 0;
-        if (had_sel) note_sel_range(st, &sel_start, &sel_end);
-
-        // Shift+方向键：开始/延伸选区，光标移动端跟随移动，锚点端不动
-        if (key == GUI_KEY_SHIFT_LEFT || key == GUI_KEY_SHIFT_RIGHT ||
-            key == GUI_KEY_SHIFT_UP   || key == GUI_KEY_SHIFT_DOWN) {
-            if (!had_sel) st->note_sel_anchor = st->note_cursor;
-            if (key == GUI_KEY_SHIFT_LEFT) note_cursor_left(st);
-            else if (key == GUI_KEY_SHIFT_RIGHT) note_cursor_right(st);
-            else if (key == GUI_KEY_SHIFT_UP) note_cursor_vertical(st, -1);
-            else note_cursor_vertical(st, 1);
-            st->note_sel_active = (st->note_sel_anchor != st->note_cursor);
-            return;
-        }
-        st->note_sel_active = 0;  // 除 Shift+方向键/Ctrl+A 外任何按键都取消选中
-        if (key == 19) {  // Ctrl+S
-            note_save(st);
-        } else if (key == GUI_KEY_BACKSPACE || key == GUI_KEY_DELETE) {
-            if (had_sel) note_delete_range(st, sel_start, sel_end);
-            else if (key == GUI_KEY_BACKSPACE) note_backspace(st);
-            else note_delete_forward(st);
-        } else if (key == GUI_KEY_LEFT) {
-            note_cursor_left(st);
-        } else if (key == GUI_KEY_RIGHT) {
-            note_cursor_right(st);
-        } else if (key == GUI_KEY_UP) {
-            note_cursor_vertical(st, -1);
-        } else if (key == GUI_KEY_DOWN) {
-            note_cursor_vertical(st, 1);
-        } else if (key == GUI_KEY_HOME) {
-            note_cursor_home(st);
-        } else if (key == GUI_KEY_END) {
-            note_cursor_end(st);
-        } else if (key == '\n') {
-            if (had_sel) note_delete_range(st, sel_start, sel_end);
-            note_insert(st, '\n');
-        } else if (key == '\t') {
-            if (had_sel) note_delete_range(st, sel_start, sel_end);
-            for (int i = 0; i < 4; i++) note_insert(st, ' ');
-        } else if (key >= 32 && key <= 126) {
-            if (had_sel) note_delete_range(st, sel_start, sel_end);
-            note_insert(st, (char)key);
-        }
-    } else if (st->app_mode == GUI_APP_UWC) {
-        if (key == 'n') gui_create_note(st);
-        else if (key == GUI_KEY_UP && st->selected_file > 0) gui_select_file(st, st->selected_file - 1);
-        else if (key == GUI_KEY_DOWN && (uint32_t)(st->selected_file + 1) < gui_file_count(st)) gui_select_file(st, st->selected_file + 1);
-    } else if (st->app_mode == GUI_APP_SNAKE) {
-        if (key == '\n') snake_reset(st);
-        else if (key == GUI_KEY_LEFT) snake_turn(st, -1, 0);
-        else if (key == GUI_KEY_RIGHT) snake_turn(st, 1, 0);
-        else if (key == GUI_KEY_UP) snake_turn(st, 0, -1);
-        else if (key == GUI_KEY_DOWN) snake_turn(st, 0, 1);
-    } else if (st->app_mode == GUI_APP_BROWSER) {
+    if (st->app_mode == GUI_APP_BROWSER) {
         browser_init(st);
         uint32_t n = (uint32_t)strlen(st->browser_url);
         if (st->browser_url_cursor > n) st->browser_url_cursor = n;  /* 页面加载等外部改动后钳制 */
@@ -8071,155 +6458,6 @@ static void handle_app_key(gui_state_t *st, int key) {
                         n - st->browser_url_cursor + 1);
                 st->browser_url[st->browser_url_cursor] = (char)key;
                 st->browser_url_cursor++;
-            }
-        }
-    } else if (st->app_mode == GUI_APP_CODE) {
-        code_load(st);
-        if (key == 1) {  // Ctrl+A：全选
-            if (st->code_len > 0) {
-                st->code_sel_anchor = 0;
-                st->code_cursor = st->code_len;
-                st->code_sel_active = 1;
-                st->status = "已全选（Backspace/输入 可替换）";
-            } else {
-                st->code_sel_active = 0;
-                st->status = "代码为空";
-            }
-            return;
-        }
-        int had_sel = st->code_sel_active;
-        uint32_t sel_start = 0, sel_end = 0;
-        if (had_sel) code_sel_range(st, &sel_start, &sel_end);
-
-        // Shift+方向键：开始/延伸选区，光标移动端跟随移动，锚点端不动
-        if (key == GUI_KEY_SHIFT_LEFT || key == GUI_KEY_SHIFT_RIGHT ||
-            key == GUI_KEY_SHIFT_UP   || key == GUI_KEY_SHIFT_DOWN) {
-            if (!had_sel) st->code_sel_anchor = st->code_cursor;
-            if (key == GUI_KEY_SHIFT_LEFT) {
-                if (st->code_cursor > 0) st->code_cursor--;
-                code_ensure_visible(st);
-            } else if (key == GUI_KEY_SHIFT_RIGHT) {
-                if (st->code_cursor < st->code_len) st->code_cursor++;
-                code_ensure_visible(st);
-            } else if (key == GUI_KEY_SHIFT_UP) {
-                code_move_vertical(st, -1);
-            } else {
-                code_move_vertical(st, 1);
-            }
-            st->code_sel_active = (st->code_sel_anchor != st->code_cursor);
-            return;
-        }
-        st->code_sel_active = 0;  // 除 Shift+方向键/Ctrl+A 外任何按键都取消选中
-        if (key == 19) {
-            (void)code_save(st);
-        } else if (key == 18) {
-            code_run_current(st);
-        } else if (key == 15) {
-            code_open_selected(st);
-        } else if (key == GUI_KEY_LEFT) {
-            if (st->code_cursor > 0) st->code_cursor--;
-            code_ensure_visible(st);
-        } else if (key == GUI_KEY_RIGHT) {
-            if (st->code_cursor < st->code_len) st->code_cursor++;
-            code_ensure_visible(st);
-        } else if (key == GUI_KEY_UP) {
-            code_move_vertical(st, -1);
-        } else if (key == GUI_KEY_DOWN) {
-            code_move_vertical(st, 1);
-        } else if (key == GUI_KEY_HOME) {
-            code_move_line_edge(st, 0);
-        } else if (key == GUI_KEY_END) {
-            code_move_line_edge(st, 1);
-        } else if (key == GUI_KEY_PGUP) {
-            code_move_page(st, -1);
-        } else if (key == GUI_KEY_PGDOWN) {
-            code_move_page(st, 1);
-        } else if (key == GUI_KEY_BACKSPACE || key == GUI_KEY_DELETE) {
-            if (had_sel) code_delete_range(st, sel_start, sel_end);
-            else if (key == GUI_KEY_BACKSPACE) code_backspace(st);
-            else code_delete_forward(st);
-        } else if (key == 3) {
-            code_set_output("Use Esc/window close to leave Code Workspace");
-            st->status = "代码工作台保持打开";
-        } else if (key == '\t') {
-            if (had_sel) code_delete_range(st, sel_start, sel_end);
-            for (int i = 0; i < 4; i++) code_insert_char(st, ' ');
-        } else if (key == '\n') {
-            if (had_sel) code_delete_range(st, sel_start, sel_end);
-            code_insert_newline(st);
-        } else if (key >= 32 && key <= 126) {
-            if (had_sel) code_delete_range(st, sel_start, sel_end);
-            code_insert_char(st, (char)key);
-        }
-    } else if (st->app_mode == GUI_APP_DIAG) {
-        if (key == GUI_KEY_BACKSPACE) {
-            if (st->console_cursor > 0) {
-                for (uint32_t j = st->console_cursor - 1; j < st->console_input_len; j++) {
-                    st->console_input[j] = st->console_input[j + 1];
-                }
-                st->console_cursor--;
-                st->console_input_len--;
-            }
-        } else if (key == '\n' || key == '\r') {
-            console_exec_cmd(st);
-        } else if (key == GUI_KEY_LEFT) {
-            if (st->console_cursor > 0) {
-                st->console_cursor--;
-            }
-        } else if (key == GUI_KEY_RIGHT) {
-            if (st->console_cursor < st->console_input_len) {
-                st->console_cursor++;
-            }
-        } else if (key == GUI_KEY_UP) {
-            int curr = (st->console_history_idx == -1) ? 15 : st->console_history_idx - 1;
-            for (int i = curr; i >= 0; i--) {
-                if (strncmp(st->console_history[i], "hbos_gui_shell:/# ", 18) == 0) {
-                    const char *cmd_val = st->console_history[i] + 18;
-                    strncpy(st->console_input, cmd_val, 79);
-                    st->console_input[79] = 0;
-                    st->console_input_len = (uint32_t)strlen(st->console_input);
-                    st->console_cursor = st->console_input_len;
-                    st->console_history_idx = i;
-                    break;
-                }
-            }
-        } else if (key == GUI_KEY_DOWN) {
-            if (st->console_history_idx != -1) {
-                int found = 0;
-                for (int i = st->console_history_idx + 1; i <= 15; i++) {
-                    if (strncmp(st->console_history[i], "hbos_gui_shell:/# ", 18) == 0) {
-                        const char *cmd_val = st->console_history[i] + 18;
-                        strncpy(st->console_input, cmd_val, 79);
-                        st->console_input[79] = 0;
-                        st->console_input_len = (uint32_t)strlen(st->console_input);
-                        st->console_cursor = st->console_input_len;
-                        st->console_history_idx = i;
-                        found = 1;
-                        break;
-                    }
-                }
-                if (!found) {
-                    st->console_input[0] = 0;
-                    st->console_input_len = 0;
-                    st->console_cursor = 0;
-                    st->console_history_idx = -1;
-                }
-            }
-        } else if (key == GUI_KEY_PGUP) {
-            st->console_scroll += 8;
-        } else if (key == GUI_KEY_PGDOWN) {
-            st->console_scroll -= 8;
-            if (st->console_scroll < 0) st->console_scroll = 0;
-        } else if (key >= 32 && key <= 126) {
-            st->console_scroll = 0;  // typing snaps back to bottom
-            if (st->console_input_len + 1 < 80) {
-                for (uint32_t j = st->console_input_len; j > st->console_cursor; j--) {
-                    st->console_input[j] = st->console_input[j - 1];
-                }
-                st->console_input[st->console_cursor] = (char)key;
-                st->console_cursor++;
-                st->console_input_len++;
-                st->console_input[st->console_input_len] = 0;
             }
         }
     }
@@ -8280,10 +6518,10 @@ static void handle_key(gui_state_t *st, int key) {
         st->selected_app = gui_step_selection(st->selected_app, gui_app_count(), 4);
         st->status = "已选择应用";
     } else if (key == 'n') {
-        gui_create_note(st);
+        app_notes_create(st);
         gui_open_panel_window(st, PANEL_FILES);
     } else if (key == 'a') {
-        gui_append_note(st);
+        app_notes_append(st);
         gui_open_panel_window(st, PANEL_FILES);
     } else if (key == 'p' && st->active == PANEL_FILES) {
         gui_copy_selected(st);
@@ -9166,12 +7404,10 @@ static void cmd_gui(int argc, char **argv) {
     st.console_line_count = 0;
     st.console_cursor = 0;
     st.console_history_idx = -1;
-    console_append_history(&st, "Welcome to the HIVE Console!");
-    console_append_history(&st, "Type 'help' to view available commands.");
+    app_diag_welcome(&st);
     /* 控制台 sink 常驻：异步 spawn 的 .hax 应用输出持续进终端历史，
      * GUI 主循环得以继续重绘（否则同步运行会冻结桌面）。 */
-    g_con_sink_st = &st;
-    console_set_sink(gui_console_sink);
+    app_diag_install_sink(&st);
     wm_set_panel_title(PANEL_FILES, "文件管理器");
     wm_set_panel_title(PANEL_DISK, "磁盘管理器");
     wm_set_panel_title(PANEL_SYS, "资源管理器");
@@ -9482,10 +7718,10 @@ static void cmd_gui(int argc, char **argv) {
             if (code_text_dragging) {
                 if (left_down) {
                     uint32_t off = 0;
-                    if (hit_code_editor(w, h, &st, mx, my, &off)) {
+                    if (app_code_hit_editor(w, h, &st, mx, my, &off)) {
                         st.code_cursor = off;
                         st.code_sel_active = (st.code_sel_anchor != st.code_cursor);
-                        code_ensure_visible(&st);
+                        app_code_ensure_visible(&st);
                         redraw = 1;
                     }
                 } else {
@@ -9497,7 +7733,7 @@ static void cmd_gui(int argc, char **argv) {
             if (note_text_dragging) {
                 if (left_down) {
                     uint32_t off = 0;
-                    if (hit_note_editor(w, h, &st, mx, my, &off)) {
+                    if (app_notes_hit_editor(w, h, &st, mx, my, &off)) {
                         st.note_cursor = off;
                         st.note_sel_active = (st.note_sel_anchor != st.note_cursor);
                         redraw = 1;
@@ -9622,8 +7858,8 @@ static void cmd_gui(int argc, char **argv) {
              * 窗口缩放边缘光标，那个优先级更高，上面已经赋过值了）。 */
             if (cursor_edge == WM_EDGE_NONE) {
                 uint32_t hover_off = 0;
-                if ((st.app_mode == GUI_APP_NOTES && hit_note_editor(w, h, &st, mx, my, &hover_off)) ||
-                    (st.app_mode == GUI_APP_CODE && hit_code_editor(w, h, &st, mx, my, &hover_off)))
+                if ((st.app_mode == GUI_APP_NOTES && app_notes_hit_editor(w, h, &st, mx, my, &hover_off)) ||
+                    (st.app_mode == GUI_APP_CODE && app_code_hit_editor(w, h, &st, mx, my, &hover_off)))
                     cursor_edge = CURSOR_HOVER_TEXT;
             }
             /* 浏览器链接悬停：手型光标 + 状态栏预览目标 URL（Chrome 把目标
@@ -9955,11 +8191,11 @@ static void cmd_gui(int argc, char **argv) {
                                     gui_focus_window(&st, content_idx);
 
                                 if (content_idx >= 0 && st.app_mode != GUI_APP_NONE) {
-                                int code_cmd = hit_code_command(w, h, &st, mx, my);
-                                if (code_cmd == CODE_CMD_GUI_RUN) {
-                                    code_gui_run(&st, &fb);
+                                int code_cmd = app_code_hit_command(w, h, &st, mx, my);
+                                if (code_cmd == 4 /* CODE_CMD_GUI_RUN */) {
+                                    app_code_gui_run(&st, &fb);
                                 } else if (code_cmd) {
-                                    handle_code_command(&st, code_cmd);
+                                    app_code_command(&st, code_cmd);
                                 } else if (hit_browser_load_button(w, h, &st, mx, my)) {
                                     browser_load(&st);
                                 } else if (hit_browser_nav_button(w, h, &st, mx, my) == 1) {
@@ -9976,15 +8212,15 @@ static void cmd_gui(int argc, char **argv) {
                                         st.status = "该链接不支持跳转";
                                     }
                                 } else {
-                                    int note_file = hit_note_file(w, h, &st, mx, my);
+                                    int note_file = app_notes_hit_file(w, h, &st, mx, my);
                                     if (note_file >= 0) {
                                         gui_select_file(&st, note_file);
                                         st.status = "已切换编辑文件";
                                     } else {
-                                        int code_file = hit_code_file(w, h, &st, mx, my);
+                                        int code_file = app_code_hit_file(w, h, &st, mx, my);
                                         if (code_file >= 0) {
                                             if (st.last_clicked_file == code_file && st.selected_file == code_file) {
-                                                code_open_selected(&st);
+                                                app_code_open_selected(&st);
                                                 st.last_clicked_file = -1;
                                             } else {
                                                 gui_select_file(&st, code_file);
@@ -9993,14 +8229,14 @@ static void cmd_gui(int argc, char **argv) {
                                             }
                                         } else {
                                             uint32_t code_off = 0, note_off = 0;
-                                            if (hit_code_editor(w, h, &st, mx, my, &code_off)) {
+                                            if (app_code_hit_editor(w, h, &st, mx, my, &code_off)) {
                                                 st.code_cursor = code_off;
                                                 st.code_sel_anchor = code_off;
                                                 st.code_sel_active = 0;
                                                 code_text_dragging = 1;
-                                                code_ensure_visible(&st);
+                                                app_code_ensure_visible(&st);
                                                 st.status = "已移动代码光标";
-                                            } else if (hit_note_editor(w, h, &st, mx, my, &note_off)) {
+                                            } else if (app_notes_hit_editor(w, h, &st, mx, my, &note_off)) {
                                                 st.note_cursor = note_off;
                                                 st.note_sel_anchor = note_off;
                                                 st.note_sel_active = 0;
@@ -10098,10 +8334,6 @@ static void cmd_gui(int argc, char **argv) {
                 gui_damage_cursor(old_mx, old_my, mx, my);
                 draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             }
-        }
-        if (snake_auto_tick(&st)) {
-            gui_dirty_mark_full();
-            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
         if (gui_app_tick(&st)) {
             gui_dirty_mark_full();
@@ -10208,8 +8440,7 @@ static void cmd_gui(int argc, char **argv) {
     mouse_shutdown();
     /* 退出 GUI 后必须解除常驻控制台 sink：否则 shell 后续所有输出仍会被
      * 吞进已退出的 GUI 终端历史，真终端什么都不显示，看起来像卡死。 */
-    g_con_sink_st = NULL;
-    console_set_sink(NULL);
+    app_diag_remove_sink();
     console_reset_terminal();
     console_puts("HIVE: 已返回 shell\n");
 }
@@ -10260,6 +8491,20 @@ void gui_text(int x, int y, const char *s, uint32_t color, int scale) { text(x, 
 void gui_text_clipped(int x, int y, int max_x, const char *s, uint32_t color, int scale) {
     text_clipped(x, y, max_x, s, color, scale);
 }
+int gui_draw_codepoint(int x, int y, uint32_t cp, uint32_t color, int scale) {
+    return draw_text_codepoint(x, y, cp, color, scale);
+}
+int gui_text_mono(int x, int y, int max_x, const char *s, uint32_t color) {
+    return text_mono(x, y, max_x, s, color);
+}
+void gui_draw_small_button(int x, int y, int w, const char *label, uint32_t color) {
+    draw_small_button(x, y, w, label, color);
+}
+int gui_ui_scale_v(int v) { return ui_s(v); }
+int gui_draw_mono_char(int x, int y, char c, uint32_t color) { return draw_mono_char(x, y, c, color); }
+int gui_key_poll(void) { return key_poll(); }
+int gui_surface_width(void) { return g_gui_surface_w; }
+int gui_surface_height(void) { return g_gui_surface_h; }
 void gui_append_char(char *buf, uint32_t cap, uint32_t *pos, char c) { append_char(buf, cap, pos, c); }
 void gui_append_str(char *buf, uint32_t cap, uint32_t *pos, const char *s) { append_str(buf, cap, pos, s); }
 void gui_append_int(char *buf, uint32_t cap, uint32_t *pos, int v) { append_int(buf, cap, pos, v); }

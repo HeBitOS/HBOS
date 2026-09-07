@@ -8,6 +8,11 @@ extern const gui_app_module_t gui_app_taskmgr;
 extern const gui_app_module_t gui_app_shortcuts;
 extern const gui_app_module_t gui_app_imgview;
 extern const gui_app_module_t gui_app_hexview;
+extern const gui_app_module_t gui_app_snake;
+extern const gui_app_module_t gui_app_uwc;
+extern const gui_app_module_t gui_app_diag;
+extern const gui_app_module_t gui_app_notes;
+extern const gui_app_module_t gui_app_code;
 
 static const gui_app_module_t *const g_modules[] = {
     &gui_app_calc,
@@ -18,6 +23,11 @@ static const gui_app_module_t *const g_modules[] = {
     &gui_app_shortcuts,
     &gui_app_imgview,
     &gui_app_hexview,
+    &gui_app_snake,
+    &gui_app_uwc,
+    &gui_app_diag,
+    &gui_app_notes,
+    &gui_app_code,
 };
 
 const gui_app_module_t *gui_app_by_mode(int mode) {
