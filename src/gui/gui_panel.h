@@ -20,6 +20,9 @@ int gui_selected_entry(gui_state_t *st, char *name, uint32_t *type,
 file_t *gui_selected_regular_file(gui_state_t *st);
 void gui_select_file(gui_state_t *st, int index);
 
+/* 后缀匹配（大小写不敏感，FAT32 短文件名全大写也能命中） */
+int gui_has_suffix(const char *path, const char *suffix);
+
 /* 记事本共享命名（文件面板选中文件时会把名字带给记事本） */
 void gui_set_note_name(gui_state_t *st, const char *name);
 const char *gui_note_name(gui_state_t *st);

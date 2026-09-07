@@ -2126,7 +2126,7 @@ static char gui_ascii_lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c -
 /* 大小写不敏感——FAT32 短文件名（8.3 格式）落盘/读回都是全大写
  * （TEST.BMP），只按小写 ".bmp" 精确匹配的话，FAT32 盘上的文件后缀检测
  * 会全部失效，退回到内容嗅探甚至记事本，而不是真正按后缀分发。 */
-static int gui_has_suffix(const char *path, const char *suffix) {
+int gui_has_suffix(const char *path, const char *suffix) {
     if (!path || !suffix) return 0;
     uint32_t plen = (uint32_t)strlen(path);
     uint32_t slen = (uint32_t)strlen(suffix);

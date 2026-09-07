@@ -203,9 +203,8 @@ void app_notes_create(gui_state_t *st) {
         st->note_len = len;
         st->note_cursor = len;
         st->note_dirty = 0;
-        st->note_loaded = 1;
-        gui_set_note_name(st, f->name);
-        st->note_loaded = 1;
+        gui_set_note_name(st, f->name);   /* 会置 note_loaded=0 */
+        st->note_loaded = 1;              /* 预填内容已就位，跳过 note_load 重读 */
     }
     (void)fs_sync();
     /* 在文件面板里选中新文件（与 gui_select_path 语义一致：比较完整路径） */

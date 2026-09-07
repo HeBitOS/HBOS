@@ -20,7 +20,7 @@ extern int hbos_gcc_last_return(void);
 #define CODE_CMD_RUN     2
 #define CODE_CMD_OPEN    3
 #define CODE_CMD_GUI_RUN 4
-#define GUI_PAGE_SIZE 4096ULL
+#define CODE_VIEW_ROWS 10
 #define ACTION_H gui_ui_scale_v(28)
 
 /* 行缓冲拼接（原 gui.c line2 的本地等价实现） */
@@ -49,20 +49,6 @@ typedef struct {
     int file_rows;
 } code_layout_t;
 
-static char code_lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
-
-static int gui_has_suffix(const char *path, const char *suffix) {
-    if (!path || !suffix) return 0;
-    uint32_t plen = (uint32_t)strlen(path);
-    uint32_t slen = (uint32_t)strlen(suffix);
-    if (slen == 0 || plen < slen) return 0;
-    const char *p = path + plen - slen;
-    for (uint32_t i = 0; i < slen; i++) {
-        if (code_lower(p[i]) != code_lower(suffix[i])) return 0;
-    }
-    return 1;
-}
-
 int gui_has_code_suffix(const char *path) {
     return gui_has_suffix(path, ".c") || gui_has_suffix(path, ".h") ||
            gui_has_suffix(path, ".cc") || gui_has_suffix(path, ".cpp") ||
@@ -74,7 +60,7 @@ int gui_has_code_suffix(const char *path) {
 static const fb_info_t *g_script_fb;
 static void sgfx_rect(int x,int y,int w,int h,uint32_t c){ gui_rect(x,y,w,h,c); }
 static void sgfx_text(int x,int y,const char*s,uint32_t c,int sc){ gui_text(x,y,s,c,sc); }
-static void sgfx_present(void){ (void)0; /* present 由 app_code_gui_run 的 fb 参数处理 */ }
+static void sgfx_present(void){ if(g_script_fb) gui_present_surface(g_script_fb); }
 static int  sgfx_sw(void){ return gui_surface_width(); }
 static int  sgfx_sh(void){ return gui_surface_height(); }
 static int  sgfx_getkey(void){ return gui_key_poll(); }
@@ -261,7 +247,7 @@ static uint32_t code_line_count(gui_state_t *st) {
 }
 
 static int code_visible_rows(gui_state_t *st) {
-    return st->code_view_rows > 0 ? st->code_view_rows : 24;
+    return st->code_view_rows > 0 ? st->code_view_rows : CODE_VIEW_ROWS;
 }
 
 static void code_clamp_scroll(gui_state_t *st) {
