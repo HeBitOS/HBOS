@@ -102,55 +102,115 @@ static void editor_goto(int row, int col) {
     console_write(buf, n);
 }
 
-/* Clear a line by writing spaces */
-static void editor_clear_line(int row, int fg, int bg) {
+/* Clear a line: fill with spaces under the given SGR attribute sequence
+ * (e.g. "\x1b[44;97m" = blue bg + bright white fg). */
+static void editor_clear_line(int row, const char *sgr) {
     editor_goto(row, 0);
-    char buf[128];
+    char buf[160];
     int n = 0;
-    buf[n++] = 0x1B;
-    buf[n++] = '[';
-    buf[n++] = '3'; /* fg */
-    buf[n++] = '0' + fg;
-    buf[n++] = ';';
-    buf[n++] = '4'; /* bg */
-    buf[n++] = '0' + bg;
-    buf[n++] = 'm';
+    for (const char *q = sgr; *q && n < 16; q++) buf[n++] = *q;
     /* Fill line with spaces */
-    for (int i = 0; i < term_cols && n < 120; i++, n++)
+    for (int i = 0; i < term_cols && n < 150; i++, n++)
         buf[n] = ' ';
+    buf[n++] = 0x1B; buf[n++] = '['; buf[n++] = '0'; buf[n++] = 'm';
     buf[n] = '\0';
-    console_puts(buf);
+    console_write(buf, n);
 }
 
+/* 光标位置信息（顶栏第二段）：行/列 + 百分比，nano 风格 */
+static void editor_pos_text(char *buf, int cap) {
+    uint32_t n = 0;
+    buf[0] = 0;
+    #define EPOS_APPEND(s) do { \
+        for (const char *q = (s); *q && n + 1 < (uint32_t)cap; q++) buf[n++] = *q; \
+    } while (0)
+    EPOS_APPEND("行 ");
+    char tmp[16]; int ti = 0;
+    int v = cursor_y + 1;
+    if (v == 0) { tmp[ti++] = '0'; }
+    while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
+    while (ti) buf[n++] = tmp[--ti];
+    EPOS_APPEND(", 列 ");
+    v = cursor_x + 1; ti = 0;
+    if (v == 0) { tmp[ti++] = '0'; }
+    while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
+    while (ti) buf[n++] = tmp[--ti];
+    EPOS_APPEND("  ");
+    int pct = line_count ? (int)((uint64_t)(cursor_y + 1) * 100 / line_count) : 100;
+    v = pct; ti = 0;
+    while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
+    while (ti) buf[n++] = tmp[--ti];
+    EPOS_APPEND("%");
+    buf[n] = 0;
+    #undef EPOS_APPEND
+}
+
+/* nano 风顶栏：蓝底(44)白字(97)，文件名居左；未保存时黄色(93) "*" 提示。
+ * 右侧放 "HBOS Editor" 标识。用 SGR 直排（编辑器里 console 即全屏 TUI）。 */
 static void editor_draw_top_bar(void) {
-    /* Draw top status bar (reverse video) */
-    editor_clear_line(0, 7, 0); /* white on black = reverse */
+    editor_clear_line(0, "\x1b[44;97m");
     editor_goto(0, 0);
-    console_puts("\x1b[7m"); /* reverse */
-    /* Show filename */
-    char buf[128];
-    int n = 0;
+
     const char *p = edit_path[0] ? edit_path : "[New File]";
-    while (*p && n < 120) buf[n++] = *p++;
-    if (edit_dirty) {
-        buf[n++] = ' ';
-        buf[n++] = '\"';
-        buf[n++] = '*';
-        buf[n++] = '\"';
-    }
+    /* 取文件名部分（最后一个 '/' 之后），顶栏更干净 */
+    const char *base = p;
+    for (const char *q = p; *q; q++) if (*q == '/') base = q + 1;
+
+    char buf[64];
+    int n = 0;
+    if (edit_dirty) buf[n++] = '*';
+    for (const char *q = base; *q && n < (int)sizeof(buf) - 1; q++) buf[n++] = *q;
     buf[n] = '\0';
+
+    console_puts("\x1b[44m\x1b[97m");
+    console_puts(" HBOS ");
     console_puts(buf);
+    console_puts(" ");
+    /* 右侧：光标位置（行/列/百分比），nano 风信息区 */
+    char pos[48];
+    editor_pos_text(pos, sizeof(pos));
+    int plen = 0;
+    for (const char *q = pos; *q; q++) plen++;
+    int used = 7 + n + 1;
+    int right = plen + 2;
+    if (used + right < term_cols) {
+        for (int i = used; i < term_cols - right; i++) console_puts(" ");
+        console_puts(pos);
+        console_puts(" ");
+    } else {
+        for (int i = used; i < term_cols; i++) console_puts(" ");
+    }
     console_puts("\x1b[0m");
 }
 
+/* nano 风底栏：快捷键字母反白高亮、说明文字浅灰，一行放不下就截断。
+ * 同时在顶栏右侧保留位置信息（行/列）——比 nano 的第三行更省一行。 */
 static void editor_draw_bottom_bar(void) {
     int last_row = term_rows - 1;
-    editor_clear_line(last_row, 7, 0);
+    editor_clear_line(last_row, "\x1b[44;97m");
     editor_goto(last_row, 0);
-    console_puts("\x1b[7m"); /* reverse */
-    console_puts("^X Exit  ^O Save  ^W Search  ^K Cut  ^U Paste  ^C Pos  ^G Help");
+    console_puts("\x1b[44m");
+    static const struct { const char *key, *desc; } items[] = {
+        {"^X", "退出"},  {"^O", "保存"},  {"^W", "搜索"},
+        {"^K", "剪切"},  {"^U", "粘贴"},  {"^G", "帮助"},
+    };
+    int used = 0;
+    for (uint32_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+        /* 每组 " 键 说明 " 约 8-10 列，放不下就停 */
+        int need = 1 + 2 + 1 + 8 + 1;   /* 空格+键+空格+说明宽度估算+空格 */
+        if (i == sizeof(items) / sizeof(items[0]) - 1) need = 1 + 2 + 1 + 8;
+        if (used + need > term_cols) break;
+        console_puts("\x1b[97;44m");   /* 白字 */
+        console_puts(items[i].key);
+        console_puts("\x1b[37;44m");   /* 浅灰说明 */
+        console_puts(" ");
+        console_puts(items[i].desc);
+        console_puts("  ");
+        used += need;
+    }
     console_puts("\x1b[0m");
 }
+
 
 static void editor_draw_line_numbers(void) {
     int display_lines = term_rows - 2; /* exclude top bar and bottom bar */
@@ -160,7 +220,7 @@ static void editor_draw_line_numbers(void) {
         int lidx = scroll_y + row;
         editor_goto(row + 1, 0);
         if (lidx >= (int)line_count) {
-            console_puts("~ ");
+            console_puts("\x1b[90m~ \x1b[0m");
         } else {
             /* Format line number */
             int n = 0;
@@ -175,7 +235,9 @@ static void editor_draw_line_numbers(void) {
             while (ti > 0) line_num_buf[n++] = tmp[--ti];
             line_num_buf[n++] = ' ';
             line_num_buf[n] = '\0';
+            console_puts("\x1b[90m");
             console_puts(line_num_buf);
+            console_puts("\x1b[0m");
         }
         /* Clear rest of line */
         console_puts("\x1b[K");
@@ -231,10 +293,12 @@ static void editor_draw_screen(void) {
 
 static void editor_show_message(const char *msg) {
     int last_row = term_rows - 1;
-    editor_clear_line(last_row, 7, 0);
+    editor_clear_line(last_row, "\x1b[41;97m");  /* 红底白字，nano 风消息条 */
     editor_goto(last_row, 0);
-    console_puts("\x1b[7m");
+    console_puts("\x1b[41;97m");
+    console_puts(" ");
     console_puts(msg);
+    console_puts(" ");
     console_puts("\x1b[0m");
 }
 
@@ -455,7 +519,7 @@ static int editor_read_input(char *buf, int maxlen) {
         }
         /* Display current input */
         int last_row = term_rows - 1;
-        editor_clear_line(last_row, 7, 0);
+        editor_clear_line(last_row, "\x1b[44;97m");
         editor_goto(last_row, 0);
         console_puts("\x1b[7m");
         if (buf[0]) console_puts(buf);

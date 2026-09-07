@@ -5370,7 +5370,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     }
 }
 
-static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int active, int state, int light) {
+static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int icon_id, int active, int state, int light) {
     int R = (state == WM_STATE_MAXIMIZED) ? 0 : 8;
     if (state != WM_STATE_MAXIMIZED) {
         soft_shadow(x, y, win_w, win_h);
@@ -5417,12 +5417,25 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MIN, 0,
                              light ? rgb(60, 64, 69) : rgb(236, 242, 240));
 
-    // Titlebar app icon (rounded accent square) + vertically-centered title.
-    int ico = 14, icy = y + (WM_TITLE_H - ico) / 2;
-    uint32_t icon_c = active ? rgb(61, 174, 233)
-                             : (light ? rgb(150, 156, 162) : rgb(110, 118, 126));
-    fill_round_rect(x + 12, icy, ico, ico, 3, icon_c, RR_ALL);
-    rect(x + 12 + 4, icy + 5, ico - 8, ico - 9, rgb(255, 255, 255));
+    // Titlebar app icon (real atlas tile; fallback = rounded accent square)
+    // + vertically-centered title.
+    int ico = 16, icy = y + (WM_TITLE_H - ico) / 2;
+    int icon_x = x + 10;
+    int tile = 0;
+    const uint32_t *src = gui_icon_tile(icon_id, &tile);
+    if (src) {
+        blit_icon_rgba(icon_x, icy, ico, src, tile);
+        if (!active) {
+            /* 非活跃窗口：图标叠一层标题栏底色半透明罩，视觉退后 */
+            rect_alpha(icon_x - 1, icy - 1, ico + 2, ico + 2,
+                       0x78000000u | (uint32_t)title_bg);
+        }
+    } else {
+        uint32_t icon_c = active ? rgb(61, 174, 233)
+                                 : (light ? rgb(150, 156, 162) : rgb(110, 118, 126));
+        fill_round_rect(icon_x, icy, ico, ico, 3, icon_c, RR_ALL);
+        rect(icon_x + 4, icy + 5, ico - 8, ico - 9, rgb(255, 255, 255));
+    }
     int tty = y + (WM_TITLE_H - gui_font_line_height()) / 2;
     text_clipped(x + 34, tty, x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16,
                  title, active ? rgb(255, 255, 255) : (light ? rgb(90, 96, 102) : rgb(190, 196, 202)), 1);
@@ -5453,6 +5466,8 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     uint8_t saved_opacity = gui_get_layer_opacity();
     if (win->opacity < 255) gui_set_layer_opacity(win->opacity);
     draw_window_frame(win_x, win_y, win_w, win_h, gui_window_title(win),
+                      win->kind == WM_WIN_PANEL ? panel_icon_id(win->mode)
+                                                : app_icon_id(win->mode),
                       idx == st->wm.active_window, win->state, st->theme_light);
 
     st->win_x = win_x;
