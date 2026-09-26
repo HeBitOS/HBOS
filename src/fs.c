@@ -496,22 +496,32 @@ static int fat32_vfs_unlink(vfs_node_t *node) {
     return ret;
 }
 
-/** 从 FAT32 根目录读取文件条目并填充 fs.files[] */
-static void fat32_rebuild_files(void) {
-    fs.file_count = 0;
-    uint32_t idx = 0;
-    char name[64];
-    uint32_t type, size;
-    while (fs.file_count < MAX_FILES &&
-           fat32_readdir(&fat32_fs, fat32_fs.bpb.root_cluster, idx, name, &type, &size) == 0) {
-        if (name[0] == '.' || name[0] == '\0') { idx++; continue; }
-        file_t *f = &fs.files[fs.file_count];
+/** 递归把 dir_cluster 目录（prefix 为完整路径前缀，根目录传空串）下的
+ *  所有条目注册进 fs.files[]。之前只扫根目录：同一次开机里创建的子目录
+ *  文件由 fs_create_file 留在内存表里所以能用，重启后重建时子目录内容
+ *  没人扫，"testdir/nested.txt" 直接从表里消失——磁盘上数据完好，cat
+ *  却报 not found。这里补上递归下钻，对齐 HBFS/ext2 后端"重启后文件还
+ *  在"的行为。g_fat32_cluster_buf 的套娃安全性见 fat32.c 顶部注释：
+ *  readdir/lookup 每次调用都自己重读目录簇，跨调用不持有缓冲区状态。 */
+static void fat32_rebuild_dir(uint32_t dir_cluster, const char *prefix) {
+    uint32_t plen = strlen(prefix);
+    for (uint32_t idx = 0; fs.file_count < MAX_FILES; idx++) {
+        char name[64];
+        uint32_t type, size;
+        if (fat32_readdir(&fat32_fs, dir_cluster, idx, name, &type, &size) < 0) return;
+        if (name[0] == '.' || name[0] == '\0') continue;
         uint32_t cluster, fsize;
         uint8_t attr;
-        if (fat32_lookup(&fat32_fs, fat32_fs.bpb.root_cluster, name, &cluster, &fsize, &attr) < 0) { idx++; continue; }
-        if (attr & (FAT32_ATTR_VOLUME_ID | FAT32_ATTR_LFN)) { idx++; continue; }
+        if (fat32_lookup(&fat32_fs, dir_cluster, name, &cluster, &fsize, &attr) < 0) { continue; }
+        if (attr & (FAT32_ATTR_VOLUME_ID | FAT32_ATTR_LFN)) { continue; }
         uint32_t nlen = 0; while (name[nlen] && nlen < MAX_FILENAME - 1) nlen++;
-        memcpy(f->name, name, nlen); f->name[nlen] = '\0';
+        if (plen + 1 + nlen >= MAX_FILENAME) continue; /* 完整路径超出扁平表可表示的长度 */
+        char full[MAX_FILENAME];
+        memcpy(full, prefix, plen);
+        if (plen) full[plen++] = '/';
+        memcpy(full + plen, name, nlen);
+        full[plen + nlen] = '\0';
+        file_t *f = &fs.files[fs.file_count];
         f->size = fsize;
         f->capacity = fsize > RAMFS_MAX_FILE_SIZE ? fsize : RAMFS_MAX_FILE_SIZE;
         f->data = NULL;
@@ -526,10 +536,17 @@ static void fat32_rebuild_files(void) {
         f->node.uid = 0;
         f->node.gid = 0;
         f->node.mode = (f->type ? S_IFDIR : S_IFREG) | 0755;
-        memcpy(f->node.name, f->name, nlen + 1);
+        memcpy(f->name, full, plen + nlen + 1);
+        memcpy(f->node.name, full, plen + nlen + 1);
         fs.file_count++;
-        idx++;
+        if (f->type) fat32_rebuild_dir(cluster, full);
     }
+}
+
+/** 从 FAT32 根目录读取文件条目并填充 fs.files[] */
+static void fat32_rebuild_files(void) {
+    fs.file_count = 0;
+    fat32_rebuild_dir(fat32_fs.bpb.root_cluster, "");
 }
 
 /** 尝试挂载 FAT32 分区（扫描 MBR 中类型 0x0C 的分区） */
@@ -543,7 +560,14 @@ static int fat32_try_mount(void) {
         uint32_t p_start = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
                            ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
         if (p_start == 0) continue;
-        if (fat32_mount(p_start, &fat32_fs) == 0) return 0;
+        if (fat32_mount(p_start, &fat32_fs) == 0) {
+            /* diskmgr 的 part/usage 行读 hbfs_* 全局（fs_disk_start_lba 等），
+             * 挂上 FAT32 后同步成真实分区范围，别让它们停留在 HBFS 探测时
+             * 留下的旧值。 */
+            hbfs_start_lba = p_start;
+            hbfs_total_sectors = fat32_fs.bpb.total_sectors_32;
+            return 0;
+        }
     }
     return -1;
 }
@@ -1039,9 +1063,10 @@ int fs_install_disk_at(uint32_t start, uint32_t sectors) {
  * 代码本身不删除——已装 HBFS 的旧盘仍可正常挂载，这里只是把"新装"
  * 的默认目标换成 FAT32，方便真实 Linux/Windows 主机直接挂载识别。 */
 
-/** FAT32 安装所需的最小扇区数（对应 fat32_format 自身的下限） */
+/** FAT32 安装所需的最小扇区数（对应 fat32_format 自身的下限；
+ *  66624 = 512B/簇时凑足 FAT32 规范 65525 簇下限的最小卷） */
 static uint32_t fat32_needed_sectors(void) {
-    return 66600;
+    return 66624;
 }
 
 /** 检查 FAT32 分区范围是否有效 */
@@ -1146,6 +1171,9 @@ static int fat32_choose_install_range(uint32_t *start, uint32_t *sectors) {
 static int fat32_mount_and_switch(uint32_t start) {
     if (fat32_mount(start, &fat32_fs) < 0) return fs_fail("FAT32 挂载失败");
     fs_backend = FS_BACKEND_FAT32;
+    /* 同 fat32_try_mount：diskmgr 读的 hbfs_* 全局同步为真实分区范围 */
+    hbfs_start_lba = start;
+    hbfs_total_sectors = fat32_fs.bpb.total_sectors_32;
     fat32_rebuild_files();
     fs.total_sectors = block_sector_count();
     return 1;
@@ -1266,6 +1294,13 @@ uint32_t fs_disk_total_sectors(void) {
 
 /** 获取文件系统总容量（字节） */
 uint32_t fs_capacity_bytes(void) {
+    /* FAT32 后端的容量是分区实际大小，不是 ramfs 的 128×128KiB 模型上限
+     * ——之前 diskmgr 在 63MiB 的 FAT32 分区上照样显示 16MiB。返回值是
+     * uint32_t，超过 4GiB 的分区饱和到 0xFFFFFFFF。 */
+    if (fs_backend == FS_BACKEND_FAT32) {
+        uint64_t bytes = (uint64_t)fat32_fs.bpb.total_sectors_32 * BLOCK_SECTOR_SIZE;
+        return bytes > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)bytes;
+    }
     return MAX_FILES * RAMFS_MAX_FILE_SIZE;
 }
 

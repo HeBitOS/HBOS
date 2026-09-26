@@ -336,7 +336,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke xhci-smoke chromium-baseline browser-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke xhci-smoke chromium-baseline browser-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
 
 all: iso
 
@@ -357,6 +357,7 @@ help:
 	@echo "  make run-nogui  Build and boot the no-GUI BIOS ISO in QEMU"
 	@echo "  make run-nogui-uefi  Build and boot the no-GUI UEFI ISO in QEMU"
 	@echo "  make nogui-smoke  Boot-test no-GUI BIOS and UEFI ISOs"
+	@echo "  make fat32-smoke  Regression-test FAT32 persistence (QEMU + host fsck/mtools)"
 	@echo "  make core-only  Build HIVE-capable core without registered/HAX apps"
 	@echo "  make clean      Clean build files"
 	@echo ""
@@ -646,6 +647,11 @@ nogui-uefi:
 
 nogui-smoke:
 	bash scripts/smoke_nogui.sh
+
+# issue #1 验收流程固化：FAT32 持久化全链路回归（QEMU 装卷/写文件/重启
+# 回读 + 宿主机 fsck.fat/mtools 互认）
+fat32-smoke:
+	bash scripts/test_fat32_persist.sh
 
 core-only:
 	@$(MAKE) --no-print-directory BUILD_DIR=build-core \
