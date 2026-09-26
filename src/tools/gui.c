@@ -22,6 +22,7 @@
 #include "../tls.h"
 #include "../unistd.h"
 #include "../elf.h"
+#include "../api/gui_service.h"
 #include "../user/app.h"
 #include "../user/hax_app.h"
 #include "../version.h"
@@ -7412,6 +7413,11 @@ static void cmd_gui(int argc, char **argv) {
     st.taskbar_show_seconds = 1;
     st.brightness = 100;
     gui_set_brightness(st.brightness);
+    /* 把 shell 的初始主题发布到 gui_service：HAX 应用窗口跟随的是
+     * service，不发布的话它们按 service 默认值（深色）渲染，桌面却是
+     * 浅色——"浅色桌面 + 深色应用窗口"的混搭（issue #2 视频里那扇
+     * 盖满整屏的深色窗口就是这么来的）。 */
+    (void)gui_service_theme_set(st.theme_light);
     st.status = "就绪";
     wm_init(&st.wm, w, h);
     st.console_input[0] = 0;
@@ -7490,6 +7496,31 @@ static void cmd_gui(int argc, char **argv) {
 
         wm_update_animations(&st.wm);
 
+        /* 跟随 gui_service 的设置变化（设置应用或其它写方经 service 改
+         * 主题时，桌面这里同步应用）。revision 未变时只是一次结构体
+         * 拷贝；service 对原值重放不递增 revision，不会引发无谓整帧
+         * 重绘（issue #2 的闪烁放大器）。 */
+        {
+            static uint32_t settings_revision;
+            gui_service_settings_t live;
+            if (gui_service_settings(0, GUI_SERVICE_SETTINGS_QUERY, &live) == 0 &&
+                live.revision != settings_revision) {
+                settings_revision = live.revision;
+                int light = live.theme == GUI_THEME_LIGHT;
+                if (st.theme_light != light) {
+                    st.theme_light = light;
+                    st.status = light ? "已切换为浅色主题" : "已切换为深色主题";
+                }
+                if (st.taskbar_show_seconds != live.taskbar_show_seconds)
+                    st.taskbar_show_seconds = live.taskbar_show_seconds;
+                if (st.brightness != live.brightness) {
+                    st.brightness = live.brightness;
+                    gui_set_brightness(st.brightness);
+                }
+                gui_dirty_mark_full();
+            }
+        }
+
         int key = key_poll();
         /* F1: toggle the start menu (keyboard-only path to every app --
          * previously mouse-only via the taskbar logo / right-click menu;
@@ -7523,6 +7554,9 @@ static void cmd_gui(int argc, char **argv) {
                     gui_close_window(&st, st.wm.active_window);
             } else {
                 st.theme_light = !st.theme_light;
+                /* shell 与 service 双写同步：HAX 应用窗口跟随 service，
+                 * 不同步就会出现桌面浅色、窗口深色的混搭（issue #2）。 */
+                (void)gui_service_theme_set(st.theme_light);
                 st.status = st.theme_light ? "已切换为浅色主题" : "已切换为深色主题";
             }
             gui_dirty_mark_full();
@@ -7931,9 +7965,16 @@ static void cmd_gui(int argc, char **argv) {
 
             if ((st.buttons & 1) && !(last_buttons & 1)) {
                 st.clicks++;
-                /* 应用窗口命中优先（关闭按钮 / 标题栏拖动 / 内容点击） */
+                /* 弹层（右键菜单/亮度/日历/开始菜单）画在所有窗口之上
+                 * （draw_gui_screen 的绘制顺序），打开期间应用窗口必须
+                 * 让出点击：否则压在弹层下面的窗口会抢走点击（点击穿透
+                 * 到下层窗口），弹层又永远等不到"点外部关闭"，像卡死一
+                 * 样留在原地；之后光标附近的每次点击都在拿球——误触
+                 * "切换主题"/"最大化" 就是 issue #2 的主题闪烁。 */
+                int popup_open = st.ctx_open || st.brightness_popup_open ||
+                                 st.cal_open || st.wm.start_menu_open;
                 int appwin_hit = 0;
-                for (int i = WINSRV_MAX - 1; i >= 0 && !appwin_hit; i--) {
+                for (int i = WINSRV_MAX - 1; i >= 0 && !appwin_hit && !popup_open; i--) {
                     winsrv_window_t *win = winsrv_get(i);
                     if (!win || win->state == WINSRV_STATE_MINIMIZED) continue;
                     int th = APPWIN_TITLE_H;
@@ -7995,7 +8036,10 @@ static void cmd_gui(int argc, char **argv) {
                     if (ci >= 0) {
                         if (st.ctx_open == 1) {           /* 桌面菜单 */
                             if (ci == 0) gui_dirty_mark_full();
-                            else if (ci == 1) st.theme_light = !st.theme_light;
+                            else if (ci == 1) {
+                                st.theme_light = !st.theme_light;
+                                (void)gui_service_theme_set(st.theme_light);
+                            }
                             else if (ci == 2) {
                                 wm_toggle_start_menu(&st.wm);
                                 if (st.wm.start_menu_open) {
