@@ -63,9 +63,14 @@ if nm "$HBOS_NOGUI_KERNEL" |
     echo "[NOGUI] forbidden desktop, resource, or bundled-app symbol found"
     exit 1
 fi
-if ! grep -q 'hax_app_table_count = 0' \
+# HPT is a required component in no-GUI images too (mk/hpt.mk), so the
+# manifest must hold exactly one app: hpt. Anything else (a GUI/desktop
+# app, busybox, tcc...) bundling into the no-GUI profile is a failure.
+if ! grep -q 'hax_app_table_count = 1' \
+      "$HBOS_REPO_DIR/$HBOS_NOGUI_BUILD/hax_manifest.c" || \
+   ! grep -qE '^\s*\{ "hpt",' \
       "$HBOS_REPO_DIR/$HBOS_NOGUI_BUILD/hax_manifest.c"; then
-    echo "[NOGUI] bundled HAX app manifest is not empty"
+    echo "[NOGUI] unexpected bundled HAX app manifest (only hpt is allowed)"
     exit 1
 fi
 echo "[NOGUI] component boundary: PASS"

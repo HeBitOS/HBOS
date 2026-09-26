@@ -9,6 +9,11 @@ ifeq ($(HBOS_KERNEL_ONLY),0)
 # Native HBOS builds (and HBOS_BUNDLE_APPS=0 no-GUI builds) use the pinned
 # top-level HPT submodule through the dedicated rule below.
 ifeq ($(and $(filter 1,$(HBOS_BUNDLE_APPS)),$(wildcard $(APP_DIR)/hpt.c)),)
+# HAX_CFLAGS 通常由 HAX-Compile/mk/hax-apps.mk 定义，但那份文件只在
+# HBOS_BUNDLE_APPS=1 时被 include；no-GUI（BUNDLE_APPS=0）走本文件这条
+# 专用规则时它是空的，hpt.c 的 <hax.h> 直接找不到头文件。这里补一个同
+# 款 fallback（已被定义时 ?= 不生效，两处定义保持一致）。
+HAX_CFLAGS ?= $(USER_CFLAGS) -I$(APP_DIR)/include -I$(APP_DIR)/lib -MMD -MP
 HPT_HAX := $(BUILD_DIR)/app/hpt.hax
 HAX_ALL_BINS += $(HPT_HAX)
 
