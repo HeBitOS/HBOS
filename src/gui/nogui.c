@@ -90,6 +90,10 @@ int gui_service_window_v2(uint32_t owner_task, uint32_t operation,
                           int handle, void *data) {
     (void)owner_task;
     (void)handle;
+    if (operation == GUI_SERVICE_SETTINGS_QUERY ||
+        operation == GUI_SERVICE_SETTINGS_UPDATE)
+        return gui_service_settings(owner_task, operation,
+                                    (gui_service_settings_t *)data);
     if (operation == GUI_SERVICE_V2_QUERY && data) {
         gui_service_caps_t *caps = (gui_service_caps_t *)data;
         if (caps->struct_size < sizeof(*caps)) return -1;
@@ -101,4 +105,15 @@ int gui_service_window_v2(uint32_t owner_task, uint32_t operation,
         return 0;
     }
     return -1;
+}
+
+int gui_service_settings(uint32_t owner_task, uint32_t operation,
+                         gui_service_settings_t *settings) {
+    (void)owner_task; (void)operation; (void)settings;
+    return -2;
+}
+
+int gui_service_theme_set(int light) {
+    (void)light;
+    return -2;
 }

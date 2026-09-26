@@ -7,6 +7,59 @@
 #include "gui_canvas.h"
 #include "winsrv.h"
 
+static gui_service_settings_t g_settings = {
+    sizeof(gui_service_settings_t), HBOS_GUI_SERVICE_ABI_MAJOR,
+    HBOS_GUI_SERVICE_ABI_MINOR, GUI_THEME_DARK, 100, 100, 1, 1, {0, 0}
+};
+
+static int settings_header(const gui_service_settings_t *s) {
+    return s && s->struct_size >= sizeof(*s) &&
+           s->abi_major == HBOS_GUI_SERVICE_ABI_MAJOR;
+}
+
+int gui_service_settings(uint32_t owner_task, uint32_t operation,
+                         gui_service_settings_t *settings) {
+    (void)owner_task;
+    if (!settings_header(settings)) return -1;
+    if (operation == GUI_SERVICE_SETTINGS_QUERY) {
+        *settings = g_settings;
+        settings->struct_size = sizeof(*settings);
+        settings->abi_major = HBOS_GUI_SERVICE_ABI_MAJOR;
+        settings->abi_minor = HBOS_GUI_SERVICE_ABI_MINOR;
+        return 0;
+    }
+    if (operation != GUI_SERVICE_SETTINGS_UPDATE) return -1;
+    if (settings->theme < GUI_THEME_LIGHT || settings->theme > GUI_THEME_DARK ||
+        settings->brightness < 20 || settings->brightness > 100 ||
+        settings->ui_scale < 70 || settings->ui_scale > 220 ||
+        (settings->taskbar_show_seconds != 0 && settings->taskbar_show_seconds != 1))
+        return -1;
+    /* 原值重放不递增 revision：跟随者（桌面 shell、应用）回写自己刚查到
+     * 的快照是常态，空更新若也推进 revision，就会让所有跟随者以为"又变
+     * 了"而整帧重绘，互相触发时表现为无意义的闪烁（issue #2）。 */
+    if (g_settings.theme == settings->theme &&
+        g_settings.brightness == settings->brightness &&
+        g_settings.ui_scale == settings->ui_scale &&
+        g_settings.taskbar_show_seconds == settings->taskbar_show_seconds) {
+        settings->revision = g_settings.revision;
+        return 0;
+    }
+    g_settings.theme = settings->theme;
+    g_settings.brightness = settings->brightness;
+    g_settings.ui_scale = settings->ui_scale;
+    g_settings.taskbar_show_seconds = settings->taskbar_show_seconds;
+    g_settings.revision++;
+    settings->revision = g_settings.revision;
+    return 0;
+}
+
+int gui_service_theme_set(int light) {
+    gui_service_settings_t s;
+    if (gui_service_settings(0, GUI_SERVICE_SETTINGS_QUERY, &s) != 0) return -1;
+    s.theme = light ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+    return gui_service_settings(0, GUI_SERVICE_SETTINGS_UPDATE, &s);
+}
+
 int gui_service_canvas_info(int *w, int *h) {
     return gui_app_info(w, h);
 }
@@ -95,6 +148,10 @@ static int gui_service_v2_header(uint32_t size, uint16_t major,
 
 int gui_service_window_v2(uint32_t owner_task, uint32_t operation,
                           int handle, void *data) {
+    if (operation == GUI_SERVICE_SETTINGS_QUERY ||
+        operation == GUI_SERVICE_SETTINGS_UPDATE)
+        return gui_service_settings(owner_task, operation,
+                                    (gui_service_settings_t *)data);
     if (operation == GUI_SERVICE_V2_QUERY) {
         gui_service_caps_t *caps = (gui_service_caps_t *)data;
         if (!caps || caps->struct_size < sizeof(*caps)) return -1;
