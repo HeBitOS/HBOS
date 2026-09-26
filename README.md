@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo/HBOS.png" alt="HBOS Logo" width="200">
+</p>
+
 # HBOS
 
 > He Bit OS — 面向 x86_64 的轻量实验操作系统
