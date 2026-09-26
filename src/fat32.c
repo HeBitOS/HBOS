@@ -1,5 +1,6 @@
 #include "fat32.h"
 #include "block.h"
+#include "rtc.h"
 #include "string.h"
 
 /* 一簇最多 64 扇区 = 32KB（见 fat32_pick_cluster_size 的上限）。这块缓冲
@@ -27,19 +28,32 @@ static int fat32_write_sector(fat32_fs_t *fs, uint32_t lba, const uint8_t *buf)
     return block_write_sector(lba, buf) == 0 ? 1 : 0;
 }
 
-/* fatgen103's standard FAT32 cluster-size table, collapsed to size
- * breakpoints (in 512B sectors) rather than the exact byte thresholds --
- * good enough for a formatter that just needs to produce a valid,
- * real-OS-mountable volume, not byte-exact parity with Windows' formatter. */
+/* fatgen103 要求 FAT32 卷至少 65525 个数据簇——不足时 Windows 会把卷当
+ * 成非法 FAT32（或按 FAT16 语义处理），fsck.fat 也警告 "less than the
+ * required minimum of 65525"。先按 fatgen103 的标准尺寸表选簇，再校验
+ * 簇数下限，不达标就逐级缩小（旧静态表在 32~128MB 这段给出 2 扇区/簇，
+ * 63MB 卷只落 ~63xxx 簇，正好踩线以下）。 */
+static uint32_t fat32_clusters_for(uint32_t total_sectors, uint32_t sectors_per_cluster)
+{
+    /* 与 fat32_format 里的 FAT 大小公式保持一致 */
+    uint32_t tmp2 = ((256 * sectors_per_cluster) + 2) / 2;
+    uint32_t sectors_per_fat = (total_sectors - 32 + tmp2 - 1) / tmp2;
+    return (total_sectors - 32 - 2 * sectors_per_fat) / sectors_per_cluster;
+}
+
 static uint32_t fat32_pick_cluster_size(uint32_t total_sectors)
 {
-    if (total_sectors < 16384)    return 1;   /* <8MB   -> 512B/cluster */
-    if (total_sectors < 131072)   return 2;   /* <64MB  -> 1KB */
-    if (total_sectors < 524288)   return 4;   /* <256MB -> 2KB */
-    if (total_sectors < 2097152)  return 8;   /* <1GB   -> 4KB */
-    if (total_sectors < 16777216) return 16;  /* <8GB   -> 8KB */
-    if (total_sectors < 33554432) return 32;  /* <16GB  -> 16KB */
-    return 64;                                /* >=16GB -> 32KB */
+    uint32_t c;
+    if (total_sectors < 16384)    c = 1;   /* <8MB   -> 512B/cluster */
+    else if (total_sectors < 131072)   c = 2;   /* <64MB  -> 1KB */
+    else if (total_sectors < 524288)   c = 4;   /* <256MB -> 2KB */
+    else if (total_sectors < 2097152)  c = 8;   /* <1GB   -> 4KB */
+    else if (total_sectors < 4194304)  c = 16;  /* <2GB   -> 8KB */
+    else if (total_sectors < 8388608)  c = 32;  /* <4GB   -> 16KB */
+    else                          c = 64;  /* >=4GB  -> 32KB */
+
+    while (c > 1 && fat32_clusters_for(total_sectors, c) < 65525) c--;
+    return c;
 }
 
 /**
@@ -49,9 +63,57 @@ static uint32_t fat32_pick_cluster_size(uint32_t total_sectors)
  * 两份 FAT 表、数据区（根目录固定占 1 簇，簇号 2）。FAT[0]/FAT[1] 写标准
  * 保留值，FAT[2]（根目录）标记为链尾，其余清零。
  */
+/* 把 RTC 当前时间打包成 FAT 目录项的 16 位日期/时间。RTC 读不到时退回
+ * 2000-01-01——全 0 是非法日期（mtools 显示成 1980-00-00），比合法固定值
+ * 更扎眼。FAT 时间戳年份范围 1980~2107，越界截断到端点。 */
+static void fat32_now(uint16_t *date_out, uint16_t *time_out)
+{
+    *date_out = 0x2821; /* 2000-01-01 */
+    *time_out = 0;
+    rtc_time_t t;
+    if (rtc_read_time(&t) < 0) return;
+    uint32_t y = t.year;
+    if (y < 1980) y = 1980;
+    if (y > 2107) y = 2107;
+    uint32_t mo = t.month ? t.month : 12;
+    uint32_t d = t.day ? t.day : 1;
+    *date_out = (uint16_t)(((y - 1980) << 9) | (mo << 5) | d);
+    *time_out = (uint16_t)(((uint32_t)t.hour << 11) |
+                           ((uint32_t)t.minute << 5) | (t.second / 2));
+}
+
+/* 往 data_start_lba 起的根目录簇第一扇区写入卷标目录项（ATTR_VOLUME_ID），
+ * 与引导扇区里的卷标字段保持一致——只写 BPB 不写根目录项时，fsck.fat 会
+ * 提示 "Label in boot sector ... but there is no volume label in root
+ * directory"，mtools/Windows 也看不到卷标。 */
+static int fat32_write_volume_label(const fat32_bpb_t *bpb, uint32_t data_start_lba)
+{
+    uint8_t label[11];
+    memcpy(label, bpb->volume_label, 11);
+    int all_space = 1;
+    for (uint32_t i = 0; i < 11; i++) {
+        if (label[i] != ' ') { all_space = 0; break; }
+    }
+    if (all_space) return 0;
+
+    uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    memset(sector, 0, sizeof(sector));
+    memcpy(sector, label, 11);
+    sector[11] = FAT32_ATTR_VOLUME_ID;
+    uint16_t date, tm;
+    fat32_now(&date, &tm);
+    memcpy(sector + 14, &date, 2); /* creation_time/date */
+    memcpy(sector + 18, &date, 2); /* access_date */
+    memcpy(sector + 22, &date, 2); /* write_time */
+    memcpy(sector + 24, &date, 2); /* write_date */
+    return block_write_sector(data_start_lba, sector);
+}
+
 int fat32_format(uint32_t partition_lba, uint32_t total_sectors, const char *volume_label)
 {
-    if (total_sectors < 66600) return -1; /* 太小，不是安全的 FAT32 尺寸 */
+    if (total_sectors < 66624) return -1; /* 太小，不是安全的 FAT32 尺寸
+        （66624 = 512B/簇时凑足 65525 簇下限的最小卷；再小 fsck.fat/Windows
+        就会按非法 FAT32 处理，见 fat32_pick_cluster_size 的注释） */
 
     uint32_t sectors_per_cluster = fat32_pick_cluster_size(total_sectors);
     uint32_t reserved_sectors = 32;
@@ -124,11 +186,14 @@ int fat32_format(uint32_t partition_lba, uint32_t total_sectors, const char *vol
     if (block_write_sector(partition_lba, sector) < 0) return -1;
     if (block_write_sector(partition_lba + bpb_local.backup_boot_sector, sector) < 0) return -1;
 
-    /* FSInfo 扇区（引导扇区 + 其备份各一份） */
+    /* FSInfo 扇区（引导扇区 + 其备份各一份）。内核的分配器只扫 FAT、
+     * 不维护空闲簇计数（fat32_alloc_cluster/fat32_free_chain 都只改 FAT
+     * 表），所以这里写规范认可的"未知" 0xFFFFFFFF，而不是格式化瞬间的
+     * 看似准确值——写准了内核一分配 fsck.fat 就报 "Free cluster summary
+     * wrong"，反而更糟。0xFFFFFFFF 表示"不确定，使用方自行重算"。 */
     memset(sector, 0, sizeof(sector));
     uint32_t lead_sig = 0x41615252, struct_sig = 0x61417272, trail_sig = 0xAA550000;
-    uint32_t free_count = total_clusters - 1; /* 根目录簇已占用 */
-    uint32_t next_free = 3;
+    uint32_t free_count = 0xFFFFFFFF, next_free = 0xFFFFFFFF;
     memcpy(sector + 0, &lead_sig, 4);
     memcpy(sector + 484, &struct_sig, 4);
     memcpy(sector + 488, &free_count, 4);
@@ -158,6 +223,9 @@ int fat32_format(uint32_t partition_lba, uint32_t total_sectors, const char *vol
     for (uint32_t i = 0; i < sectors_per_cluster; i++) {
         if (block_write_sector(data_start_lba + i, zero) < 0) return -1;
     }
+
+    /* 卷标目录项：与 BPB 的 volume_label 保持一致 */
+    if (fat32_write_volume_label(&bpb_local, data_start_lba) < 0) return -1;
 
     return 0;
 }
@@ -600,6 +668,13 @@ int fat32_create_file(fat32_fs_t *fs, uint32_t dir_cluster, const char *name,
     memset(&entry, 0, sizeof(entry));
     memcpy(entry.name, dir_name, 11);
     entry.attr = 0x20;
+    uint16_t cdate, ctime;
+    fat32_now(&cdate, &ctime);
+    entry.creation_time = ctime;
+    entry.creation_date = cdate;
+    entry.access_date = cdate;
+    entry.write_time = ctime;
+    entry.write_date = cdate;
     entry.first_cluster_low = (uint16_t)(new_clu & 0xFFFF);
     entry.first_cluster_high = (uint16_t)((new_clu >> 16) & 0xFFFF);
     entry.file_size = 0;
@@ -708,6 +783,13 @@ int fat32_mkdir(fat32_fs_t *fs, uint32_t dir_cluster, const char *name)
     memset(&entry, 0, sizeof(entry));
     memcpy(entry.name, dir_name, 11);
     entry.attr = FAT32_ATTR_DIRECTORY;
+    uint16_t ddate, dtime;
+    fat32_now(&ddate, &dtime);
+    entry.creation_time = dtime;
+    entry.creation_date = ddate;
+    entry.access_date = ddate;
+    entry.write_time = dtime;
+    entry.write_date = ddate;
     entry.first_cluster_low = (uint16_t)(new_clu & 0xFFFF);
     entry.first_cluster_high = (uint16_t)((new_clu >> 16) & 0xFFFF);
     entry.file_size = 0;
@@ -802,15 +884,22 @@ int fat32_set_file_size(fat32_fs_t *fs, uint32_t dir_cluster, uint32_t file_clus
             uint32_t ent_cluster = entry->first_cluster_low |
                                    ((uint32_t)entry->first_cluster_high << 16);
             if (ent_cluster == file_cluster) {
-                /* 只改 file_size 这 4 字节，走 memcpy 写进 uint8_t 缓冲区，
-                 * 不通过强转出来的结构体指针赋值——见 fat32_format() 里那次
-                 * 严格别名死代码优化的教训，同一个坑不重复踩。file_size
-                 * 在 fat32_dir_entry_t 里的偏移量固定是 28（name[11]+attr+
-                 * nt_reserved+creation_tenth+creation_time+creation_date+
-                 * access_date+first_cluster_high+write_time+write_date+
-                 * first_cluster_low = 11+1+1+1+2+2+2+2+2+2+2 = 28）。 */
+                /* 只改 file_size/write_time/write_date 这几个字节，走
+                 * memcpy 写进 uint8_t 缓冲区，不通过强转出来的结构体指针
+                 * 赋值——见 fat32_format() 里那次严格别名死代码优化的
+                 * 教训，同一个坑不重复踩。file_size 在 fat32_dir_entry_t
+                 * 里的偏移量固定是 28（name[11]+attr+nt_reserved+
+                 * creation_tenth+creation_time+creation_date+access_date+
+                 * first_cluster_high+write_time+write_date+
+                 * first_cluster_low = 11+1+1+1+2+2+2+2+2+2+2 = 28），
+                 * write_time/write_date 在 22/24。顺手把修改时间刷成
+                 * 当前值，文件"改过但时间戳没动"在宿主机上看着很怪。 */
                 uint32_t sz = new_size;
                 memcpy(cluster_buf + off + 28, &sz, 4);
+                uint16_t mdate, mtime;
+                fat32_now(&mdate, &mtime);
+                memcpy(cluster_buf + off + 22, &mtime, 2);
+                memcpy(cluster_buf + off + 24, &mdate, 2);
                 return fat32_write_cluster(fs, c, cluster_buf);
             }
         }
