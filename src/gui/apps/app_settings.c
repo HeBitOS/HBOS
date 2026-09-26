@@ -1,5 +1,6 @@
 #include "gui_app.h"
 #include "gui_draw.h"
+#include "../../api/gui_service.h"
 #include "../../graphics/gui_font.h"
 #include "../../string.h"
 #include "../../version.h"
@@ -144,8 +145,13 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
     /* theme row */
     y += 20;
     int ti = hit_row(mx, my, x, y, SB_W + 10, 8, 2);
-    if (ti == 0) { st->theme_light = 1; st->status = "已切换为浅色主题"; return 1; }
-    if (ti == 1) { st->theme_light = 0; st->status = "已切换为深色主题"; return 1; }
+    if (ti == 0 || ti == 1) {
+        st->theme_light = (ti == 0);
+        /* 与 F4/右键菜单同路径写入 service：应用窗口跟随 service 主题 */
+        (void)gui_service_theme_set(st->theme_light);
+        st->status = st->theme_light ? "已切换为浅色主题" : "已切换为深色主题";
+        return 1;
+    }
     y += SB_H + 14;
 
     /* font size row */
