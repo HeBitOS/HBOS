@@ -343,9 +343,6 @@ static uint8_t g_layer_opacity = 255;
  * 临时置 1，画完立刻复位，不影响其余所有 text() 调用者。 */
 static int g_text_italic = 0;
 
-/* ── Script GUI hooks (defined after text()/key_poll()) ─────── */
-static const fb_info_t *g_script_fb;
-
 void gui_set_layer_opacity(uint8_t opacity) {
     g_layer_opacity = opacity;
 }
@@ -1200,16 +1197,6 @@ static void gui_go_parent(gui_state_t *st) {
     st->status = "返回上级目录";
 }
 
-static void gui_make_note_name(char *out, uint32_t cap, uint32_t index) {
-    uint32_t pos = 0;
-    out[0] = 0;
-    append_str(out, cap, &pos, "gui-note");
-    if (index > 0) {
-        append_char(out, cap, &pos, '-');
-        append_uint(out, cap, &pos, index);
-    }
-}
-
 void gui_set_note_name(gui_state_t *st, const char *name) {
     uint32_t i = 0;
     while (name && name[i] && i + 1 < sizeof(st->note_name)) {
@@ -1523,20 +1510,6 @@ static int key_poll(void) {
     if (key == '\b') return GUI_KEY_BACKSPACE;
     return key;
 }
-
-/* ── Script GFX hooks (after text/rect/key_poll are defined) ── */
-static void sgfx_rect(int x,int y,int w,int h,uint32_t c){rect(x,y,w,h,c);}
-static void sgfx_text(int x,int y,const char*s,uint32_t c,int sc){text(x,y,s,c,sc);}
-static void sgfx_present(void){ if(g_script_fb) gui_present_surface(g_script_fb); }
-static int  sgfx_sw(void){ return g_gui_surface_w; }
-static int  sgfx_sh(void){ return g_gui_surface_h; }
-static int  sgfx_getkey(void){ return key_poll(); }
-static int  sgfx_waitkey(void){ int k; while(!(k=key_poll())) task_yield(); return k; }
-static const cc_gfx_t g_sgfx = {
-    .rect=sgfx_rect,.text=sgfx_text,.present=sgfx_present,
-    .screen_w=sgfx_sw,.screen_h=sgfx_sh,
-    .get_key=sgfx_getkey,.wait_key=sgfx_waitkey
-};
 
 /* ── HAX GUI 应用画布接口（供内核 syscall 层调用） ───────────────────
  * 用户态 .hax 应用通过 int 0x80 调用这些函数，直接绘制到 GUI 的离屏表面

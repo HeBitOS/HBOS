@@ -345,6 +345,32 @@ static inline void cjk_sync_old_cursor(struct flanterm_fb_context *fc) {
     fc->old_cursor_y = fc->cursor_y;
 }
 
+/**
+ * @brief 在终端帧缓冲上画一条水平像素段（右侧/下方越界自动裁剪）。
+ *
+ * 为什么需要它：fb_put_pixel() 每个像素都要重做一遍「取 fc → 两次边界比较 →
+ * y*(pitch/4)+x 乘法寻址」。一个 CJK 字形在 2×3 缩放时要调 16×16×6 ≈ 1500 次，
+ * 而这些参数在整个字形内根本不变。这里一次裁剪、一次寻址，然后沿行顺序写，
+ * 把一个字形的花费从上千次函数调用降到几十次。
+ *
+ * 目标（back buffer）不是 MMIO——console_present() 才做真正上屏，因此顺序
+ * 写整行是安全的。
+ *
+ * @param fc    flanterm 帧缓冲上下文
+ * @param x     起点列（可越界，越界则不画）
+ * @param y     行
+ * @param n     像素个数（越过右边界部分被裁掉）
+ * @param color 0xRRGGBB 颜色
+ */
+static inline void cjk_hline(struct flanterm_fb_context *fc, uint64_t x, uint64_t y,
+                             uint64_t n, uint32_t color) {
+    if (n == 0 || y >= fc->height || x >= fc->width) return;
+    uint64_t avail = fc->width - x;                 /* 裁剪：不越过右边界 */
+    if (n > avail) n = avail;
+    volatile uint32_t *p = &fc->framebuffer[y * (fc->pitch / 4) + x];
+    while (n--) *p++ = color;
+}
+
 static void cjk_render_at_cursor(uint32_t codepoint) {
     if (!g_term) return;
 
@@ -380,25 +406,33 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
     uint64_t cell_h = fc->glyph_height;
 
     // ---- background fill: erase old ASCII pixels ----
+    // 逐行成段写（见 cjk_hline）：一个 16×32 的字形单元格原来是 1024 次
+    // fb_put_pixel，现在是 32 次行填充。裁剪语义与逐像素时完全一致。
     for (uint64_t rr = 0; rr < cell_h; rr++)
-        for (uint64_t cc = 0; cc < cell_w * 2; cc++)
-            fb_put_pixel(px + cc, py + rr, bg);
+        cjk_hline(fc, px, py + rr, cell_w * 2, bg);
 
     // ---- paint CJK 16×16 glyph pixels (upscaled) ----
+    // 字形位图是 16×16 单色点阵，每个置位点要放大成 scale_x × scale_y 的实心块。
+    // 这里把同一行内连续的置位列合并成一条水平段，再按放大高度重复该行——
+    // 输出像素与「逐点 fb_put_pixel」逐位相同，但调用次数按游程长度成倍减少。
     const uint8_t *glyph = cjk_font_lookup(codepoint);
     if (glyph) {
         for (int row = 0; row < CJK_GLYPH_SIZE; row++) {
             uint8_t byte0 = glyph[row * 2];
             uint8_t byte1 = glyph[row * 2 + 1];
             uint16_t line16 = ((uint16_t)byte0 << 8) | byte1;
-            if (line16 == 0) continue;
-            for (int col = 0; col < 16; col++) {
-                if (!(line16 & (0x8000 >> col))) continue;
-                uint64_t base_x = px + (uint64_t)col * scale_x;
-                uint64_t base_y = py + (uint64_t)row * scale_y;
+            if (line16 == 0) continue;              /* 整行空白：整行跳过 */
+            uint64_t row_y = py + (uint64_t)row * scale_y;
+            int col = 0;
+            while (col < 16) {
+                if (!(line16 & (0x8000 >> col))) { col++; continue; }
+                int run = 1;                        /* 合并连续置位列 */
+                while (col + run < 16 && (line16 & (0x8000 >> (col + run)))) run++;
+                uint64_t run_x = px + (uint64_t)col * scale_x;
+                uint64_t run_w = (uint64_t)run * scale_x;
                 for (uint64_t sy = 0; sy < scale_y; sy++)
-                    for (uint64_t sx = 0; sx < scale_x; sx++)
-                        fb_put_pixel(base_x + sx, base_y + sy, fg);
+                    cjk_hline(fc, run_x, row_y + sy, run_w, fg);
+                col += run;
             }
         }
     }
