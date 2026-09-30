@@ -2,6 +2,13 @@
 #include "block.h"
 #include "string.h"
 
+/**
+ * 位图栈缓冲容量（字节）。一个块组最多 8192 块 / 8192 inode，即 1024 字节
+ * 位图；留到 4 KiB 与最大块尺寸一致，兼顾 64 KiB/组以下的卷。分配/释放
+ * 路径在读取位图前都会校验 (bits+7)/8 ≤ 本常量，避免损坏超级块导致栈越界。
+ */
+#define EXT2_BITMAP_BUF_BYTES 4096u
+
 static uint32_t ext2_read_sector(uint32_t partition_lba, uint32_t lba, uint8_t *buf)
 {
     return block_read_sector(partition_lba + lba, buf) == 0 ? 1 : 0;
@@ -36,6 +43,19 @@ int ext2_mount(uint32_t partition_lba, ext2_fs_t *fs)
     return 0;
 }
 
+/**
+ * @brief 读取一个 ext2 块（block_size 可能为 1/2/4 KiB）到 buf。
+ *
+ * 性能要点：块总是扇区的整数倍且 LBA 连续，因此整块一次下发给块层
+ * （block_read_sectors）。AHCI 后端会把它合成**一条** DMA 命令；旧的逐扇区
+ * 写法在 4 KiB 块上要多发 7 条命令、多等 7 次握手——这是 ext2 路径上
+ * 最大的一笔 I/O 开销，目录查找与 inode 读取全都走这里。
+ *
+ * @param fs    已挂载的文件系统实例
+ * @param block 文件系统内块号（非 LBA）
+ * @param buf   输出缓冲，容量须 ≥ fs->block_size
+ * @return 0 成功，-1 参数非法或底层读失败
+ */
 int ext2_read_block(ext2_fs_t *fs, uint32_t block, uint8_t *buf)
 {
     if (!fs || !fs->mounted || !buf) return -1;
@@ -43,12 +63,8 @@ int ext2_read_block(ext2_fs_t *fs, uint32_t block, uint8_t *buf)
     uint32_t sectors_per_block = fs->block_size / BLOCK_SECTOR_SIZE;
     uint32_t start_lba = block * sectors_per_block;
 
-    for (uint32_t i = 0; i < sectors_per_block; i++) {
-        if (!ext2_read_sector(fs->partition_lba, start_lba + i,
-                              buf + i * BLOCK_SECTOR_SIZE))
-            return -1;
-    }
-    return 0;
+    return block_read_sectors(fs->partition_lba + start_lba,
+                              buf, sectors_per_block) == 0 ? 0 : -1;
 }
 
 static int ext2_read_bgd(ext2_fs_t *fs, uint32_t group, ext2_bgd_t *bgd)
@@ -94,10 +110,25 @@ int ext2_read_inode(ext2_fs_t *fs, uint32_t inode_num, ext2_inode_t *inode)
     return 0;
 }
 
+/**
+ * @brief 把文件内逻辑块号翻译成磁盘物理块号（ext2 间接块解析）。
+ *
+ * ext2 的 inode 直接指向 12 个数据块，超出后依次走一次/二次/三次间接块。
+ * 每多一级就多一次同步块读，因此这里严格按「直→单→双→三」短路返回，
+ * 任何一级读失败即返回 0（ext2 约定 0 号为孔洞/无效块）。
+ *
+ * 注意：间接块缓冲必须 4 字节对齐——它们随后被当作 uint32_t 数组索引，
+ * 只声明 aligned(2) 属于对齐不足（x86 上侥幸可用，但违反 C 对齐要求）。
+ *
+ * @param fs        已挂载实例（需要 block_size 计算每块地址数）
+ * @param inode     已读入内存的 inode
+ * @param block_idx 文件内逻辑块号（0 起）
+ * @return 物理块号；0 表示越界/空洞/读失败
+ */
 static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t block_idx)
 {
-    uint32_t blk_per = fs->block_size / 4;
-    uint32_t addr_per_block = fs->block_size / 4;
+    /* 每个间接块能装下的块地址数：ext2 块地址固定 4 字节 */
+    const uint32_t addr_per_block = fs->block_size / 4;
 
     if (block_idx < EXT2_NDIR_BLOCKS) {
         return inode->i_block[block_idx];
@@ -105,10 +136,10 @@ static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t bl
     block_idx -= EXT2_NDIR_BLOCKS;
 
     if (block_idx < addr_per_block) {
-        uint8_t ind_buf[4096] __attribute__((aligned(2)));
+        uint8_t ind_buf[4096] __attribute__((aligned(4)));
         if (ext2_read_block(fs, inode->i_block[EXT2_IND_BLOCK], ind_buf) < 0)
             return 0;
-        return ((uint32_t *)ind_buf)[block_idx];
+        return ((const uint32_t *)(const void *)ind_buf)[block_idx];
     }
     block_idx -= addr_per_block;
 
@@ -116,13 +147,13 @@ static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t bl
     if (block_idx < dind_per) {
         uint32_t i1 = block_idx / addr_per_block;
         uint32_t i2 = block_idx % addr_per_block;
-        uint8_t dind_buf[4096] __attribute__((aligned(2)));
-        uint8_t ind_buf[4096] __attribute__((aligned(2)));
+        uint8_t dind_buf[4096] __attribute__((aligned(4)));
+        uint8_t ind_buf[4096] __attribute__((aligned(4)));
         if (ext2_read_block(fs, inode->i_block[EXT2_DIND_BLOCK], dind_buf) < 0)
             return 0;
-        if (ext2_read_block(fs, ((uint32_t *)dind_buf)[i1], ind_buf) < 0)
+        if (ext2_read_block(fs, ((const uint32_t *)(const void *)dind_buf)[i1], ind_buf) < 0)
             return 0;
-        return ((uint32_t *)ind_buf)[i2];
+        return ((const uint32_t *)(const void *)ind_buf)[i2];
     }
     block_idx -= dind_per;
 
@@ -134,19 +165,17 @@ static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t bl
     uint32_t i2 = block_idx / addr_per_block;
     uint32_t i3 = block_idx % addr_per_block;
 
-    uint8_t tind_buf[4096] __attribute__((aligned(2)));
-    uint8_t dind_buf[4096] __attribute__((aligned(2)));
-    uint8_t ind_buf[4096] __attribute__((aligned(2)));
+    uint8_t tind_buf[4096] __attribute__((aligned(4)));
+    uint8_t dind_buf[4096] __attribute__((aligned(4)));
+    uint8_t ind_buf[4096] __attribute__((aligned(4)));
 
     if (ext2_read_block(fs, inode->i_block[EXT2_TIND_BLOCK], tind_buf) < 0)
         return 0;
-    if (ext2_read_block(fs, ((uint32_t *)tind_buf)[i1], dind_buf) < 0)
+    if (ext2_read_block(fs, ((const uint32_t *)(const void *)tind_buf)[i1], dind_buf) < 0)
         return 0;
-    if (ext2_read_block(fs, ((uint32_t *)dind_buf)[i2], ind_buf) < 0)
+    if (ext2_read_block(fs, ((const uint32_t *)(const void *)dind_buf)[i2], ind_buf) < 0)
         return 0;
-    return ((uint32_t *)ind_buf)[i3];
-
-    (void)blk_per;
+    return ((const uint32_t *)(const void *)ind_buf)[i3];
 }
 
 int ext2_read_file(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t offset,
@@ -288,15 +317,22 @@ int ext2_path_to_inode(ext2_fs_t *fs, const char *path, uint32_t *out_inode)
 }
 /* ── Write helpers ──────────────────────────────────────────── */
 
+/**
+ * @brief 写回一个 ext2 块（与 ext2_read_block 对称的合并写）。
+ *
+ * 同 ext2_read_block：整块一次下发，AHCI 上合成单条 DMA 写命令。
+ *
+ * @param fs    已挂载的文件系统实例
+ * @param block 文件系统内块号（0 是合法块号，不作无效判断）
+ * @param buf   待写入数据，长度 fs->block_size
+ * @return 0 成功，-1 参数非法或底层写失败
+ */
 int ext2_write_block(ext2_fs_t *fs, uint32_t block, const uint8_t *buf)
 {
     if (!fs || !fs->mounted || !buf || !block) return -1;
     uint32_t spb = fs->block_size / BLOCK_SECTOR_SIZE;
     uint32_t start = block * spb;
-    for (uint32_t i = 0; i < spb; i++)
-        if (ext2_write_sector(fs->partition_lba, start + i, buf + i * BLOCK_SECTOR_SIZE) < 0)
-            return -1;
-    return 0;
+    return block_write_sectors(fs->partition_lba + start, buf, spb) == 0 ? 0 : -1;
 }
 
 static int ext2_write_bgd(ext2_fs_t *fs, uint32_t group, const ext2_bgd_t *bgd)
@@ -340,40 +376,93 @@ int ext2_write_inode(ext2_fs_t *fs, uint32_t inode_num, const ext2_inode_t *inod
 
 /* ── Block / inode allocator ────────────────────────────────── */
 
-uint32_t ext2_alloc_block(ext2_fs_t *fs)
+/**
+ * @brief 在位图中查找第一个为 0（空闲）的位，按 64 位字批量跳过已占满区间。
+ *
+ * 分配器的实际负载：一个「几乎写满」的组里，逐位扫描要做 blocks_per_group
+ * （常见 8192）次移位判断才能确认该组已满。整字比较后，同样只需 128 次
+ * 比较，命中时再用 ctz 直接算出位号——语义与逐位扫描完全一致（都返回最小
+ * 空闲位），只是常数小两个数量级。
+ *
+ * 用 memcpy 取值而非强转 uint64_t*：位图缓冲位于栈上、只保证 8 字节以下
+ * 对齐，直接解引用会违反对齐要求。
+ *
+ * @param bm    位图缓冲区
+ * @param limit 有效位数（组内块数 / 组内 inode 数，可能不是 64 的整数倍）
+ * @param out   输出：第一个空闲位的位号
+ * @return 1 找到，0 该组已满
+ */
+static int bitmap_first_free(const uint8_t *bm, uint32_t limit, uint32_t *out)
 {
-    if (!fs || !fs->mounted || fs->sb.s_free_blocks_count == 0) return 0;
-    uint8_t bitmap[4096] __attribute__((aligned(2)));
-    for (uint32_t g = 0; g < fs->block_group_count; g++) {
-        ext2_bgd_t bgd;
-        if (ext2_read_bgd(fs, g, &bgd) < 0) continue;
-        if (bgd.bg_free_blocks_count == 0) continue;
-        if (ext2_read_block(fs, bgd.bg_block_bitmap, bitmap) < 0) continue;
-        uint32_t bpg = fs->sb.s_blocks_per_group;
-        for (uint32_t i = 0; i < bpg; i++) {
-            if (!(bitmap[i / 8] & (1u << (i % 8)))) {
-                bitmap[i / 8] |= (1u << (i % 8));
-                if (ext2_write_block(fs, bgd.bg_block_bitmap, bitmap) < 0) return 0;
-                bgd.bg_free_blocks_count--;
-                ext2_write_bgd(fs, g, &bgd);
-                fs->sb.s_free_blocks_count--;
-                ext2_write_superblock(fs);
-                return g * bpg + i + fs->sb.s_first_data_block;
-            }
-        }
+    uint32_t i = 0;
+    for (; i + 64u <= limit; i += 64u) {
+        uint64_t w;
+        memcpy(&w, bm + (i >> 3), sizeof(w));
+        if (w == ~0ULL) continue;                      /* 64 个全占用：整字跳过 */
+        *out = i + (uint32_t)__builtin_ctzll(~w);      /* 最低 0 位即空闲位 */
+        return 1;
+    }
+    for (; i < limit; i++) {                           /* 尾部不足 64 位 */
+        if (!(bm[i >> 3] & (1u << (i & 7u)))) { *out = i; return 1; }
     }
     return 0;
 }
 
+/**
+ * @brief 分配一个数据块：置位块位图、递减组/超级块空闲计数并落盘。
+ *
+ * 扫描顺序固定从组 0 开始（结果确定，便于测试与 fsck 互认）；组级
+ * bg_free_blocks_count 为 0 的组在读位图前就被排除，因此满盘的代价只有
+ * 每组一次 BGD 读，而非整卷位图扫描。
+ *
+ * @param fs 已挂载实例
+ * @return 分配到的物理块号；0 表示磁盘已满或写回失败（0 是保留无效块号）
+ */
+uint32_t ext2_alloc_block(ext2_fs_t *fs)
+{
+    if (!fs || !fs->mounted || fs->sb.s_free_blocks_count == 0) return 0;
+    uint8_t bitmap[EXT2_BITMAP_BUF_BYTES] __attribute__((aligned(2)));
+    for (uint32_t g = 0; g < fs->block_group_count; g++) {
+        ext2_bgd_t bgd;
+        if (ext2_read_bgd(fs, g, &bgd) < 0) continue;
+        if (bgd.bg_free_blocks_count == 0) continue;   /* 组满：免读位图 */
+        uint32_t bpg = fs->sb.s_blocks_per_group;
+        /* 卷参数来自磁盘镜像，可能损坏或被恶意构造：位图必须装得进栈缓冲，
+         * 否则宁可视为无效组，也不能越界读写栈。 */
+        if (bpg == 0 || (bpg + 7u) / 8u > sizeof(bitmap)) continue;
+        if (ext2_read_block(fs, bgd.bg_block_bitmap, bitmap) < 0) continue;
+        uint32_t i;
+        if (!bitmap_first_free(bitmap, bpg, &i)) continue;
+        bitmap[i >> 3] |= (uint8_t)(1u << (i & 7u));
+        if (ext2_write_block(fs, bgd.bg_block_bitmap, bitmap) < 0) return 0;
+        bgd.bg_free_blocks_count--;
+        ext2_write_bgd(fs, g, &bgd);
+        fs->sb.s_free_blocks_count--;
+        ext2_write_superblock(fs);
+        return g * bpg + i + fs->sb.s_first_data_block;
+    }
+    return 0;
+}
+
+/**
+ * @brief 释放一个数据块：清位图位并回写组描述符与超级块的空闲计数。
+ * @param fs    已挂载实例
+ * @param block 待释放的物理块号（0 是保留无效块号，直接拒绝）
+ * @return 0 成功，-1 参数非法、越界或底层读写失败
+ */
 int ext2_free_block(ext2_fs_t *fs, uint32_t block)
 {
     if (!fs || !fs->mounted || !block) return -1;
     uint32_t bpg = fs->sb.s_blocks_per_group;
+    if (bpg == 0) return -1;
+    if ((bpg + 7u) / 8u > EXT2_BITMAP_BUF_BYTES) return -1;
     uint32_t adj = block - fs->sb.s_first_data_block;
     uint32_t g = adj / bpg, i = adj % bpg;
+    /* 越界块号会算出超范围的组号，先拦下来再碰组描述符表 */
+    if (g >= fs->block_group_count) return -1;
     ext2_bgd_t bgd;
     if (ext2_read_bgd(fs, g, &bgd) < 0) return -1;
-    uint8_t bitmap[4096] __attribute__((aligned(2)));
+    uint8_t bitmap[EXT2_BITMAP_BUF_BYTES] __attribute__((aligned(2)));
     if (ext2_read_block(fs, bgd.bg_block_bitmap, bitmap) < 0) return -1;
     bitmap[i / 8] &= ~(1u << (i % 8));
     if (ext2_write_block(fs, bgd.bg_block_bitmap, bitmap) < 0) return -1;
@@ -383,41 +472,62 @@ int ext2_free_block(ext2_fs_t *fs, uint32_t block)
     return ext2_write_superblock(fs);
 }
 
+/**
+ * @brief 分配一个 inode（与 ext2_alloc_block 同构，扫 inode 位图）。
+ *
+ * inode 号从 1 起算且 1/2 号保留（坏块表/根目录），因此返回值恒 ≥ 3：
+ * 组号 0 且位号 0、1 对应 inode 1、2，ext2 约定它们恒为占用位，正常卷上
+ * 不会命中；这里保持与旧实现完全一致的取值公式 g * ipg + i + 1。
+ *
+ * @param fs 已挂载实例
+ * @return 新 inode 号；0 表示 inode 表已满或写回失败
+ */
 uint32_t ext2_alloc_inode(ext2_fs_t *fs)
 {
     if (!fs || !fs->mounted || fs->sb.s_free_inodes_count == 0) return 0;
-    uint8_t bitmap[4096] __attribute__((aligned(2)));
+    uint8_t bitmap[EXT2_BITMAP_BUF_BYTES] __attribute__((aligned(2)));
     for (uint32_t g = 0; g < fs->block_group_count; g++) {
         ext2_bgd_t bgd;
         if (ext2_read_bgd(fs, g, &bgd) < 0) continue;
-        if (bgd.bg_free_inodes_count == 0) continue;
-        if (ext2_read_block(fs, bgd.bg_inode_bitmap, bitmap) < 0) continue;
+        if (bgd.bg_free_inodes_count == 0) continue;   /* 组满：免读位图 */
         uint32_t ipg = fs->sb.s_inodes_per_group;
-        for (uint32_t i = 0; i < ipg; i++) {
-            if (!(bitmap[i / 8] & (1u << (i % 8)))) {
-                bitmap[i / 8] |= (1u << (i % 8));
-                if (ext2_write_block(fs, bgd.bg_inode_bitmap, bitmap) < 0) return 0;
-                bgd.bg_free_inodes_count--;
-                ext2_write_bgd(fs, g, &bgd);
-                fs->sb.s_free_inodes_count--;
-                ext2_write_superblock(fs);
-                return g * ipg + i + 1;
-            }
-        }
+        if (ipg == 0 || (ipg + 7u) / 8u > sizeof(bitmap)) continue;
+        if (ext2_read_block(fs, bgd.bg_inode_bitmap, bitmap) < 0) continue;
+        uint32_t i;
+        if (!bitmap_first_free(bitmap, ipg, &i)) continue;
+        bitmap[i >> 3] |= (uint8_t)(1u << (i & 7u));
+        if (ext2_write_block(fs, bgd.bg_inode_bitmap, bitmap) < 0) return 0;
+        bgd.bg_free_inodes_count--;
+        ext2_write_bgd(fs, g, &bgd);
+        fs->sb.s_free_inodes_count--;
+        ext2_write_superblock(fs);
+        return g * ipg + i + 1;
     }
     return 0;
 }
 
+/**
+ * @brief 释放一个 inode：清 inode 位图对应位并回写计数。
+ *
+ * s_inodes_per_group 来自磁盘超级块；若镜像损坏使其为 0，下面的除法会触发
+ * #DE 除零异常直接打死内核，故必须先校验（块分配路径同样校验）。
+ *
+ * @param fs        已挂载实例
+ * @param inode_num 待释放 inode 号（0 无效）
+ * @return 0 成功，-1 参数非法或底层读写失败
+ */
 int ext2_free_inode(ext2_fs_t *fs, uint32_t inode_num)
 {
     if (!fs || !fs->mounted || inode_num == 0) return -1;
     uint32_t ipg = fs->sb.s_inodes_per_group;
+    if (ipg == 0 || (ipg + 7u) / 8u > EXT2_BITMAP_BUF_BYTES) return -1;
     uint32_t g = (inode_num - 1) / ipg, i = (inode_num - 1) % ipg;
+    if (g >= fs->block_group_count) return -1;         /* 越界 inode 号 */
     ext2_bgd_t bgd;
     if (ext2_read_bgd(fs, g, &bgd) < 0) return -1;
-    uint8_t bitmap[4096] __attribute__((aligned(2)));
+    uint8_t bitmap[EXT2_BITMAP_BUF_BYTES] __attribute__((aligned(2)));
     if (ext2_read_block(fs, bgd.bg_inode_bitmap, bitmap) < 0) return -1;
-    bitmap[i / 8] &= ~(1u << (i % 8));
+    bitmap[i >> 3] &= (uint8_t)~(1u << (i & 7u));
     if (ext2_write_block(fs, bgd.bg_inode_bitmap, bitmap) < 0) return -1;
     bgd.bg_free_inodes_count++;
     ext2_write_bgd(fs, g, &bgd);

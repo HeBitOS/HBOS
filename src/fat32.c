@@ -331,25 +331,47 @@ static int fat32_set_cluster_entry(fat32_fs_t *fs, uint32_t cluster, uint32_t va
     return 0;
 }
 
+/**
+ * @brief 分配一个空闲簇：从簇 2 起顺序找第一个 FAT 项为 0 的簇，并预置为 EOC。
+ *
+ * 性能要点：一个 FAT 项占 4 字节，一个扇区装得下 128 项。旧实现每检查一个
+ * 簇就重读一次所在扇区（127/128 的读是纯浪费），在接近写满的卷上要发出
+ * 数十万条块命令；这里改成按扇区推进——一次读入、内存里查 128 项，扇区读
+ * 少 128 倍，找到的仍是同一个「最小编号空闲簇」，语义完全不变。
+ *
+ * 4 字节 FAT 项恒不跨扇区边界（512 % 4 == 0），故可安全地按 memcpy 取值。
+ *
+ * @param fs 已挂载实例
+ * @return 新簇号；0 表示卷已满（0/1 为保留簇号，永不返回）
+ */
 static uint32_t fat32_alloc_cluster(fat32_fs_t *fs)
 {
     if (!fs || !fs->mounted) return 0;
 
     uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    const uint32_t per_sector   = BLOCK_SECTOR_SIZE / 4;   /* 每扇区 128 个 FAT 项 */
+    const uint32_t last_cluster = fs->total_clusters + 2;  /* 开区间上界 */
 
-    for (uint32_t c = 2; c < fs->total_clusters + 2; c++) {
-        uint32_t fat_offset = c * 4;
-        uint32_t fat_sector = fs->fat_start_lba + fat_offset / BLOCK_SECTOR_SIZE;
-        uint32_t ent_offset = fat_offset % BLOCK_SECTOR_SIZE;
-
-        if (block_read_sector(fat_sector, sector) < 0) continue;
-
-        uint32_t val;
-        memcpy(&val, sector + ent_offset, 4);
-        if ((val & 0x0FFFFFFF) == 0) {
-            fat32_set_cluster_entry(fs, c, FAT32_EOC);
-            return c;
+    for (uint32_t c = 2; c < last_cluster; ) {
+        /* FAT 项号 == 簇号：簇 c 位于第 c/128 个 FAT 扇区的第 c%128 项。
+         * 首个扇区从 c=2 对应的项开始扫，其后每个扇区都从第 0 项起扫。 */
+        uint32_t sec_idx = c / per_sector;
+        uint32_t k       = c % per_sector;
+        if (block_read_sector(fs->fat_start_lba + sec_idx, sector) < 0) {
+            c = (sec_idx + 1) * per_sector;                /* 读失败：跳过该扇区 */
+            continue;
         }
+        for (; k < per_sector; k++) {
+            uint32_t clu = sec_idx * per_sector + k;
+            if (clu >= last_cluster) return 0;
+            uint32_t val;
+            memcpy(&val, sector + k * 4u, 4);
+            if ((val & 0x0FFFFFFF) == 0) {
+                fat32_set_cluster_entry(fs, clu, FAT32_EOC);
+                return clu;
+            }
+        }
+        c = (sec_idx + 1) * per_sector;
     }
     return 0;
 }
@@ -376,6 +398,12 @@ int fat32_read_file(fat32_fs_t *fs, uint32_t first_cluster, uint32_t file_size,
     uint32_t done = 0;
     uint8_t *cluster_buf = g_fat32_cluster_buf; /* 见文件顶部注释：改用共享静态缓冲区，避免栈溢出 */
 
+    /* 单游标沿簇链前进（与 fat32_write_file 同样的线性化改法）：offset 单调
+     * 递增 ⇒ cluster_num 单调不减，游标只需从头到尾走一遍簇链。旧写法每个
+     * 块边界都从 first_cluster 重新走链，读一个大文件是二次方的 FAT 读。 */
+    uint32_t cur_cluster = first_cluster;
+    uint32_t cur_idx     = 0;                    /* cur_cluster 的簇序号 */
+
     while (done < count && first_cluster >= 2) {
         uint32_t abs = offset + done;
         uint32_t cluster_num = abs / fs->cluster_size;
@@ -383,11 +411,11 @@ int fat32_read_file(fat32_fs_t *fs, uint32_t first_cluster, uint32_t file_size,
         uint32_t chunk = fs->cluster_size - cluster_off;
         if (chunk > count - done) chunk = count - done;
 
-        uint32_t cur_cluster = first_cluster;
-        for (uint32_t i = 0; i < cluster_num; i++) {
+        while (cur_idx < cluster_num) {
             int next = fat32_next_cluster(fs, cur_cluster);
             if (next < 0) return (int)done;
             cur_cluster = (uint32_t)next;
+            cur_idx++;
         }
 
         if (fat32_read_cluster(fs, cur_cluster, cluster_buf) < 0)
@@ -565,6 +593,13 @@ int fat32_write_file(fat32_fs_t *fs, uint32_t first_cluster, uint32_t *file_size
     uint32_t done = 0;
     uint8_t *cluster_buf = g_fat32_cluster_buf; /* 见文件顶部注释：改用共享静态缓冲区，避免栈溢出 */
 
+    /* 逐簇前进的游标：cluster_num 在外层循环里单调递增，因此游标可以就地
+     * 跟着走。旧写法每处理一个簇都从 first_cluster 重新走一遍整条链，写
+     * n 个簇要做 1+2+…+n 次 FAT 读（1 MiB / 4 KiB 簇 = 256 簇即 32896 次）；
+     * 改成单游标后总 FAT 读与簇数成正比，写大文件的耗时从二次方降为线性。 */
+    uint32_t cur_cluster = first_cluster;
+    uint32_t cur_idx     = 0;                    /* cur_cluster 对应的簇序号 */
+
     while (done < count) {
         uint32_t abs = offset + done;
         uint32_t cluster_num = abs / fs->cluster_size;
@@ -572,14 +607,15 @@ int fat32_write_file(fat32_fs_t *fs, uint32_t first_cluster, uint32_t *file_size
         uint32_t chunk = fs->cluster_size - cluster_off;
         if (chunk > count - done) chunk = count - done;
 
-        uint32_t cur_cluster = first_cluster;
-        for (uint32_t i = 0; i < cluster_num; i++) {
+        while (cur_idx < cluster_num) {
             int next = fat32_next_cluster(fs, cur_cluster);
             if (next < 0) return -1;
             cur_cluster = (uint32_t)next;
+            cur_idx++;
         }
 
         if (chunk < fs->cluster_size) {
+            /* 部分簇写：先读回整簇，改中间一段再整簇写回（读-改-写） */
             if (fat32_read_cluster(fs, cur_cluster, cluster_buf) < 0)
                 return -1;
         }
