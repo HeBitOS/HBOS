@@ -194,6 +194,35 @@ CODE_STYLE §4 "不要在栈上放 >4 KiB 的缓冲"。
 读回内容与生成规则逐字节一致（差分断言 `failures=0`），分配器语义
 （最小空闲块、free 后可复用）不变。
 
+### 3.10 Poly1305：一次越界读修复，以及一次**被否决**的"优化"（`src/crypto/chacha20_poly1305.c`）
+
+新增 `make crypto-test`：用 RFC 8439 官方测试向量（§2.4.2 ChaCha20 分组函数、
+§2.5.2 Poly1305 MAC、§2.8.2 AEAD 加解密）做回归，真值来自规范而非本仓库实现。
+此前 `poly1305` 路径没有任何独立验证——TLS 里跑通不等于逐位正确。
+
+**修掉一处真实的越界读**：`poly1305_block()` 用 17 字节缓冲（前 16 字节数据 +
+第 17 字节的隐含高位 1），但 `load26(block + 12, 8)` 要读 `[12,20)` 共 8 字节，
+越过缓冲尾部 3 字节。结果靠 `& 0x3ffffff` 掩码侥幸正确，但属未定义行为
+（栈保护/`-fsanitize=address` 下会直接报错）。缓冲扩到 20 字节即可，
+`poly1305_mac()` 的内联循环同理。
+
+**被否决的优化（记下来避免后人重做）**：把 `load26()` 的"8 次逐字节载入"
+改成"一次 64 位非对齐载入"。这看起来是明显的收益（每个 16 字节块从 40 次
+字节载入降到 5 次），实测**反而慢 21%**（484 → 384 MB/s）：
+
+- 原因：`load26()` 读的是刚刚由 `memcpy` 写过的栈缓冲，8 字节载入与 4 字节
+  存储**部分重叠**，触发 x86 store-to-load forwarding 失败，每次要等存储提交
+  （约十几周期），比逐字节载入的代价更高。
+- 结论：这类"减少指令数"的改动在数据依赖紧密的路径上不一定是净收益，
+  必须实测。**当前实现保持逐字节载入**。
+- 顺带验证：满块（`len == 16`）跳过 `memset` 同样没有可测量的收益
+  （在噪声范围内），且我第一版还因此写错了隐藏位的位置导致向量失败；
+  现已回退，只保留纯粹正确性相关的改动。真正的提速方向是"一次处理多个块、
+  让乘加链流水起来"，属于更大改动，留作后续。
+
+**结论**：本轮对 crypto 只做正确性修复，性能数字与改动前持平
+（poly1305 约 550 MB/s、chacha20 约 450 MB/s，宿主 `gcc -O2`）。
+
 ## 4. 刻意不改的东西（附理由）
 
 1. **FAT32 簇分配游标（把 O(M²) 的 FAT 扫描降为 O(M)）**：会让"总是挑最小编号
@@ -226,7 +255,7 @@ inflate`、`gui/graphics/shell/tools/core` 的分子系统审计。以下为**�
 | 7 | `src/fs.c` `fat32_rebuild_dir` / `src/ext2.c` `ext2_readdir` | 挂载时按索引逐个重走目录（O(E²) 块读） | 流式单遍遍历产出 name→inode |
 | 8 | `src/fs.c` `hbfs_read_data`/`hbfs_write_data` | 对齐的整段仍逐扇区发命令 | 中间整段用 `block_read_sectors`/`block_write_sectors` |
 | 9 | ~~`src/inflate.c` `huff_decode`/`br_getbits`~~ | **已实施，见 §3.8**（169 → 276 MB/s） | — |
-| 10 | `src/crypto/chacha20_poly1305.c` | poly1305 每 16 B 一次 memset+memcpy+5×8 次字节载入 | 非对齐 64 位载入取 5 个 limb；keystream 8 字节异或 |
+| 10 | `src/crypto/chacha20_poly1305.c` | 越界读已修（17 B 缓冲按 8 B 窗口读到第 19 B），见 §3.10；**"64 位载入"实测是负优化已否决** | 后续方向：多块并行让乘加链流水 |
 | 11 | `src/net.c:net_tcp_recv` 预算 | `80000` 自旋 × `80000` 轮、无 PIT 截止 → 对端挂死可卡数分钟 | 引入 PIT 截止时间，缩小每轮自旋 |
 | 12 | `src/net.c:rtl8139_poll` | 每次自旋 2 次端口读 + 1 次端口写（每次都是 VM exit） | 用 ISR 状态位门控 `CHIP_CMD` 读 |
 | 13 | `src/secure_https.c:secure_https_get` | 每个 HTTPS 请求都重新解析整份 CA bundle + 重建 TLS config | 按 PEM 内容哈希缓存解析结果 |
@@ -256,6 +285,7 @@ make -j$(nproc)                 # 构建（应零 warning）
 make bench-boot RUNS=5          # 冷启动基准（BIOS + UEFI）
 make bench-boot ONLY=bios       # 只测 BIOS
 make inflate-bench              # inflate 逐字节差分 + 吞吐量（真值来自 Python zlib）
+make crypto-test                # ChaCha20-Poly1305 RFC 8439 标准向量
 make ext2-diff                  # ext2 宿主差分 + 底层块命令数（真实镜像）
 make BOOT_MENU_TIMEOUT=0 bench-boot   # 最快配置对照
 make smoke                      # 启动/网络/镜像功能回归

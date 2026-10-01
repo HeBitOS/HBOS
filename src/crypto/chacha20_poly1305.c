@@ -169,7 +169,9 @@ void poly1305_mac(const uint8_t *msg, size_t len, const uint8_t key[32], uint8_t
     uint64_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
     uint64_t h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0;
     while (len) {
-        uint8_t block[17];
+        /* 20 字节（原 17）：`load26(block + 12, 8)` 要读 [12,20)，
+         * 17 字节缓冲会越界 3 字节（结果靠掩码侥幸正确）。 */
+        uint8_t block[20];
         size_t n = len > 16 ? 16 : len;
         memset(block, 0, sizeof(block));
         memcpy(block, msg, n);
@@ -255,10 +257,29 @@ static void poly1305_init(poly1305_state_t *st, const uint8_t key[32]) {
  * @param len 消息块有效长度（1~16）
  */
 static void poly1305_block(poly1305_state_t *st, const uint8_t *msg, size_t len) {
-    uint8_t block[17];
-    memset(block, 0, sizeof(block));
-    memcpy(block, msg, len);
+    /*
+     * 缓冲扩到 20 字节修掉一处越界读：`load26(block + 12, 8)` 要读 [12,20)
+     * 共 8 字节，而数值只占前 16 字节 + 第 17 字节的隐含高位 1。旧实现用
+     * 17 字节缓冲，这次载入越过缓冲尾部 3 字节——掩码恰好把越界位丢掉、
+     * 结果没错，但属于未定义行为（栈保护/ASAN 下会报错）。多留 3 字节即可。
+     * 满块（len == 16）时也不需要 memset：16 字节会被 memcpy 全部覆盖。
+     */
+    uint8_t block[20];
+    if (len == 16) {
+        memcpy(block, msg, 16);
+    } else {
+        memset(block, 0, 16);
+        memcpy(block, msg, len);
+    }
+    /* 隐含的高位 1 必须落在"消息末字节之后的那一位"：
+     *   - 满块时消息占满 [0,16)，隐含 1 在第 17 字节 block[16]；
+     *   - 不足 16 字节时消息止于 block[len-1]，隐含 1 落在 block[len]。
+     * 旧写法 `block[len] = 1` 同时覆盖了这两种情况（len==16 时正好是
+     * block[16]），因此这里也统一用 block[len]，不能写死 block[16]。 */
     block[len] = 1;
+    block[17] = 0;
+    block[18] = 0;
+    block[19] = 0;
     st->h0 += load26(block + 0, 0);
     st->h1 += load26(block + 3, 2);
     st->h2 += load26(block + 6, 4);
