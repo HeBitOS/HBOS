@@ -74,6 +74,23 @@
 #define E1000_EERD_DONE  (1U << 4)
 /** @brief MAC 复位等待上限（毫秒）；真机上复位通常 <10ms，给足余量 */
 #define E1000_RESET_TIMEOUT_MS   100U
+/** @brief MDI 控制寄存器（PHY 读写统一走它；Linux e1000e regs.h: E1000_MDIC） */
+#define E1000_MDIC               0x0020
+#define E1000_MDIC_DATA_MASK     0x0000FFFFU  /**< 读回的数据 */
+#define E1000_MDIC_REG_MASK      0x001F0000U  /**< PHY 寄存器号 */
+#define E1000_MDIC_REG_SHIFT     16
+#define E1000_MDIC_PHY_SHIFT     21
+#define E1000_MDIC_OP_WRITE      0x04000000U
+#define E1000_MDIC_OP_READ       0x08000000U
+#define E1000_MDIC_READY         0x10000000U  /**< 事务完成 */
+#define E1000_MDIC_ERROR         0x40000000U  /**< 事务失败 */
+/** @brief IEEE 802.3 标准 PHY 寄存器：基本模式状态（BMSR）与链路位 */
+#define E1000_MII_BMSR           0x01U
+#define E1000_BMSR_LSTATUS       0x0004U
+/** @brief MDIC 单次事务等待上限（毫秒）；典型 <50us，给足余量 */
+#define E1000_MDIC_TIMEOUT_MS    10U
+/** @brief MDIC 等待的自旋上限：PIT 未推进时的兜底 */
+#define E1000_MDIC_STALL_SPINS   200000U
 /** @brief 链路建立等待上限（毫秒）；千兆自协商在真机上可能耗时数秒 */
 #define E1000_LINK_TIMEOUT_MS    4000U
 /** @brief 链路等待的自旋上限：PIT tick 尚未推进（启动早期）时的兜底 */
@@ -838,6 +855,56 @@ static int arp_resolve(uint32_t ip, uint8_t mac[6]) {
 }
 
 /**
+ * @brief 经 MDIC 读一个 PHY 寄存器（IEEE 802.3 MII 管理接口）
+ *
+ * 为什么需要它：`STATUS.LU` 只在 8254x/8257x 上可靠。ICH8 家族（82566/82567、
+ * I217/I218/I219）的链路状态在 **PHY** 里，必须经 MDIC 读 BMSR 的
+ * `BMSR_LSTATUS` 位判定（Linux e1000e 的 `e1e_rphy()` → `e1000_read_phy_reg_mdic()`
+ * 走的就是这条路）。只等 STATUS.LU 会让这些真机网卡"初始化成功但 link down"，
+ * DHCP 直接失败——这正是笔记本板载网卡不可用的原因之一。
+ *
+ * @param reg  PHY 寄存器号（BMSR = 0x01）
+ * @param phy  PHY 地址（0 是常规单 PHY 的地址）
+ * @param out  输出 16 位寄存器值
+ * @return 0 成功，-1 超时或 PHY 报错
+ */
+static int e1000_read_phy_mdic(uint8_t reg, uint8_t phy, uint16_t *out) {
+    uint32_t cmd = ((uint32_t)(reg & 0x1FU) << E1000_MDIC_REG_SHIFT) |
+                   ((uint32_t)(phy & 0x1FU) << E1000_MDIC_PHY_SHIFT) |
+                   E1000_MDIC_OP_READ;
+    reg_write(E1000_MDIC, cmd);
+
+    hw_deadline_t deadline = hw_deadline_start();
+    uint32_t v;
+    for (;;) {
+        v = reg_read(E1000_MDIC);
+        if (v & E1000_MDIC_READY) break;
+        if (v & E1000_MDIC_ERROR) return -1;
+        if (hw_deadline_expired_ms(&deadline, E1000_MDIC_TIMEOUT_MS,
+                                   E1000_MDIC_STALL_SPINS)) return -1;
+        cpu_relax();
+    }
+    if (v & E1000_MDIC_ERROR) return -1;
+    if (out) *out = (uint16_t)(v & E1000_MDIC_DATA_MASK);
+    return 0;
+}
+
+/**
+ * @brief 经 MDIC 判定链路是否已建立（读 BMSR 两次取"仍在线"语义）
+ *
+ * BMSR 的 LSTATUS 是 latch-low：链路曾经断开时该位会保持 0 直到被读走。
+ * 因此按 Linux `mii_check_link()` 的做法连续读两次，以第二次为准。
+ *
+ * @return 1 链路已建立，0 未建立或 PHY 不可访问
+ */
+static int e1000_phy_link_up(void) {
+    uint16_t bmsr = 0;
+    if (e1000_read_phy_mdic(E1000_MII_BMSR, 0, &bmsr) < 0) return 0;
+    if (e1000_read_phy_mdic(E1000_MII_BMSR, 0, &bmsr) < 0) return 0;
+    return (bmsr & E1000_BMSR_LSTATUS) ? 1 : 0;
+}
+
+/**
  * @brief 通过 EERD 读取 EEPROM/NVM 中的一个 16 位字（8254x/8257x 半自动读）
  *
  * EERD 是"半自动"读：写入字地址并置 START，硬件读完后置 DONE，数据在
@@ -924,12 +991,16 @@ static int e1000_mac_is_valid(const uint8_t mac[6]) {
  */
 static int e1000_wait_link_up(void) {
     hw_deadline_t deadline = hw_deadline_start();
-    while (!(reg_read(E1000_STATUS) & E1000_STATUS_LU)) {
+    for (;;) {
+        /* STATUS.LU 在 8254x/8257x 上可靠；ICH8 家族（I217/I218/I219）要看
+         * PHY 的 BMSR_LSTATUS。两者取"或"：任一路径报告链路就绪即可，
+         * 这样两代芯片用同一段代码就能正确判定。 */
+        if (reg_read(E1000_STATUS) & E1000_STATUS_LU) return 1;
+        if (e1000_phy_link_up()) return 1;
         if (hw_deadline_expired_ms(&deadline, E1000_LINK_TIMEOUT_MS,
                                    E1000_LINK_STALL_SPINS)) return 0;
         cpu_relax();
     }
-    return 1;
 }
 
 /**
