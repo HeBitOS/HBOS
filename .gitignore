@@ -9,6 +9,7 @@ build-core/
 *.iso
 *.bin
 .roomodes
+.zcodeignore
 
 fonts/HarmonyOS-Sans/
 tools/__pycache__/
@@ -18,3 +19,5 @@ build-compat/
 HPT-server/
 scripts/__pycache__/
 .zcode/
+# inflate 差分测试的生成向量（约 20 MB，由 make inflate-bench 生成）
+tests/host/vectors/

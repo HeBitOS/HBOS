@@ -223,6 +223,33 @@ CODE_STYLE §4 "不要在栈上放 >4 KiB 的缓冲"。
 **结论**：本轮对 crypto 只做正确性修复，性能数字与改动前持平
 （poly1305 约 550 MB/s、chacha20 约 450 MB/s，宿主 `gcc -O2`）。
 
+### 3.11 HBFS 读写：整段合并成一条块命令（`src/fs.c`）
+
+**问题**：`hbfs_read_data()`/`hbfs_write_data()` 原来**每个扇区**都调一次
+`block_read_sector()`/`block_write_sector()`。后端（AHCI/USB）会把连续的单扇区
+请求合成一条命令，但每次调用仍要走一遍 LBA 换算与后端派发，跨后端的合并窗口
+也有限；CODE_STYLE §5 明确要求"连续扇区用批量接口"。
+
+**改法**：首尾**不完整**扇区仍走单扇区接口（首部需读改写、尾部不足一扇区），
+中间**整段**扇区一次 `block_read_sectors()`/`block_write_sectors()` 下发。
+可以用批量接口的前提是 hbfs 文件在盘上连续（`hbfs_file_lba()` 由 `disk_slot`
+线性推得），任意 `[start, start+n)` 都是连续 LBA 区间。
+
+**量化证据**（可复现：`make hbfs-batch-test`）。该测试把新旧两版算法各实现
+一份，跑 9 种 offset × 10 种 count = **90 个边界用例**，断言"两版写出的磁盘
+字节逐字节一致、读出的数据逐字节一致"，同时统计命令数：
+
+| 场景 | 旧（逐扇区） | 新（整段合并） |
+|---|---:|---:|
+| 16 KiB 整段写 | 32 条 | **1 条** |
+| 16 KiB 整段读 | 32 条 | **1 条** |
+| 90 个用例累计 | 650 条 | 161 条（**−75%**）|
+
+语义不变有两条独立证据：宿主机差分逐字节一致；QEMU 全链路回归
+（BIOS+UEFI 启动、三个 seed 写入 tcc headers / hpt repo / web vendor ——
+这些是兆字节级写入，走的正是这条批量路径）、`make smoke`、`make fat32-smoke`
+全部 PASS。
+
 ## 4. 刻意不改的东西（附理由）
 
 1. **FAT32 簇分配游标（把 O(M²) 的 FAT 扫描降为 O(M)）**：会让"总是挑最小编号
@@ -253,7 +280,7 @@ inflate`、`gui/graphics/shell/tools/core` 的分子系统审计。以下为**�
 | 5 | ~~`src/ext2.c` `ext2_inode_block`~~ | **已实施，见 §3.9**（读命令 −26%，栈占用 12 KiB → 0） | — |
 | 6 | `src/ext2.c` `ext2_alloc_block`/`ext2_inode_set_block` | 每分配一块就写 inode + 位图 + BGD + 超级块（~10 条命令/4 KiB） | inode 只改内存、末尾写一次；位图/BGD 延迟落盘 |
 | 7 | `src/fs.c` `fat32_rebuild_dir` / `src/ext2.c` `ext2_readdir` | 挂载时按索引逐个重走目录（O(E²) 块读） | 流式单遍遍历产出 name→inode |
-| 8 | `src/fs.c` `hbfs_read_data`/`hbfs_write_data` | 对齐的整段仍逐扇区发命令 | 中间整段用 `block_read_sectors`/`block_write_sectors` |
+| 8 | ~~`src/fs.c` `hbfs_read_data`/`hbfs_write_data`~~ | **已实施，见 §3.11**（整段命令 32 → 1 条，累计 −75%） | — |
 | 9 | ~~`src/inflate.c` `huff_decode`/`br_getbits`~~ | **已实施，见 §3.8**（169 → 276 MB/s） | — |
 | 10 | `src/crypto/chacha20_poly1305.c` | 越界读已修（17 B 缓冲按 8 B 窗口读到第 19 B），见 §3.10；**"64 位载入"实测是负优化已否决** | 后续方向：多块并行让乘加链流水 |
 | 11 | `src/net.c:net_tcp_recv` 预算 | `80000` 自旋 × `80000` 轮、无 PIT 截止 → 对端挂死可卡数分钟 | 引入 PIT 截止时间，缩小每轮自旋 |
@@ -286,6 +313,7 @@ make bench-boot RUNS=5          # 冷启动基准（BIOS + UEFI）
 make bench-boot ONLY=bios       # 只测 BIOS
 make inflate-bench              # inflate 逐字节差分 + 吞吐量（真值来自 Python zlib）
 make crypto-test                # ChaCha20-Poly1305 RFC 8439 标准向量
+make hbfs-batch-test            # HBFS 批量扇区读写等价性 + 命令数
 make ext2-diff                  # ext2 宿主差分 + 底层块命令数（真实镜像）
 make BOOT_MENU_TIMEOUT=0 bench-boot   # 最快配置对照
 make smoke                      # 启动/网络/镜像功能回归

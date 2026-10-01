@@ -587,18 +587,53 @@ static uint32_t hbfs_read_data(file_t *f, uint32_t offset, void *buf, uint32_t c
     uint32_t available = f->size - offset;
     if (count > available) count = available;
 
-    uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    /*
+     * 批量读：一次 block_read_sectors() 覆盖"中间整扇区段"，只在首尾两个
+     * 不完整扇区才走单扇区接口。
+     *
+     * 旧实现每个扇区都调一次 block_read_sector()：AHCI/USB 后端会把连续的
+     * 单扇区读合成一条命令，但每次调用仍要走一遍"LBA 换算 + 后端派发"，
+     * 而且**跨后端的合并窗口有限**。当文件大到跨 128 个扇区以上时（本文件
+     * 系统单文件上限 256 扇区），逐次调用的固定开销就不可忽略。这与
+     * CODE_STYLE §5 "批量化设备命令"的要求一致。
+     *
+     * 不变式：hbfs 文件在磁盘上是**连续**的（hbfs_file_lba 由 disk_slot 直接
+     * 线性推得），所以任意 [start_sector, start_sector+n) 都是连续 LBA 区间，
+     * 可以安全合成一条命令——这也是能用批量接口的前提。
+     */
     uint8_t *out = (uint8_t *)buf;
     uint32_t done = 0;
-    while (done < count) {
-        uint32_t abs = offset + done;
-        uint32_t sector_index = abs / BLOCK_SECTOR_SIZE;
-        uint32_t sector_off = abs % BLOCK_SECTOR_SIZE;
+    uint8_t lead[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+
+    /* 首扇区不完整：单扇区读后只取需要的部分。 */
+    uint32_t sector_off = offset % BLOCK_SECTOR_SIZE;
+    if (sector_off != 0) {
+        uint32_t first_sector = offset / BLOCK_SECTOR_SIZE;
         uint32_t chunk = BLOCK_SECTOR_SIZE - sector_off;
-        if (chunk > count - done) chunk = count - done;
-        if (block_read_sector(hbfs_file_lba(f->disk_slot, sector_index), sector) < 0)
-            return done;
-        memcpy(out + done, sector + sector_off, chunk);
+        if (chunk > count) chunk = count;
+        if (block_read_sector(hbfs_file_lba(f->disk_slot, first_sector),
+                              lead) < 0) return 0;
+        memcpy(out, lead + sector_off, chunk);
+        done = chunk;
+    }
+
+    /* 中间整扇区段：一次批量命令。 */
+    uint32_t mid_sectors = (count - done) / BLOCK_SECTOR_SIZE;
+    if (mid_sectors) {
+        uint32_t mid_lba = hbfs_file_lba(f->disk_slot,
+                                         (offset + done) / BLOCK_SECTOR_SIZE);
+        if (block_read_sectors(mid_lba, out + done,
+                               mid_sectors) < 0) return done;
+        done += mid_sectors * BLOCK_SECTOR_SIZE;
+    }
+
+    /* 尾部不足一扇区：单扇区读。 */
+    if (done < count) {
+        uint32_t tail_sector = (offset + done) / BLOCK_SECTOR_SIZE;
+        uint32_t chunk = count - done;
+        if (block_read_sector(hbfs_file_lba(f->disk_slot, tail_sector),
+                              lead) < 0) return done;
+        memcpy(out + done, lead, chunk);
         done += chunk;
     }
     return done;
@@ -616,25 +651,54 @@ static int hbfs_write_data(file_t *f, uint32_t offset, const void *buf, uint32_t
     if (!f || !f->used || (!buf && count)) return -1;
     if (offset > f->capacity || count > f->capacity - offset) return -1;
 
-    uint8_t sector[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    /*
+     * 批量写：与 hbfs_read_data() 对称——首尾不完整扇区走"读改写"，
+     * 中间整扇区段一次 block_write_sectors() 下发。
+     *
+     * 注意"读改写"只用于**部分扇区**：整扇区写不需要先读（旧实现虽然对整
+     * 扇区跳过了读，但仍是每扇区一条命令），现在整段合成一条。
+     */
     const uint8_t *in = (const uint8_t *)buf;
     uint32_t done = 0;
-    while (done < count) {
-        uint32_t abs = offset + done;
-        uint32_t sector_index = abs / BLOCK_SECTOR_SIZE;
-        uint32_t sector_off = abs % BLOCK_SECTOR_SIZE;
-        uint32_t chunk = BLOCK_SECTOR_SIZE - sector_off;
-        if (chunk > count - done) chunk = count - done;
+    uint8_t lead[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
 
-        if (sector_off != 0 || chunk != BLOCK_SECTOR_SIZE) {
-            if (block_read_sector(hbfs_file_lba(f->disk_slot, sector_index), sector) < 0)
-                memset(sector, 0, sizeof(sector));
-        } else {
-            memset(sector, 0, sizeof(sector));
+    /* 首扇区不完整：读改写。 */
+    uint32_t sector_off = offset % BLOCK_SECTOR_SIZE;
+    if (sector_off != 0) {
+        uint32_t first_sector = offset / BLOCK_SECTOR_SIZE;
+        uint32_t chunk = BLOCK_SECTOR_SIZE - sector_off;
+        if (chunk > count) chunk = count;
+        if (block_read_sector(hbfs_file_lba(f->disk_slot, first_sector),
+                              lead) < 0) {
+            /* 该扇区此前从未写过：按全 0 处理，写入后再落盘。 */
+            memset(lead, 0, sizeof(lead));
         }
-        memcpy(sector + sector_off, in + done, chunk);
-        if (block_write_sector(hbfs_file_lba(f->disk_slot, sector_index), sector) < 0)
-            return -1;
+        memcpy(lead + sector_off, in, chunk);
+        if (block_write_sector(hbfs_file_lba(f->disk_slot, first_sector),
+                               lead) < 0) return -1;
+        done = chunk;
+    }
+
+    /* 中间整扇区段：一次批量命令，不需要读改写。 */
+    uint32_t mid_sectors = (count - done) / BLOCK_SECTOR_SIZE;
+    if (mid_sectors) {
+        uint32_t mid_lba = hbfs_file_lba(f->disk_slot,
+                                         (offset + done) / BLOCK_SECTOR_SIZE);
+        if (block_write_sectors(mid_lba, in + done, mid_sectors) < 0) return -1;
+        done += mid_sectors * BLOCK_SECTOR_SIZE;
+    }
+
+    /* 尾部不足一扇区：读改写。 */
+    if (done < count) {
+        uint32_t tail_sector = (offset + done) / BLOCK_SECTOR_SIZE;
+        uint32_t chunk = count - done;
+        if (block_read_sector(hbfs_file_lba(f->disk_slot, tail_sector),
+                              lead) < 0) {
+            memset(lead, 0, sizeof(lead));
+        }
+        memcpy(lead, in + done, chunk);
+        if (block_write_sector(hbfs_file_lba(f->disk_slot, tail_sector),
+                               lead) < 0) return -1;
         done += chunk;
     }
 

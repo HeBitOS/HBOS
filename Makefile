@@ -353,7 +353,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff inflate-bench hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
 
 all: iso
 
@@ -645,6 +645,11 @@ xhci-smoke: $(ISO_BIOS)
 
 chromium-baseline:
 	bash scripts/check_chromium_baseline.sh
+
+# HBFS 批量扇区读写的等价性 + 底层命令数（首尾单扇区、中间整段合并）。
+hbfs-batch-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra tests/host/test_hbfs_batch.c -o $(BUILD_DIR)/test_hbfs_batch
+	$(BUILD_DIR)/test_hbfs_batch
 
 # ChaCha20-Poly1305 的 RFC 8439 标准向量回归（真值来自规范，不是本仓库实现）。
 crypto-test: | $(BUILD_DIR)
