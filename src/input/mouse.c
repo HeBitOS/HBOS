@@ -22,6 +22,27 @@
 static int mouse_ready;
 static int mouse_backend;
 static int mouse_packet_size = 3;
+/**
+ * @brief PS/2 初始化成功后，还没收到任何数据包的累计轮询次数
+ *
+ * 真机问题：部分芯片组（以及某些虚拟化）的 i8042 aux 端口会对 0xF4 回 ACK，
+ * 让 `ps2_mouse_init()` 判定"PS/2 鼠标就绪"，但端口上其实没有鼠标 —— 此后
+ * `mouse_poll()` 永远什么都收不到，而 USB 后端**已经不会再被尝试**（init 只
+ * 跑一次）。纯 USB 鼠标的整机（很多迷你主机/一体机）就会表现成"鼠标没有
+ * 驱动"。
+ *
+ * 对策：PS/2 就绪后给它一段宽限期（见 MOUSE_PS2_PROBE_POLLS），期间若始终
+ * 没有任何字节到达，就认定误判，切到 USB 后端。宽限期按"轮询次数"而不是
+ * 时间计算，因为 GUI 主循环的轮询频率随负载变化，按次数更稳定。
+ */
+static uint32_t ps2_silent_polls;
+/** @brief PS/2 宽限期：约 1~2 秒（GUI 主循环通常每帧轮询一次） */
+#define MOUSE_PS2_PROBE_POLLS 120U
+
+/** @brief 尝试从 PS/2 切到 USB 后端（PS/2 被误判时用）；成功返回 1 */
+static int mouse_fallback_to_usb(void);
+/** @brief PS/2 原始队列里是否还有待解析字节 */
+static int ps2_mouse_has_data(void);
 static uint8_t packet[4];
 static uint8_t packet_i;
 static volatile uint8_t mouse_raw_queue[128];
@@ -203,6 +224,7 @@ int mouse_init(void) {
     mouse_ready = 0;
     mouse_backend = MOUSE_BACKEND_NONE;
 
+    ps2_silent_polls = 0;
     if (ps2_mouse_init() == 0) {
         mouse_ready = 1;
         mouse_backend = MOUSE_BACKEND_PS2;
@@ -249,6 +271,11 @@ static int ps2_mouse_dequeue_byte(void) {
     uint8_t b = mouse_raw_queue[mouse_raw_tail];
     mouse_raw_tail = (uint8_t)((mouse_raw_tail + 1) & 127);
     return b;
+}
+
+/** @brief PS/2 原始队列里是否还有待解析字节（宽限期判定用） */
+static int ps2_mouse_has_data(void) {
+    return mouse_raw_tail != mouse_raw_head;
 }
 
 static int ps2_mouse_poll(mouse_event_t *ev) {
@@ -340,8 +367,44 @@ static int usb_mouse_poll(mouse_event_t *ev) {
 int mouse_poll(mouse_event_t *ev) {
     if (!mouse_ready || !ev) return 0;
     if (mouse_backend == MOUSE_BACKEND_USB) return usb_mouse_poll(ev);
-    if (mouse_backend == MOUSE_BACKEND_PS2) return ps2_mouse_poll(ev);
+    if (mouse_backend == MOUSE_BACKEND_PS2) {
+        int got = ps2_mouse_poll(ev);
+        if (got) {
+            ps2_silent_polls = 0;
+            return got;
+        }
+        /* PS/2 一直没数据：过了宽限期就尝试切 USB（真机纯 USB 鼠标场景）。
+         * 判定用"原始队列是否有字节"而不是"poll 是否有事件"：移动量为 0 的
+         * 数据包解析成功但不产生事件，那说明 PS/2 是活的，不该被判为误判。 */
+        if (ps2_mouse_has_data()) {
+            ps2_silent_polls = 0;
+            return 0;
+        }
+        if (ps2_silent_polls < MOUSE_PS2_PROBE_POLLS) {
+            ps2_silent_polls++;
+            return 0;
+        }
+        ps2_silent_polls = 0;
+        if (mouse_fallback_to_usb()) return usb_mouse_poll(ev);
+        return 0;
+    }
     return 0;
+}
+
+/**
+ * @brief PS/2 无数据时尝试改用 USB 后端
+ *
+ * 只在"PS/2 队列空 + USB 上确实有鼠标设备"时才切换，避免把一台真的接了
+ * PS/2 鼠标、只是暂时没动的机器误切走。切换后原 PS/2 端口保持使能状态，
+ * 不影响键盘（键盘走 IRQ1，与本端口无关）。
+ *
+ * @return 1 已切到 USB 且就绪，0 未切换
+ */
+static int mouse_fallback_to_usb(void) {
+    if (usb_mouse_init() != 0) return 0;
+    mouse_backend = MOUSE_BACKEND_USB;
+    ps2_silent_polls = 0;
+    return 1;
 }
 
 int mouse_is_ready(void) {
