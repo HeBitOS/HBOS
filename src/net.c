@@ -7,6 +7,7 @@
 #include "net.h"
 #include "net_virtio.h"
 #include "net/nic_r8169.h"
+#include "net/nic_e1000e_ids.h"
 #include "pci.h"
 #include "string.h"
 #include "core/cpu.h"
@@ -307,13 +308,34 @@ static inline void reg_write(uint32_t off, uint32_t val) {
  */
 static net_driver_t detect_driver(uint16_t vendor, uint16_t device) {
     if (vendor == 0x8086) {
+        /*
+         * Intel 网卡分两代，必须**取并集**判定，不能只查 e1000e 表：
+         *   - 老 8254x 家族（82540/82541/82545/82546/82547 等，0x1004~0x10B5）
+         *     由本文件里原来的 e1000 后端驱动，它们的 ID **不在** e1000e 表里
+         *     （e1000e 只管 82571 及以后）；漏掉就会出现"QEMU 的 e1000
+         *     (82540EM, 0x100E) 反而认不出来"这种倒退。
+         *   - 82571 及以后（82571/82572/82573/82574/82583/80003ES2LAN/
+         *     82566/82567/ICH8~10/I217/I218/I219/I210/I211）走 e1000e 表
+         *     （113 条，见 net/nic_e1000e_ids.h，照抄 Linux 7.2.8）。
+         * 两张表的 ID 不重叠，并集即"所有能被 e1000 后端驱动的 Intel 网卡"。
+         */
         switch (device) {
             case 0x1004: case 0x1008: case 0x1009: case 0x100C:
-            case 0x100D: case 0x100E: case 0x100F: case 0x1015:
-            case 0x1016: case 0x1017: case 0x10D3:
+            case 0x100D: case 0x100E: case 0x100F: case 0x1010:
+            case 0x1011: case 0x1012: case 0x1013: case 0x1014:
+            case 0x1015: case 0x1016: case 0x1017: case 0x1018:
+            case 0x1019: case 0x101A: case 0x101D: case 0x101E:
+            case 0x1026: case 0x1027: case 0x1028: case 0x105E:
+            case 0x105F: case 0x1060: case 0x1075: case 0x1076:
+            case 0x1077: case 0x1078: case 0x1079: case 0x107A:
+            case 0x107B: case 0x107C: case 0x108A: case 0x1099:
+            case 0x10B5: case 0x10B9: case 0x10BA: case 0x10BB:
+            case 0x10BC: case 0x10C4: case 0x10C5: case 0x10D5:
+            case 0x10D6: case 0x10D9: case 0x10DA: case 0x10E5:
                 return NET_DRIVER_E1000;
             default: break;
         }
+        if (e1000e_model_name(device)) return NET_DRIVER_E1000;
     }
     if (vendor == 0x1022 && device == 0x2000) return NET_DRIVER_PCNET;
     if (vendor == 0x10EC && device == 0x8139) return NET_DRIVER_RTL8139;

@@ -1,6 +1,8 @@
 #include "../graphics/graphics.h"
 #include "../fcntl.h"
 #include "../net.h"
+#include "../net/nic_e1000e_ids.h"
+#include "../net/nic_r8169.h"
 #include "../string.h"
 #include "../tls.h"
 #include "../unistd.h"
@@ -75,6 +77,23 @@ static void cmd_netinfo(int argc, char **argv) {
     console_puts("  driver: ");
     console_puts(net_driver_name(dev->driver));
     console_putchar('\n');
+
+    /* 型号名：真机排查时"driver: Intel E1000"不够用，要能看出到底是
+     * 82574L 还是 I219-LM —— 不同型号的 PHY/NVM 路径完全不同。 */
+    {
+        const char *model = e1000e_model_name(dev->device_id);
+        if (dev->driver == NET_DRIVER_E1000) {
+            console_puts("  model: ");
+            /* e1000e 表里的型号名优先；老 8254x 家族（表外）按 device id
+             * 给一个通用名，避免真机排查时这一行是空的。 */
+            console_puts(model ? model : "8254x/legacy e1000");
+            console_putchar('\n');
+        } else if (dev->driver == NET_DRIVER_R8169) {
+            console_puts("  model: ");
+            console_puts(r8169_device_name());
+            console_putchar('\n');
+        }
+    }
 
     console_puts("  pci: ");
     print_uint(dev->bus);
