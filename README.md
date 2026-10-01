@@ -33,7 +33,7 @@ HBOS 从引导、内核、驱动、文件系统、网络栈到桌面环境均以
 | 应用 | TinyCC、BusyBox applets、文件管理器、终端、编辑器、计算器、浏览器等 |
 | 存储 | ramfs、FAT32、HBFS、AHCI 优先并回退 ATA PIO |
 | 网络 | E1000、DHCP、ARP、ICMP、DNS、TCP、HTTP/HTTPS、用户态 socket API |
-| 输入 | PS/2 键鼠、USB xHCI HID 键盘与鼠标基础路径 |
+| 输入 | PS/2 键鼠、USB xHCI + EHCI HID 键鼠（含 HID 报告描述符解析） |
 
 HBOS 也提供不包含桌面和图形应用的 no-GUI 构建，可单独验证内核、Shell、
 文件系统、网络和用户态程序。
@@ -92,6 +92,7 @@ git submodule update --init --recursive
 | `make run-uefi` | 在 QEMU 中启动 UEFI 硬盘镜像 |
 | `make release` | 生成 ISO、VMware VMDK 和 VirtualBox VDI |
 | `make smoke` | 构建并启动验证全部发布格式 |
+| `make bench-boot` | 测量冷启动时间（BIOS/UEFI，分引导器与内核两段） |
 | `make nogui` | 构建不含 HIVE 和内嵌应用的 BIOS/UEFI ISO |
 | `make run-nogui` | 构建并在 QEMU 中启动 no-GUI BIOS 版 |
 | `make run-nogui-uefi` | 构建并在 QEMU 中启动 no-GUI UEFI 版 |
@@ -122,6 +123,25 @@ hive
 
 `drivers` 用于确认输入设备、USB、块设备、文件系统和网卡是否被识别；
 `hive` 启动图形桌面，`gui` 与 `startx` 保留为兼容别名。
+
+### 4. 启动时间与开机菜单
+
+BIOS 与 UEFI 的开机菜单等待时间由同一个变量控制（默认 1 秒，改动后自动重建
+ISO/镜像）：
+
+```sh
+make                       # 默认：菜单显示 1 秒后自动进默认项
+make BOOT_MENU_TIMEOUT=0   # 不等待：自动化/冒烟测试最快（约 1.9s 进内核）
+make BOOT_MENU_TIMEOUT=5   # 旧行为：留足时间手动选择 text fallback
+make bench-boot RUNS=5     # 实测冷启动时间（引导器阶段 + 内核阶段）
+```
+
+注意 `BOOT_MENU_TIMEOUT=0` 时 GRUB 的菜单**按键也唤不回来**（已实测），需要
+在 gfxterm 失败的真机上手动选 text fallback 时请保留非零值。
+
+参考数字（QEMU 512M，BIOS ISO）：默认配置约 **3.0 s**（其中内核阶段
+**0.04 s**），`BOOT_MENU_TIMEOUT=0` 约 **1.9 s**。测量方法与历代对比见
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
 
 ## HIVE 桌面环境
 
@@ -212,10 +232,13 @@ graph TD
 | x86_64 CPU | 可用 | 需要长模式 |
 | BIOS / UEFI | 可用 | UEFI 不支持 Secure Boot |
 | PS/2 键盘、鼠标 | 可用 | 建议真机优先测试 |
-| USB xHCI HID | 基础可用 | 键盘、鼠标兼容性仍在扩展 |
+| USB xHCI HID | 可用 | **多控制器**（不再只看第一台）；按 HID 报告描述符解析鼠标字段（report protocol），兼容 `bInterfaceProtocol=0` 的现代鼠标 |
+| USB EHCI (USB 2.0) HID | 可用 | 真机键鼠主力总线；多控制器、根端口复位、EP0 控制传输、周期调度中断 IN（纯轮询） |
 | AHCI SATA | 可用 | 优先块设备后端 |
 | ATA PIO | 可用 | AHCI 不可用时回退 |
-| Intel E1000 | 可用 | 当前主要网络路径 |
+| Intel E1000 (8254x) | 可用 | 轮询收发、DHCP/协议栈已接通 |
+| Intel E1000e / I219 | 可用 | 82571/82574/82583/80003ES2LAN/ICH8-10/I217/I218/I219 与 I210/I211；MAC 复位、NVM/flash 读 MAC、MDIC 链路判定 |
+| Realtek RTL8168/8111/8169/8125 | 可用 | 按 XID 识别真实型号并走对应 PHY 配置；RTL8168h/8111h 等真机常见型号 |
 | RTL8139 | 可用 | 轮询收发、DHCP/协议栈已接通 |
 | VirtIO-net | 可用 | virtio 1.0 PCI 轮询收发，DHCP/协议栈已接通（QEMU 默认 0x1000/0x1041） |
 | AC97 | 基础可用 | 依设备和虚拟机配置而定 |
@@ -256,6 +279,8 @@ HBOS/
 | [`CHROMIUM_COMPAT_ROADMAP.md`](CHROMIUM_COMPAT_ROADMAP.md) | Chromium 平台兼容层十阶段计划 |
 | [`docs/LINUX_KDE_COMPAT.md`](docs/LINUX_KDE_COMPAT.md) | 轻量 Linux ABI 与原版 KDE 分阶段路线 |
 | [`HIVE/docs/BROWSER_BILIBILI_UPGRADE.md`](HIVE/docs/BROWSER_BILIBILI_UPGRADE.md) | 浏览器现状、Vue/Bilibili 技术栈审计与分级验收方案 |
+| [`docs/CODE_STYLE.md`](docs/CODE_STYLE.md) | 代码规范、注释规范与性能纪律 |
+| [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | 性能工作记录：测量方法、已做优化、刻意不改的项与待办清单 |
 
 Chromium 目前尚未移植；路线图描述的是兼容层建设计划，而不是已经可运行的
 Chromium 浏览器。

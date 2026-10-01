@@ -21,6 +21,7 @@ typedef enum {
     NET_DRIVER_RTL8139,            /**< Realtek RTL8139 网卡 */
     NET_DRIVER_VIRTIO_NET,         /**< VirtIO 虚拟网卡 */
     NET_DRIVER_PCNET,              /**< AMD PCnet-PCI II (Am79C970A) */
+    NET_DRIVER_R8169,              /**< Realtek RTL8168/8111/8169/8101/8125 */
     NET_DRIVER_UNKNOWN_ETHERNET    /**< 未知以太网卡 */
 } net_driver_t;
 

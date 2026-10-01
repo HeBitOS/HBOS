@@ -165,31 +165,62 @@
 
 /******************************************************************************/
 
-static xhci_t xhci;
-static volatile uint32_t *xhci_op;
+/** @brief 控制器实例池：一台机器上可能有多个 xHCI（PCH 一个 + 板载 ASMedia 等） */
+static xhci_t xhci_pool[XHCI_MAX_CONTROLLERS];
+/**
+ * @brief 当前操作上下文（控制器）
+ *
+ * 不变量：所有公开 API 在入口处用 xhci_select_controller()/xhci_select_dev()
+ * 设置 hc，之后到返回为止不再切换。HBOS 的 USB 传输是同步、协作式调度的，
+ * 同一时刻只有一个传输在进行，因此"环境指针"是安全的；**不要**在持有 hc
+ * 的路径里递归调用另一个控制器的 API。
+ */
+static xhci_t *hc;
+/** @brief 当前控制器的操作寄存器窗口（HCSPARAMS 之后的 operational registers） */
+static volatile uint32_t *hc_op;
+
+/**
+ * @brief 全局设备表条目：设备属于哪个控制器实例、占用该实例的哪个 slot
+ *
+ * 设备下标（dev_idx）是跨控制器的全局编号：HID/存储层只认这个编号，由
+ * xhci_select_dev() 换算成 (控制器, slot)。真机上一台机器可能有两个 xHCI
+ * （PCH 一个 + 板载第三方一个），鼠标挂在第二个上时，只认第一个控制器的
+ * 旧实现就完全看不到设备。
+ */
+typedef struct {
+    uint8_t ctrl;  /**< 控制器在 xhci_pool 中的下标 */
+    uint32_t slot; /**< 该控制器内的 slot id */
+} xhci_dev_ref_t;
+
+/** @brief 跨控制器的全局设备表 */
+static xhci_dev_ref_t xhci_dev_refs[XHCI_MAX_DEVICES];
+/** @brief 全局设备表中的有效条目数 */
+static int xhci_dev_total;
+/** @brief 已成功初始化的控制器数量 */
+static int xhci_ctrl_count;
 
 static uint32_t xhci_read32(uint32_t offset) {
-    return xhci.mmio[offset / 4];
+    return hc->mmio[offset / 4];
 }
 
 static void xhci_write32(uint32_t offset, uint32_t value) {
-    xhci.mmio[offset / 4] = value;
+    hc->mmio[offset / 4] = value;
 }
 
 static uint32_t xhci_op_read32(uint32_t offset) {
-    return xhci_op[offset / 4];
+    return hc_op[offset / 4];
 }
 
 static void xhci_op_write32(uint32_t offset, uint32_t value) {
-    xhci_op[offset / 4] = value;
+    hc_op[offset / 4] = value;
 }
 
 static uint32_t xhci_read_portsc(uint32_t port) {
-    return xhci_op[(PORTSC_OFFSET + (port - 1) * 16) / 4];
+    return hc_op[(PORTSC_OFFSET + (port - 1) * 16) / 4];
 }
 
 static void xhci_write_portsc(uint32_t port, uint32_t value) {
-    xhci_op[(PORTSC_OFFSET + (port - 1) * 16) / 4] = value;
+    hc_op[(PORTSC_OFFSET + (port - 1) * 16) / 4] = value;
 }
 
 static uint32_t xhci_port_state_to_neutral(uint32_t portsc) {
@@ -197,7 +228,7 @@ static uint32_t xhci_port_state_to_neutral(uint32_t portsc) {
 }
 
 static void xhci_ring_doorbell(uint32_t slot, uint32_t target) {
-    if (xhci.doorbell) xhci.doorbell[slot] = target;
+    if (hc->doorbell) hc->doorbell[slot] = target;
 }
 
 static uint64_t *xhci_alloc_aligned(size_t size, uint64_t *phys) {
@@ -215,36 +246,36 @@ static void xhci_build_trb(xhci_trb_t *trb, uint64_t param, uint32_t status, uin
 }
 
 static int xhci_event_ready(const xhci_trb_t *evt) {
-    return (evt->param3 & TRB_C) == xhci.event_ring_cycle;
+    return (evt->param3 & TRB_C) == hc->event_ring_cycle;
 }
 
 static void xhci_advance_event(void) {
-    xhci.event_ring_idx++;
-    if (xhci.event_ring_idx >= XHCI_EVENT_RING_SIZE) {
-        xhci.event_ring_idx = 0;
-        xhci.event_ring_cycle ^= 1;
+    hc->event_ring_idx++;
+    if (hc->event_ring_idx >= XHCI_EVENT_RING_SIZE) {
+        hc->event_ring_idx = 0;
+        hc->event_ring_cycle ^= 1;
     }
-    if (xhci.runtime) {
-        uint64_t erdp = xhci.event_ring_phys + xhci.event_ring_idx * 16;
-        xhci.runtime[0x38 / 4] = (uint32_t)(erdp & 0xFFFFFFFF) | (1 << 3);
-        xhci.runtime[0x3C / 4] = (uint32_t)(erdp >> 32);
+    if (hc->runtime) {
+        uint64_t erdp = hc->event_ring_phys + hc->event_ring_idx * 16;
+        hc->runtime[0x38 / 4] = (uint32_t)(erdp & 0xFFFFFFFF) | (1 << 3);
+        hc->runtime[0x3C / 4] = (uint32_t)(erdp >> 32);
     }
 }
 
 static int xhci_post_cmd(uint32_t trb_type, uint64_t param, uint32_t status) {
-    uint32_t idx = xhci.cmd_ring_idx;
-    xhci_trb_t *trb = &((xhci_trb_t *)xhci.cmd_ring)[idx];
+    uint32_t idx = hc->cmd_ring_idx;
+    xhci_trb_t *trb = &((xhci_trb_t *)hc->cmd_ring)[idx];
 
     /* Correct XHCI Command TRB specification layout:
      * Slot ID (and other control status parameters) belong to DWORD 3 (trb->param3),
      * not DWORD 2 (trb->param2). Setting DWORD 2 to zero and merging status into DWORD 3. */
     xhci_build_trb(trb, param, 0,
-                   status | (trb_type << 10) | (xhci.cmd_ring_cycle ? TRB_C : 0));
+                   status | (trb_type << 10) | (hc->cmd_ring_cycle ? TRB_C : 0));
 
-    xhci.cmd_ring_idx++;
-    if (xhci.cmd_ring_idx >= XHCI_CMD_RING_SIZE) {
-        xhci.cmd_ring_idx = 0;
-        xhci.cmd_ring_cycle ^= 1;
+    hc->cmd_ring_idx++;
+    if (hc->cmd_ring_idx >= XHCI_CMD_RING_SIZE) {
+        hc->cmd_ring_idx = 0;
+        hc->cmd_ring_cycle ^= 1;
     }
 
     xhci_ring_doorbell(0, 0);
@@ -271,15 +302,15 @@ static void dbg_print_hex16(uint16_t v);
 
 static int xhci_wait_cmd_resp(void) {
     console_puts("[XHCI] Waiting for command response. Event ring idx: ");
-    dbg_print_uint(xhci.event_ring_idx);
+    dbg_print_uint(hc->event_ring_idx);
     console_puts(", cycle: ");
-    dbg_print_uint(xhci.event_ring_cycle);
+    dbg_print_uint(hc->event_ring_cycle);
     console_puts("\n");
 
     hw_deadline_t deadline = hw_deadline_start();
     for (;;) {
-        uint32_t idx = xhci.event_ring_idx;
-        xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[idx];
+        uint32_t idx = hc->event_ring_idx;
+        xhci_trb_t *evt = &((xhci_trb_t *)hc->event_ring)[idx];
         
         static uint32_t last_p3 = 0xFFFFFFFF;
         if (evt->param3 != last_p3) {
@@ -350,66 +381,66 @@ static int xhci_reset_controller(void) {
 }
 
 static int xhci_init_rings(void) {
-    xhci.cmd_ring = (uint64_t *)xhci_alloc_aligned(
-        XHCI_CMD_RING_SIZE * 16, &xhci.cmd_ring_phys);
-    if (!xhci.cmd_ring) return -1;
-    memset(xhci.cmd_ring, 0, XHCI_CMD_RING_SIZE * 16);
-    xhci.cmd_ring_idx = 0;
-    xhci.cmd_ring_cycle = 1;
+    hc->cmd_ring = (uint64_t *)xhci_alloc_aligned(
+        XHCI_CMD_RING_SIZE * 16, &hc->cmd_ring_phys);
+    if (!hc->cmd_ring) return -1;
+    memset(hc->cmd_ring, 0, XHCI_CMD_RING_SIZE * 16);
+    hc->cmd_ring_idx = 0;
+    hc->cmd_ring_cycle = 1;
 
     uint64_t event_ring_seg_phys = 0;
-    xhci.event_ring_seg = (uint64_t *)xhci_alloc_aligned(16, &event_ring_seg_phys);
-    if (!xhci.event_ring_seg) return -1;
+    hc->event_ring_seg = (uint64_t *)xhci_alloc_aligned(16, &event_ring_seg_phys);
+    if (!hc->event_ring_seg) return -1;
 
-    xhci.event_ring = (uint64_t *)xhci_alloc_aligned(
-        XHCI_EVENT_RING_SIZE * 16, &xhci.event_ring_phys);
-    if (!xhci.event_ring) return -1;
-    memset(xhci.event_ring, 0, XHCI_EVENT_RING_SIZE * 16);
-    xhci.event_ring_idx = 0;
-    xhci.event_ring_cycle = 1;
+    hc->event_ring = (uint64_t *)xhci_alloc_aligned(
+        XHCI_EVENT_RING_SIZE * 16, &hc->event_ring_phys);
+    if (!hc->event_ring) return -1;
+    memset(hc->event_ring, 0, XHCI_EVENT_RING_SIZE * 16);
+    hc->event_ring_idx = 0;
+    hc->event_ring_cycle = 1;
 
-    xhci.event_ring_seg[0] = xhci.event_ring_phys;
-    xhci.event_ring_seg[1] = XHCI_EVENT_RING_SIZE;
+    hc->event_ring_seg[0] = hc->event_ring_phys;
+    hc->event_ring_seg[1] = XHCI_EVENT_RING_SIZE;
 
-    xhci_op_write32(XHCI_CRCR_LO, (uint32_t)(xhci.cmd_ring_phys & 0xFFFFFFFF) | TRB_C);
-    xhci_op_write32(XHCI_CRCR_HI, (uint32_t)(xhci.cmd_ring_phys >> 32));
+    xhci_op_write32(XHCI_CRCR_LO, (uint32_t)(hc->cmd_ring_phys & 0xFFFFFFFF) | TRB_C);
+    xhci_op_write32(XHCI_CRCR_HI, (uint32_t)(hc->cmd_ring_phys >> 32));
 
-    if (!xhci.runtime) return -1;
-    xhci.runtime[0x28 / 4] = 1; /* ERSTSZ */
-    xhci.runtime[0x30 / 4] = (uint32_t)(event_ring_seg_phys & 0xFFFFFFFF);
-    xhci.runtime[0x34 / 4] = (uint32_t)(event_ring_seg_phys >> 32);
-    xhci.runtime[0x38 / 4] = (uint32_t)(xhci.event_ring_phys & 0xFFFFFFFF);
-    xhci.runtime[0x3C / 4] = (uint32_t)(xhci.event_ring_phys >> 32);
+    if (!hc->runtime) return -1;
+    hc->runtime[0x28 / 4] = 1; /* ERSTSZ */
+    hc->runtime[0x30 / 4] = (uint32_t)(event_ring_seg_phys & 0xFFFFFFFF);
+    hc->runtime[0x34 / 4] = (uint32_t)(event_ring_seg_phys >> 32);
+    hc->runtime[0x38 / 4] = (uint32_t)(hc->event_ring_phys & 0xFFFFFFFF);
+    hc->runtime[0x3C / 4] = (uint32_t)(hc->event_ring_phys >> 32);
 
     return 0;
 }
 
 static int xhci_init_scratchpad(void) {
-    xhci.dcbaa = (uint64_t *)xhci_alloc_aligned(
-        XHCI_MAX_SLOTS * 8 + 16, &xhci.dcbaa_phys);
-    if (!xhci.dcbaa) return -1;
-    memset(xhci.dcbaa, 0, XHCI_MAX_SLOTS * 8 + 16);
+    hc->dcbaa = (uint64_t *)xhci_alloc_aligned(
+        XHCI_MAX_SLOTS * 8 + 16, &hc->dcbaa_phys);
+    if (!hc->dcbaa) return -1;
+    memset(hc->dcbaa, 0, XHCI_MAX_SLOTS * 8 + 16);
 
-    if (xhci.max_scratchpad > XHCI_MAX_SCRATCHPAD_BUFFERS) return -1;
-    if (xhci.max_scratchpad > 0) {
+    if (hc->max_scratchpad > XHCI_MAX_SCRATCHPAD_BUFFERS) return -1;
+    if (hc->max_scratchpad > 0) {
         uint64_t scratchpad_array_phys = 0;
-        xhci.scratchpad_array = (uint64_t *)xhci_alloc_aligned(
-            xhci.max_scratchpad * 8, &scratchpad_array_phys);
-        if (!xhci.scratchpad_array) return -1;
-        memset(xhci.scratchpad_array, 0, xhci.max_scratchpad * 8);
-        for (uint32_t i = 0; i < xhci.max_scratchpad; i++) {
+        hc->scratchpad_array = (uint64_t *)xhci_alloc_aligned(
+            hc->max_scratchpad * 8, &scratchpad_array_phys);
+        if (!hc->scratchpad_array) return -1;
+        memset(hc->scratchpad_array, 0, hc->max_scratchpad * 8);
+        for (uint32_t i = 0; i < hc->max_scratchpad; i++) {
             uint64_t scratchpad_phys = 0;
-            xhci.scratchpad_buffers[i] = (uint64_t *)xhci_alloc_aligned(
+            hc->scratchpad_buffers[i] = (uint64_t *)xhci_alloc_aligned(
                 4096, &scratchpad_phys);
-            if (!xhci.scratchpad_buffers[i]) return -1;
-            memset(xhci.scratchpad_buffers[i], 0, 4096);
-            xhci.scratchpad_array[i] = scratchpad_phys;
+            if (!hc->scratchpad_buffers[i]) return -1;
+            memset(hc->scratchpad_buffers[i], 0, 4096);
+            hc->scratchpad_array[i] = scratchpad_phys;
         }
-        xhci.dcbaa[0] = scratchpad_array_phys;
+        hc->dcbaa[0] = scratchpad_array_phys;
     }
 
-    xhci_op_write32(XHCI_DCBAAP_LO, (uint32_t)(xhci.dcbaa_phys & 0xFFFFFFFF));
-    xhci_op_write32(XHCI_DCBAAP_HI, (uint32_t)(xhci.dcbaa_phys >> 32));
+    xhci_op_write32(XHCI_DCBAAP_LO, (uint32_t)(hc->dcbaa_phys & 0xFFFFFFFF));
+    xhci_op_write32(XHCI_DCBAAP_HI, (uint32_t)(hc->dcbaa_phys >> 32));
 
     return 0;
 }
@@ -457,17 +488,17 @@ static int xhci_setup_device_context(uint32_t slot_id) {
     uint64_t *ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &ctx_phys);
     if (!ctx) return -1;
     memset(ctx, 0, CTX_SIZE * 32);
-    xhci.device_context_base[slot_id] = ctx;
-    xhci.dcbaa[slot_id] = ctx_phys;
+    hc->device_context_base[slot_id] = ctx;
+    hc->dcbaa[slot_id] = ctx_phys;
     return 0;
 }
 
 static int xhci_enable_slot(uint32_t *slot_id) {
     int ret = xhci_send_cmd(TRB_ENABLE_SLOT, 0, 0);
     if (ret < 0) return ret;
-    for (uint32_t i = 1; i <= xhci.max_slots; i++) {
-        if (!xhci.slot_enabled[i]) {
-            xhci.slot_enabled[i] = 1;
+    for (uint32_t i = 1; i <= hc->max_slots; i++) {
+        if (!hc->slot_enabled[i]) {
+            hc->slot_enabled[i] = 1;
             *slot_id = i;
             if (xhci_setup_device_context(i) < 0) return -1;
             return 0;
@@ -494,12 +525,12 @@ static int xhci_address_device(uint32_t slot_id, uint32_t port, uint32_t speed) 
     uint32_t link_ctrl = (TRB_LINK << 10) | TRB_TC;
     xhci_build_trb(&trb_ring[XHCI_TRB_RING_SIZE - 1], ep0_ring_phys, 0, link_ctrl);
 
-    xhci.input_context[slot_id] = ep0_ring;
-    xhci.ep_rings[slot_id][1] = ep0_ring;
-    xhci.ep_rings_phys[slot_id][1] = ep0_ring_phys;
-    xhci.ep_ring_idx[slot_id][1] = 0;
-    xhci.ep_ring_cycle[slot_id][1] = 1;
-    xhci.ep_configured[slot_id][1] = 1;
+    hc->input_context[slot_id] = ep0_ring;
+    hc->ep_rings[slot_id][1] = ep0_ring;
+    hc->ep_rings_phys[slot_id][1] = ep0_ring_phys;
+    hc->ep_ring_idx[slot_id][1] = 0;
+    hc->ep_ring_cycle[slot_id][1] = 1;
+    hc->ep_configured[slot_id][1] = 1;
 
     uint32_t *ctx = (uint32_t *)input_ctx;
     ctx[1] = (1 << 0) | (1 << 1); /* Add slot + EP0 contexts */
@@ -528,7 +559,7 @@ static int xhci_configure_endpoint(uint32_t slot_id, uint32_t ep_type,
     ctx[1] = (1 << 0) | (1 << ep_id); /* Add slot + target endpoint */
     uint32_t context_entries = ep_id;
     for (uint32_t i = ep_id + 1; i < XHCI_MAX_EP; i++) {
-        if (xhci.ep_configured[slot_id][i]) context_entries = i;
+        if (hc->ep_configured[slot_id][i]) context_entries = i;
     }
     ctx[8] = context_entries << 27;
 
@@ -582,40 +613,33 @@ static void xhci_dump_pci_device(const pci_device_t *dev, void *ctx) {
     console_puts("\n");
 }
 
-static int xhci_init_internal(void) {
-
-    console_puts("[XHCI] Scanning PCI bus for USB controllers...\n");
-    /* 递归、桥感知的枚举（跟进 PCI-to-PCI 桥的 Secondary Bus），而不是
-     * 各自维护一份平坦的 bus 0-255 扫描——见 pci.c pci_enumerate_all()。 */
-    pci_enumerate_all(xhci_dump_pci_device, NULL);
-
-    pci_device_t dev;
-    if (pci_find_class(XHCI_PCI_CLASS, XHCI_PCI_SUBCLASS, XHCI_PCI_PROGIF, &dev) < 0) {
-        console_puts("[XHCI] Failed to find xHCI controller on PCI!\n");
-        return -1;
-    }
-
-    memset(&xhci, 0, sizeof(xhci));
-
-    uint32_t bar0 = pci_bar(dev.bus, dev.slot, dev.func, 0);
+/**
+ * @brief 初始化一个 xHCI 控制器（调用方已选定 hc）
+ *
+ * @param ctrl_idx 该控制器在 xhci_pool 中的下标（登记全局设备表用）
+ * @param dev      PCI 上找到的这台 xHCI 控制器
+ * @return 0 成功（控制器进入 READY 并完成根端口扫描），-1 失败
+ */
+static int xhci_init_controller(int ctrl_idx, const pci_device_t *dev) {
+    uint32_t bar0 = pci_bar(dev->bus, dev->slot, dev->func, 0);
     console_puts("[XHCI] BAR0 raw value: ");
     dbg_print_hex16((uint16_t)(bar0 >> 16));
     dbg_print_hex16((uint16_t)(bar0 & 0xFFFF));
     console_puts("\n");
     int bar_is_io = 0;
-    uint64_t bar_address = pci_bar_address(dev.bus, dev.slot, dev.func, 0,
+    uint64_t bar_address = pci_bar_address(dev->bus, dev->slot, dev->func, 0,
                                            &bar_is_io);
     if (!bar_address || bar_is_io) {
         console_puts("[XHCI] BAR0 is invalid!\n");
         return -1;
     }
-    xhci.mmio_phys = bar_address;
+    hc->mmio_phys = bar_address;
 
-    pci_enable_bus_master_mmio(&dev);
+    pci_enable_bus_master_mmio(dev);
 
-    xhci.mmio = (volatile uint32_t *)vmm_map_mmio(
-        xhci.mmio_phys, XHCI_MMIO_MAP_SIZE);
-    if (!xhci.mmio) {
+    hc->mmio = (volatile uint32_t *)vmm_map_mmio(
+        hc->mmio_phys, XHCI_MMIO_MAP_SIZE);
+    if (!hc->mmio) {
         console_puts("[XHCI] MMIO mapping failed!\n");
         return -1;
     }
@@ -626,7 +650,7 @@ static int xhci_init_internal(void) {
         console_puts("[XHCI] Invalid capability length!\n");
         return -1;
     }
-    xhci_op = (volatile uint32_t *)((uint8_t *)xhci.mmio + caplength);
+    hc_op = (volatile uint32_t *)((uint8_t *)hc->mmio + caplength);
 
     uint32_t hcsparams1 = xhci_read32(XHCI_HCSPARAMS1);
     uint32_t hcsparams2 = xhci_read32(XHCI_HCSPARAMS2);
@@ -680,26 +704,26 @@ static int xhci_init_internal(void) {
         ext_cap_offset += next << 2;
     }
 
-    xhci.max_slots = hcsparams1 & 0xFFU;
-    if (xhci.max_slots > XHCI_MAX_SLOTS) xhci.max_slots = XHCI_MAX_SLOTS;
-    xhci.max_ports = (hcsparams1 >> 24) & 0xFFU;
-    if (xhci.max_ports > XHCI_MAX_PORTS) xhci.max_ports = XHCI_MAX_PORTS;
-    xhci.max_scratchpad = (((hcsparams2 >> 27) & 0x1FU) << 5) |
+    hc->max_slots = hcsparams1 & 0xFFU;
+    if (hc->max_slots > XHCI_MAX_SLOTS) hc->max_slots = XHCI_MAX_SLOTS;
+    hc->max_ports = (hcsparams1 >> 24) & 0xFFU;
+    if (hc->max_ports > XHCI_MAX_PORTS) hc->max_ports = XHCI_MAX_PORTS;
+    hc->max_scratchpad = (((hcsparams2 >> 27) & 0x1FU) << 5) |
                           ((hcsparams2 >> 21) & 0x1FU);
-    if (!xhci.max_slots || !xhci.max_ports) return -1;
+    if (!hc->max_slots || !hc->max_ports) return -1;
 
     uint32_t db_offset = xhci_read32(XHCI_DBOFF) & ~0x3U;
     uint32_t rts_offset = xhci_read32(XHCI_RTSOFF) & ~0x1FU;
     uint64_t doorbell_end = (uint64_t)db_offset +
-                            ((uint64_t)xhci.max_slots + 1U) * sizeof(uint32_t);
+                            ((uint64_t)hc->max_slots + 1U) * sizeof(uint32_t);
     if (doorbell_end > XHCI_MMIO_MAP_SIZE ||
         (uint64_t)rts_offset + 0x40U > XHCI_MMIO_MAP_SIZE) {
         console_puts("[XHCI] MMIO register offsets exceed mapped BAR!\n");
         return -1;
     }
 
-    xhci.doorbell = (volatile uint32_t *)((uint8_t *)xhci.mmio + db_offset);
-    xhci.runtime = (volatile uint32_t *)((uint8_t *)xhci.mmio + rts_offset);
+    hc->doorbell = (volatile uint32_t *)((uint8_t *)hc->mmio + db_offset);
+    hc->runtime = (volatile uint32_t *)((uint8_t *)hc->mmio + rts_offset);
 
     if (xhci_reset_controller() < 0) {
         console_puts("[XHCI] Controller reset failed!\n");
@@ -709,7 +733,7 @@ static int xhci_init_internal(void) {
         console_puts("[XHCI] Controller does not support 4KiB pages!\n");
         return -1;
     }
-    xhci.page_size = 4096U;
+    hc->page_size = 4096U;
     if (xhci_init_rings() < 0) {
         console_puts("[XHCI] Ring initialization failed!\n");
         return -1;
@@ -718,22 +742,22 @@ static int xhci_init_internal(void) {
         console_puts("[XHCI] Scratchpad initialization failed!\n");
         return -1;
     }
-    xhci_op_write32(XHCI_CONFIG, xhci.max_slots);
+    xhci_op_write32(XHCI_CONFIG, hc->max_slots);
     if (xhci_start_controller() < 0) {
         console_puts("[XHCI] Controller start failed!\n");
         return -1;
     }
 
     console_puts("[XHCI] Controller initialized. Max slots: ");
-    dbg_print_uint(xhci.max_slots);
+    dbg_print_uint(hc->max_slots);
     console_puts(", Max ports: ");
-    dbg_print_uint(xhci.max_ports);
+    dbg_print_uint(hc->max_ports);
     console_puts("\n");
 
     // Wait 100ms for ports to stabilize
     usleep(100000);
 
-    for (uint32_t port = 1; port <= xhci.max_ports; port++) {
+    for (uint32_t port = 1; port <= hc->max_ports; port++) {
         uint32_t portsc = xhci_read_portsc(port);
         if (!(portsc & XHCI_PORTSC_CCS)) continue;
 
@@ -762,39 +786,107 @@ static int xhci_init_internal(void) {
         if (xhci_address_device(slot, port, speed) < 0) {
             console_puts("[XHCI] Address device failed!\n");
             xhci_send_cmd(TRB_DISABLE_SLOT, 0, (slot << 24));
-            xhci.slot_enabled[slot] = 0;
+            hc->slot_enabled[slot] = 0;
             continue;
         }
         console_puts("[XHCI] Device addressed successfully!\n");
         usleep(10000); // 10ms recovery time after Set Address
     }
 
+    /* 把本控制器上已寻址的设备登记进全局设备表：设备下标从此跨控制器唯一。 */
+    for (uint32_t slot = 1; slot <= hc->max_slots; slot++) {
+        if (!hc->slot_enabled[slot]) continue;
+        if (xhci_dev_total >= XHCI_MAX_DEVICES) {
+            console_puts("[XHCI] Global device table full, extra devices ignored.\n");
+            break;
+        }
+        xhci_dev_refs[xhci_dev_total].ctrl = (uint8_t)ctrl_idx;
+        xhci_dev_refs[xhci_dev_total].slot = slot;
+        xhci_dev_total++;
+    }
+
     return 0;
 }
 
-int xhci_init(void) {
-    if (xhci.initialized != XHCI_STATE_UNINITIALIZED) {
-        return xhci.initialized == XHCI_STATE_READY ? 0 : -1;
-    }
-    int ret = xhci_init_internal();
-    if (ret < 0) {
-        xhci.initialized = XHCI_STATE_FAILED;
-    } else {
-        xhci.initialized = XHCI_STATE_READY;
-    }
-    return ret;
+/**
+ * @brief xhci_init() 的控制器扫描上下文：收集所有可达的 xHCI 控制器
+ */
+typedef struct {
+    pci_device_t list[XHCI_MAX_CONTROLLERS]; /**< 已收集的控制器 */
+    int count;                               /**< 已收集数量 */
+} xhci_scan_ctx_t;
+
+/**
+ * @brief pci_enumerate_all() 回调：把 xHCI 控制器收进扫描上下文
+ *
+ * 不再用 pci_find_class() 只取第一台：真机上常有第二个 xHCI（板载第三方
+ * 控制器，或 CPU 直连的那一个），键鼠插在它上面时只初始化第一台就等于
+ * "没有 USB 输入"。
+ */
+static void xhci_collect_controller(const pci_device_t *dev, void *ctx) {
+    xhci_scan_ctx_t *scan = (xhci_scan_ctx_t *)ctx;
+    if (dev->class_code != XHCI_PCI_CLASS ||
+        dev->subclass != XHCI_PCI_SUBCLASS ||
+        dev->prog_if != XHCI_PCI_PROGIF) return;
+    if (scan->count >= XHCI_MAX_CONTROLLERS) return;
+    scan->list[scan->count++] = *dev;
 }
 
-void xhci_poll(void) {
-    if (xhci.initialized != XHCI_STATE_READY) return;
+int xhci_init(void) {
+    static int initialized;
+    static int ready;
+    if (initialized) return ready > 0 ? 0 : -1;
+    initialized = 1;
+
+    console_puts("[XHCI] Scanning PCI bus for USB controllers...\n");
+    /* 递归、桥感知的枚举（跟进 PCI-to-PCI 桥的 Secondary Bus），而不是
+     * 各自维护一份平坦的 bus 0-255 扫描——见 pci.c pci_enumerate_all()。 */
+    pci_enumerate_all(xhci_dump_pci_device, NULL);
+
+    xhci_scan_ctx_t scan;
+    scan.count = 0;
+    pci_enumerate_all(xhci_collect_controller, &scan);
+    if (scan.count == 0) {
+        console_puts("[XHCI] Failed to find xHCI controller on PCI!\n");
+        return -1;
+    }
+    console_puts("[XHCI] Controllers found: ");
+    dbg_print_uint((uint32_t)scan.count);
+    console_puts("\n");
+
+    xhci_ctrl_count = 0;
+    for (int i = 0; i < scan.count; i++) {
+        hc = &xhci_pool[i];
+        memset(hc, 0, sizeof(*hc));
+        if (xhci_init_controller(i, &scan.list[i]) < 0) {
+            hc->initialized = XHCI_STATE_FAILED;
+            console_puts("[XHCI] Controller init failed; trying next one.\n");
+            continue;
+        }
+        hc->initialized = XHCI_STATE_READY;
+        xhci_ctrl_count++;
+    }
+    hc = 0;
+    ready = xhci_ctrl_count;
+    return ready > 0 ? 0 : -1;
+}
+
+/**
+ * @brief 推进**一个**控制器的事件处理（调用方已选定 hc）
+ *
+ * 传输路径（xhci_control_transfer 等）在等待完成时调用本函数，因此它必须
+ * 只动当前 hc：如果这里改成遍历所有控制器，正在进行的传输上下文会被打断。
+ */
+static void xhci_poll_hc(void) {
+    if (hc->initialized != XHCI_STATE_READY) return;
 
     uint32_t usbsts = xhci_op_read32(XHCI_USBSTS);
     if (usbsts & XHCI_STS_EINT) {
         xhci_op_write32(XHCI_USBSTS, XHCI_STS_EINT);
 
         while (1) {
-            uint32_t idx = xhci.event_ring_idx;
-            xhci_trb_t *evt = &((xhci_trb_t *)xhci.event_ring)[idx];
+            uint32_t idx = hc->event_ring_idx;
+            xhci_trb_t *evt = &((xhci_trb_t *)hc->event_ring)[idx];
             if (!xhci_event_ready(evt)) break;
 
             uint32_t evt_type = (evt->param3 >> 10) & 0x3F;
@@ -809,16 +901,16 @@ void xhci_poll(void) {
                 uint32_t ep = (evt->param3 >> 16) & 0x1F;
                 int code = (evt->param2 >> 24) & 0xFF;
 
-                if (slot > 0 && slot <= xhci.max_slots && ep > 0 && ep < XHCI_MAX_EP) {
-                    xhci.ep_transfer_residue[slot][ep] =
+                if (slot > 0 && slot <= hc->max_slots && ep > 0 && ep < XHCI_MAX_EP) {
+                    hc->ep_transfer_residue[slot][ep] =
                         evt->param2 & 0x00FFFFFFU;
-                    xhci.ep_has_data[slot][ep] = (uint32_t)code;
-                    
-                    if (xhci.ep_data_buf[slot][ep]) {
+                    hc->ep_has_data[slot][ep] = (uint32_t)code;
+
+                    if (hc->ep_data_buf[slot][ep]) {
                         // Re-enqueue the TRB to keep polling
                         uint32_t control = (TRB_NORMAL << 10) | TRB_IOC | TRB_ISP;
-                        xhci_post_transfer_trb(slot, ep, xhci.ep_data_buf_phys[slot][ep],
-                                               xhci.ep_data_buf_len[slot][ep], control);
+                        xhci_post_transfer_trb(slot, ep, hc->ep_data_buf_phys[slot][ep],
+                                               hc->ep_data_buf_len[slot][ep], control);
                         xhci_ring_doorbell(slot, ep);
                     }
                 }
@@ -829,34 +921,90 @@ void xhci_poll(void) {
     }
 }
 
-int xhci_device_count(void) {
-    int count = 0;
-    for (uint32_t i = 1; i <= xhci.max_slots; i++) {
-        if (xhci.slot_enabled[i]) count++;
+void xhci_poll(void) {
+    /* 任务上下文里的轮询：把所有就绪控制器都推进一遍，否则鼠标挂在第二个
+     * 控制器上时它的完成事件永远不会被处理。hc 用完必须恢复，避免把调用方
+     * （可能正处于某次传输中）的上下文改掉。 */
+    xhci_t *saved = hc;
+    for (int i = 0; i < XHCI_MAX_CONTROLLERS; i++) {
+        if (xhci_pool[i].initialized != XHCI_STATE_READY) continue;
+        hc = &xhci_pool[i];
+        xhci_poll_hc();
     }
-    return count;
+    hc = saved;
+}
+
+/**
+ * @brief 按全局设备下标选中对应的控制器与 slot
+ *
+ * 设备下标跨控制器唯一（见 xhci_dev_refs），这是真机多控制器场景能工作的
+ * 前提。成功时把 hc 切到该设备所属控制器，调用方随后的 slot 级访问才有意义。
+ *
+ * @param dev_idx 全局设备下标
+ * @param out_slot 输出该设备在所属控制器内的 slot id；可为 NULL
+ * @return 0 成功，-1 下标越界
+ */
+static int xhci_select_dev(int dev_idx, uint32_t *out_slot) {
+    if (dev_idx < 0 || dev_idx >= xhci_dev_total) return -1;
+    xhci_dev_ref_t *ref = &xhci_dev_refs[dev_idx];
+    if (ref->ctrl >= XHCI_MAX_CONTROLLERS) return -1;
+    hc = &xhci_pool[ref->ctrl];
+    if (hc->initialized != XHCI_STATE_READY) return -1;
+    if (out_slot) *out_slot = ref->slot;
+    return 0;
+}
+
+int xhci_device_count(void) {
+    return xhci_dev_total;
 }
 
 int xhci_device_slot(int idx) {
-    for (uint32_t i = 1; i <= xhci.max_slots; i++) {
-        if (xhci.slot_enabled[i]) {
-            if (idx == 0) return (int)i;
-            idx--;
-        }
-    }
-    return -1;
+    if (idx < 0 || idx >= xhci_dev_total) return -1;
+    return (int)xhci_dev_refs[idx].slot;
+}
+
+/*
+ * 设备下标版传输 API —— HID/存储层只认全局设备下标，控制器与 slot 的换算
+ * 封在 xhci_select_dev() 里。旧的 slot 版接口保留给控制器内部与诊断使用。
+ */
+
+int xhci_dev_control_transfer(int dev_idx, uint8_t bmRequestType,
+                              uint8_t bRequest, uint16_t wValue,
+                              uint16_t wIndex, void *data, uint16_t wLength) {
+    uint32_t slot = 0;
+    if (xhci_select_dev(dev_idx, &slot) < 0) return -1;
+    return xhci_control_transfer((int)slot, bmRequestType, bRequest,
+                                 wValue, wIndex, data, wLength);
+}
+
+int xhci_dev_interrupt_transfer(int dev_idx, int ep_addr, void *data,
+                                uint32_t len, uint32_t interval) {
+    uint32_t slot = 0;
+    if (xhci_select_dev(dev_idx, &slot) < 0) return -1;
+    return xhci_interrupt_transfer((int)slot, ep_addr, data, len, interval);
+}
+
+int xhci_dev_bulk_transfer_packet(int dev_idx, int ep_addr, void *data,
+                                  uint32_t len, uint32_t max_packet) {
+    uint32_t slot = 0;
+    if (xhci_select_dev(dev_idx, &slot) < 0) return -1;
+    return xhci_bulk_transfer_packet((int)slot, ep_addr, data, len, max_packet);
+}
+
+int xhci_dev_bulk_transfer(int dev_idx, int ep_addr, void *data, uint32_t len) {
+    uint32_t slot = 0;
+    if (xhci_select_dev(dev_idx, &slot) < 0) return -1;
+    return xhci_bulk_transfer((int)slot, ep_addr, data, len);
 }
 
 int xhci_get_device_desc(int idx, usb_device_desc_t *desc) {
     if (!desc) return -1;
-    int slot = xhci_device_slot(idx);
-    if (slot < 0) return -1;
+    if (idx < 0 || idx >= xhci_dev_total) return -1;
 
     uint8_t *buf = (uint8_t *)kmalloc(64);
     if (!buf) return -1;
 
-    int ret = xhci_control_transfer(slot,
-        0x80, 6, 0x0100, 0, buf, 18);
+    int ret = xhci_dev_control_transfer(idx, 0x80, 6, 0x0100, 0, buf, 18);
     if (ret >= 0) memcpy(desc, buf, 18);
     kfree(buf);
     return ret;
@@ -865,12 +1013,12 @@ int xhci_get_device_desc(int idx, usb_device_desc_t *desc) {
 static xhci_trb_t *xhci_get_or_create_ep_ring(uint32_t slot_id, uint32_t ep_id,
                                               uint32_t ep_type, uint32_t max_packet_size,
                                               uint32_t interval, uint64_t *out_phys) {
-    if (slot_id <= 0 || slot_id > xhci.max_slots) return NULL;
+    if (slot_id <= 0 || slot_id > hc->max_slots) return NULL;
     if (ep_id <= 0 || ep_id >= XHCI_MAX_EP) return NULL;
 
-    if (xhci.ep_rings[slot_id][ep_id]) {
-        if (out_phys) *out_phys = xhci.ep_rings_phys[slot_id][ep_id];
-        return (xhci_trb_t *)xhci.ep_rings[slot_id][ep_id];
+    if (hc->ep_rings[slot_id][ep_id]) {
+        if (out_phys) *out_phys = hc->ep_rings_phys[slot_id][ep_id];
+        return (xhci_trb_t *)hc->ep_rings[slot_id][ep_id];
     }
 
     uint64_t ring_phys = 0;
@@ -893,11 +1041,11 @@ static xhci_trb_t *xhci_get_or_create_ep_ring(uint32_t slot_id, uint32_t ep_id,
         }
     }
 
-    xhci.ep_rings[slot_id][ep_id] = ring;
-    xhci.ep_rings_phys[slot_id][ep_id] = ring_phys;
-    xhci.ep_ring_idx[slot_id][ep_id] = 0;
-    xhci.ep_ring_cycle[slot_id][ep_id] = 1;
-    xhci.ep_configured[slot_id][ep_id] = 1;
+    hc->ep_rings[slot_id][ep_id] = ring;
+    hc->ep_rings_phys[slot_id][ep_id] = ring_phys;
+    hc->ep_ring_idx[slot_id][ep_id] = 0;
+    hc->ep_ring_cycle[slot_id][ep_id] = 1;
+    hc->ep_configured[slot_id][ep_id] = 1;
 
     // For Interrupt IN endpoint, allocate persistent buffer and enqueue first TRB
     if (ep_id != 1 && ep_type == EP_CTX_INTERRUPT_IN) {
@@ -906,10 +1054,10 @@ static xhci_trb_t *xhci_get_or_create_ep_ring(uint32_t slot_id, uint32_t ep_id,
         uint8_t *buf = (uint8_t *)xhci_alloc_aligned(max_packet_size, &buf_phys);
         if (buf) {
             memset(buf, 0, max_packet_size);
-            xhci.ep_data_buf[slot_id][ep_id] = buf;
-            xhci.ep_data_buf_phys[slot_id][ep_id] = buf_phys;
-            xhci.ep_data_buf_len[slot_id][ep_id] = max_packet_size;
-            xhci.ep_has_data[slot_id][ep_id] = 0;
+            hc->ep_data_buf[slot_id][ep_id] = buf;
+            hc->ep_data_buf_phys[slot_id][ep_id] = buf_phys;
+            hc->ep_data_buf_len[slot_id][ep_id] = max_packet_size;
+            hc->ep_has_data[slot_id][ep_id] = 0;
             
             // Post first TRB pointing to this buffer
             uint32_t control = (TRB_NORMAL << 10) | TRB_IOC | TRB_ISP;
@@ -926,10 +1074,10 @@ static xhci_trb_t *xhci_get_or_create_ep_ring(uint32_t slot_id, uint32_t ep_id,
 
 static void xhci_post_transfer_trb(uint32_t slot_id, uint32_t ep_id,
                                     uint64_t param, uint32_t status, uint32_t control) {
-    xhci_trb_t *ring = (xhci_trb_t *)xhci.ep_rings[slot_id][ep_id];
-    uint64_t ring_phys = xhci.ep_rings_phys[slot_id][ep_id];
-    uint32_t idx = xhci.ep_ring_idx[slot_id][ep_id];
-    uint32_t cycle = xhci.ep_ring_cycle[slot_id][ep_id];
+    xhci_trb_t *ring = (xhci_trb_t *)hc->ep_rings[slot_id][ep_id];
+    uint64_t ring_phys = hc->ep_rings_phys[slot_id][ep_id];
+    uint32_t idx = hc->ep_ring_idx[slot_id][ep_id];
+    uint32_t cycle = hc->ep_ring_cycle[slot_id][ep_id];
 
     // If the next slot is the Link TRB, execute toggle cycle and wrap around
     if (idx == XHCI_TRB_RING_SIZE - 1) {
@@ -943,16 +1091,16 @@ static void xhci_post_transfer_trb(uint32_t slot_id, uint32_t ep_id,
     xhci_build_trb(&ring[idx], param, status, final_ctrl);
 
     idx++;
-    xhci.ep_ring_idx[slot_id][ep_id] = idx;
-    xhci.ep_ring_cycle[slot_id][ep_id] = cycle;
+    hc->ep_ring_idx[slot_id][ep_id] = idx;
+    hc->ep_ring_cycle[slot_id][ep_id] = cycle;
 }
 
 int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           uint8_t bRequest, uint16_t wValue,
                           uint16_t wIndex, void *data, uint16_t wLength) {
-    if (xhci.initialized != XHCI_STATE_READY || slot_id <= 0 ||
-        (uint32_t)slot_id > xhci.max_slots) return -1;
-    if (!xhci.slot_enabled[slot_id]) return -1;
+    if (hc->initialized != XHCI_STATE_READY || slot_id <= 0 ||
+        (uint32_t)slot_id > hc->max_slots) return -1;
+    if (!hc->slot_enabled[slot_id]) return -1;
 
     uint64_t ring_phys;
     xhci_trb_t *ring = xhci_get_or_create_ep_ring((uint32_t)slot_id, 1, EP_CTX_CONTROL, 8, 0, &ring_phys);
@@ -978,7 +1126,7 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
                           ((uint64_t)wLength << 48);
 
     // Clear completion flag
-    xhci.ep_has_data[slot_id][1] = 0;
+    hc->ep_has_data[slot_id][1] = 0;
 
     // We post Setup Stage TRB
     xhci_post_transfer_trb((uint32_t)slot_id, 1, setup_word, 8,
@@ -1001,10 +1149,10 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
     int ret_val = -1;
     hw_deadline_t deadline = hw_deadline_start();
     for (;;) {
-        xhci_poll();
-        uint32_t code = xhci.ep_has_data[slot_id][1];
+        xhci_poll_hc();
+        uint32_t code = hc->ep_has_data[slot_id][1];
         if (code != 0) {
-            xhci.ep_has_data[slot_id][1] = 0;
+            hc->ep_has_data[slot_id][1] = 0;
             if (code == XHCI_COMP_SUCCESS ||
                 code == XHCI_COMP_SHORT_PACKET) {
                 if (data_buf && dir_in) memcpy(data, data_buf, wLength);
@@ -1025,10 +1173,10 @@ int xhci_control_transfer(int slot_id, uint8_t bmRequestType,
 
 int xhci_bulk_transfer_packet(int slot_id, int ep_addr, void *data,
                               uint32_t len, uint32_t max_packet) {
-    if (xhci.initialized != XHCI_STATE_READY || !data || !len) return -1;
+    if (hc->initialized != XHCI_STATE_READY || !data || !len) return -1;
     if (len > XHCI_TRB_MAX_BUFFER) return -1;
-    if (slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
-    if (!xhci.slot_enabled[slot_id]) return -1;
+    if (slot_id <= 0 || (uint32_t)slot_id > hc->max_slots) return -1;
+    if (!hc->slot_enabled[slot_id]) return -1;
     if (!max_packet || max_packet > 1024U) return -1;
 
     int ep_num = ep_addr & 0x0F;
@@ -1058,7 +1206,7 @@ int xhci_bulk_transfer_packet(int slot_id, int ep_addr, void *data,
     }
 
     // Clear completion flag
-    xhci.ep_has_data[slot_id][ep_id] = 0;
+    hc->ep_has_data[slot_id][ep_id] = 0;
 
     /* Build and post a Normal TRB pointing to the data buffer */
     uint32_t control = (TRB_NORMAL << 10) | TRB_IOC | TRB_ISP;
@@ -1070,13 +1218,13 @@ int xhci_bulk_transfer_packet(int slot_id, int ep_addr, void *data,
     int ret_val = -1;
     hw_deadline_t deadline = hw_deadline_start();
     for (;;) {
-        xhci_poll();
-        uint32_t code = xhci.ep_has_data[slot_id][ep_id];
+        xhci_poll_hc();
+        uint32_t code = hc->ep_has_data[slot_id][ep_id];
         if (code != 0) {
-            xhci.ep_has_data[slot_id][ep_id] = 0;
+            hc->ep_has_data[slot_id][ep_id] = 0;
             if (code == XHCI_COMP_SUCCESS ||
                 code == XHCI_COMP_SHORT_PACKET) {
-                uint32_t residue = xhci.ep_transfer_residue[slot_id][ep_id];
+                uint32_t residue = hc->ep_transfer_residue[slot_id][ep_id];
                 uint32_t actual = residue <= len ? len - residue : 0;
                 if (is_in) {
                     memcpy(data, data_buf, actual);
@@ -1101,9 +1249,9 @@ int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len) {
 }
 
 int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len, uint32_t interval) {
-    if (xhci.initialized != XHCI_STATE_READY || !data || !len) return -1;
-    if (slot_id <= 0 || (uint32_t)slot_id > xhci.max_slots) return -1;
-    if (!xhci.slot_enabled[slot_id]) return -1;
+    if (hc->initialized != XHCI_STATE_READY || !data || !len) return -1;
+    if (slot_id <= 0 || (uint32_t)slot_id > hc->max_slots) return -1;
+    if (!hc->slot_enabled[slot_id]) return -1;
 
     int ep_num = ep_addr & 0x0F;
     int is_in = (ep_addr & 0x80) ? 1 : 0;
@@ -1116,20 +1264,20 @@ int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len, 
     xhci_trb_t *ring = xhci_get_or_create_ep_ring((uint32_t)slot_id, ep_id, EP_CTX_INTERRUPT_IN, max_packet, interval, &ring_phys);
     if (!ring) return -1;
 
-    // Run xhci_poll to pull any new interrupt event
-    xhci_poll();
+    // 只推进当前控制器：这会是一台设备的一次中断 IN 传输
+    xhci_poll_hc();
 
     // Check if new data has arrived
-    uint32_t code = xhci.ep_has_data[slot_id][ep_id];
+    uint32_t code = hc->ep_has_data[slot_id][ep_id];
     if (code != 0) {
-        xhci.ep_has_data[slot_id][ep_id] = 0;
+        hc->ep_has_data[slot_id][ep_id] = 0;
         if (code == XHCI_COMP_SUCCESS ||
             code == XHCI_COMP_SHORT_PACKET) {
-            uint32_t residue = xhci.ep_transfer_residue[slot_id][ep_id];
+            uint32_t residue = hc->ep_transfer_residue[slot_id][ep_id];
             uint32_t copy_len = residue <= max_packet
                               ? max_packet - residue : 0;
             if (copy_len > len) copy_len = len;
-            memcpy(data, xhci.ep_data_buf[slot_id][ep_id], copy_len);
+            memcpy(data, hc->ep_data_buf[slot_id][ep_id], copy_len);
             return (int)copy_len;
         }
         return -(int)code;

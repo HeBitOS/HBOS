@@ -16,16 +16,16 @@
  * fat32_write_dir_entry，不存在"两边同时都要读"的情况）。 */
 static uint8_t g_fat32_cluster_buf[32768] __attribute__((aligned(2)));
 
+/**
+ * @brief 读一个扇区（薄封装，仅用于给返回 0/1 的老式调用点保留原语义）。
+ *
+ * 批量路径（整簇读写、整段目录扫描）一律直接用 block_read_sectors /
+ * block_write_sectors，不要再退回逐扇区命令。
+ */
 static int fat32_read_sector(fat32_fs_t *fs, uint32_t lba, uint8_t *buf)
 {
     (void)fs;
     return block_read_sector(lba, buf) == 0 ? 1 : 0;
-}
-
-static int fat32_write_sector(fat32_fs_t *fs, uint32_t lba, const uint8_t *buf)
-{
-    (void)fs;
-    return block_write_sector(lba, buf) == 0 ? 1 : 0;
 }
 
 /* fatgen103 要求 FAT32 卷至少 65525 个数据簇——不足时 Windows 会把卷当
@@ -255,6 +255,14 @@ int fat32_mount(uint32_t partition_lba, fat32_fs_t *fs)
     return 0;
 }
 
+/**
+ * @brief 读入整簇数据（簇内所有扇区）。
+ *
+ * 一次 `block_read_sectors` 取代原来的"逐扇区 512 字节命令"循环：扇区在卷上
+ * 连续，块层能把 AHCI 合成单条 DMA 命令、把 USB 合成单条 SCSI 命令，命令数从
+ * sectors_per_cluster（最大 64）降到 1。语义不变——读的是同一段 LBA 区间，
+ * 失败仍然返回 -1，由调用者按"部分读"处理。
+ */
 int fat32_read_cluster(fat32_fs_t *fs, uint32_t cluster, uint8_t *buf)
 {
     if (!fs || !fs->mounted || !buf) return -1;
@@ -263,13 +271,17 @@ int fat32_read_cluster(fat32_fs_t *fs, uint32_t cluster, uint8_t *buf)
     uint32_t first_sector = fs->data_start_lba +
                             (cluster - 2) * fs->bpb.sectors_per_cluster;
 
-    for (uint32_t i = 0; i < fs->bpb.sectors_per_cluster; i++) {
-        if (!fat32_read_sector(fs, first_sector + i, buf + i * BLOCK_SECTOR_SIZE))
-            return -1;
-    }
-    return 0;
+    return block_read_sectors(first_sector, buf, fs->bpb.sectors_per_cluster) == 0
+               ? 0 : -1;
 }
 
+/**
+ * @brief 写出整簇数据（簇内所有扇区）。
+ *
+ * 与 fat32_read_cluster 对称：合并成一条块层命令。写失败时不再尝试后续扇区，
+ * 与旧实现"遇错即返回 -1"的行为一致（簇内是否部分写入由块层决定，文件系统
+ * 事后依靠 fs_sync/重挂载校验）。
+ */
 static int fat32_write_cluster(fat32_fs_t *fs, uint32_t cluster, const uint8_t *buf)
 {
     if (!fs || !fs->mounted || !buf) return -1;
@@ -278,11 +290,8 @@ static int fat32_write_cluster(fat32_fs_t *fs, uint32_t cluster, const uint8_t *
     uint32_t first_sector = fs->data_start_lba +
                             (cluster - 2) * fs->bpb.sectors_per_cluster;
 
-    for (uint32_t i = 0; i < fs->bpb.sectors_per_cluster; i++) {
-        if (!fat32_write_sector(fs, first_sector + i, buf + i * BLOCK_SECTOR_SIZE))
-            return -1;
-    }
-    return 0;
+    return block_write_sectors(first_sector, buf, fs->bpb.sectors_per_cluster) == 0
+               ? 0 : -1;
 }
 
 int fat32_next_cluster(fat32_fs_t *fs, uint32_t cluster)

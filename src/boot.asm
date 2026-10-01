@@ -147,8 +147,11 @@ _start:
     jmp gdt64.code:long_mode
 
 .no_long:
-    hlt
-    jmp $                                ; CPU 不支持 long mode — 死循环
+    ;对于不支持 long mode的电脑直接关机
+    MOV AX, 2001H ; 设置AX寄存器的值
+    MOV DX, 1004H ; 设置DX寄存器的值
+    OUT DX, AX ; 向端口1004H写入2001H
+
 
 ; ---- 64 位 long mode 入口 ----
 bits 64

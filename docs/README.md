@@ -14,6 +14,10 @@
   已实现接口和不修改上游 KDE 的分阶段路线。
 - **[HIVE 浏览器与 Bilibili 兼容升级方案](../HIVE/docs/BROWSER_BILIBILI_UPGRADE.md)**
   —— 当前 HTML/CSS/JS 能力审计、Bilibili 现网技术栈抽样和可验收的升级门槛。
+- **[CODE_STYLE.md](CODE_STYLE.md)** —— 命名、注释、错误处理与性能纪律
+  （含栈预算、字级例程、设备命令批量化等硬性约定）。
+- **[PERFORMANCE.md](PERFORMANCE.md)** —— 性能工作记录：冷启动基准的测量方法、
+  已实施优化及其验证证据、刻意不改的取舍，以及分子系统审计出的待办清单。
 
 ## 重新生成 PDF
 

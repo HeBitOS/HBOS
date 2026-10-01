@@ -8,6 +8,10 @@
  * POSIX_MAX_FDS (currently 128), without messages, copies, or a helper process.
  */
 
+ /** 
+  * 一个linux ABI的兼容层，负责转译程序，把linux程序的请求翻译成 HBOS 的进程、FD、网络、内存、任务和 IPC 操作。
+  */
+
 #include "linux_compat.h"
 
 #include "core/heap.h"
@@ -21,39 +25,59 @@
 #include "string.h"
 #include "unistd.h"
 
-#define LINUX_EVENT_SLOTS POSIX_MAX_FDS
-#define LINUX_EPOLL_SLOTS 8
-#define LINUX_EPOLL_WATCHES POSIX_MAX_FDS
-#define LINUX_GRND_NONBLOCK 0x0001
+#define LINUX_EVENT_SLOTS POSIX_MAX_FDS //最多同时管理多少个 eventfd 对象
+#define LINUX_EPOLL_SLOTS 8    //最多 8 个 epoll 实例
+#define LINUX_EPOLL_WATCHES POSIX_MAX_FDS  //一个 epoll 能管理多少个监听项
+
+#define LINUX_GRND_NONBLOCK 0x0001  
 #define LINUX_GRND_RANDOM   0x0002
-#define LINUX_FUTEX_WAIT 0
-#define LINUX_FUTEX_WAKE 1
-#define LINUX_FUTEX_WAIT_BITSET 9
-#define LINUX_FUTEX_WAKE_BITSET 10
-#define LINUX_FUTEX_CLOCK_REALTIME 256
+//getrandom() 的选项
+
+#define LINUX_FUTEX_WAIT 0 
+#define LINUX_FUTEX_WAKE 1 
+#define LINUX_FUTEX_WAIT_BITSET 9 
+#define LINUX_FUTEX_WAKE_BITSET 10 
+#define LINUX_FUTEX_CLOCK_REALTIME 256 
 #define LINUX_FUTEX_COMMAND_MASK 0x7f
+//Linux futex 操作编号
+
 #define LINUX_FUTEX_SLOTS MAX_TASKS
 #define LINUX_FUTEX_BITSET_MATCH_ANY UINT32_MAX
+//futex 相关槽位数量上限
+
 #define LINUX_AF_UNIX 1
+//Linux Unix Domain Socket 的地址族编号
+
+
 #define LINUX_SOCK_STREAM 1
 #define LINUX_SOCK_TYPE_MASK 0xf
 #define LINUX_SOCK_NONBLOCK 0x800
 #define LINUX_SOCK_CLOEXEC 0x80000
+//socket 类型、非阻塞、CLOEXEC 等标志
+
 #define LINUX_MSG_DONTWAIT 0x40
+
 #define UNIX_SOCKET_SLOTS 16
 #define UNIX_SOCKET_BUFFER 4096
 #define UNIX_SOCKET_BACKLOG 8
+//HBOS 这套 Unix socket 实现自己的资源上限
+
 #define UNIX_PATH_MAX 108
 #define UNIX_RIGHTS_QUEUE 4
 #define UNIX_RIGHTS_MAX_FDS 4
+
 #define LINUX_MEMFD_SLOTS 8
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
 #define LINUX_MFD_CLOEXEC 0x0001
 #define LINUX_MFD_ALLOW_SEALING 0x0002
+//Linux memfd_create() 兼容
+
 #define LINUX_INOTIFY_SLOTS 8
 #define LINUX_INOTIFY_WATCHES 16
 #define LINUX_INOTIFY_EVENTS 32
 #define LINUX_INOTIFY_NAME_MAX 256
+
+
 #define LINUX_IN_NONBLOCK 0x00000800
 #define LINUX_IN_CLOEXEC  0x00080000
 #define LINUX_IN_ONLYDIR  0x01000000U
@@ -67,6 +91,7 @@
                             LINUX_IN_EXCL_UNLINK | LINUX_IN_MASK_CREATE | \
                             LINUX_IN_MASK_ADD | LINUX_IN_ONESHOT)
 
+//Linux inotify 文件监控兼容
 typedef struct {
     fd_entry_t *entries;
     uint8_t count;

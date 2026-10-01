@@ -311,22 +311,29 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
 }
 
 
+/**
+ * @brief USB 后端取一次鼠标事件
+ *
+ * 注意 `hid_mouse_report_t` 里已经是**解好的状态**（usb_hid.c 按报告描述符
+ * 的字段布局解位），这里的 dx/dy/dz 可能是 8/12/16 位，不再假定 int8_t；
+ * 位移依旧按 PS/2 后端同样的约定累加到 mouse_event_t。
+ */
 static int usb_mouse_poll(mouse_event_t *ev) {
     hid_mouse_report_t report;
     if (usb_mouse_get_report(&report) < 0) return 0;
-    if (report.x == 0 && report.y == 0 && report.wheel == 0 &&
+    if (report.dx == 0 && report.dy == 0 && report.dz == 0 &&
         report.buttons == 0) return 0;
 
-    static int last_usb_buttons = 0;
+    static uint32_t last_usb_buttons = 0;
     if (report.buttons != last_usb_buttons) {
         kb_clear_modifiers();
         last_usb_buttons = report.buttons;
     }
 
-    ev->dx = report.x;
-    ev->dy = report.y;
-    ev->dz = report.wheel;
-    ev->buttons = report.buttons & (MOUSE_LEFT | MOUSE_RIGHT | MOUSE_MIDDLE);
+    ev->dx = report.dx;
+    ev->dy = report.dy;
+    ev->dz = report.dz;
+    ev->buttons = (int)(report.buttons & (MOUSE_LEFT | MOUSE_RIGHT | MOUSE_MIDDLE));
     return 1;
 }
 

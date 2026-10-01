@@ -2,8 +2,20 @@
  * @file heap.c
  * @brief 可回收、可合并的内核堆
  *
- * 使用静态 BSS 池和 first-fit free list。普通分配至少 16 字节对齐；释放
- * 时合并相邻空闲块，避免 USB、文件和网络路径的短生命周期缓冲耗尽堆。
+ * 结构：静态 BSS 池（HEAP_POOL_SIZE）+ 双向空闲链表 + first-fit + 相邻空闲块
+ * 合并。普通分配至少 16 字节对齐；释放时与后继、前驱合并，避免 USB、文件和
+ * 网络路径的短生命周期缓冲把堆切成碎片而耗尽。
+ *
+ * 复杂度与取舍（改这里之前先读）
+ * ──────────────────────────────
+ *  - kmalloc 是 O(块数) 的 first-fit 顺序扫描。块数不会无限增长：空闲块在
+ *    kfree 时就地合并，链表长度上界是"同时在用的分配数"，而不是分配次数。
+ *  - 没有采用 next-fit 游标（rover）：那会把"总是挑最低地址的足够大空闲块"
+ *    换成"从上次位置继续找"，在 2 MiB 的小池子里更容易让一个小分配吃掉一块
+ *    大空闲区，从而让后续大分配失败。这里用"多花几次指针追链"换"内存利用率
+ *    可预期"，是刻意的取舍。
+ *  - 零填充与扩容拷贝走 lib/string.c 的字级 memset/memcpy：内核禁用了 SSE/
+ *    MMX（中断路径不保存向量寄存器状态），字级实现是这里能拿到的最快路径。
  */
 
 #include <stdbool.h>
@@ -11,6 +23,8 @@
 #include <stdint.h>
 
 #include "heap.h"
+
+#include "../string.h"   /* 字级 memset/memcpy：见文件头"复杂度与取舍" */
 
 #define HEAP_POOL_SIZE   (2U * 1024U * 1024U)
 #define HEAP_ALIGN       16U
@@ -139,14 +153,20 @@ void *kmalloc(size_t size) {
     return ptr;
 }
 
+/**
+ * @brief 分配 count*size 字节并清零（calloc 语义）。
+ *
+ * 先做乘法溢出检查，再 kmalloc，最后用字级 memset 清零：清零走 lib/string.c
+ * 的 8 字节批写，比逐字节循环快约 4~8 倍（内核禁用 SSE，字级已是上限）。
+ * mbedtls/lwIP 的会话缓冲、POSIX 的 fd 表都从这里落地，属于热路径。
+ */
 void *kcalloc(size_t count, size_t size) {
     if (size && count > SIZE_MAX / size) return NULL;
     size_t total = count * size;
     void *ptr = kmalloc(total);
     if (!ptr) return NULL;
 
-    uint8_t *bytes = (uint8_t *)ptr;
-    for (size_t i = 0; i < total; i++) bytes[i] = 0;
+    memset(ptr, 0, total);
     return ptr;
 }
 
@@ -169,6 +189,12 @@ void kfree(void *ptr) {
     heap_unlock_irqrestore(flags);
 }
 
+/**
+ * @brief 调整已分配块的大小（原地缩容 / 扩容时搬迁）。
+ *
+ * 原块可用空间够用就直接返回同一指针（O(1)）；不够则新分配一块、拷贝
+ * min(旧可用, 新请求) 字节、释放旧块。拷贝走字级 memcpy。
+ */
 void *krealloc(void *ptr, size_t new_size) {
     if (!ptr) return kmalloc(new_size);
     if (!new_size) {
@@ -192,9 +218,7 @@ void *krealloc(void *ptr, size_t new_size) {
 
     void *replacement = kmalloc(new_size);
     if (!replacement) return NULL;
-    uint8_t *src = (uint8_t *)ptr;
-    uint8_t *dst = (uint8_t *)replacement;
-    for (size_t i = 0; i < usable; i++) dst[i] = src[i];
+    memcpy(replacement, ptr, usable);
     kfree(ptr);
     return replacement;
 }

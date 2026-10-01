@@ -7,6 +7,10 @@
 #define XHCI_MAX_SLOTS      64
 #define XHCI_MAX_PORTS      32
 #define XHCI_MAX_EP          32
+/** @brief 同时支持的 xHCI 控制器数量（PCH 一个 + 板载第三方一个 + 余量） */
+#define XHCI_MAX_CONTROLLERS  4
+/** @brief 跨控制器的全局设备表容量 */
+#define XHCI_MAX_DEVICES     32
 #define XHCI_TRB_RING_SIZE   256
 #define XHCI_EVENT_RING_SIZE 256
 #define XHCI_CMD_RING_SIZE   256
@@ -150,5 +154,18 @@ int xhci_bulk_transfer(int slot_id, int ep_addr, void *data, uint32_t len);
 int xhci_bulk_transfer_packet(int slot_id, int ep_addr, void *data,
                               uint32_t len, uint32_t max_packet);
 int xhci_interrupt_transfer(int slot_id, int ep_addr, void *data, uint32_t len, uint32_t interval);
+
+/*
+ * 设备下标版接口（推荐）：下标是跨控制器的全局编号，内部换算成
+ * (控制器, slot)。上层（HID/MSC）应使用这一组，避免依赖"当前控制器"。
+ */
+int xhci_dev_control_transfer(int dev_idx, uint8_t bmRequestType,
+                              uint8_t bRequest, uint16_t wValue,
+                              uint16_t wIndex, void *data, uint16_t wLength);
+int xhci_dev_interrupt_transfer(int dev_idx, int ep_addr, void *data,
+                                uint32_t len, uint32_t interval);
+int xhci_dev_bulk_transfer(int dev_idx, int ep_addr, void *data, uint32_t len);
+int xhci_dev_bulk_transfer_packet(int dev_idx, int ep_addr, void *data,
+                                  uint32_t len, uint32_t max_packet);
 
 #endif

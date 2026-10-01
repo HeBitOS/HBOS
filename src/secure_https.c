@@ -42,10 +42,26 @@ static int host_is_ipv6(const char *host) {
 static int transport_connect(secure_transport_t *transport,
                              const char *host, uint16_t port) {
     memset(transport, 0, sizeof(*transport));
+    /* 顺序很重要：先认字面量 IPv4/IPv6，再做 DNS，最后才轮到 AAAA 尝鲜。
+     *
+     * 旧顺序是"先发 AAAA 查询，不管主机名长什么样"，于是连 93.184.216.34 这
+     * 种字面量地址也要先跑一次 IPv6 DNS；在只有 IPv4 解析器的网络里，
+     * net_dns_query 会重试 3×1000ms，等于每次 HTTPS 请求白白多等最多 3 秒，
+     * 之后才开始本该立刻进行的 IPv4 连接。（host_is_ipv6 / net_parse_ipv4
+     * 都是纯字符串判断，无网络开销。） */
     if (host_is_ipv6(host)) {
         transport->kind = SECURE_TRANSPORT_IPV6;
         int status = net6_tcp_connect(host, port,
                                       &transport->connection.ipv6, 10000);
+        transport->active = status == 0;
+        return status;
+    }
+
+    uint32_t literal = net_parse_ipv4(host);
+    if (literal) {
+        transport->kind = SECURE_TRANSPORT_IPV4;
+        int status =
+            net_tcp_connect(literal, port, &transport->connection.ipv4);
         transport->active = status == 0;
         return status;
     }
@@ -62,8 +78,8 @@ static int transport_connect(secure_transport_t *transport,
         }
     }
 
-    uint32_t address = net_parse_ipv4(host);
-    if (!address && net_dns_resolve(host, &address) < 0) return -1;
+    uint32_t address = 0;
+    if (net_dns_resolve(host, &address) < 0) return -1;
     transport->kind = SECURE_TRANSPORT_IPV4;
     int status =
         net_tcp_connect(address, port, &transport->connection.ipv4);

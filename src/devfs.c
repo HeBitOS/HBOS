@@ -35,11 +35,16 @@ static int devfs_node_count;
 /** 全局系统启动 TSC 计数器 */
 static uint64_t boot_tsc;
 
+/** 读取64位CPU的时间戳计数器
+ * return: 返回时间戳，uint64_t格式
+ * 可用于测量两个代码点之间经过了多少 CPU 时间戳计数
+ */
 static inline uint64_t rdtsc(void) {
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
+
 
 static void set_name(vfs_node_t *n, const char *s) {
     int i = 0;

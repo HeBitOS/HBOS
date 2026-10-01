@@ -1,0 +1,188 @@
+# HBOS 性能工作记录
+
+> 本文记录"性能优化"这件事在 HBOS 里**怎么量、改了什么、为什么不改什么**，
+> 以及还没做的高价值项。目的有两个：让结论可复核，让后来者不必重新做一遍
+> 分析。配套的代码规范见 [`CODE_STYLE.md`](CODE_STYLE.md)。
+
+## 1. 怎么量
+
+| 目标 | 工具 | 说明 |
+|---|---|---|
+| 冷启动时间 | `make bench-boot`（`scripts/bench_boot.sh` + `boot_time.py`） | QEMU 冷启动，"固件+引导器"与"内核阶段"分开计时，取中位数 |
+| 磁盘命令数 / 逐字节语义 | `tests/host/`（宿主机上编译真实 `fat32.c`/`ext2.c`，块设备换文件替身） | 改动文件系统后比对镜像字节与命令计数 |
+| 解压正确性 | `tests/host` 风格的一次性差分（本文件 §4 记录了做法与向量） | 用 Python `zlib` 生成真值，逐字节比对 |
+| 端到端功能 | `make smoke`、`make fat32-smoke`、`make nogui-smoke` | 启动、DHCP/ping、FAT32 持久化、no-GUI 清单 |
+
+**启动时间为什么必须拆两段**：串口第一个字节并不等于内核开始执行——UEFI 下
+OVMF 自己会往串口写控制台输出（`BdsDxe: ...`）。所以 `boot_time.py` 改用
+内核横幅 `===== HBOS ... Starting =====`（`kmain` 的第一行输出）作为"引导器
+交给内核"的时刻，否则会把 1.6 秒固件时间算进内核阶段。
+
+## 2. 启动时间：7.1s → 3.0s
+
+实测环境：QEMU 512M，`-cdrom`，宿主为普通 x86_64 开发机。
+
+| 配置 | BIOS ISO 冷启动 | 说明 |
+|---|---|---|
+| 改动前（GRUB `timeout=5`） | **7.11 s** | 其中 5 s 是纯菜单倒计时 |
+| 改动后（`BOOT_MENU_TIMEOUT=1`，默认） | **3.02 s** | 固件+引导器 2.98 s，内核阶段 **0.042 s** |
+| `make BOOT_MENU_TIMEOUT=0` | **1.86 s** | 自动化/冒烟测试推荐 |
+
+UEFI ISO：**3.92 s**（OVMF 固件 + Limine 3.66 s，内核阶段 0.26 s）。
+
+改动内容：把开机菜单等待时间变成单一事实源 `BOOT_MENU_TIMEOUT`，同时作用于
+GRUB（BIOS ISO 与硬盘镜像的 BIOS 路径）和 Limine（UEFI），生成物按取值命名，
+改这个变量会自动重生成配置并重建 ISO/镜像。
+
+**为什么默认是 1 而不是 0**：`timeout=0` 时会直接进内核，菜单唤不回来——
+实测用 QEMU `sendkey` 连续按住 Shift 3.5 s，内核仍照常启动（但同一手法发方向
+键可以停住 `timeout=1` 的倒计时，说明按键注入本身有效）。也就是说 0 会牺牲
+"gfxterm 失败时手动选 text fallback"这条恢复路径。`<1>` 秒既保住菜单可见可
+选，又拿回 4 秒。
+
+**剩余的大头（未做，属于可选优化）**：内核镜像 31 MB 的 rodata 里，GUI 字形
+图集 20.2 MB、壁纸 5.8 MB、HAX blob 2.9 MB 是主角。实测 2 MB 内核 0.50 s、
+31 MB 内核 1.68 s（`timeout=0`），即**每 29 MB 约 1.18 s ≈ 25 MB/s** 的引导器
+加载成本。压缩这些 blob（如 4-bit coverage、按行游程、整块 DEFLATE）能再拿回
+约 1 秒，但会改 `GFN2` 字形格式，而该格式在 HIVE 子模块里有一份同步副本
+（`HIVE/src/graphics/gui_font.c`），需要跨仓同步，风险与收益需要在 HIVE 侧
+一起评估。
+
+另有一处内核阶段差异：UEFI 下内核阶段 0.26 s，BIOS 下 0.04 s（同样跑 PNG 自
+检与三个 seed）。差额出现在 XHCI 探测与自检之间，未定位；因为只占 3.9 s 中的
+0.22 s，暂未追。
+
+## 3. 已实施的算法与常数优化
+
+### 3.1 文件复制：256 B 块 → 64 KiB 块（`src/fs.c: fs_copy_file`）
+
+底层每次 `read`/`write` 的**固定开销**与字节数无关：FAT32 每次写要重解析父
+目录路径、重扫目录项、重数簇链；ext2 每次读写要重读磁盘 inode；HBFS 文件长度
+每增长一次就同步整张 16 扇区文件表。原来的 256 B 小块把固定开销按每 MiB 放大
+4096 倍。现改为 `kmalloc(64 KiB)` 搬运（堆不足时退回栈上 512 B），固定开销摊薄
+256 倍；缓冲区**不放栈**（任务栈只有 8 KiB），也**不用静态缓冲**（块设备路径
+将来可能引入让出点）。
+
+**验证**：guest 内 `wget` 落盘 42600 字节文本，再 `cp s.txt m.txt`、
+`cp m.txt d.txt` 连做两次，`stat d.txt` 仍为 `size: 42600 bytes`。
+
+### 3.2 FAT32 整簇读写合并成一条块命令（`src/fat32.c`）
+
+`fat32_read_cluster` / `fat32_write_cluster` 从"每扇区一次 `block_read_sector`"
+（最大 64 条命令/簇）改成一次 `block_read_sectors` / `block_write_sectors`：
+AHCI 后端合成单条 DMA、USB 合成单条 SCSI。读的是同一段 LBA、写的是同一批扇区
+且顺序不变，磁盘镜像逐字节不变。顺带删掉了因此变成死代码的 `fat32_write_sector`。
+
+### 3.3 INFLATE：字级回指拷贝 + 延迟取模 + 固定霍夫曼表缓存（`src/inflate.c`）
+
+- LZ77 回指拷贝：`distance >= 8` 时源区间整体落在目标区间之前，可整字搬运；
+  `distance == 1` 是单字节游程，用广播字一次写 8 字节；`2..7` 仍逐字节以保证
+  重叠语义正确。
+- 非压缩块整段拷贝改用 `memcpy`（源与目标永不重叠）。
+- adler32 改为 zlib 式延迟取模（每 5552 字节一次除法），取代每输出字节两次
+  `% 65521`。
+- 固定霍夫曼表只构建一次；不再每个 `type==1` 块重建 288+30 项规范表。
+- **验证**：宿主机编译真实 `src/inflate.c` + 用 Python `zlib` 生成 56 个向量
+  （level 0/1/6/9 × {空、单字节、70000 字节单字节游程、distance 3/5/7/8/9、
+  长文本、随机、混合、全零、类 PNG}），输出**逐字节一致**；破坏尾校验和的流
+  仍被拒绝。内核侧另由 `[SELFTEST] PNG decode: PASS` 覆盖。
+
+### 3.4 校验和：16 位逐对 → 8 字节字（`src/net.c`）
+
+TCP/UDP/IP 的反码和改为一次加 4 个 16 位 lane，并在累加器过半时折叠，避免
+64 位溢出（`2^64 ≡ 1 (mod 65535)`，溢出会等于多加 1）。**验证**：宿主机对新
+旧实现比对长度 0..70000、偏移 0..7 的全部组合，结果完全相同（另对 30 万字节
+做稀疏抽样）。
+
+### 3.5 E1000 轮询不再每次自旋读 MMIO（`src/net.c`）
+
+`reg_read(E1000_RDT)` 原本在每次自旋都做一次（MMIO 窗口是 `VMM_CD` 映射，
+每次都是真实 PCIe/VM-exit 事务），而 RDT 是软件私有寄存器、硬件只读，值恒等于
+驱动自己上次写入的值。改为内存镜像 `rx_tail`（初始化与消费时同步更新）。
+
+### 3.6 TCP 接收缓冲改为环形（`src/net.c`）
+
+旧实现每 `recv` 一次就把剩余字节 `memmove` 到缓冲头部：消费者小块读取时
+（mbedtls 先读 5 字节 TLS 记录头、用户态 `recv` 按用户 buffer 长度读），一个
+8 KiB 窗口内的搬移量是 O(窗口²/块)。改为环形后入队写
+`(rx_head+rx_len)%cap`、出队从 `rx_head` 起，两端最多各两段 `memcpy`，搬移量
+变成 O(交付字节数)。可用空间仍是 `cap - rx_len`，ACK/窗口/丢弃策略不变。
+**验证**：QEMU 内 `wget` 从宿主 HTTP 服务拉 42600 字节，串口回显与源文件
+逐字节一致；与未改动的 `net.c`（`git checkout` 后重建）对照，同一测试结果相同。
+
+### 3.7 其它
+
+- IPv6 等待循环补 `task_yield()`（`src/net6.c`）：原来 `connect/send/recv` 的
+  等待会把一个核占满整个超时窗口，GUI/Shell 无法推进；IPv4 路径本来就是这么
+  做的。
+- HTTPS 连接顺序：先认字面量 IPv4/IPv6，再 AAAA，最后 A（`src/secure_https.c`）。
+  旧顺序对字面量地址也先发 AAAA，在没有 IPv6 解析器的网络里要白白重试
+  3×1000 ms。
+- 去掉 DHCP 等待循环里重复的 `net_udp_drain()`（该函数一次就排空整条队列）。
+- `kcalloc`/`krealloc` 改用字级 `memset`/`memcpy`（`src/core/heap.c`）。
+
+## 4. 刻意不改的东西（附理由）
+
+1. **FAT32 簇分配游标（把 O(M²) 的 FAT 扫描降为 O(M)）**：会让"总是挑最小编号
+   空闲簇"变成"从上次位置继续挑"，从而改变**分配顺序**。仓库里正在维护
+   `tests/host/test_fat32_diff.c`（把新旧实现的镜像逐字节比对），分配顺序变化
+   会让这类差分失去意义；收益只是每分配一个簇少读几个 FAT 扇区（扇区级扫描
+   已经把 128 项合并到一次读）。若要做，应同时更新差分测试并明确接受顺序变化。
+2. **内核堆加 next-fit 游标**：2 MiB 池子里，next-fit 更容易让一个小分配吃掉
+   一块大空闲区，导致后续大分配失败。当前用"多几次指针追链"换"内存利用率可
+   预期"；链表长度上界是"同时在用的分配数"而非分配次数（空闲块就地合并），
+   所以扫描不会随分配次数无限增长。取舍写在 `src/core/heap.c` 文件头。
+3. **压缩 GUI 字形/壁纸 blob**：见 §2 末尾，需要与 HIVE 子模块同步格式。
+4. **`vfs_readdir_at` 每次从 0 重走**：确实是 O(n²)，但 n 受 `MAX_FILES=128`
+   限制，绝对开销约 8k 次比较，收益低于改动风险。
+
+## 5. 尚未处理的高价值清单（按 影响×把握 排序）
+
+来源：本轮对 `fs/vfs/ext2/fat32/block/devfs`、`net/net6/tls/secure_https/crypto/
+inflate`、`gui/graphics/shell/tools/core` 的分子系统审计。以下为**未实施**项，
+留作后续任务（每条都带位置与理由）：
+
+| # | 位置 | 问题 | 建议 |
+|---|---|---|---|
+| 1 | `src/fs.c` `fat32_vfs_write` | 每次 write 重解析父路径 + 重扫父目录 + 重数簇链 | 在 `file_t` 里缓存父簇与目录项偏移（纯内存字段） |
+| 2 | `src/fat32.c:fat32_alloc_cluster` | 每次从簇 2 重扫，分配 M 簇 ~ M²/256 次 FAT 扇区读 | 内存游标（若接受分配顺序变化，见 §4.1） |
+| 3 | `src/fat32.c:fat32_write_file` | 每次调用重数整条簇链（分块写 ⇒ O(n²)） | 用已传入的 `file_size` 取下界或缓存链尾 |
+| 4 | `src/fs.c` `hbfs_write_data` | 文件长度每次增长都重写整张 16 扇区文件表 | 脏标记 + 只回写受影响扇区，`fs_sync`/close 时统一刷 |
+| 5 | `src/ext2.c` `ext2_inode_block` | 每个数据块都重读间接块（≥12 块的文件 I/O 翻倍） | 循环内缓存当前间接块 |
+| 6 | `src/ext2.c` `ext2_alloc_block`/`ext2_inode_set_block` | 每分配一块就写 inode + 位图 + BGD + 超级块（~10 条命令/4 KiB） | inode 只改内存、末尾写一次；位图/BGD 延迟落盘 |
+| 7 | `src/fs.c` `fat32_rebuild_dir` / `src/ext2.c` `ext2_readdir` | 挂载时按索引逐个重走目录（O(E²) 块读） | 流式单遍遍历产出 name→inode |
+| 8 | `src/fs.c` `hbfs_read_data`/`hbfs_write_data` | 对齐的整段仍逐扇区发命令 | 中间整段用 `block_read_sectors`/`block_write_sectors` |
+| 9 | `src/inflate.c` `huff_decode`/`br_getbits` | 逐位霍夫曼解码 + 逐位取位 | 位缓冲批量补充（一次 32 位）+ 9 位一级表 |
+| 10 | `src/crypto/chacha20_poly1305.c` | poly1305 每 16 B 一次 memset+memcpy+5×8 次字节载入 | 非对齐 64 位载入取 5 个 limb；keystream 8 字节异或 |
+| 11 | `src/net.c:net_tcp_recv` 预算 | `80000` 自旋 × `80000` 轮、无 PIT 截止 → 对端挂死可卡数分钟 | 引入 PIT 截止时间，缩小每轮自旋 |
+| 12 | `src/net.c:rtl8139_poll` | 每次自旋 2 次端口读 + 1 次端口写（每次都是 VM exit） | 用 ISR 状态位门控 `CHIP_CMD` 读 |
+| 13 | `src/secure_https.c:secure_https_get` | 每个 HTTPS 请求都重新解析整份 CA bundle + 重建 TLS config | 按 PEM 内容哈希缓存解析结果 |
+| 14 | `src/net.c:net_udp_queue`/`net_udp_drain` | 无 UDP 等待者时仍整帧拷贝；压缩时按整结构体赋值 | 无等待者时跳过入队；压缩只拷 `len` 字节 |
+| 15 | `src/net6.c:net6_link_output` | 单 pbuf 也先拷进 2 KiB 栈帧，驱动再拷一次 | 单段且 `len==tot_len` 时直接交给驱动 |
+| 16 | `src/vfs.c` + `src/fs.c` 路径查找 | 每次 open/stat 线性 `strcmp` 最多约 270 个名字 | FNV-1a 路径哈希或有序表二分 |
+
+判为**已经最优、不必再查**的项：`block.c` 的分块合并、`ext2` 的位图字级扫描与
+按组空闲计数跳过、`fat32` 的 128 项/扇区扫描与簇链单游标、`crypto/sha256`
+（内核无 SSE，已是可移植最优）、ARP 邻接表/套接字表（都是有界常数）、
+`vfs_static_read`/ramfs（纯 memcpy）、`devfs` 的格式化（有界 4 KiB 缓冲）。
+
+## 6. 顺带发现的正确性缺陷（未修，需单独立项）
+
+**IPv4 TCP 大响应会在约 113 KB 处截断。** 复现：宿主起
+`python3 -m http.server`，guest 内 `wget -O - http://10.0.2.2:8099/t.txt`
+（t.txt = 142000 字节文本），串口回显在字节 113742 处中断（行 `01602` 中间），
+`wget` 不报错。**已用 `git checkout -- src/net.c` 的原始实现对照：截断位置与
+丢失字节完全相同**，因此不是本次环形缓冲改动引入的，属既有缺陷（嫌疑在接收
+窗口通告/ACK 或"缓冲满时仍推进 ack"的语义）。42.6 KB 的响应在新旧实现下都
+完整且逐字节一致，可用来确认修复效果。
+
+## 7. 复现命令
+
+```sh
+make -j$(nproc)                 # 构建（应零 warning）
+make bench-boot RUNS=5          # 冷启动基准（BIOS + UEFI）
+make bench-boot ONLY=bios       # 只测 BIOS
+make BOOT_MENU_TIMEOUT=0 bench-boot   # 最快配置对照
+make smoke                      # 启动/网络/镜像功能回归
+make fat32-smoke                # FAT32 持久化全链路
+```

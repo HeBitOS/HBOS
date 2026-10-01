@@ -1,3 +1,8 @@
+/**
+ * IPV6支持
+ * 依托于new.h;
+ */
+
 #include "net6.h"
 
 #include "core/cpu.h"
@@ -199,6 +204,10 @@ static int net6_wait_for_source(const ip6_addr_t *target,
     do {
         net6_poll();
         if (net6_source_ready(target)) return 0;
+        /* net6_poll 每次只轮询固定次数就返回，这里必须让出 CPU：否则等待
+         * 源地址/对端响应的整个超时窗口都会把一个核占满，GUI 与 Shell 在
+         * IPv6 连接期间无法推进（IPv4 路径 net.c 的等待循环本来就是这么做的）。*/
+        task_yield();
     } while (!net6_deadline_reached(deadline));
     return -1;
 }
@@ -227,8 +236,10 @@ static int net6_tcp_connect_parsed(const ip6_addr_t *parsed, uint16_t port,
 
     uint64_t deadline = net6_deadline_after_ms(timeout_ms);
     while (!connection->connected && !connection->error &&
-           !net6_deadline_reached(deadline))
+           !net6_deadline_reached(deadline)) {
         net6_poll();
+        task_yield();
+    }
     if (!connection->connected) {
         net6_tcp_close(connection);
         return -1;
@@ -268,6 +279,7 @@ int net6_tcp_send(net6_tcp_conn_t *connection, const uint8_t *data,
         if (chunk > 65535U) chunk = 65535U;
         if (!chunk) {
             net6_poll();
+            task_yield();
             continue;
         }
         err_t write_status =
@@ -275,12 +287,14 @@ int net6_tcp_send(net6_tcp_conn_t *connection, const uint8_t *data,
                       TCP_WRITE_FLAG_COPY);
         if (write_status == ERR_MEM) {
             net6_poll();
+            task_yield();
             continue;
         }
         if (write_status != ERR_OK) return -1;
         if (tcp_output(pcb) != ERR_OK) return -1;
         sent += chunk;
         net6_poll();
+        task_yield();
     }
     return sent == length ? (int)sent : -1;
 }
@@ -290,8 +304,10 @@ int net6_tcp_recv(net6_tcp_conn_t *connection, uint8_t *data,
     if (!connection || !data || !capacity) return -1;
     uint64_t deadline = net6_deadline_after_ms(timeout_ms);
     while (!connection->rx_length && !connection->closed &&
-           !connection->error && !net6_deadline_reached(deadline))
+           !connection->error && !net6_deadline_reached(deadline)) {
         net6_poll();
+        task_yield();
+    }
     if (!connection->rx_length)
         return connection->closed ? 0 : -1;
 

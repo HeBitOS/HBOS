@@ -145,6 +145,19 @@ OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 QEMU_IMG ?= qemu-img
 
+# ── 开机菜单等待时间（秒，GRUB 与 Limine 共用同一事实源） ──────────────
+# 冷启动时间里唯一的大头：引导器自身加载只占几百毫秒，菜单倒计时才是白等。
+# 原值 5 秒意味着每次启动都要先等 5 秒才把控制权交给内核；实测 BIOS ISO
+# 因此从 1.7s 变成 7.1s（见 scripts/bench_boot.sh，差值≈4 秒的纯等待）。
+# 菜单本身仍然显示、仍然可以按键选择，只是倒计时更短：
+#   make BOOT_MENU_TIMEOUT=0   # 不等待；自动化/冒烟测试最快
+#   make BOOT_MENU_TIMEOUT=5   # 旧行为：留足时间手动切 text fallback
+BOOT_MENU_TIMEOUT ?= 1
+# 生成文件按取值命名，于是改这个变量会自动重生成配置并重建 ISO/镜像，
+# 无需 make clean。
+GRUB_CFG = $(BUILD_DIR)/boot/grub-timeout-$(BOOT_MENU_TIMEOUT).cfg
+LIMINE_CONF = $(BUILD_DIR)/boot/limine-timeout-$(BOOT_MENU_TIMEOUT).conf
+
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
          -O2 -Wall -Wextra -MMD -MP \
@@ -199,6 +212,7 @@ C_SRCS = \
 	$(SRC_DIR)/pci.c \
 	$(SRC_DIR)/net.c \
 	$(SRC_DIR)/net_virtio.c \
+	$(SRC_DIR)/net/nic_r8169.c \
 	$(SRC_DIR)/tls.c \
 	$(SRC_DIR)/block.c \
 	$(SRC_DIR)/ahci.c \
@@ -208,6 +222,9 @@ C_SRCS = \
 	$(SRC_DIR)/fb.c \
 	$(SRC_DIR)/flanterm.c \
 	$(SRC_DIR)/xhci.c \
+	$(SRC_DIR)/usb_host.c \
+	$(SRC_DIR)/usb_hid_parser.c \
+	$(SRC_DIR)/usb_ehci.c \
 	$(SRC_DIR)/usb_hid.c \
 	$(SRC_DIR)/usb_msc.c \
 	$(SRC_DIR)/smp.c \
@@ -336,7 +353,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke xhci-smoke chromium-baseline browser-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
 
 all: iso
 
@@ -502,23 +519,36 @@ $(KERNEL_BIOS): $(ALL_OBJS) linker_bios.ld
 	$(LD) $(LDFLAGS_BIOS) $(filter-out linker_bios.ld,$^) -o $@
 	@echo "✓ BIOS kernel: $@"
 
-$(ISO_BIOS): $(KERNEL_BIOS)
+# ── 引导配置生成（GRUB / Limine） ──────────────────────────────────────
+# 两份配置的内容只随 BOOT_MENU_TIMEOUT 变化；生成物按取值命名，因此改这个
+# 变量会让下面的 ISO/镜像规则自然重跑（依赖文件换了名字），不必 make clean。
+$(GRUB_CFG): Makefile
+	@mkdir -p $(dir $@)
+	@printf 'set timeout=$(BOOT_MENU_TIMEOUT)\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1920x1080x32,1680x1050x32,1600x900x32,1440x900x32,1366x768x32,1280x800x32,1024x768x32,auto\n' > $@
+	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $@
+	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $@
+
+# Limine 配置以仓库里的 limine.conf 为模板，只把 TIMEOUT 行替换成当前取值，
+# 其余内容（协议、内核路径、分辨率）保持原样。
+$(LIMINE_CONF): limine.conf Makefile
+	@mkdir -p $(dir $@)
+	@sed -e 's/^\(TIMEOUT[[:space:]]*:[[:space:]]*\).*/\1$(BOOT_MENU_TIMEOUT)/' limine.conf > $@
+
+$(ISO_BIOS): $(KERNEL_BIOS) $(GRUB_CFG)
 	@rm -rf $(BUILD_DIR)/isodir-bios
 	@mkdir -p $(BUILD_DIR)/isodir-bios/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-bios/boot/hbos.bin
-	@printf 'set timeout=5\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1920x1080x32,1680x1050x32,1600x900x32,1440x900x32,1366x768x32,1280x800x32,1024x768x32,auto\n' > $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
-	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
-	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
+	@cp $(GRUB_CFG) $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios
 	@cp $@ "$(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 	@echo "✓ BIOS ISO: $@"
 	@echo "✓ Versioned BIOS ISO: $(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 
-$(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) limine.conf
+$(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) $(LIMINE_CONF)
 	@rm -rf $(BUILD_DIR)/isodir-uefi
 	@mkdir -p $(BUILD_DIR)/isodir-uefi/EFI/BOOT $(BUILD_DIR)/isodir-uefi/boot
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-uefi/boot/hbos.bin
-	@cp limine.conf $(BUILD_DIR)/isodir-uefi/limine.conf
+	@cp $(LIMINE_CONF) $(BUILD_DIR)/isodir-uefi/limine.conf
 	@cp $(LIMINE_EFI) $(BUILD_DIR)/isodir-uefi/EFI/BOOT/BOOTX64.EFI
 	@cp $(UEFI_CD_IMG) $(BUILD_DIR)/isodir-uefi/boot/uefi-cd.img
 	@xorriso -as mkisofs -R -r -J -V HBOS_UEFI \
@@ -548,11 +578,11 @@ run-bios-nodisk: $(ISO_BIOS)
 
 disk-img: $(DISK_IMG)
 
-$(INSTALL_IMG_BIOS): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf tools/mkhbosdisk.py
-	python3 tools/mkhbosdisk.py $@ --mode bios --kernel $(KERNEL_BIOS) --limine-conf limine.conf --limine-dir limine-bin/bin
+$(INSTALL_IMG_BIOS): $(KERNEL_BIOS) $(LIMINE_EFI) $(LIMINE_CONF) tools/mkhbosdisk.py
+	python3 tools/mkhbosdisk.py $@ --mode bios --kernel $(KERNEL_BIOS) --limine-conf $(LIMINE_CONF) --limine-dir limine-bin/bin
 
-$(INSTALL_IMG_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf tools/mkhbosdisk.py
-	python3 tools/mkhbosdisk.py $@ --mode uefi --kernel $(KERNEL_BIOS) --limine-conf limine.conf --limine-dir limine-bin/bin
+$(INSTALL_IMG_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(LIMINE_CONF) tools/mkhbosdisk.py
+	python3 tools/mkhbosdisk.py $@ --mode uefi --kernel $(KERNEL_BIOS) --limine-conf $(LIMINE_CONF) --limine-dir limine-bin/bin
 
 $(INSTALL_IMG): $(INSTALL_IMG_UEFI)
 	@cp $(INSTALL_IMG_UEFI) $@
@@ -598,6 +628,13 @@ release: $(ISO_BIOS) $(ISO_UEFI) $(VMWARE_BIOS_VMDK) $(VMWARE_UEFI_VMDK) $(VBOX_
 
 smoke:
 	bash scripts/smoke.sh
+
+# 冷启动时间基准：分别测引导器阶段（固件+引导器+加载内核）与内核阶段，
+# 输出每次运行与中位数。RUNS/ONLY 可覆盖，例如：
+#   make bench-boot RUNS=5
+#   make bench-boot ONLY=bios
+bench-boot: $(ISO_BIOS) $(ISO_UEFI)
+	RUNS=$(RUNS) ONLY=$(ONLY) bash scripts/bench_boot.sh
 
 linux-compat-smoke: $(ISO_BIOS)
 	bash scripts/test_linux_compat_smoke.sh $(ISO_BIOS)
@@ -721,22 +758,22 @@ limine-uefi: $(LIMINE_EFI)
 $(LIMINE_EFI):
 	$(MAKE) -C limine-bin limine-uefi-x86-64 BUILD_UEFI_X86_64=limine-uefi-x86-64
 
-$(UEFI_CD_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf
+$(UEFI_CD_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) $(LIMINE_CONF)
 	@rm -f $@
 	@dd if=/dev/zero of=$@ bs=512 count=98304 2>/dev/null
 	@mformat -i $@ -h 64 -t 96 -s 16 -N 12345678 ::
 	@mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
 	@mcopy -D o -m -i $@ $(LIMINE_EFI) ::/EFI/BOOT/BOOTX64.EFI
-	@mcopy -D o -m -i $@ limine.conf ::/limine.conf
+	@mcopy -D o -m -i $@ $(LIMINE_CONF) ::/limine.conf
 	@mcopy -D o -m -i $@ $(KERNEL_BIOS) ::/boot/hbos.bin
 
-$(UEFI_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) limine.conf
+$(UEFI_IMG): $(KERNEL_BIOS) $(LIMINE_EFI) $(LIMINE_CONF)
 	@rm -f $@
 	@truncate -s 64M $@
 	@mkfs.fat -F 32 $@ >/dev/null
 	@mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
 	@mcopy -i $@ $(LIMINE_EFI) ::/EFI/BOOT/BOOTX64.EFI
-	@mcopy -i $@ limine.conf ::/limine.conf
+	@mcopy -i $@ $(LIMINE_CONF) ::/limine.conf
 	@mcopy -i $@ $(KERNEL_BIOS) ::/boot/hbos.bin
 	@echo "✓ UEFI FAT image: $@"
 

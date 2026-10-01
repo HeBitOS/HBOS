@@ -6,9 +6,11 @@
 
 #include "net.h"
 #include "net_virtio.h"
+#include "net/nic_r8169.h"
 #include "pci.h"
 #include "string.h"
 #include "core/cpu.h"
+#include "core/io.h"
 #include "core/vmm.h"
 #include "core/heap.h"
 #include "core/task.h"
@@ -56,6 +58,25 @@
 #define E1000_RAL0   0x5400
 /** @brief E1000 接收地址高 32 位（MAC 地址寄存器 0） */
 #define E1000_RAH0   0x5404
+
+/** @brief E1000 控制寄存器：链路建立（Set Link Up，自保持位） */
+#define E1000_CTRL_SLU   (1U << 6)
+/** @brief E1000 控制寄存器：MAC 自复位（自清位，置位后需轮询等待清零） */
+#define E1000_CTRL_RST   (1U << 26)
+/** @brief E1000 状态寄存器：链路已建立 */
+#define E1000_STATUS_LU  (1U << 1)
+/** @brief E1000 EEPROM/NVM 读寄存器偏移 */
+#define E1000_EERD       0x0014
+/** @brief EERD：启动一次读（自清位） */
+#define E1000_EERD_START (1U << 0)
+/** @brief EERD：读完成，数据在 bit16-31 */
+#define E1000_EERD_DONE  (1U << 4)
+/** @brief MAC 复位等待上限（毫秒）；真机上复位通常 <10ms，给足余量 */
+#define E1000_RESET_TIMEOUT_MS   100U
+/** @brief 链路建立等待上限（毫秒）；千兆自协商在真机上可能耗时数秒 */
+#define E1000_LINK_TIMEOUT_MS    4000U
+/** @brief 链路等待的自旋上限：PIT tick 尚未推进（启动早期）时的兜底 */
+#define E1000_LINK_STALL_SPINS   20000000U
 
 /** @brief 接收描述符环大小 */
 #define RX_COUNT 32
@@ -213,6 +234,15 @@ static uint8_t rx_buf[RX_COUNT][PKT_SIZE] __attribute__((aligned(16)));
 static uint8_t tx_buf[TX_COUNT][PKT_SIZE] __attribute__((aligned(16)));
 /** @brief 发送描述符尾指针索引 */
 static uint16_t tx_tail;
+/**
+ * @brief 接收描述符尾指针索引（RDT 的内存镜像）。
+ *
+ * E1000 的 RDT 是「软件私有」寄存器：硬件只读、不回写，只有驱动在初始化和
+ * 每次回收描述符后写它。因此下一个待检查的描述符下标完全可以放在内存里，
+ * 不必在每次轮询自旋里 reg_read(E1000_RDT)——MMIO 窗口是以 VMM_CD 映射的，
+ * 每次读都是实打实的一笔 PCIe/VM-exit 事务，而结果恒等于驱动自己上次写的值。
+ */
+static uint16_t rx_tail;
 /** @brief IP 报文标识符计数器 */
 static uint16_t ip_id = 1;
 /** @brief 下一个可用的临时源端口号 */
@@ -287,6 +317,9 @@ static net_driver_t detect_driver(uint16_t vendor, uint16_t device) {
     }
     if (vendor == 0x1022 && device == 0x2000) return NET_DRIVER_PCNET;
     if (vendor == 0x10EC && device == 0x8139) return NET_DRIVER_RTL8139;
+    /* RTL8168/8111/8169/8101/8125 的真实型号要从 XID 寄存器读，device id 只
+     * 用来认领——判定表放在驱动里，避免网卡家族扩充时改这里的 switch。 */
+    if (r8169_probe(vendor, device)) return NET_DRIVER_R8169;
     if (vendor == 0x1AF4 && (device == 0x1000 || device == 0x1041)) return NET_DRIVER_VIRTIO_NET;
     return NET_DRIVER_UNKNOWN_ETHERNET;
 }
@@ -302,6 +335,7 @@ const char *net_driver_name(net_driver_t driver) {
         case NET_DRIVER_RTL8139: return "Realtek RTL8139";
         case NET_DRIVER_VIRTIO_NET: return "VirtIO net";
         case NET_DRIVER_PCNET: return "AMD PCnet";
+        case NET_DRIVER_R8169: return r8169_driver_name();
         case NET_DRIVER_UNKNOWN_ETHERNET: return "unknown ethernet";
         default: return "none";
     }
@@ -324,21 +358,80 @@ const char *net_last_error(void) {
 }
 
 /**
- * @brief 计算数据的标准互联网校验和（RFC 1071）
- * @param data 数据指针
- * @param len 数据长度
- * @return 16 位校验和（网络字节序）
+ * @brief 通过当前主网卡发送一帧
+ *
+ * 统一入口而不是直接调 primary.send()：未探测到可用网卡时（或驱动初始化
+ * 失败后）send 为 NULL，直接调用会跳到地址 0 触发内核异常，而调用方
+ * （DHCP/ARP/TCP）拿到的应该只是一个 -1。
+ *
+ * @return 0 成功，-1 无可用网卡或驱动发送失败
  */
-static uint16_t checksum(const void *data, uint32_t len) {
-    const uint8_t *p = data;
-    uint32_t sum = 0;
+static int net_hw_send(const void *frame, uint16_t len) {
+    if (!primary.send) {
+        set_error("no network device");
+        return -1;
+    }
+    return primary.send(frame, len);
+}
+
+/**
+ * @brief 把 32 位累加器折叠回 16 位反码和（RFC 1071 的最终进位回卷）。
+ */
+static uint32_t checksum_fold(uint32_t sum) {
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return sum;
+}
+
+/**
+ * @brief 按 8 字节字累加一段字节到反码和累加器（RFC 1071）。
+ *
+ * 为什么整字累加是合法的：一个 8 字节字里装着 4 个 16 位大端字，而反码求和
+ * 的模数是 65535，有 2^16 ≡ 1 (mod 65535)。因此把 4 个 lane 分别加进累加器、
+ * 最后统一折叠，结果与"逐 16 位相加再折叠"逐位相同（加法可交换）。
+ *
+ * 为什么用 `(uint16_t)v` 分四次加而不是把 bswap 后的字整体加进 64 位：
+ * 整体相加会在长载荷上溢出 64 位，而 2^64 也只是 ≡ 1 (mod 65535)，溢出一次
+ * 就等价于给结果多加 1。这里每次最多加 4 个 ≤0xFFFF 的数，并在累加器过半时
+ * 立即折叠，任何长度都不会溢出 uint32。
+ *
+ * x86_64 允许非对齐访问；用 memcpy 取字以避免严格别名/对齐的未定义行为。
+ *
+ * @param sum 现有累加器（可为 0，也可带伪首部）
+ * @param data 数据指针
+ * @param len  字节数
+ * @return 未折叠的 32 位累加器
+ */
+static uint32_t checksum_add(uint32_t sum, const void *data, uint32_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    while (len >= 8) {
+        uint64_t word;
+        memcpy(&word, p, 8);
+        word = __builtin_bswap64(word);   /* 低 16 位即网络序的第一个字 */
+        sum += (uint16_t)word; word >>= 16;
+        sum += (uint16_t)word; word >>= 16;
+        sum += (uint16_t)word; word >>= 16;
+        sum += (uint16_t)word;
+        p += 8;
+        len -= 8;
+        if (sum >= 0x80000000u) sum = checksum_fold(sum);
+    }
     while (len > 1) {
         sum += ((uint16_t)p[0] << 8) | p[1];
         p += 2;
         len -= 2;
     }
     if (len) sum += (uint16_t)p[0] << 8;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return sum;
+}
+
+/**
+ * @brief 计算数据的标准互联网校验和（RFC 1071）
+ * @param data 数据指针
+ * @param len 数据长度
+ * @return 16 位校验和（网络字节序）
+ */
+static uint16_t checksum(const void *data, uint32_t len) {
+    uint32_t sum = checksum_fold(checksum_add(0, data, len));
     return htons((uint16_t)~sum);
 }
 
@@ -358,12 +451,9 @@ static uint16_t udp_checksum(ipv4_hdr_t *ip, udp_hdr_t *udp, const uint8_t *payl
     sum += ((uint16_t)src[0] << 8) | src[1]; sum += ((uint16_t)src[2] << 8) | src[3];
     sum += ((uint16_t)dst[0] << 8) | dst[1]; sum += ((uint16_t)dst[2] << 8) | dst[3];
     sum += IP_PROTO_UDP; sum += udp_len;
-    const uint8_t *p = (const uint8_t *)udp;
-    for (uint32_t i = 0; i < sizeof(udp_hdr_t); i += 2) sum += ((uint16_t)p[i] << 8) | p[i + 1];
-    p = payload;
-    for (uint16_t i = 0; i + 1 < plen; i += 2) sum += ((uint16_t)p[i] << 8) | p[i + 1];
-    if (plen & 1) sum += (uint16_t)p[plen - 1] << 8;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    sum = checksum_add(sum, udp, (uint32_t)sizeof(udp_hdr_t));
+    sum = checksum_add(sum, payload, plen);
+    sum = checksum_fold(sum);
     return htons((uint16_t)~sum);
 }
 
@@ -383,12 +473,9 @@ static uint16_t tcp_checksum(ipv4_hdr_t *ip, tcp_hdr_t *tcp, const uint8_t *payl
     sum += ((uint16_t)src[0] << 8) | src[1]; sum += ((uint16_t)src[2] << 8) | src[3];
     sum += ((uint16_t)dst[0] << 8) | dst[1]; sum += ((uint16_t)dst[2] << 8) | dst[3];
     sum += IP_PROTO_TCP; sum += tcp_len;
-    const uint8_t *p = (const uint8_t *)tcp;
-    for (uint32_t i = 0; i < 20; i += 2) sum += ((uint16_t)p[i] << 8) | p[i + 1];
-    p = payload;
-    for (uint16_t i = 0; i + 1 < plen; i += 2) sum += ((uint16_t)p[i] << 8) | p[i + 1];
-    if (plen & 1) sum += (uint16_t)p[plen - 1] << 8;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    sum = checksum_add(sum, tcp, 20);
+    sum = checksum_add(sum, payload, plen);
+    sum = checksum_fold(sum);
     return htons((uint16_t)~sum);
 }
 
@@ -437,8 +524,9 @@ typedef int (*packet_cb_t)(const uint8_t *pkt, uint16_t len, void *arg);
 static int e1000_poll(packet_cb_t cb, void *arg, uint32_t spins) {
     if (!primary.link_ready || !mmio) return -1;
     for (uint32_t s = 0; s < spins; s++) {
-        uint32_t tail = reg_read(E1000_RDT);
-        uint32_t idx = (tail + 1) % RX_COUNT;
+        /* 用内存镜像的 rx_tail 取代每次自旋一次不可缓存的 MMIO 读：见 rx_tail
+         * 声明处的说明。剩余的工作只是查描述符的 DD 位（普通内存读）。 */
+        uint32_t idx = (uint32_t)(rx_tail + 1) % RX_COUNT;
         e1000_rx_desc_t *d = &rx_desc[idx];
         if (!(d->status & 1)) continue;
         uint16_t len = d->length;
@@ -457,6 +545,7 @@ static int e1000_poll(packet_cb_t cb, void *arg, uint32_t spins) {
             primary.rx_dropped++;
         }
         d->status = 0;
+        rx_tail = (uint16_t)idx;
         reg_write(E1000_RDT, idx);
         if (ret) return ret;
     }
@@ -493,6 +582,7 @@ static int net_poll(packet_cb_t cb, void *arg, uint32_t spins) {
     case NET_DRIVER_RTL8139: return rtl8139_poll(cb, arg, spins);
     case NET_DRIVER_PCNET:  return pcnet_poll(cb, arg, spins);
     case NET_DRIVER_VIRTIO_NET: return virtio_poll(cb, arg, spins);
+    case NET_DRIVER_R8169:  return r8169_poll(cb, arg, spins);
     default: return -1;
     }
 }
@@ -551,7 +641,7 @@ static int send_ip(const uint8_t dst_mac[6], uint32_t dst_ip, uint8_t proto,
     ip->csum = 0;
     ip->csum = checksum(ip, sizeof(ipv4_hdr_t));
     memcpy(frame + sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t), payload, plen);
-    return primary.send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + plen));
+    return net_hw_send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + plen));
 }
 
 /**
@@ -581,7 +671,7 @@ static int send_udp_raw(const uint8_t dst_mac[6], uint32_t src_ip, uint32_t dst_
     udp->src = htons(sport); udp->dst = htons(dport);
     udp->len = htons((uint16_t)(sizeof(udp_hdr_t) + plen)); udp->csum = 0;
     udp->csum = udp_checksum(ip, udp, data, plen);
-    return primary.send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(udp_hdr_t) + plen));
+    return net_hw_send(frame, (uint16_t)(sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(udp_hdr_t) + plen));
 }
 
 /**
@@ -601,7 +691,7 @@ static int send_arp(uint16_t op, uint32_t target_ip, const uint8_t target_mac[6]
     arp->hlen = 6; arp->plen = 4; arp->op = htons(op);
     memcpy(arp->sha, primary.mac, 6); arp->spa = primary.ip;
     memcpy(arp->tha, op == 1 ? zero : target_mac, 6); arp->tpa = target_ip;
-    return primary.send(frame, sizeof(frame));
+    return net_hw_send(frame, sizeof(frame));
 }
 
 /**
@@ -726,17 +816,125 @@ static int arp_resolve(uint32_t ip, uint8_t mac[6]) {
 }
 
 /**
- * @brief 初始化 E1000 网卡硬件：映射 MMIO、读取 MAC 地址、配置收发描述符环和控制寄存器
- * @param pdev PCI 设备信息指针
+ * @brief 通过 EERD 读取 EEPROM/NVM 中的一个 16 位字（8254x/8257x 半自动读）
+ *
+ * EERD 是"半自动"读：写入字地址并置 START，硬件读完后置 DONE，数据在
+ * bit16-31。轮询必须有截止时间——集成网卡（尤其 ICH 系列）可能根本没有
+ * 外挂 EEPROM，DONE 永远不来，无截止时间就会在启动路径上挂死。
+ *
+ * @param addr EEPROM 字地址
+ * @param out  输出 16 位字；可为 NULL（只做可用性探测）
+ * @return 0 成功，-1 超时（NVM 不存在或未就绪）
  */
-static void e1000_init_hw(const pci_device_t *pdev) {
-    if (primary.bar0_io || primary.bar0_base == 0) return;
+static int e1000_read_eeprom(uint8_t addr, uint16_t *out) {
+    reg_write(E1000_EERD, ((uint32_t)addr << 8) | E1000_EERD_START);
+    uint64_t deadline = net_deadline_after_ms(10U);
+    uint32_t v;
+    while (!((v = reg_read(E1000_EERD)) & E1000_EERD_DONE)) {
+        if (!net_before_deadline(deadline)) return -1;
+        __asm__ volatile("pause");
+    }
+    if (out) *out = (uint16_t)(v >> 16);
+    return 0;
+}
+
+/**
+ * @brief 复位 E1000 MAC 并等待自清，随后重新置链路建立位
+ *
+ * 真机上固件可能把 MAC 留在半配置状态（例如 PXE 或 BIOS 只做了部分初始化），
+ * 不先做一次 MAC 复位就配描述符环，收发会静默失效。RST 是自清位，必须轮询
+ * 到硬件清零才能继续；超时则视为复位失败，交由调用方回退到下一台网卡。
+ *
+ * @return 0 成功，-1 超时
+ */
+static int e1000_reset_mac(void) {
+    reg_write(E1000_CTRL, reg_read(E1000_CTRL) | E1000_CTRL_RST);
+    uint64_t deadline = net_deadline_after_ms(E1000_RESET_TIMEOUT_MS);
+    while (reg_read(E1000_CTRL) & E1000_CTRL_RST) {
+        if (!net_before_deadline(deadline)) return -1;
+        __asm__ volatile("pause");
+    }
+    /* 复位会清掉 SLU，必须重新置位，否则 PHY 侧不会进入链路建立流程。 */
+    reg_write(E1000_CTRL, reg_read(E1000_CTRL) | E1000_CTRL_SLU);
+    return 0;
+}
+
+/**
+ * @brief 从 EEPROM/NVM 读出 6 字节 MAC 地址
+ * @param mac 输出 6 字节 MAC
+ * @return 0 成功，-1 NVM 不可用
+ *
+ * 8254x/8257x 上电时会把 EEPROM 的前三个字自动搬进 RAL0/RAH0，但 MAC 复位
+ * 之后（以及部分集成网卡上）这份自动装载可能缺失，此时必须自己按 16 位字
+ * 读回来，否则拿到全 0/全 F 的 MAC，DHCP 直接失败。
+ */
+static int e1000_read_mac_from_nvm(uint8_t mac[6]) {
+    for (uint8_t i = 0; i < 3; i++) {
+        uint16_t w;
+        if (e1000_read_eeprom((uint8_t)(i * 2), &w) < 0) return -1;
+        mac[i * 2]     = (uint8_t)(w & 0xFF);
+        mac[i * 2 + 1] = (uint8_t)(w >> 8);
+    }
+    return 0;
+}
+
+/**
+ * @brief 判断 MAC 地址是否可用（既非全 0 也非全 F）
+ */
+static int e1000_mac_is_valid(const uint8_t mac[6]) {
+    int all_zero = 1, all_ones = 1;
+    for (int i = 0; i < 6; i++) {
+        if (mac[i] != 0x00) all_zero = 0;
+        if (mac[i] != 0xFF) all_ones = 0;
+    }
+    return !all_zero && !all_ones;
+}
+
+/**
+ * @brief 等待链路建立（STATUS.LU），轮询而非死等
+ *
+ * 真机上千兆自协商可能耗时数秒，QEMU/VBox 里 LU 也可能在复位后延迟置位，
+ * 所以这里给一个较宽的截止时间：超时不当作初始化失败（网卡寄存器已配好，
+ * 只是当前没有载波），把 link_ready 如实置为 false，让 `drivers` 诊断能
+ * 区分"没驱动"和"插着网线但没协商上"。
+ *
+ * @return 1 链路已建立，0 超时
+ */
+static int e1000_wait_link_up(void) {
+    hw_deadline_t deadline = hw_deadline_start();
+    while (!(reg_read(E1000_STATUS) & E1000_STATUS_LU)) {
+        if (hw_deadline_expired_ms(&deadline, E1000_LINK_TIMEOUT_MS,
+                                   E1000_LINK_STALL_SPINS)) return 0;
+        cpu_relax();
+    }
+    return 1;
+}
+
+/**
+ * @brief 初始化 E1000 网卡硬件：映射 MMIO、复位 MAC、读取 MAC 地址、
+ *        配置收发描述符环和控制寄存器并等待链路建立
+ * @param pdev PCI 设备信息指针
+ * @return 0 成功；-1 失败（BAR 不可用或 MAC 复位超时）
+ */
+static int e1000_init_hw(const pci_device_t *pdev) {
+    if (primary.bar0_io || primary.bar0_base == 0) {
+        set_error("e1000 requires MMIO BAR0");
+        return -1;
+    }
     uint64_t base = (uint64_t)(primary.bar0_base & ~0xFFFU);
     for (uint64_t off = 0; off < 0x20000; off += PAGE_SIZE)
         (void)vmm_map_page(base + off, base + off, VMM_W | VMM_CD);
     mmio = (volatile uint8_t *)(uintptr_t)primary.bar0_base;
     pci_enable_bus_master_mmio(pdev);
-    reg_write(E1000_CTRL, reg_read(E1000_CTRL) | (1U << 6));
+
+    /* 关中断：本驱动是纯轮询模型，硬件中断打开只会打断启动路径。 */
+    reg_write(E1000_IMC, 0xFFFFFFFF);
+
+    if (e1000_reset_mac() < 0) {
+        set_error("e1000 MAC reset timeout");
+        mmio = 0;
+        return -1;
+    }
 
     uint32_t lo = reg_read(E1000_RAL0);
     uint32_t hi = reg_read(E1000_RAH0);
@@ -746,10 +944,22 @@ static void e1000_init_hw(const pci_device_t *pdev) {
     primary.mac[3] = (uint8_t)((lo >> 24) & 0xFF);
     primary.mac[4] = (uint8_t)(hi & 0xFF);
     primary.mac[5] = (uint8_t)((hi >> 8) & 0xFF);
-    primary.mac_valid = (primary.mac[0] | primary.mac[1] | primary.mac[2] |
-                         primary.mac[3] | primary.mac[4] | primary.mac[5]) != 0;
+    if (!e1000_mac_is_valid(primary.mac)) {
+        /* 自动装载不可用：退回按字读 NVM，再不行才判定 MAC 无效。 */
+        if (e1000_read_mac_from_nvm(primary.mac) < 0 ||
+            !e1000_mac_is_valid(primary.mac)) {
+            set_error("e1000 invalid MAC");
+            return -1;
+        }
+        reg_write(E1000_RAL0, (uint32_t)primary.mac[0] |
+                              ((uint32_t)primary.mac[1] << 8) |
+                              ((uint32_t)primary.mac[2] << 16) |
+                              ((uint32_t)primary.mac[3] << 24));
+        reg_write(E1000_RAH0, (uint32_t)primary.mac[4] |
+                              ((uint32_t)primary.mac[5] << 8));
+    }
+    primary.mac_valid = true;
 
-    reg_write(E1000_IMC, 0xFFFFFFFF);
     for (int i = 0; i < RX_COUNT; i++) {
         rx_desc[i].addr = (uint64_t)(uintptr_t)rx_buf[i];
         rx_desc[i].status = 0;
@@ -763,6 +973,7 @@ static void e1000_init_hw(const pci_device_t *pdev) {
     reg_write(E1000_RDLEN, sizeof(rx_desc));
     reg_write(E1000_RDH, 0);
     reg_write(E1000_RDT, RX_COUNT - 1);
+    rx_tail = RX_COUNT - 1;   /* RDT 的内存镜像，必须与上面写入的值一致 */
     reg_write(E1000_RCTL, (1U << 1) | (1U << 2) | (1U << 15) | (1U << 26));
     reg_write(E1000_TDBAL, (uint32_t)(uintptr_t)tx_desc);
     reg_write(E1000_TDBAH, (uint32_t)((uint64_t)(uintptr_t)tx_desc >> 32));
@@ -772,7 +983,12 @@ static void e1000_init_hw(const pci_device_t *pdev) {
     tx_tail = 0;
     reg_write(E1000_TCTL, (1U << 1) | (1U << 3) | (0x10U << 4) | (0x40U << 12));
     reg_write(E1000_TIPG, 10 | (8 << 10) | (6 << 20));
-    primary.link_ready = true; /* Force link ready (VirtualBox/QEMU LU status bit can be 0 initially during reset) */
+
+    /* 如实反映链路状态：超时不等于初始化失败，网卡寄存器此时已可用，
+     * 只是当前没有载波（真机上未插网线、或自协商尚未完成）。 */
+    primary.link_ready = e1000_wait_link_up() != 0;
+    last_error = "ok";
+    return 0;
 }
 
 /* ================================================================
@@ -1293,46 +1509,142 @@ static int pcnet_poll(packet_cb_t cb, void *arg, uint32_t spins) {
     return 0;
 }
 
+/** @brief 候选网卡数量上限；真机上以太网控制器通常 1~3 个（含 USB/雷电坞），留足余量 */
+#define NET_MAX_CANDIDATES 8
+
+/** @brief 探测阶段收集到的以太网控制器候选列表 */
+static pci_device_t net_candidates[NET_MAX_CANDIDATES];
+/** @brief 候选列表中已收集的设备数量 */
+static int net_candidate_count;
+
 /**
- * @brief 初始化网络子系统：扫描 PCI 总线查找以太网卡，检测驱动类型并初始化硬件
+ * @brief pci_enumerate_all() 回调：把以太网控制器收进候选列表
+ *
+ * 这里只按"大类=网络、子类=以太网"过滤，不判断驱动是否可用——能不能用放到
+ * net_init() 里逐台试。旧实现用 pci_find_class() 只拿第一台，遇到第一台是
+ * 没驱动的型号（例如双口主板上前一个是 2.5G 新片）就整个网络子系统放弃，
+ * 后面那台本来能驱动的网卡也一起被丢掉，这正是真机上"网卡时有时无"的来源。
+ */
+static void net_collect_candidate(const pci_device_t *dev, void *ctx) {
+    (void)ctx;
+    if (dev->class_code != PCI_CLASS_NETWORK ||
+        dev->subclass != PCI_SUBCLASS_ETHERNET) return;
+    if (net_candidate_count >= NET_MAX_CANDIDATES) return;
+    net_candidates[net_candidate_count++] = *dev;
+}
+
+/**
+ * @brief 把候选设备的 PCI 位置与 BAR0 信息写入 primary
+ *
+ * 各驱动实现（e1000/rtl8139/pcnet/virtio）都从 primary.bar0_* 取自己的
+ * 寄存器窗口，因此切换候选设备时必须先刷新这些字段。
+ */
+static void net_select_device(const pci_device_t *dev, net_driver_t driver) {
+    primary.driver = driver;
+    primary.bus = dev->bus; primary.slot = dev->slot; primary.func = dev->func;
+    primary.vendor_id = dev->vendor_id; primary.device_id = dev->device_id;
+    primary.bar0_raw = pci_bar(dev->bus, dev->slot, dev->func, 0);
+    primary.bar0_io = (primary.bar0_raw & 1U) != 0;
+    primary.bar0_base = primary.bar0_io ? (primary.bar0_raw & ~3U)
+                                        : (primary.bar0_raw & ~0xFU);
+}
+
+/**
+ * @brief 尝试用指定驱动初始化一台候选网卡
+ *
+ * 失败时把 primary 回滚到"未就绪"状态（send 置空、link/MAC 清掉），调用方
+ * 可以安全地继续尝试下一台候选设备。
+ *
+ * @param dev   候选 PCI 设备
+ * @param driver 该设备对应的驱动类型（调用方已判定不是 UNKNOWN）
+ * @return 0 成功，-1 失败
+ */
+static int net_try_driver(const pci_device_t *dev, net_driver_t driver) {
+    net_select_device(dev, driver);
+    primary.send = 0;
+    primary.mac_valid = false;
+    primary.link_ready = false;
+    memset(primary.mac, 0, sizeof(primary.mac));
+
+    int rc = -1;
+    switch (driver) {
+        case NET_DRIVER_E1000:
+            primary.send = e1000_send;
+            rc = e1000_init_hw(dev);
+            break;
+        case NET_DRIVER_RTL8139:
+            primary.send = rtl8139_send;
+            rc = rtl8139_init_hw(dev);
+            break;
+        case NET_DRIVER_PCNET:
+            primary.send = pcnet_send;
+            rc = pcnet_init_hw((pci_device_t *)dev);
+            break;
+        case NET_DRIVER_VIRTIO_NET:
+            primary.send = virtio_send;
+            rc = virtio_net_init_hw(dev, primary.mac, &primary.mac_valid,
+                                    &primary.link_ready);
+            break;
+        case NET_DRIVER_R8169:
+            primary.send = r8169_send;
+            rc = r8169_init_hw(dev, primary.mac, &primary.mac_valid,
+                               &primary.link_ready);
+            break;
+        default:
+            rc = -1;
+            break;
+    }
+
+    if (rc < 0) {
+        primary.send = 0;
+        primary.mac_valid = false;
+        primary.link_ready = false;
+    }
+    return rc;
+}
+
+/**
+ * @brief 初始化网络子系统：枚举全部以太网控制器并逐台尝试驱动
+ *
+ * 按"先已知驱动、后未知型号"的顺序尝试：已知驱动里任何一台初始化成功就
+ * 立即选定；全部失败时才把第一台未知型号填进 primary，供 `drivers`/`netinfo`
+ * 诊断显示"检测到但没驱动"的厂商/设备 ID。
  */
 void net_init(void) {
     if (initialized) return;
     initialized = 1;
-    pci_device_t dev;
-    if (pci_find_class(PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, 0xFF, &dev) < 0) {
+
+    net_candidate_count = 0;
+    pci_enumerate_all(net_collect_candidate, 0);
+    if (net_candidate_count == 0) {
         set_error("no ethernet controller");
         return;
     }
-    primary.present = true;
-    primary.driver = detect_driver(dev.vendor_id, dev.device_id);
-    primary.bus = dev.bus; primary.slot = dev.slot; primary.func = dev.func;
-    primary.vendor_id = dev.vendor_id; primary.device_id = dev.device_id;
-    primary.bar0_raw = pci_bar(dev.bus, dev.slot, dev.func, 0);
-    primary.bar0_io = (primary.bar0_raw & 1U) != 0;
-    primary.bar0_base = primary.bar0_io ? (primary.bar0_raw & ~3U) : (primary.bar0_raw & ~0xFU);
-    /* Dispatch to driver */
-    if (primary.driver == NET_DRIVER_E1000) {
-        primary.send = e1000_send;
-        e1000_init_hw(&dev);
-    } else if (primary.driver == NET_DRIVER_RTL8139) {
-        primary.send = rtl8139_send;
-        if (rtl8139_init_hw(&dev) < 0) primary.send = 0;
-    } else if (primary.driver == NET_DRIVER_PCNET) {
-        primary.send = pcnet_send;
-        if (pcnet_init_hw(&dev) < 0) primary.send = 0;
-    } else if (primary.driver == NET_DRIVER_VIRTIO_NET) {
-        primary.send = virtio_send;
-        if (virtio_net_init_hw(&dev, primary.mac, &primary.mac_valid,
-                               &primary.link_ready) < 0) {
-            set_error("virtio-net init failed");
-            primary.send = 0;
+
+    int first_unknown = -1;
+    for (int i = 0; i < net_candidate_count; i++) {
+        net_driver_t driver = detect_driver(net_candidates[i].vendor_id,
+                                            net_candidates[i].device_id);
+        if (driver == NET_DRIVER_UNKNOWN_ETHERNET) {
+            if (first_unknown < 0) first_unknown = i;
+            continue;
         }
-    } else {
+        if (net_try_driver(&net_candidates[i], driver) == 0) {
+            primary.present = true;
+            last_error = "ok";
+            return;
+        }
+    }
+
+    if (first_unknown >= 0) {
+        net_select_device(&net_candidates[first_unknown], NET_DRIVER_UNKNOWN_ETHERNET);
+        primary.present = true;
         set_error("no driver for this NIC");
         return;
     }
+    set_error("no usable ethernet controller");
 }
+
 
 /**
  * @brief 获取主网卡设备信息指针，若未初始化则自动调用 net_init
@@ -1439,8 +1751,7 @@ int net_dhcp(void) {
         if (send_dhcp(1, xid, 0, 0) < 0) break;
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!w.found && net_before_deadline(deadline)) {
-            net_udp_drain(dhcp_cb, &w);
-            net_udp_drain(dhcp_cb, &w);
+            net_udp_drain(dhcp_cb, &w);   /* 一次即可：排空循环内部自会处理整条队列 */
             net_poll(dhcp_cb, &w, 4096);
             task_yield();
         }
@@ -1455,8 +1766,7 @@ int net_dhcp(void) {
         if (send_dhcp(3, xid, offer, server) < 0) break;
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!w.found && net_before_deadline(deadline)) {
-            net_udp_drain(dhcp_cb, &w);
-            net_udp_drain(dhcp_cb, &w);
+            net_udp_drain(dhcp_cb, &w);   /* 一次即可：排空循环内部自会处理整条队列 */
             net_poll(dhcp_cb, &w, 4096);
             task_yield();
         }
@@ -1848,9 +2158,54 @@ typedef struct {
     uint16_t dport;                /**< 对端端口 */
     uint32_t seq;                  /**< 本端发送序列号（下一个要发的） */
     uint32_t ack;                  /**< 期望接收的对端序列号 */
-    uint8_t rx_buf[NET_TCP_RXBUF_SIZE]; /**< 该连接接收缓冲 */
+    uint8_t rx_buf[NET_TCP_RXBUF_SIZE]; /**< 该连接接收缓冲（环形，见 rx_head） */
     uint32_t rx_len;               /**< 缓冲中未读字节数 */
+    /**
+     * @brief 环形接收缓冲的读起点（0..NET_TCP_RXBUF_SIZE-1）。
+     *
+     * 旧实现是"线性缓冲 + 每次 recv 后把剩余字节 memmove 到头部"：消费者用小
+     * 块读取时（mbedtls 先读 5 字节 TLS 记录头，用户态 recv 按用户 buffer 长度
+     * 读），每读走 k 字节就要搬动 (rx_len-k) 字节，一个 8 KiB 窗口内的总搬运量
+     * 是 O(窗口²/k)。改成环形后，入队写到 (rx_head+rx_len)%cap、出队从 rx_head
+     * 起读，两端最多各拆成两段 memcpy，接收路径的搬移量变成 O(交付字节数)。
+     * 语义不变：可用空间仍是 cap - rx_len，ACK/窗口/丢弃策略与旧实现一致。
+     */
+    uint32_t rx_head;
 } tcp_conn_t;
+
+/**
+ * @brief 把载荷追加进连接的环形接收缓冲（满则丢弃多余部分，与旧实现一致）。
+ * @return 实际收下的字节数（≤ len）
+ */
+static uint32_t tcp_conn_append(tcp_conn_t *c, const uint8_t *data, uint32_t len) {
+    uint32_t space = NET_TCP_RXBUF_SIZE - c->rx_len;
+    if (len > space) len = space;
+    if (!len) return 0;
+    uint32_t tail = (c->rx_head + c->rx_len) % NET_TCP_RXBUF_SIZE;
+    uint32_t first = NET_TCP_RXBUF_SIZE - tail;
+    if (first > len) first = len;
+    memcpy(c->rx_buf + tail, data, first);
+    if (first < len) memcpy(c->rx_buf, data + first, len - first);
+    c->rx_len += len;
+    return len;
+}
+
+/**
+ * @brief 从环形接收缓冲取出至多 cap 字节；剩余数据保持原位，不做搬移。
+ * @return 实际取出的字节数（≤ cap）
+ */
+static uint32_t tcp_conn_read(tcp_conn_t *c, uint8_t *buf, uint32_t cap) {
+    uint32_t count = c->rx_len;
+    if (count > cap) count = cap;
+    if (!count) return 0;
+    uint32_t first = NET_TCP_RXBUF_SIZE - c->rx_head;
+    if (first > count) first = count;
+    memcpy(buf, c->rx_buf + c->rx_head, first);
+    if (first < count) memcpy(buf + first, c->rx_buf, count - first);
+    c->rx_head = (c->rx_head + count) % NET_TCP_RXBUF_SIZE;
+    c->rx_len -= count;
+    return count;
+}
 
 static tcp_conn_t tcp_conns[NET_TCP_CONNS];
 
@@ -1910,7 +2265,7 @@ static int send_tcp(const uint8_t mac[6], uint32_t dst_ip, uint16_t sport, uint1
         tcp_loopback_rx(frame, (uint16_t)(sizeof(eth_hdr_t) + 20 + 20 + dlen));
         return 0;
     }
-    return primary.send(frame, (uint16_t)(sizeof(eth_hdr_t) + 20 + 20 + dlen));
+    return net_hw_send(frame, (uint16_t)(sizeof(eth_hdr_t) + 20 + 20 + dlen));
 }
 
 /**
@@ -1955,13 +2310,7 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
         c->acked = 1;
     }
     if (dlen && seq == c->ack) {
-        uint32_t copy = dlen;
-        if (c->rx_len + copy > NET_TCP_RXBUF_SIZE)
-            copy = NET_TCP_RXBUF_SIZE - c->rx_len;
-        if (copy) {
-            memcpy(c->rx_buf + c->rx_len, data, copy);
-            c->rx_len += copy;
-        }
+        tcp_conn_append(c, data, dlen);   /* 环形入队；满则丢弃多余部分 */
         c->ack += dlen;
         c->need_ack = 1;
         if (flags & 0x01) {
@@ -2193,14 +2542,8 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
         return 0;
     }
     if (c->rx_len) {
-        uint32_t copy = c->rx_len;
-        if (copy > cap) copy = cap;
-        memcpy(buf, c->rx_buf, copy);
-        if (copy < c->rx_len)
-            memmove(c->rx_buf, c->rx_buf + copy, c->rx_len - copy);
-        c->rx_len -= copy;
+        *len = tcp_conn_read(c, buf, cap);   /* 环形出队，不再搬移剩余字节 */
         conn->rx_len = c->rx_len;
-        *len = copy;
         return 0;
     }
     if (!c->open) {
@@ -2223,14 +2566,7 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
         c->open = false;
         conn->open = false;
     }
-    uint32_t copy = c->rx_len;
-    if (copy > cap) copy = cap;
-    if (copy) {
-        memcpy(buf, c->rx_buf, copy);
-        if (copy < c->rx_len)
-            memmove(c->rx_buf, c->rx_buf + copy, c->rx_len - copy);
-        c->rx_len -= copy;
-    }
+    uint32_t copy = tcp_conn_read(c, buf, cap);
     conn->rx_len = c->rx_len;
     conn->ack = c->ack;
     *len = copy;
@@ -2714,6 +3050,7 @@ int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn,
         if (copy > NET_TCP_RXBUF_SIZE) copy = NET_TCP_RXBUF_SIZE;
         memcpy(ac->rx_buf, p->rx_stage, copy);
         ac->rx_len = copy;
+        ac->rx_head = 0;   /* 预置数据从缓冲头部开始，读游标必须归零 */
     }
     conn->tcp_slot = aslot;
     conn->rx_len = ac->rx_len;

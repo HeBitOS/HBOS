@@ -4,6 +4,7 @@
  *        包含 MBR/GPT 分区表解析
  */
 #include "block.h"
+#include "core/heap.h"
 #include "ext2.h"
 #include "fat32.h"
 #include "fs.h"
@@ -1547,7 +1548,26 @@ int fs_delete_file(const char *name) {
     return 0;
 }
 
-/** 复制普通文件 */
+/**
+ * @brief 复制普通文件（`mv` 在 ext2/FAT32 上也走这里做 copy-delete 回退）。
+ *
+ * 为什么分块大小是这里唯一重要的性能旋钮
+ * ──────────────────────────────────────
+ * 底层每一次 read/write 的**固定开销**与传输字节数无关，却相当可观：
+ *   - fat32：每次 write 都重解析父目录路径、重扫父目录项、重数一遍 FAT 簇链；
+ *   - ext2：每次 read/write 都要重读磁盘 inode（BGD 块 + inode 表块）；
+ *   - hbfs：文件长度每增长一次就要同步整张 16 扇区文件表。
+ * 原来的 256 字节小块等于把这些固定开销按每 MiB 放大 4096 倍，1 MiB 文件要
+ * 走几千次元数据路径。本函数改用 kmalloc 出的大块（64 KiB）搬运，固定开销
+ * 摊薄 256 倍；堆不足时退回栈上的小块，复制行为本身不变。
+ *
+ * 缓冲区走堆而不是栈：任务栈只有 TASK_STACK_SIZE(8 KiB)，放不下大块；也不
+ * 用静态缓冲区，因为块设备路径将来可能引入让出点（task_sleep 等），静态
+ * 缓冲会在两个任务同时复制时被踩。
+ */
+#define FS_COPY_BUF_BYTES (64U * 1024U)  /**< 首选搬运块大小（堆分配） */
+#define FS_COPY_BUF_MIN   512U           /**< 堆不可用时的栈上回退块大小 */
+
 int fs_copy_file(const char *src_name, const char *dst_name) {
     char src_norm[MAX_FILENAME];
     char dst_norm[MAX_FILENAME];
@@ -1567,22 +1587,35 @@ int fs_copy_file(const char *src_name, const char *dst_name) {
         return fs_fail("准备目标失败");
     }
 
-    uint8_t buf[256];
+    uint8_t stack_buf[FS_COPY_BUF_MIN];
+    uint8_t *buf = (uint8_t *)kmalloc(FS_COPY_BUF_BYTES);
+    uint32_t buf_bytes = FS_COPY_BUF_BYTES;
+    if (!buf) {                       /* 堆紧张时降级，不改变成功/失败语义 */
+        buf = stack_buf;
+        buf_bytes = (uint32_t)sizeof(stack_buf);
+    }
+
+    int result = 0;
     uint32_t off = 0;
     while (off < src_file->size) {
         uint32_t chunk = src_file->size - off;
-        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+        if (chunk > buf_bytes) chunk = buf_bytes;
         uint32_t got = fs_read_file_data(src_file, off, buf, chunk);
         if (got != chunk) {
             (void)fs_delete_file(dst_norm);
-            return fs_fail("读取源文件失败");
+            result = fs_fail("读取源文件失败");
+            break;
         }
         if (fs_write_file_data(dst_file, off, buf, got) < 0) {
             (void)fs_delete_file(dst_norm);
-            return fs_fail("写入目标失败");
+            result = fs_fail("写入目标失败");
+            break;
         }
         off += got;
     }
+    if (buf != stack_buf) kfree(buf);
+    if (result < 0) return result;
+
     (void)fs_sync();
     fs_error = "ok";
     return 0;
