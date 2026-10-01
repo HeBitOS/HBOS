@@ -509,7 +509,26 @@ static int xhci_enable_slot(uint32_t *slot_id) {
 
 static uint64_t *xhci_alloc_transfer_ring(uint64_t *ring_phys);
 
-static int xhci_address_device(uint32_t slot_id, uint32_t port, uint32_t speed) {
+/**
+ * @brief 给一个设备分配地址（Address Device）
+ *
+ * @param slot_id 已 enable 的 slot
+ * @param port    根端口号（1 起算），写入 slot context 的 ROOT_HUB_PORT
+ * @param speed   设备速度（PORTSC 的 speed 域）
+ * @param tt_slot 父 hub 的 slot id；0 表示设备直连根端口（不需要 TT）
+ * @param tt_port 父 hub 上的下行端口号；仅 tt_slot != 0 时有意义
+ *
+ * 关键点（真机上"鼠标插在 hub/扩展坞后面就不认"的根因）：设备挂在 **USB 2.0
+ * hub** 后面时，xHC 需要知道 split 事务要发给哪个 hub 的哪个端口，也就是
+ * slot context 的 `tt_info`：
+ *    bits 0-7  = TT hub 的 slot id
+ *    bits 8-15 = TT hub 上的端口号
+ * 不填的话 xHC 会把全速/低速设备的事务直接发到根端口，设备永远收不到，表现
+ * 就是控制传输超时、枚举失败。参考 Linux `xhci-mem.c:
+ * xhci_setup_addressable_virt_dev()` 的 `slot_ctx->tt_info`。
+ */
+static int xhci_address_device(uint32_t slot_id, uint32_t port, uint32_t speed,
+                               uint32_t tt_slot, uint32_t tt_port) {
     uint64_t input_phys = 0;
     uint64_t *input_ctx = (uint64_t *)xhci_alloc_aligned(CTX_SIZE * 32, &input_phys);
     if (!input_ctx) return -1;
@@ -536,6 +555,11 @@ static int xhci_address_device(uint32_t slot_id, uint32_t port, uint32_t speed) 
     ctx[1] = (1 << 0) | (1 << 1); /* Add slot + EP0 contexts */
     ctx[8] = (1 << 27) | (speed << 20);
     ctx[9] = (port << 16);
+    /* Route string 为 0（设备在根端口下第一层或更深层由 tt_info 描述）。
+     * hub 后面的设备：填 TT slot/port，让 xHC 生成 split 事务。 */
+    if (tt_slot) {
+        ctx[8 + 2] = (tt_slot & 0xFFU) | ((tt_port & 0xFFU) << 8);
+    }
 
     uint32_t ep0 = 16;
     ctx[ep0 + 1] = (EP_CTX_CONTROL << 3) | (8 << 16) | (3 << 1);
@@ -611,6 +635,257 @@ static void xhci_dump_pci_device(const pci_device_t *dev, void *ctx) {
     console_puts(" ProgIF=");
     dbg_print_hex16(dev->prog_if);
     console_puts("\n");
+}
+
+/*
+ * USB hub 支持
+ * ════════════
+ * 真机上鼠标/键盘经常挂在**内置 hub** 后面（笔记本键盘上方的扩展口、显示器
+ * 自带 hub、扩展坞）。这类拓扑下根端口上看到的是 hub 类设备（bDeviceClass=9），
+ * 真正的键鼠在 hub 的下行端口上。只扫根端口就永远找不到它们。
+ *
+ * 这里实现最小闭环（与 Linux `usb/core/hub.c` 的 hub 枚举一致）：
+ *   1. 识别 bDeviceClass=9 的设备；
+ *   2. GET_DESCRIPTOR(hub class descriptor) 拿 bNbrPorts；
+ *   3. 对每个下行端口 SetPortFeature(PORT_POWER) 上电 → 读 port status；
+ *   4. 有连接的端口 SetPortFeature(PORT_RESET) 复位，等 C_PORT_RESET；
+ *   5. 清变化位（wPortChange 各位是粘滞的，不清会反复上报）；
+ *   6. 递归调用寻址（设备在 hub 后 → 填 TT slot/port）。
+ *
+ * 上层（HID）不需要知道这层：hub 后的设备与前排设备一样出现在全局设备表里。
+ *
+ * ⚠ 验证状态：**QEMU 无法构造"设备挂在 hub 后面"的拓扑**（QEMU 的 usb-hub
+ * 不暴露可寻址的下游 bus，`-device usb-mouse,bus=hubX` 会直接报 Bus not
+ * found），因此这段代码只做了编译与"直连设备不受影响"的回归验证，枚举时序
+ * 是照 Linux `usb/core/hub.c` 写的、未在真机/模拟器上端到端跑过。真机上若
+ * hub 后的键鼠仍不认，排查顺序建议：
+ *   1) 串口里有没有 `[XHCI] Hub on port N with M downstream ports`——
+ *      没有说明 hub 设备本身没被识别为 hub（bDeviceClass 不是 9？）；
+ *   2) 有没有 `Hub downstream device addressed`——没有则看是端口复位失败
+ *      还是 Address Device 失败（后者多半是 tt_info 没生效）；
+ *   3) 有 addressed 但 HID 层没注册：看设备描述符/配置描述符读取是否成功。
+ */
+
+/** @brief hub 类请求：bmRequestType / bRequest / feature 编号（USB 2.0 §11.24） */
+#define USB_RT_HUB          0x20U
+#define USB_RT_PORT         0x23U
+#define USB_REQ_GET_STATUS  0x00U
+#define USB_REQ_SET_FEATURE 0x03U
+#define USB_REQ_CLEAR_FEATURE 0x01U
+/** @brief 端口特性：连接变化 / 复位 / 端口电源 */
+#define USB_PORT_FEAT_C_RESET     16U
+#define USB_PORT_FEAT_RESET        4U
+#define USB_PORT_FEAT_POWER        8U
+/** @brief wPortStatus 位：当前连接 / 已使能 / 低速 / 高速 */
+#define USB_PORT_STAT_CONNECTION  0x0001U
+#define USB_PORT_STAT_ENABLE      0x0002U
+#define USB_PORT_STAT_LOW_SPEED   0x0200U
+#define USB_PORT_STAT_HIGH_SPEED  0x0400U
+/** @brief 单个 hub 的下行端口上限（USB 2.0 规范 ≤ 31） */
+#define USB_HUB_MAX_PORTS 31
+/** @brief hub 类描述符长度上限（7 + 端口位图） */
+#define USB_HUB_DESC_MAX  15
+
+/**
+ * @brief 判断一个设备描述符是否是 hub（bDeviceClass = 9）
+ *
+ * 注意：有些复合设备把 hub 类信息放在接口描述符里（bDeviceClass = 0），本
+ * 驱动只处理设备级声明的 hub —— 这覆盖了绝大多数真机内置 hub。
+ */
+static int xhci_is_hub(const usb_device_desc_t *desc) {
+    return desc && desc->bDeviceClass == 0x09;
+}
+
+/**
+ * @brief 给 hub 的一个下行端口上电
+ *
+ * 即使 hub 声明不支持电源切换（wHubCharacteristics 的 LPSM=2）也要发这条
+ * 请求：Linux `hub.c` 的注释说明"有些 hub 只是模拟它，不发端口就不工作"。
+ */
+static int xhci_hub_port_power(uint32_t hub_slot, uint32_t port) {
+    return xhci_control_transfer(hub_slot, USB_RT_PORT, USB_REQ_SET_FEATURE,
+                                 USB_PORT_FEAT_POWER, (uint16_t)port, 0, 0);
+}
+
+/** @brief 清除端口变化位（粘滞位，必须显式清，否则会反复上报） */
+static int xhci_hub_clear_change(uint32_t hub_slot, uint32_t port, uint16_t feature) {
+    return xhci_control_transfer(hub_slot, USB_RT_PORT, USB_REQ_CLEAR_FEATURE,
+                                 feature, (uint16_t)port, 0, 0);
+}
+
+/**
+ * @brief 读一个下行端口的状态
+ * @param port_status 输出 4 字节：低 2 字节 wPortStatus、高 2 字节 wPortChange
+ * @return 0 成功，-1 失败
+ */
+static int xhci_hub_port_status(uint32_t hub_slot, uint32_t port,
+                                uint16_t *port_status, uint16_t *port_change) {
+    uint8_t buf[4];
+    int ret = xhci_control_transfer(hub_slot, USB_RT_PORT | 0x80U,
+                                    USB_REQ_GET_STATUS, 0, (uint16_t)port,
+                                    buf, sizeof(buf));
+    if (ret < 0) return -1;
+    *port_status = (uint16_t)(buf[0] | ((uint16_t)buf[1] << 8));
+    *port_change = (uint16_t)(buf[2] | ((uint16_t)buf[3] << 8));
+    return 0;
+}
+
+/**
+ * @brief 复位 hub 的一个下行端口并等复位完成
+ *
+ * 判定条件与 Linux `hub.c: hub_port_wait_reset()` 一致：轮询 GetPortStatus，
+ * 直到 `PORT_RESET` 清零**且**连接位仍为 1；成功后清 `C_PORT_RESET`。
+ */
+static int xhci_hub_reset_port(uint32_t hub_slot, uint32_t port) {
+    if (xhci_control_transfer(hub_slot, USB_RT_PORT, USB_REQ_SET_FEATURE,
+                              USB_PORT_FEAT_RESET, (uint16_t)port, 0, 0) < 0)
+        return -1;
+
+    hw_deadline_t deadline = hw_deadline_start();
+    for (;;) {
+        uint16_t st = 0, chg = 0;
+        if (xhci_hub_port_status(hub_slot, port, &st, &chg) < 0) return -1;
+        if (!(st & 0x10U) && (st & USB_PORT_STAT_CONNECTION)) {
+            /* 复位完成：清掉 C_PORT_RESET，否则该位会一直粘着。 */
+            (void)xhci_hub_clear_change(hub_slot, port, USB_PORT_FEAT_C_RESET);
+            return 0;
+        }
+        if (hw_deadline_expired_ms(&deadline, XHCI_PORT_TIMEOUT_MS,
+                                   XHCI_INIT_MAX_STALL_SPINS)) return -1;
+        cpu_relax();
+    }
+}
+
+/**
+ * @brief 探测并寻址一个已连接的 USB 设备（根端口或 hub 下行端口通用）
+ *
+ * @param port    根端口号（1 起算），写进 slot context 的 ROOT_HUB_PORT
+ * @param speed   设备速度
+ * @param tt_slot 父 hub 的 slot（0 = 直连根端口）
+ * @param tt_port 父 hub 的下行端口号
+ * @param out_slot 输出分配到的 slot id
+ * @param out_is_hub 输出该设备是否是 hub（调用方据此决定是否继续下钻）
+ * @return 0 成功，-1 失败
+ */
+static int xhci_probe_device(uint32_t port, uint32_t speed, uint32_t tt_slot,
+                             uint32_t tt_port, uint32_t *out_slot,
+                             int *out_is_hub) {
+    uint32_t slot;
+    if (xhci_enable_slot(&slot) < 0) return -1;
+    if (xhci_address_device(slot, port, speed, tt_slot, tt_port) < 0) {
+        xhci_send_cmd(TRB_DISABLE_SLOT, 0, (slot << 24));
+        hc->slot_enabled[slot] = 0;
+        return -1;
+    }
+
+    /* 读设备描述符：判断是不是 hub（hub 的下行端口还要继续枚举）。 */
+    usb_device_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    uint8_t buf[18];
+    int is_hub = 0;
+    if (xhci_control_transfer((int)slot, 0x80, 6, 0x0100, 0, buf, sizeof(buf)) >= 18) {
+        memcpy(&desc, buf, 18);
+        is_hub = xhci_is_hub(&desc);
+    }
+    if (out_slot) *out_slot = slot;
+    if (out_is_hub) *out_is_hub = is_hub;
+    return 0;
+}
+
+/** @brief 递归深度上限，防止 hub 环或异常拓扑导致无限递归 */
+#define XHCI_HUB_MAX_DEPTH 4
+/** @brief 单次探测里寻址的设备总数上限 */
+#define XHCI_HUB_MAX_DEVICES 12
+
+/**
+ * @brief 枚举一个 hub 的所有下行端口，并对有连接的端口递归寻址
+ *
+ * @param hub_slot   hub 自身的 slot
+ * @param n_ports    hub 报告的下行端口数
+ * @param root_port  该 hub 所在的根端口（透传给下游设备的 slot context）
+ * @param depth      当前递归深度
+ * @param budget     剩余可寻址设备数（调用方保证不会无限枚举）
+ * @return 本次新寻址的设备数
+ */
+static int xhci_scan_hub_ports(uint32_t hub_slot, uint32_t n_ports,
+                               uint32_t root_port, int depth, int *budget) {
+    if (depth > XHCI_HUB_MAX_DEPTH) return 0;
+    int found = 0;
+
+    for (uint32_t p = 1; p <= n_ports && *budget > 0; p++) {
+        if (xhci_hub_port_power(hub_slot, p) < 0) continue;
+        /* 上电后给端口一点稳定时间（USB 2.0 §7.1.7.3 要求 ≥100ms，
+         * 这里按 Linux HUB_DEBOUNCE 的思路给 50ms 的折中）。 */
+        usleep(50000);
+
+        uint16_t st = 0, chg = 0;
+        if (xhci_hub_port_status(hub_slot, p, &st, &chg) < 0) continue;
+        if (!(st & USB_PORT_STAT_CONNECTION)) continue;
+        if (chg) {
+            /* 清掉所有变化位，避免下次读到陈旧的连接事件。 */
+            for (uint16_t b = 16; b <= 23; b++) {
+                if (chg & (1U << b)) (void)xhci_hub_clear_change(hub_slot, p, b);
+            }
+        }
+
+        console_puts("[XHCI] Hub slot ");
+        dbg_print_uint(hub_slot);
+        console_puts(" port ");
+        dbg_print_uint(p);
+        console_puts(" connected, resetting...\n");
+
+        if (xhci_hub_reset_port(hub_slot, p) < 0) {
+            console_puts("[XHCI] Hub port reset failed.\n");
+            continue;
+        }
+
+        /* 速度判定（USB 2.0 §11.24.2.7.1）：两位都 0 表示全速。
+         * 全速/低速设备走在高速 hub 后面时需要 TT，xHC 会按 tt_info 生成
+         * split 事务，因此这里把父 hub 的 slot/端口一并传下去。 */
+        uint32_t speed = 1; /* 默认全速 */
+        if (st & USB_PORT_STAT_HIGH_SPEED) speed = 3;
+        else if (st & USB_PORT_STAT_LOW_SPEED) speed = 2;
+
+        uint32_t child_slot = 0;
+        int child_is_hub = 0;
+        if (xhci_probe_device(root_port, speed, hub_slot, p, &child_slot,
+                              &child_is_hub) < 0) {
+            console_puts("[XHCI] Hub downstream device address failed.\n");
+            continue;
+        }
+        (*budget)--;
+        found++;
+        console_puts("[XHCI] Hub downstream device addressed.\n");
+        usleep(10000);
+
+        if (child_is_hub) {
+            /* 下级 hub：读它的端口数继续下钻。 */
+            uint8_t hd[USB_HUB_DESC_MAX];
+            int r = xhci_control_transfer((int)child_slot,
+                                          USB_RT_HUB | 0x80U, 6, 0x2900, 0,
+                                          hd, sizeof(hd));
+            if (r >= 3 && hd[2] > 0 && hd[2] <= USB_HUB_MAX_PORTS) {
+                found += xhci_scan_hub_ports(child_slot, hd[2], root_port,
+                                             depth + 1, budget);
+            }
+        }
+    }
+    return found;
+}
+
+/**
+ * @brief 读 hub 的下行端口数（hub class descriptor 的 bNbrPorts）
+ * @return 端口数（1..31），失败返回 0
+ */
+static uint32_t xhci_hub_port_count(uint32_t hub_slot) {
+    uint8_t hd[USB_HUB_DESC_MAX];
+    /* GET_DESCRIPTOR 的 wValue 高字节 = 描述符类型 0x29（hub class）。 */
+    int r = xhci_control_transfer((int)hub_slot, USB_RT_HUB | 0x80U, 6, 0x2900,
+                                  0, hd, sizeof(hd));
+    if (r < 3) return 0;
+    uint32_t n = hd[2];
+    if (n == 0 || n > USB_HUB_MAX_PORTS) return 0;
+    return n;
 }
 
 /**
@@ -757,6 +1032,7 @@ static int xhci_init_controller(int ctrl_idx, const pci_device_t *dev) {
     // Wait 100ms for ports to stabilize
     usleep(100000);
 
+    int hub_budget = XHCI_HUB_MAX_DEVICES;
     for (uint32_t port = 1; port <= hc->max_ports; port++) {
         uint32_t portsc = xhci_read_portsc(port);
         if (!(portsc & XHCI_PORTSC_CCS)) continue;
@@ -770,27 +1046,28 @@ static int xhci_init_controller(int ctrl_idx, const pci_device_t *dev) {
             continue;
         }
 
-        uint32_t slot;
-        if (xhci_enable_slot(&slot) < 0) {
-            console_puts("[XHCI] Enable slot failed!\n");
-            continue;
-        }
-
         uint32_t speed = (xhci_read_portsc(port) >> 10) & 0xF;
-        console_puts("[XHCI] Slot ");
-        dbg_print_uint(slot);
-        console_puts(" enabled. Addressing device at speed ");
-        dbg_print_uint(speed);
-        console_puts("...\n");
-
-        if (xhci_address_device(slot, port, speed) < 0) {
+        uint32_t slot = 0;
+        int is_hub = 0;
+        if (xhci_probe_device(port, speed, 0, 0, &slot, &is_hub) < 0) {
             console_puts("[XHCI] Address device failed!\n");
-            xhci_send_cmd(TRB_DISABLE_SLOT, 0, (slot << 24));
-            hc->slot_enabled[slot] = 0;
             continue;
         }
         console_puts("[XHCI] Device addressed successfully!\n");
         usleep(10000); // 10ms recovery time after Set Address
+
+        if (is_hub) {
+            /* 根端口上是 hub：真机鼠标很可能就在它的下行端口上。 */
+            uint32_t n = xhci_hub_port_count(slot);
+            if (n) {
+                console_puts("[XHCI] Hub on port ");
+                dbg_print_uint(port);
+                console_puts(" with ");
+                dbg_print_uint(n);
+                console_puts(" downstream ports.\n");
+                (void)xhci_scan_hub_ports(slot, n, port, 1, &hub_budget);
+            }
+        }
     }
 
     /* 把本控制器上已寻址的设备登记进全局设备表：设备下标从此跨控制器唯一。 */
