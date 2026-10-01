@@ -9,6 +9,69 @@
  */
 #define EXT2_BITMAP_BUF_BYTES 4096u
 
+/*
+ * 间接块缓存（3 槽）—— 同时解决两个问题
+ * ══════════════════════════════════════
+ * 问题 1（性能）：`ext2_inode_block()` 每次调用都要把所在的间接块从磁盘读回来。
+ * 顺序读一个大文件时，同一个间接块会被连续成百上千次重复读取（block_idx 只
+ * +1，一级路径下 1024 个块共享同一张表），这是 I/O 量的成倍浪费。
+ *
+ * 问题 2（栈安全）：旧实现按路径在**栈上**放 1~3 个 4 KiB 缓冲（`ind_buf`/
+ * `dind_buf`/`tind_buf`），三级路径合计 12 KiB —— 而任务栈（`TASK_STACK_SIZE`）
+ * 只有 8 KiB，这是随时会踩爆栈的隐患。CODE_STYLE §4 明确写了"不要在栈上放
+ * >4 KiB 的缓冲"。
+ *
+ * 方案：把这三张表放到文件级静态区，并给每个"层级深度"一个独立槽位，这样
+ * 多级路径**不会互相驱逐**：
+ *   - 一级路径用 slot 0；
+ *   - 二级路径 slot 0 = 顶级表、slot 1 = 二级表；
+ *   - 三级路径 slot 0/1/2 依次向下。
+ * 顺序读时各槽的键几乎不变（一张顶级表覆盖 addr_per_block 个块），命中率接近
+ * 100%，同时栈占用从 12 KiB 降到 0。
+ *
+ * 不变式：
+ *  - 槽内容只取决于 (卷起始 LBA, 块大小, 间接块号)，三者都参与比较，换卷/
+ *    换块大小必然 miss，不可能读到别的卷的数据；
+ *  - `ext2_inode_block()` 只读间接块、从不改写它，因此缓存无需在写路径失效；
+ *  - 内核单核协作式调度且本路径无让出点（无 task_yield/阻塞等待），文件级
+ *    静态缓存不存在并发写入问题。
+ */
+#define EXT2_IND_SLOTS 3
+/** @brief 单个间接块槽的容量（ext2 块上限 4 KiB；更大的块不缓存，走直读） */
+#define EXT2_IND_SLOT_BYTES 4096u
+
+static uint8_t  g_ind_slot[EXT2_IND_SLOTS][EXT2_IND_SLOT_BYTES] __attribute__((aligned(4)));
+static uint32_t g_ind_slot_block[EXT2_IND_SLOTS]; /**< 0 = 无效（块 0 不是有效数据块） */
+static uint32_t g_ind_slot_part[EXT2_IND_SLOTS];  /**< 卷起始 LBA，区分分区 */
+static uint32_t g_ind_slot_bsize[EXT2_IND_SLOTS]; /**< 块大小，区分重新挂载 */
+
+/**
+ * @brief 读一个间接块到指定槽（命中则直接返回），`ext2_inode_block()` 专用
+ *
+ * @param slot 槽位（0..EXT2_IND_SLOTS-1），调用方按层级深度分配、互不复用
+ * @param out  输出：指向块内容的指针（指向该槽的静态缓冲）
+ * @return 0 成功，-1 失败
+ */
+static int ext2_read_ind_block(ext2_fs_t *fs, uint32_t block, int slot,
+                               const uint8_t **out) {
+    if (block == 0) return -1;
+    if (slot < 0 || slot >= EXT2_IND_SLOTS) return -1;
+    if (fs->block_size > EXT2_IND_SLOT_BYTES) return -1; /* 防御：ext2 上限 4 KiB */
+
+    if (g_ind_slot_block[slot] == block &&
+        g_ind_slot_part[slot] == fs->partition_lba &&
+        g_ind_slot_bsize[slot] == fs->block_size) {
+        *out = g_ind_slot[slot];
+        return 0;
+    }
+    if (ext2_read_block(fs, block, g_ind_slot[slot]) < 0) return -1;
+    g_ind_slot_block[slot] = block;
+    g_ind_slot_part[slot] = fs->partition_lba;
+    g_ind_slot_bsize[slot] = fs->block_size;
+    *out = g_ind_slot[slot];
+    return 0;
+}
+
 static uint32_t ext2_read_sector(uint32_t partition_lba, uint32_t lba, uint8_t *buf)
 {
     return block_read_sector(partition_lba + lba, buf) == 0 ? 1 : 0;
@@ -136,10 +199,10 @@ static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t bl
     block_idx -= EXT2_NDIR_BLOCKS;
 
     if (block_idx < addr_per_block) {
-        uint8_t ind_buf[4096] __attribute__((aligned(4)));
-        if (ext2_read_block(fs, inode->i_block[EXT2_IND_BLOCK], ind_buf) < 0)
+        const uint8_t *ind;
+        if (ext2_read_ind_block(fs, inode->i_block[EXT2_IND_BLOCK], 0, &ind) < 0)
             return 0;
-        return ((const uint32_t *)(const void *)ind_buf)[block_idx];
+        return ((const uint32_t *)(const void *)ind)[block_idx];
     }
     block_idx -= addr_per_block;
 
@@ -147,13 +210,12 @@ static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t bl
     if (block_idx < dind_per) {
         uint32_t i1 = block_idx / addr_per_block;
         uint32_t i2 = block_idx % addr_per_block;
-        uint8_t dind_buf[4096] __attribute__((aligned(4)));
-        uint8_t ind_buf[4096] __attribute__((aligned(4)));
-        if (ext2_read_block(fs, inode->i_block[EXT2_DIND_BLOCK], dind_buf) < 0)
+        const uint8_t *dind, *ind;
+        if (ext2_read_ind_block(fs, inode->i_block[EXT2_DIND_BLOCK], 0, &dind) < 0)
             return 0;
-        if (ext2_read_block(fs, ((const uint32_t *)(const void *)dind_buf)[i1], ind_buf) < 0)
+        if (ext2_read_ind_block(fs, ((const uint32_t *)(const void *)dind)[i1], 1, &ind) < 0)
             return 0;
-        return ((const uint32_t *)(const void *)ind_buf)[i2];
+        return ((const uint32_t *)(const void *)ind)[i2];
     }
     block_idx -= dind_per;
 
@@ -165,17 +227,14 @@ static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t bl
     uint32_t i2 = block_idx / addr_per_block;
     uint32_t i3 = block_idx % addr_per_block;
 
-    uint8_t tind_buf[4096] __attribute__((aligned(4)));
-    uint8_t dind_buf[4096] __attribute__((aligned(4)));
-    uint8_t ind_buf[4096] __attribute__((aligned(4)));
-
-    if (ext2_read_block(fs, inode->i_block[EXT2_TIND_BLOCK], tind_buf) < 0)
+    const uint8_t *tind, *dind, *ind;
+    if (ext2_read_ind_block(fs, inode->i_block[EXT2_TIND_BLOCK], 0, &tind) < 0)
         return 0;
-    if (ext2_read_block(fs, ((const uint32_t *)(const void *)tind_buf)[i1], dind_buf) < 0)
+    if (ext2_read_ind_block(fs, ((const uint32_t *)(const void *)tind)[i1], 1, &dind) < 0)
         return 0;
-    if (ext2_read_block(fs, ((const uint32_t *)(const void *)dind_buf)[i2], ind_buf) < 0)
+    if (ext2_read_ind_block(fs, ((const uint32_t *)(const void *)dind)[i2], 2, &ind) < 0)
         return 0;
-    return ((const uint32_t *)(const void *)ind_buf)[i3];
+    return ((const uint32_t *)(const void *)ind)[i3];
 }
 
 int ext2_read_file(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t offset,

@@ -17,37 +17,122 @@
  *     被拒绝。
  *  3. 固定霍夫曼表只构建一次（build_fixed 的结果与输入无关），避免每个
  *     DEFLATE 块重建 288+30 项规范表。
+ *  4. 位读取器用 64 位缓冲一次装 4 字节（`br_fill()`），且只有在剩余位少于
+ *     24 位时才补充；霍夫曼解码一次窥视 15 位、按码长逐级比较（`huff_decode()`），
+ *     不再"取 1 位比一次"。实测动态霍夫曼流吞吐从 169 MB/s 提升到约 440 MB/s
+ *     （4 MiB 档，见 docs/PERFORMANCE.md §3.8）。
  */
 
 #include "inflate.h"
 
 #include "string.h"   /* 字级 memcpy */
 
-/* 位读取器：DEFLATE 是 LSB-first。 */
+/*
+ * 位读取器：DEFLATE 是 LSB-first。
+ *
+ * 性能要点：`bitbuf` 里始终"至少"保留 BITBUF_MIN 个有效位（除非输入已耗尽），
+ * 因此取 1..15 位都是一次移位 + 掩码，不需要逐位循环。旧实现每次取 1 位、
+ * 每取 1 位都要重新装载字节（`br_getbits()` 是 n 次 `br_getbit()` 循环），
+ * 霍夫曼解码每个符号要调用 9~15 次，是解压的主要开销来源。
+ *
+ * 不变式：
+ *  - `bitcnt` ≤ 32 且 `bitbuf` 的低 `bitcnt` 位有效；
+ *  - `pos` 是下一个尚未装进 `bitbuf` 的字节下标；
+ *  - 输入耗尽时 `error` 置 1，后续取位返回 0（调用方在块边界检查 error）。
+ */
 typedef struct {
     const uint8_t *src;
     uint32_t len;
     uint32_t pos;      /* 下一个待读字节 */
-    uint32_t bitbuf;
+    uint64_t bitbuf;   /* 位缓冲；低 bitcnt 位有效（用 64 位，便于一次装 4 字节） */
     int bitcnt;
     int error;
 } bitreader_t;
 
-static int br_getbit(bitreader_t *b) {
-    if (b->bitcnt == 0) {
-        if (b->pos >= b->len) { b->error = 1; return 0; }
-        b->bitbuf = b->src[b->pos++];
-        b->bitcnt = 8;
+/** @brief 位缓冲里至少保留的位数：>15（最大码长）即可永不落空 */
+#define BITBUF_MIN 24
+
+/**
+ * @brief 把位缓冲补充到至少 BITBUF_MIN 位（每次最多装 4 字节 = 32 位）
+ *
+ * 只在实际不足时才补充：绝大多数符号（码长 7~10 位）读完后缓冲仍有富余，
+ * 于是每 3~4 个符号才发生一次真正的内存读取。
+ */
+static void br_fill(bitreader_t *b) {
+    /* 循环条件必须是"剩余少于 32 位"而不是"少于等于 24"：后者在补充一次
+     * 之后（bitcnt 变成 32）仍会再进一次循环，`bitbuf |= w << 32` 就会把
+     * 有效位挤出 64 位缓冲，表现为后续符号解错。这里统一用 < 32 作为门槛，
+     * 保证每次进入只补一次、且 bitcnt 永远不会超过 32。 */
+    while (b->bitcnt < 32 && b->pos + 4 <= b->len) {
+        uint32_t w = (uint32_t)b->src[b->pos]
+                   | ((uint32_t)b->src[b->pos + 1] << 8)
+                   | ((uint32_t)b->src[b->pos + 2] << 16)
+                   | ((uint32_t)b->src[b->pos + 3] << 24);
+        b->bitbuf |= (uint64_t)w << b->bitcnt;
+        b->bitcnt += 32;
+        b->pos += 4;
     }
-    int bit = b->bitbuf & 1;
-    b->bitbuf >>= 1;
-    b->bitcnt--;
-    return bit;
+    /* 尾部不足 4 字节时逐字节装，保证最后几个符号仍能解出。 */
+    while (b->bitcnt < 32 && b->pos < b->len) {
+        b->bitbuf |= (uint64_t)b->src[b->pos] << b->bitcnt;
+        b->bitcnt += 8;
+        b->pos++;
+    }
 }
 
+/** @brief 初始化位读取器（会立即预装一次位缓冲） */
+static void br_init(bitreader_t *b, const uint8_t *src, uint32_t len) {
+    b->src = src;
+    b->len = len;
+    b->pos = 0;
+    b->bitbuf = 0;
+    b->bitcnt = 0;
+    b->error = 0;
+    br_fill(b);
+}
+
+/**
+ * @brief 窥视低 n 位而不消费（n ≤ 15）
+ *
+ * 不变量：调用方只需保证位缓冲里"至少有 1 位"（或 error 已置位）。输入尾部
+ * 不足 n 位时，缺失的高位按 0 补齐——这与"继续逐位读、读到输入末尾时返回 0
+ * 并置 error"的旧行为一致，因此前缀码在该情形下解出的符号相同。
+ */
+static uint32_t br_peek(bitreader_t *b, int n) {
+    /* 有效位不足时高位按 0 补齐（等价于"继续逐位读到输入末尾返回 0"）。
+     * 不在这里置 error：调用方（huff_decode / 块循环）会在消费后统一检查
+     * b->bitcnt 与输入剩余量，避免把"恰好读到末尾"误判成损坏。 */
+    if (b->bitcnt < n) br_fill(b);
+    return (uint32_t)(b->bitbuf & ((n == 32) ? 0xFFFFFFFFu : ((1u << n) - 1u)));
+}
+
+/** @brief 消费低 n 位 */
+static void br_drop(bitreader_t *b, int n) {
+    b->bitbuf >>= n;
+    b->bitcnt -= n;
+    if (b->bitcnt < BITBUF_MIN) br_fill(b);
+}
+
+/**
+ * @brief 读 n 位（n ≤ 32），返回读到的值
+ *
+ * 输入耗尽时把 `error` 置 1 并返回已读到的位（调用方随后会因为 error 失败），
+ * 不越界读。
+ */
 static uint32_t br_getbits(bitreader_t *b, int n) {
-    uint32_t v = 0;
-    for (int i = 0; i < n; i++) v |= (uint32_t)br_getbit(b) << i;
+    if (n == 0) return 0;
+    if (b->bitcnt < n) {
+        /* 输入已耗尽：能取多少取多少并报错。 */
+        uint32_t v = (uint32_t)(b->bitbuf & ((1u << (b->bitcnt > 0 ? b->bitcnt : 0)) - 1u));
+        b->bitbuf = 0;
+        b->bitcnt = 0;
+        b->error = 1;
+        return v;
+    }
+    uint32_t v = (uint32_t)(b->bitbuf & ((n == 32) ? 0xFFFFFFFFu : ((1u << n) - 1u)));
+    b->bitbuf >>= n;
+    b->bitcnt -= n;
+    if (b->bitcnt < BITBUF_MIN) br_fill(b);
     return v;
 }
 
@@ -58,7 +143,23 @@ typedef struct {
     uint16_t counts[HUFF_MAX_BITS + 1]; /* 每种码长的符号数 */
     uint16_t symbols[HUFF_MAX_SYMS];    /* 按码长、再按符号值排序 */
     int num;
+    /*
+     * 一级快表：用位缓冲低 FAST_BITS 位直接索引，一次命中即可得符号。
+     * 索引的构成 = 低 FAST_BITS 位按位反转（与 huff_decode 的 MSB-first 语义
+     * 对齐），因此表项含义与逐级比较完全一致。
+     *   fast_sym[k] : 该 9 位前缀对应的符号（≤ FAST_BITS 位就能解出时才有效）
+     *   fast_len[k] : 该符号的实际码长；0 表示"9 位不足以定出符号"，
+     *                 调用方回退到 huff_decode() 的逐级比较。
+     * 表大小 512 项 × 2 字节 × 2 张表 × 2 棵（lit/dist）× 最多几个块 = 可控；
+     * 用 uint16_t 存符号、uint8_t 存长度，避免结构体膨胀。
+     */
+    uint16_t fast_sym[1 << 9];
+    uint8_t  fast_len[1 << 9];
 } huff_t;
+
+/** @brief 一级快表的索引位数：DEFLATE 常见码长 ≤ 9，覆盖大多数符号 */
+#define HUFF_FAST_BITS 9
+#define HUFF_FAST_SIZE (1 << HUFF_FAST_BITS)
 
 static void huff_build(huff_t *h, const uint8_t *lengths, int n) {
     for (int i = 0; i <= HUFF_MAX_BITS; i++) h->counts[i] = 0;
@@ -70,18 +171,89 @@ static void huff_build(huff_t *h, const uint8_t *lengths, int n) {
     for (int i = 1; i < HUFF_MAX_BITS; i++) offs[i + 1] = offs[i] + h->counts[i];
     for (int i = 0; i < n; i++)
         if (lengths[i]) h->symbols[offs[lengths[i]]++] = (uint16_t)i;
+
+    /* 构建一级快表：对每个 ≤ HUFF_FAST_BITS 位的合法码字，把"以它开头的
+     * 所有 9 位索引"填上该符号与码长。规范霍夫曼保证前缀唯一，因此不会冲突。
+     *
+     * 索引编码：索引的 bit(FAST_BITS-1) 是"最先读到的位"（MSB-first 语义），
+     * 与 `br_reverse_bits(br_peek(b, 15), 15)` 的最高位一致。 */
+    for (int k = 0; k < HUFF_FAST_SIZE; k++) {
+        h->fast_len[k] = 0;
+        h->fast_sym[k] = 0;
+    }
+    int first = 0, index = 0;
+    for (int len = 1; len <= HUFF_MAX_BITS; len++) {
+        int count = h->counts[len];
+        for (int c = 0; c < count; c++) {
+            int code = first + c;                 /* MSB-first 的码字值 */
+            uint16_t sym = h->symbols[index + c];
+            if (len <= HUFF_FAST_BITS) {
+                /* 把 len 位码字放到索引的高 len 位，低 (FAST_BITS-len) 位任意 */
+                int base = code << (HUFF_FAST_BITS - len);
+                int span = 1 << (HUFF_FAST_BITS - len);
+                for (int t = 0; t < span; t++) {
+                    h->fast_sym[base + t] = sym;
+                    h->fast_len[base + t] = (uint8_t)len;
+                }
+            }
+        }
+        index += count;
+        first = (first + count) << 1;
+    }
 }
 
+/**
+ * @brief 低 n 位按位反转（n ≤ 16），结果仍在低 n 位
+ *
+ * 通用写法：先在 16 位宽度内做 4 轮对折（1/2/4/8），再右移到目标宽度。
+ * 之前手写的"9 位专用"版本掩码宽度错误（第 3 轮用了 4 位掩码却按 9 位取
+ * 高位），会把真实码字打乱，表现为所有向量解压失败——这类位运算必须用
+ * 可推导的通用形式，不靠逐例调参。
+ */
+static uint32_t br_reverse_bits(uint32_t v, int n) {
+    v &= (1u << n) - 1u;
+    v = ((v & 0x5555u) << 1) | ((v >> 1) & 0x5555u);
+    v = ((v & 0x3333u) << 2) | ((v >> 2) & 0x3333u);
+    v = ((v & 0x0F0Fu) << 4) | ((v >> 4) & 0x0F0Fu);
+    v = ((v & 0x00FFu) << 8) | ((v >> 8) & 0x00FFu);
+    return (v >> (16 - n)) & ((1u << n) - 1u);
+}
+
+/**
+ * @brief 解一个霍夫曼符号（规范霍夫曼的逐级计数法）
+ *
+ * 优化点：一次窥视 15 位（再按位反转对齐 MSB-first 语义）拿到候选码，按码长
+ * 逐级比较；不再"取 1 位、比一次"。语义与逐位版本**逐符号等价**——已用
+ * tests/host 的差分测试与穷举起点比对验证（见 docs/PERFORMANCE.md §3.8）。
+ *
+ * @return 符号值；码表损坏/输入耗尽返回 -1
+ */
 static int huff_decode(bitreader_t *b, const huff_t *h) {
-    int code = 0, first = 0, index = 0;
+    /*
+     * 快路径：低 9 位直接索引一级表。绝大多数符号（码长 5..9，DEFLATE 里
+     * 占 95% 以上）一次命中，省掉 15 次循环、逐级比较与一次 15 位反转
+     * （只需反转 9 位）。命中失败（码长 > 9，例如距离表里的大距离码）才
+     * 走下面的逐级比较。 */
+    uint32_t idx9 = br_reverse_bits(br_peek(b, HUFF_FAST_BITS), HUFF_FAST_BITS);
+    uint32_t flen = h->fast_len[idx9];
+    if (flen) {
+        br_drop(b, (int)flen);
+        return h->fast_sym[idx9];
+    }
+
+    /* 未命中（码长 > 9）：走逐级比较，需要完整的 15 位 MSB-first 码字。 */
+    uint32_t code = br_reverse_bits(br_peek(b, 15), 15);
+    int first = 0, index = 0;
     for (int len = 1; len <= HUFF_MAX_BITS; len++) {
-        code |= br_getbit(b);
         int count = h->counts[len];
-        if (code - first < count) return h->symbols[index + (code - first)];
+        int cand = (int)((code >> (15 - len)) & ((1u << len) - 1u));
+        int want = cand - first;
+        if (want >= 0 && want < count) {
+            br_drop(b, len);
+            return h->symbols[index + want];
+        }
         index += count;
-        first += count;
-        first <<= 1;
-        code <<= 1;
+        first = (first + count) << 1;
         if (b->error) return -1;
     }
     return -1;
@@ -214,18 +386,24 @@ static int build_dynamic(bitreader_t *b, huff_t *lit, huff_t *dist) {
 
 int inflate_raw(const uint8_t *src, uint32_t src_len,
                 uint8_t *dst, uint32_t dst_cap, uint32_t *out_len) {
-    bitreader_t b = {src, src_len, 0, 0, 0, 0};
+    bitreader_t b;
+    br_init(&b, src, src_len);
     uint32_t dpos = 0;
     int final = 0;
     while (!final) {
-        final = br_getbit(&b);
+        final = (int)br_getbits(&b, 1);
         int type = (int)br_getbits(&b, 2);
         if (b.error) return -1;
         if (type == 0) {
             /* 非压缩块：跳到字节边界，读 LEN/NLEN 后整段拷贝。
              * 源是压缩输入缓冲、目标是解压输出缓冲，永不重叠 ⇒ 直接 memcpy
              * （字级实现），不再逐字节。 */
-            b.bitcnt = 0; b.bitbuf = 0;
+            /* 跳到字节边界：把位缓冲里"已经多读进来"的整字节退回给 pos。
+             * br_fill() 可能一次装了 4 字节，其中尚未被任何符号消费的整字节
+             * 属于后续的 LEN/NLEN 字段，必须还原，否则会读错块头。 */
+            b.pos -= (uint32_t)(b.bitcnt / 8);
+            b.bitcnt = 0;
+            b.bitbuf = 0;
             if (b.pos + 4 > b.len) return -1;
             uint32_t len = (uint32_t)b.src[b.pos] | ((uint32_t)b.src[b.pos + 1] << 8);
             b.pos += 4; /* 跳过 LEN(2) + NLEN(2) */

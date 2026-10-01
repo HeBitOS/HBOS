@@ -121,6 +121,79 @@ TCP/UDP/IP 的反码和改为一次加 4 个 16 位 lane，并在累加器过半
 - 去掉 DHCP 等待循环里重复的 `net_udp_drain()`（该函数一次就排空整条队列）。
 - `kcalloc`/`krealloc` 改用字级 `memset`/`memcpy`（`src/core/heap.c`）。
 
+### 3.8 DEFLATE 解压：字级位缓冲 + 9 位一级快表（`src/inflate.c`）
+
+**测量方法**（可复现）：`make inflate-bench`。真值由宿主 Python `zlib` 压缩
+生成（`tests/host/gen_inflate_vectors.py`），内核里的 inflate 解压后**逐字节
+比对**，因此这个目标同时是正确性差分与吞吐量基准。三档向量都是动态霍夫曼
+块（4 KiB / 256 KiB / 4 MiB 原始数据，压缩率 29%~34%），不是 stored block
+——纯随机会退化成 stored，测不到霍夫曼路径。
+
+| 向量 | 改动前 | 改动后 | 提升 |
+|---|---:|---:|---:|
+| 4 KiB（200 次） | 169 MB/s | 218 MB/s | +29% |
+| 256 KiB（8 次） | 169 MB/s | 294 MB/s | +74% |
+| 4 MiB（1 次） | 171 MB/s | 276 MB/s | +61% |
+
+（宿主为普通 x86_64 开发机，`gcc -O2`，单次运行；量级与相对关系稳定，
+绝对值会随机器浮动。）
+
+**改了什么**
+
+1. **位读取器改为批量装填**（`br_fill()` / `br_init()`）。旧 `br_getbits(n)`
+   就是 n 次 `br_getbit()` 循环，每次都要判断缓冲是否为空、可能再装一个字节；
+   霍夫曼解码每个符号要调用 9~15 次。现在用 64 位缓冲一次装 4 字节，且只在
+   剩余不足 32 位时才补充，取 1..15 位都是一次移位 + 掩码。
+2. **霍夫曼解码加 9 位一级快表**（`huff_t::fast_sym/fast_len`）。DEFLATE 里
+   绝大多数符号码长 ≤ 9，用位缓冲低 9 位（按 MSB-first 语义做位反转后）直接
+   索引即可一次命中，省掉逐级比较的循环；码长 > 9 的（主要是距离表的大距离码）
+   才回退到逐级比较。
+3. 去掉两套位反转实现，统一为可推导的 `br_reverse_bits(v, n)`。
+
+**踩到的三个坑（都靠差分测试逮住，记录以免后人重复）**
+
+- 位缓冲补充循环的条件写成 `bitcnt <= 24` 时，补一次到 32 位后仍会再进一次
+  循环，`bitbuf |= w << 32` 把有效位挤出 64 位缓冲；必须是 `< 32`。
+- 规范霍夫曼的 `code` 在解码器里是 **MSB-first**（第一个读到的位是最高位），
+  而位缓冲是 LSB-first，批量取出的位**必须先按位反转**才能与 `counts`/`first`
+  的递推对齐。等价性用"逐位参考实现 vs 批量实现、穷举所有起始位"在宿主侧
+  验证过。
+- 手写"9 位专用"反转时掩码宽度写错（第 3 轮用了 4 位掩码却按 9 位取高位），
+  所有向量立刻失败。位运算要用可推导的通用形式，不靠逐例调参。
+
+**语义不变**：解码出的符号序列、输出字节、adler32 校验结果与改动前逐字节
+相同（差分测试保证）；非压缩块跳字节边界时新增"把位缓冲里多装的整字节退回
+`pos`"这一步，否则块头会被读错。
+
+### 3.9 ext2 间接块缓存（3 槽）—— 同时消除 12 KiB 栈占用（`src/ext2.c`）
+
+**问题 1（I/O）**：`ext2_inode_block()` 每次调用都要把所在的间接块从磁盘读回来。
+顺序读大文件时同一个间接块被连续成百上千次重复读取（一级路径下 1024 个块共享
+同一张表）。
+
+**问题 2（栈安全）**：旧实现按路径在**栈上**放 1~3 个 4 KiB 缓冲
+（`ind_buf`/`dind_buf`/`tind_buf`），三级路径合计 12 KiB，而任务栈
+（`TASK_STACK_SIZE`）只有 8 KiB —— 这是随时会踩爆栈的隐患，也违反
+CODE_STYLE §4 "不要在栈上放 >4 KiB 的缓冲"。
+
+**改法**：把三张表移到文件级静态区，并给每个"层级深度"一个独立槽位
+（一级用 slot 0；二级 slot 0=顶级表、slot 1=二级表；三级依次向下），
+多级路径因此**不会互相驱逐**。顺序读时各槽键几乎不变，命中率接近 100%；
+栈占用从 12 KiB 降到 0。
+
+**量化证据**（可复现：`make ext2-diff`）。测试用 mkfs.ext2 + debugfs 造真实
+镜像、覆盖 1 B / 511 B / 1 KiB / 4 KiB / 6000 B / 70000 B（跨一级间接边界）
+六种尺寸，在宿主机上把块设备换成文件替身并统计底层命令数：
+
+| 指标 | 改动前 | 改动后 | 变化 |
+|---|---:|---:|---:|
+| 块读命令数 | 214 | 158 | **−26%** |
+| 读扇区数 | 427 | 315 | **−26%** |
+| 写命令/扇区 | 27 / 45 | 27 / 45 | 不变 |
+
+读回内容与生成规则逐字节一致（差分断言 `failures=0`），分配器语义
+（最小空闲块、free 后可复用）不变。
+
 ## 4. 刻意不改的东西（附理由）
 
 1. **FAT32 簇分配游标（把 O(M²) 的 FAT 扫描降为 O(M)）**：会让"总是挑最小编号
@@ -148,11 +221,11 @@ inflate`、`gui/graphics/shell/tools/core` 的分子系统审计。以下为**�
 | 2 | `src/fat32.c:fat32_alloc_cluster` | 每次从簇 2 重扫，分配 M 簇 ~ M²/256 次 FAT 扇区读 | 内存游标（若接受分配顺序变化，见 §4.1） |
 | 3 | `src/fat32.c:fat32_write_file` | 每次调用重数整条簇链（分块写 ⇒ O(n²)） | 用已传入的 `file_size` 取下界或缓存链尾 |
 | 4 | `src/fs.c` `hbfs_write_data` | 文件长度每次增长都重写整张 16 扇区文件表 | 脏标记 + 只回写受影响扇区，`fs_sync`/close 时统一刷 |
-| 5 | `src/ext2.c` `ext2_inode_block` | 每个数据块都重读间接块（≥12 块的文件 I/O 翻倍） | 循环内缓存当前间接块 |
+| 5 | ~~`src/ext2.c` `ext2_inode_block`~~ | **已实施，见 §3.9**（读命令 −26%，栈占用 12 KiB → 0） | — |
 | 6 | `src/ext2.c` `ext2_alloc_block`/`ext2_inode_set_block` | 每分配一块就写 inode + 位图 + BGD + 超级块（~10 条命令/4 KiB） | inode 只改内存、末尾写一次；位图/BGD 延迟落盘 |
 | 7 | `src/fs.c` `fat32_rebuild_dir` / `src/ext2.c` `ext2_readdir` | 挂载时按索引逐个重走目录（O(E²) 块读） | 流式单遍遍历产出 name→inode |
 | 8 | `src/fs.c` `hbfs_read_data`/`hbfs_write_data` | 对齐的整段仍逐扇区发命令 | 中间整段用 `block_read_sectors`/`block_write_sectors` |
-| 9 | `src/inflate.c` `huff_decode`/`br_getbits` | 逐位霍夫曼解码 + 逐位取位 | 位缓冲批量补充（一次 32 位）+ 9 位一级表 |
+| 9 | ~~`src/inflate.c` `huff_decode`/`br_getbits`~~ | **已实施，见 §3.8**（169 → 276 MB/s） | — |
 | 10 | `src/crypto/chacha20_poly1305.c` | poly1305 每 16 B 一次 memset+memcpy+5×8 次字节载入 | 非对齐 64 位载入取 5 个 limb；keystream 8 字节异或 |
 | 11 | `src/net.c:net_tcp_recv` 预算 | `80000` 自旋 × `80000` 轮、无 PIT 截止 → 对端挂死可卡数分钟 | 引入 PIT 截止时间，缩小每轮自旋 |
 | 12 | `src/net.c:rtl8139_poll` | 每次自旋 2 次端口读 + 1 次端口写（每次都是 VM exit） | 用 ISR 状态位门控 `CHIP_CMD` 读 |
@@ -182,6 +255,8 @@ inflate`、`gui/graphics/shell/tools/core` 的分子系统审计。以下为**�
 make -j$(nproc)                 # 构建（应零 warning）
 make bench-boot RUNS=5          # 冷启动基准（BIOS + UEFI）
 make bench-boot ONLY=bios       # 只测 BIOS
+make inflate-bench              # inflate 逐字节差分 + 吞吐量（真值来自 Python zlib）
+make ext2-diff                  # ext2 宿主差分 + 底层块命令数（真实镜像）
 make BOOT_MENU_TIMEOUT=0 bench-boot   # 最快配置对照
 make smoke                      # 启动/网络/镜像功能回归
 make fat32-smoke                # FAT32 持久化全链路
