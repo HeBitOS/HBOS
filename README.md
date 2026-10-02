@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo/HBOS.png" alt="HBOS Logo" width="200">
+  <img src="docs/logo/new-logo.png" alt="HBOS Logo" width="200">
 </p>
 
 # HBOS
