@@ -42,6 +42,46 @@
 
 /* app_imgview.c / app_hexview.c 各自路径 setter，供 gui_open_selected_file()
  * 打开对应查看器前写入要打开的文件路径 */
+/* ── 浏览器私有状态 ───────────────────────────────────────────
+ * 16 个 browser_* 字段原先挂在全局 gui_state_t（"上帝对象"）上。浏览器的
+ * 实现一直在 gui.c 内部（抓取/历史/渲染分发），因此这一轮先把它从全局
+ * 状态里摘出来，收成 gui.c 的文件级私有结构体：
+ *   - 框架其余部分不再看到"浏览器"这个概念
+ *   - 后续要把浏览器整体搬成独立模块时，只需把这个结构体与相关函数一起
+ *     移走，不必再从 gui_state_t 里一个个挑字段
+ *
+ * 字段名去掉 browser_ 前缀（结构体内已无歧义）。访问点由 bs()->x
+ * 改为 bs()->x。 */
+typedef struct {
+    char url[BROWSER_URL_CAP];
+    uint32_t url_cursor;  /* 左右键在网址栏内移动的插入点 */
+    char page[BROWSER_PAGE_CAP];
+    uint32_t page_len;
+    /* 带样式标记的渲染缓冲（每行首字节为 blk_t 块类型），仅供屏幕渲染用；
+    * page 保持纯文本供“保存网页”使用。 */
+    char render[BROWSER_PAGE_CAP];
+    uint32_t render_len;
+    uint64_t required_caps; /* 当前文档声明/使用但后端尚未必具备的 Web 能力 */
+    int loaded;
+    int scroll;
+    /* 每次渲染页面时 render_from_html() 填好的链接 href 表，
+    * draw_rendered_page() 按流里出现的链接块顺序对应到这里的下标
+    * （见 gui.c 里 BRK_LINK 的编码方式）。 */
+    char link_href[BROWSER_LINK_MAX][96];
+    int link_count;
+    /* 后退/前进历史：定长环状最近 20 条，不缓存每条的完整渲染内容
+    * （避免 * 20 的内存倍数），后退/前进时用存的 URL 重新抓取。 */
+    char hist[BROWSER_HIST_MAX][BROWSER_URL_CAP];
+    int hist_count;
+    int hist_pos;
+    int  loading;       /* 1=正在后台抓取页面，0=空闲 */
+    int  push_hist;     /* 本次加载是否需要向历史压栈 */
+    uint32_t load_tid;  /* 后台抓取任务的 task ID（用于检测完成） */
+} browser_state_t;
+
+static browser_state_t g_browser;
+static browser_state_t *bs(void) { return &g_browser; }
+
 void app_imgview_set_path(gui_state_t *st, const char *path);
 void app_hexview_set_path(gui_state_t *st, const char *path);
 void app_snake_reset(gui_state_t *st);
@@ -1743,6 +1783,7 @@ static int br_card_img_slot(const char *inner, uint32_t len) {
 
 /* 提取卡片内第一个 <a href>，登记为浏览器链接，返回 link_idx（-1 无） */
 static int br_card_link(gui_state_t *st, const char *inner, uint32_t len) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     const char *a = body_strcasestr(inner, "<a");
     if (!a || (uint32_t)(a - inner) >= len) return -1;
     uint32_t start = (uint32_t)(a - inner);
@@ -1753,13 +1794,13 @@ static int br_card_link(gui_state_t *st, const char *inner, uint32_t len) {
     if (!br_attr_value(inner + start, j - start, "href", href, sizeof(href)) ||
         !href[0])
         return -1;
-    if (st->browser_link_count >= BROWSER_LINK_MAX) return -1;
-    int idx = st->browser_link_count;
+    if (bs()->link_count >= BROWSER_LINK_MAX) return -1;
+    int idx = bs()->link_count;
     uint32_t hl = (uint32_t)strlen(href);
-    if (hl >= sizeof(st->browser_link_href[0])) hl = sizeof(st->browser_link_href[0]) - 1;
-    memcpy(st->browser_link_href[idx], href, hl);
-    st->browser_link_href[idx][hl] = 0;
-    st->browser_link_count++;
+    if (hl >= sizeof(bs()->link_href[0])) hl = sizeof(bs()->link_href[0]) - 1;
+    memcpy(bs()->link_href[idx], href, hl);
+    bs()->link_href[idx][hl] = 0;
+    bs()->link_count++;
     return idx;
 }
 
@@ -1797,6 +1838,7 @@ static void br_emit_card(gui_state_t *st, char *out, uint32_t cap, uint32_t *pos
 }
 
 static void browser_render_from_html(gui_state_t *st, const char *html, char *out, uint32_t cap, uint32_t *out_len) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t pos = 0;
     int space = 1;
     int need_prefix = 1;
@@ -1845,11 +1887,11 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
     ol_flag[0] = 0; ol_num[0] = 0;
 
     gh_css_reset();
-    st->browser_link_count = 0;
+    bs()->link_count = 0;
     g_br_img_count = 0;
     g_br_css_fetches = 0;
     g_br_script_fetches = 0;
-    strncpy(g_br_current_url, st->browser_url, sizeof(g_br_current_url) - 1);
+    strncpy(g_br_current_url, bs()->url, sizeof(g_br_current_url) - 1);
     g_br_current_url[sizeof(g_br_current_url) - 1] = 0;
     g_br_dns_n = 0;
     g_br_sub_fails = 0;
@@ -2265,13 +2307,13 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
                     if (st_type == BRK_LINK) {
                         char href[96];
                         if (br_attr_value(html + attr_start, attr_len, "href", href, sizeof(href)) &&
-                            st->browser_link_count < BROWSER_LINK_MAX) {
-                            new_link_idx = st->browser_link_count;
+                            bs()->link_count < BROWSER_LINK_MAX) {
+                            new_link_idx = bs()->link_count;
                             uint32_t hl = (uint32_t)strlen(href);
-                            if (hl >= sizeof(st->browser_link_href[0])) hl = sizeof(st->browser_link_href[0]) - 1;
-                            memcpy(st->browser_link_href[st->browser_link_count], href, hl);
-                            st->browser_link_href[st->browser_link_count][hl] = 0;
-                            st->browser_link_count++;
+                            if (hl >= sizeof(bs()->link_href[0])) hl = sizeof(bs()->link_href[0]) - 1;
+                            memcpy(bs()->link_href[bs()->link_count], href, hl);
+                            bs()->link_href[bs()->link_count][hl] = 0;
+                            bs()->link_count++;
                         }
                     }
                 }
@@ -2401,17 +2443,18 @@ static void browser_render_from_html(gui_state_t *st, const char *html, char *ou
 // 把纯文本消息同时写入 browser_page（保存用）与 browser_render（渲染用，单个
 // 普通段落块），用于错误提示/初始占位文本，二者始终保持一致。
 static void browser_set_plain(gui_state_t *st, const char *msg) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t n = (uint32_t)strlen(msg);
     if (n >= BROWSER_PAGE_CAP) n = BROWSER_PAGE_CAP - 1;
-    memcpy(st->browser_page, msg, n);
-    st->browser_page[n] = 0;
-    st->browser_page_len = n;
+    memcpy(bs()->page, msg, n);
+    bs()->page[n] = 0;
+    bs()->page_len = n;
     uint32_t rn = n;
     if (rn > BROWSER_PAGE_CAP - 2) rn = BROWSER_PAGE_CAP - 2;
-    st->browser_render[0] = (char)BRK_P;
-    memcpy(st->browser_render + 1, msg, rn);
-    st->browser_render[1 + rn] = 0;
-    st->browser_render_len = 1 + rn;
+    bs()->render[0] = (char)BRK_P;
+    memcpy(bs()->render + 1, msg, rn);
+    bs()->render[1 + rn] = 0;
+    bs()->render_len = 1 + rn;
 }
 
 static void browser_set_plain2(gui_state_t *st, const char *a, const char *b) {
@@ -2421,31 +2464,33 @@ static void browser_set_plain2(gui_state_t *st, const char *a, const char *b) {
 }
 
 static void browser_init(gui_state_t *st) {
-    if (st->browser_loaded) return;
-    strcpy(st->browser_url, "https://example.com/");
-    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (bs()->loaded) return;
+    strcpy(bs()->url, "https://example.com/");
+    bs()->url_cursor = (uint32_t)strlen(bs()->url);
     browser_set_plain(st, "输入网址后按 Enter 加载。当前 HTTPS 支持 TLS 1.3 + ChaCha20-Poly1305；部分网站会自动尝试 HTTP。");
-    st->browser_scroll = 0;
-    st->browser_required_caps = HIVE_WEB_CAP_HTML_STATIC;
-    st->browser_loaded = 1;
+    bs()->scroll = 0;
+    bs()->required_caps = HIVE_WEB_CAP_HTML_STATIC;
+    bs()->loaded = 1;
 }
 
 /* 后退/前进历史：定长环状最近 BROWSER_HIST_MAX 条 URL + 当前位置下标。
  * 新导航（非后退/前进触发）会截断当前位置之后的“前进”条目，和标准浏览器
  * 语义一致；满了就整体前移丢最老的一条。 */
 static void browser_hist_push(gui_state_t *st, const char *url) {
-    if (st->browser_hist_pos < st->browser_hist_count - 1) {
-        st->browser_hist_count = st->browser_hist_pos + 1;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (bs()->hist_pos < bs()->hist_count - 1) {
+        bs()->hist_count = bs()->hist_pos + 1;
     }
-    if (st->browser_hist_count >= BROWSER_HIST_MAX) {
-        memmove(st->browser_hist[0], st->browser_hist[1],
+    if (bs()->hist_count >= BROWSER_HIST_MAX) {
+        memmove(bs()->hist[0], bs()->hist[1],
                 (uint32_t)(BROWSER_HIST_MAX - 1) * BROWSER_URL_CAP);
-        st->browser_hist_count = BROWSER_HIST_MAX - 1;
+        bs()->hist_count = BROWSER_HIST_MAX - 1;
     }
-    strncpy(st->browser_hist[st->browser_hist_count], url, BROWSER_URL_CAP - 1);
-    st->browser_hist[st->browser_hist_count][BROWSER_URL_CAP - 1] = 0;
-    st->browser_hist_count++;
-    st->browser_hist_pos = st->browser_hist_count - 1;
+    strncpy(bs()->hist[bs()->hist_count], url, BROWSER_URL_CAP - 1);
+    bs()->hist[bs()->hist_count][BROWSER_URL_CAP - 1] = 0;
+    bs()->hist_count++;
+    bs()->hist_pos = bs()->hist_count - 1;
 }
 
 /* 浏览器自己的状态文本：st->status 是所有应用共享的一个指针，别的应用
@@ -2787,6 +2832,7 @@ int browser_exec_scripts_core(const char *body, char *title, uint32_t title_cap,
 }
 
 static void browser_exec_scripts(gui_state_t *st, const char *body) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     static char js_title[BROWSER_TITLE_CAP];
     static char js_out[24 * 1024];
 
@@ -2807,8 +2853,8 @@ static void browser_exec_scripts(gui_state_t *st, const char *body) {
      * 替换内核静态解析结果，重新走一遍内核渲染器拿完整样式（BRK_H1/
      * BRK_LINK/BRK_IMG…）。输入与输出必须是独立缓冲；解析器从左向右读
      * mini HTML，同时向输出写 BRK 标记，就地解析会在读完前破坏源码。 */
-    browser_render_from_html(st, js_out, st->browser_render,
-                             BROWSER_PAGE_CAP, &st->browser_render_len);
+    browser_render_from_html(st, js_out, bs()->render,
+                             BROWSER_PAGE_CAP, &bs()->render_len);
 }
 
 /* browser_fetch_images：
@@ -2868,10 +2914,10 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
     uint32_t len = 0;
     /* file:// 本地页面：直接读文件渲染，绕过网络与重定向循环。本地
      * HTML 是路线图阶段 6 的回归载体，也用于内联 <script> 的 JS 测试。 */
-    if (strncmp(st->browser_url, "file://", 7) == 0) {
-        int lfd = open(st->browser_url + 7, O_RDONLY);
+    if (strncmp(bs()->url, "file://", 7) == 0) {
+        int lfd = open(bs()->url + 7, O_RDONLY);
         if (lfd < 0) {
-            browser_set_plain2(st, "无法读取本地文件: ", st->browser_url + 7);
+            browser_set_plain2(st, "无法读取本地文件: ", bs()->url + 7);
             br_status(st, "浏览器本地文件失败");
             return;
         }
@@ -2895,7 +2941,7 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
         const char *path = "/";
         uint16_t port = 80;
         int https = 0;
-        const char *err = gui_parse_url(st->browser_url, &https, host, sizeof(host), &port, &path);
+        const char *err = gui_parse_url(bs()->url, &https, host, sizeof(host), &port, &path);
         if (err) {
             browser_set_plain(st, err);
             br_status(st, "浏览器 URL 错误");
@@ -2938,16 +2984,16 @@ static void browser_load_internal(gui_state_t *st, int push_history) {
         }
         char next_url[BROWSER_URL_CAP];
         if (browser_resolve_href(st, loc, next_url, sizeof(next_url)) < 0) break;
-        strncpy(st->browser_url, next_url, BROWSER_URL_CAP - 1);
-        st->browser_url[BROWSER_URL_CAP - 1] = 0;
-        st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
+        strncpy(bs()->url, next_url, BROWSER_URL_CAP - 1);
+        bs()->url[BROWSER_URL_CAP - 1] = 0;
+        bs()->url_cursor = (uint32_t)strlen(bs()->url);
     }
 render_page:
     const char *body = http_body_ptr(response);
-    st->browser_required_caps =
+    bs()->required_caps =
         hive_browser_detect_requirements(body, strlen(body));
-    browser_text_from_html(body, st->browser_page, BROWSER_PAGE_CAP, &st->browser_page_len);
-    browser_render_from_html(st, body, st->browser_render, BROWSER_PAGE_CAP, &st->browser_render_len);
+    browser_text_from_html(body, bs()->page, BROWSER_PAGE_CAP, &bs()->page_len);
+    browser_render_from_html(st, body, bs()->render, BROWSER_PAGE_CAP, &bs()->render_len);
     /* 执行内联 <script>（v1：无 src、quickjs ring3 运行时），输出追加到
      * 渲染流末尾。放在 og 卡片/图片之前，JS 写的标题优先。 */
     browser_exec_scripts(st, body);
@@ -2955,7 +3001,7 @@ render_page:
      * og:title/og:description/og:image。若解析后正文很少，就把 og 信息作为
      * "视频卡片"插到渲染缓冲最前——用 memmove 挪出头部空间，写入一个
      * H2（标题）+ P（描述）+ 可选 IMG 块。 */
-    if (g_br_og_title[0] && st->browser_render_len < 800) {
+    if (g_br_og_title[0] && bs()->render_len < 800) {
         static char og_card[512];
         uint32_t cp = 0;
 #define OGBYTE(c) do { if (cp + 1 < sizeof(og_card)) og_card[cp++] = (char)(c); } while (0)
@@ -2986,18 +3032,18 @@ render_page:
 #undef OGSTR
         og_card[cp] = 0;
         /* 把 og_card 插到 browser_render 最前面 */
-        uint32_t rem = st->browser_render_len;
+        uint32_t rem = bs()->render_len;
         if (cp + rem + 1 <= BROWSER_PAGE_CAP) {
-            memmove(st->browser_render + cp, st->browser_render, rem + 1);
-            memcpy(st->browser_render, og_card, cp);
-            st->browser_render_len += cp;
+            memmove(bs()->render + cp, bs()->render, rem + 1);
+            memcpy(bs()->render, og_card, cp);
+            bs()->render_len += cp;
         }
     }
     browser_fetch_images(st); /* 渲染登记了图片 src（含 og:image 占的槽），逐张抓取解码 */
-    st->browser_scroll = 0;
+    bs()->scroll = 0;
     if (strcmp(st->status, "HTTPS 失败，已用 HTTP 回退") != 0)
         br_status(st, "浏览器加载完成");
-    if (push_history) browser_hist_push(st, st->browser_url);
+    if (push_history) browser_hist_push(st, bs()->url);
     /* <title> 抓到了就用它做窗口标题（"浏览器 - 页面标题"），跟真实浏览器
      * 标题栏/标签页显示网页标题一样；没有 <title> 就保持默认的"浏览器"。 */
     if (g_browser_page_title[0]) {
@@ -3017,14 +3063,15 @@ render_page:
  * 提前清零会让页面数据已经生成但屏幕永远停在加载前一帧。 */
 static void browser_fetch_bg(void *arg) {
     gui_state_t *st = (gui_state_t *)arg;
-    browser_load_internal(st, st->browser_push_hist);
+    browser_load_internal(st, bs()->push_hist);
 }
 
 static void browser_load(gui_state_t *st) {
-    if (st->browser_loading) return; /* 上一次加载还没结束，忽略本次请求 */
-    st->browser_loading = 1;
-    st->browser_push_hist = 1;
-    st->browser_load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (bs()->loading) return; /* 上一次加载还没结束，忽略本次请求 */
+    bs()->loading = 1;
+    bs()->push_hist = 1;
+    bs()->load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
 }
 
 /* 解析 <a href> 目标：绝对 URL（含 scheme）原样用；"/xxx" 相对当前页面
@@ -3032,6 +3079,7 @@ static void browser_load(gui_state_t *st) {
  * 折叠——真实页面里出现的比例不高，这里只做到“大部分链接能点开”）。
  * "#"/"javascript:"/"mailto:" 之类不导航。 */
 static int browser_resolve_href(const gui_state_t *st, const char *href, char *out, uint32_t out_cap) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     if (!href || !href[0]) return -1;
     if (href[0] == '#') return -1;
     if (strncmp(href, "javascript:", 11) == 0) return -1;
@@ -3045,14 +3093,14 @@ static int browser_resolve_href(const gui_state_t *st, const char *href, char *o
         /* 协议相对 URL（"//news.baidu.com/x"）：继承当前页面的 scheme。
          * 大站 CDN 链接几乎全是这种写法；之前它落进"绝对路径"分支被拼成
          * "https://www.baidu.com//news.baidu.com"，点新闻直接跳错。 */
-        const char *scheme = (strncmp(st->browser_url, "https://", 8) == 0) ? "https:" : "http:";
+        const char *scheme = (strncmp(bs()->url, "https://", 8) == 0) ? "https:" : "http:";
         uint32_t pos = 0;
         for (const char *p = scheme; *p && pos + 1 < out_cap; p++) out[pos++] = *p;
         for (uint32_t k = 0; href[k] && pos + 1 < out_cap; k++) out[pos++] = href[k];
         out[pos] = 0;
         return 0;
     }
-    const char *cur = st->browser_url;
+    const char *cur = bs()->url;
     const char *scheme_end = strstr(cur, "://");
     if (!scheme_end) return -1;
     const char *host_start = scheme_end + 3;
@@ -3080,37 +3128,39 @@ static int browser_resolve_href(const gui_state_t *st, const char *href, char *o
 }
 
 static void browser_navigate(gui_state_t *st, const char *url) {
-    strncpy(st->browser_url, url, BROWSER_URL_CAP - 1);
-    st->browser_url[BROWSER_URL_CAP - 1] = 0;
-    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    strncpy(bs()->url, url, BROWSER_URL_CAP - 1);
+    bs()->url[BROWSER_URL_CAP - 1] = 0;
+    bs()->url_cursor = (uint32_t)strlen(bs()->url);
     browser_load(st);
 }
 
 static void browser_go_back(gui_state_t *st) {
-    if (st->browser_loading) return;
-    if (st->browser_hist_pos <= 0) { st->status = "没有更早的页面"; return; }
-    st->browser_hist_pos--;
-    strncpy(st->browser_url, st->browser_hist[st->browser_hist_pos], BROWSER_URL_CAP - 1);
-    st->browser_url[BROWSER_URL_CAP - 1] = 0;
-    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
-    st->browser_loading = 1;
-    st->browser_push_hist = 0;
-    st->browser_load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
+    if (bs()->loading) return;
+    if (bs()->hist_pos <= 0) { st->status = "没有更早的页面"; return; }
+    bs()->hist_pos--;
+    strncpy(bs()->url, bs()->hist[bs()->hist_pos], BROWSER_URL_CAP - 1);
+    bs()->url[BROWSER_URL_CAP - 1] = 0;
+    bs()->url_cursor = (uint32_t)strlen(bs()->url);
+    bs()->loading = 1;
+    bs()->push_hist = 0;
+    bs()->load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
 }
 
 static void browser_go_forward(gui_state_t *st) {
-    if (st->browser_loading) return;
-    if (st->browser_hist_pos + 1 >= st->browser_hist_count) { st->status = "没有更新的页面"; return; }
-    st->browser_hist_pos++;
-    strncpy(st->browser_url, st->browser_hist[st->browser_hist_pos], BROWSER_URL_CAP - 1);
-    st->browser_url[BROWSER_URL_CAP - 1] = 0;
-    st->browser_url_cursor = (uint32_t)strlen(st->browser_url);
-    st->browser_loading = 1;
-    st->browser_push_hist = 0;
-    st->browser_load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
+    if (bs()->loading) return;
+    if (bs()->hist_pos + 1 >= bs()->hist_count) { st->status = "没有更新的页面"; return; }
+    bs()->hist_pos++;
+    strncpy(bs()->url, bs()->hist[bs()->hist_pos], BROWSER_URL_CAP - 1);
+    bs()->url[BROWSER_URL_CAP - 1] = 0;
+    bs()->url_cursor = (uint32_t)strlen(bs()->url);
+    bs()->loading = 1;
+    bs()->push_hist = 0;
+    bs()->load_tid = (uint32_t)task_create("browser-fetch", browser_fetch_bg, st);
 }
 
 static void browser_save_page(gui_state_t *st) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     browser_init(st);
     char path[GUI_PATH_MAX];
     if (gui_path_join(gui_file_path(st), "browser-page.txt", path, sizeof(path)) < 0) {
@@ -3121,7 +3171,7 @@ static void browser_save_page(gui_state_t *st) {
     if (!node) node = vfs_create(path);
     if (!node || node->type != VFS_NODE_FILE ||
         vfs_truncate(node) < 0 ||
-        vfs_write(node, 0, st->browser_page, st->browser_page_len) < 0) {
+        vfs_write(node, 0, bs()->page, bs()->page_len) < 0) {
         br_status(st, "网页保存失败");
         return;
     }
@@ -3172,6 +3222,7 @@ static inline void br_icon_arrow(int cx, int cy, int dir, uint32_t col) { gb_br_
 static inline void br_icon_reload(int cx, int cy, uint32_t col, uint32_t bg) { gb_br_icon_reload(cx, cy, col, bg); }
 
 static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *st) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     browser_init(st);
     const hive_browser_backend_t *browser_backend = hive_browser_lite_backend();
     int wx = tx - 29;            /* 窗口内区左边缘（win_x+1） */
@@ -3212,12 +3263,12 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
 
     /* 工具栏 */
     rect(wx, ty + BR_TAB_H, ww, BR_TOOL_H, tool_bg);
-    int can_back = st->browser_hist_pos > 0;
-    int can_fwd  = st->browser_hist_pos + 1 < st->browser_hist_count;
+    int can_back = bs()->hist_pos > 0;
+    int can_fwd  = bs()->hist_pos + 1 < bs()->hist_count;
     br_icon_arrow(tx + BR_BACK_CX, ty + BR_BTN_CY, -1, can_back ? icon_col : icon_dis);
     br_icon_arrow(tx + BR_FWD_CX, ty + BR_BTN_CY, 1, can_fwd ? icon_col : icon_dis);
     /* 加载中时旋转动画替代重载图标，用8帧弧段表示旋转进度 */
-    if (st->browser_loading) {
+    if (bs()->loading) {
         static uint32_t spin_tick = 0;
         spin_tick++;
         int frame = (int)(spin_tick / 4) % 8;
@@ -3248,7 +3299,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     /* https 锁 / http 空心圆点 */
     int ind_x = pill_x + 14;
     int ind_cy = pill_y + pill_h / 2;
-    if (st->browser_url[0] == 'h' && st->browser_url[4] == 's') {
+    if (bs()->url[0] == 'h' && bs()->url[4] == 's') {
         rect(ind_x - 3, ind_cy - 1, 8, 6, UI_FG2);      /* 锁体 */
         rect(ind_x - 2, ind_cy - 4, 1, 3, UI_FG2);      /* 锁梁 */
         rect(ind_x + 3, ind_cy - 4, 1, 3, UI_FG2);
@@ -3258,14 +3309,14 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
         gui_fill_circle(ind_x, ind_cy, 2, pill_bg);
     }
     int url_x = pill_x + 28;
-    text_clipped(url_x, pill_y + 5, pill_r - 10, st->browser_url, UI_FG, 1);
+    text_clipped(url_x, pill_y + 5, pill_r - 10, bs()->url, UI_FG, 1);
     /* 闪烁插入光标 */
     {
-        uint32_t cur = st->browser_url_cursor;
-        uint32_t n = (uint32_t)strlen(st->browser_url);
+        uint32_t cur = bs()->url_cursor;
+        uint32_t n = (uint32_t)strlen(bs()->url);
         if (cur > n) cur = n;
         char prefix[BROWSER_URL_CAP];
-        memcpy(prefix, st->browser_url, cur);
+        memcpy(prefix, bs()->url, cur);
         prefix[cur] = 0;
         int caret_x = url_x + text_width(prefix, 1);
         if (caret_x > pill_r - 10) caret_x = pill_r - 10;
@@ -3281,7 +3332,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
      * （加载中/出错文本都显示在那里，Chrome 底部状态气泡的等价物）。 */
     int page_h = win_h - 42 - (BR_TAB_H + BR_TOOL_H) - 32;
     if (page_h < 80) page_h = 80;
-    uint64_t missing_caps = st->browser_required_caps &
+    uint64_t missing_caps = bs()->required_caps &
                             ~browser_backend->capabilities;
     if (missing_caps) {
         /* 列出全部缺失能力（用 “ · ” 连接），而不是只显示第一个。
@@ -3329,14 +3380,14 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     for (int pass = 0; pass < 2; pass++) {
         rect(wx, page_y, ww, page_h, UI_FG);
         total = draw_rendered_page(wx + 18, page_y + 12, ww - 44, inner_h,
-                                   st->browser_render, st->browser_render_len,
-                                   st->browser_scroll);
+                                   bs()->render, bs()->render_len,
+                                   bs()->scroll);
         int rh = gui_font_line_height() + 3;
         visible_rows = inner_h / rh;
         max_scroll = total - visible_rows;
         if (max_scroll < 0) max_scroll = 0;
-        if (st->browser_scroll <= max_scroll) break;
-        st->browser_scroll = max_scroll;
+        if (bs()->scroll <= max_scroll) break;
+        bs()->scroll = max_scroll;
     }
     /* Chrome 式滚动条：浅色细槽 + 灰滑块，内容装得下就不显示 */
     if (total > visible_rows && visible_rows > 0) {
@@ -3348,7 +3399,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
         if (thumb_h < 20) thumb_h = 20;
         if (thumb_h > sb_h) thumb_h = sb_h;
         int thumb_y = sb_y;
-        if (max_scroll > 0) thumb_y += (sb_h - thumb_h) * st->browser_scroll / max_scroll;
+        if (max_scroll > 0) thumb_y += (sb_h - thumb_h) * bs()->scroll / max_scroll;
         fill_round_rect(sb_x, thumb_y, 6, thumb_h, 3, UI_FG2, RR_ALL);
     }
 }
@@ -4276,8 +4327,8 @@ static void handle_wheel(gui_state_t *st, int dz) {
          * wheel-down（应让网页显示更靠后内容、滚动位置增大）此时 steps
          * 恰好是 -1，wheel-up 是 +1——和其它分支的符号是反的，所以这里
          * 单独取负号，不动 steps 本身（其它分支继续用原来的语义）。 */
-        st->browser_scroll -= steps;
-        if (st->browser_scroll < 0) st->browser_scroll = 0;
+        bs()->scroll -= steps;
+        if (bs()->scroll < 0) bs()->scroll = 0;
         st->status = "滚动网页";
     }
 }
@@ -4422,49 +4473,49 @@ static void handle_app_key(gui_state_t *st, int key) {
     if (gui_app_handle_key(st, key)) return;
     if (st->app_mode == GUI_APP_BROWSER) {
         browser_init(st);
-        uint32_t n = (uint32_t)strlen(st->browser_url);
-        if (st->browser_url_cursor > n) st->browser_url_cursor = n;  /* 页面加载等外部改动后钳制 */
+        uint32_t n = (uint32_t)strlen(bs()->url);
+        if (bs()->url_cursor > n) bs()->url_cursor = n;  /* 页面加载等外部改动后钳制 */
         if (key == '\n') browser_load(st);
         else if (key == 19) browser_save_page(st);
         else if (key == GUI_KEY_BACKSPACE) {
-            if (st->browser_url_cursor > 0) {
-                memmove(st->browser_url + st->browser_url_cursor - 1,
-                        st->browser_url + st->browser_url_cursor,
-                        n - st->browser_url_cursor + 1);
-                st->browser_url_cursor--;
+            if (bs()->url_cursor > 0) {
+                memmove(bs()->url + bs()->url_cursor - 1,
+                        bs()->url + bs()->url_cursor,
+                        n - bs()->url_cursor + 1);
+                bs()->url_cursor--;
             }
         } else if (key == GUI_KEY_DELETE) {
             /* 之前地址栏只认 Backspace，Delete 完全没反应 */
-            if (st->browser_url_cursor < n) {
-                memmove(st->browser_url + st->browser_url_cursor,
-                        st->browser_url + st->browser_url_cursor + 1,
-                        n - st->browser_url_cursor);
+            if (bs()->url_cursor < n) {
+                memmove(bs()->url + bs()->url_cursor,
+                        bs()->url + bs()->url_cursor + 1,
+                        n - bs()->url_cursor);
             }
         } else if (key == GUI_KEY_HOME) {
-            st->browser_url_cursor = 0;
+            bs()->url_cursor = 0;
         } else if (key == GUI_KEY_END) {
-            st->browser_url_cursor = n;
+            bs()->url_cursor = n;
         } else if (key == GUI_KEY_LEFT) {
-            if (st->browser_url_cursor > 0) st->browser_url_cursor--;
+            if (bs()->url_cursor > 0) bs()->url_cursor--;
         } else if (key == GUI_KEY_RIGHT) {
-            if (st->browser_url_cursor < n) st->browser_url_cursor++;
+            if (bs()->url_cursor < n) bs()->url_cursor++;
         } else if (key == GUI_KEY_UP) {
-            if (st->browser_scroll > 0) st->browser_scroll--;
+            if (bs()->scroll > 0) bs()->scroll--;
         } else if (key == GUI_KEY_DOWN) {
-            st->browser_scroll++;
+            bs()->scroll++;
         } else if (key == GUI_KEY_PGUP) {
             /* 整页滚动：一次滚 10 行（视口高度因窗口而异，取个稳妥值） */
-            st->browser_scroll -= 10;
-            if (st->browser_scroll < 0) st->browser_scroll = 0;
+            bs()->scroll -= 10;
+            if (bs()->scroll < 0) bs()->scroll = 0;
         } else if (key == GUI_KEY_PGDOWN) {
-            st->browser_scroll += 10;  /* 越界由 draw_browser_app 的钳制兜住 */
+            bs()->scroll += 10;  /* 越界由 draw_browser_app 的钳制兜住 */
         } else if (key >= 32 && key <= 126) {
             if (n + 1 < BROWSER_URL_CAP) {
-                memmove(st->browser_url + st->browser_url_cursor + 1,
-                        st->browser_url + st->browser_url_cursor,
-                        n - st->browser_url_cursor + 1);
-                st->browser_url[st->browser_url_cursor] = (char)key;
-                st->browser_url_cursor++;
+                memmove(bs()->url + bs()->url_cursor + 1,
+                        bs()->url + bs()->url_cursor,
+                        n - bs()->url_cursor + 1);
+                bs()->url[bs()->url_cursor] = (char)key;
+                bs()->url_cursor++;
             }
         }
     }
@@ -5489,9 +5540,9 @@ static void cmd_gui(int argc, char **argv) {
     if (argc > 1 && argv[1][0]) {
         if (gui_open_window(&st, WM_WIN_APP, GUI_APP_BROWSER, 0) >= 0) {
             browser_init(&st);
-            strncpy(st.browser_url, argv[1], BROWSER_URL_CAP - 1);
-            st.browser_url[BROWSER_URL_CAP - 1] = 0;
-            st.browser_url_cursor = (uint32_t)strlen(st.browser_url);
+            strncpy(bs()->url, argv[1], BROWSER_URL_CAP - 1);
+            bs()->url[BROWSER_URL_CAP - 1] = 0;
+            bs()->url_cursor = (uint32_t)strlen(bs()->url);
             browser_load(&st);
         }
     }
@@ -5950,12 +6001,12 @@ static void cmd_gui(int argc, char **argv) {
                 if (hl >= 0) cursor_edge = CURSOR_HOVER_LINK;
                 if (hl != br_hover_idx) {
                     br_hover_idx = hl;
-                    if (hl >= 0 && hl < st.browser_link_count) {
+                    if (hl >= 0 && hl < bs()->link_count) {
                         if (st.status != br_hover_buf) br_saved_status = st.status;
                         /* 预览解析后的完整地址（协议相对/相对路径都补全），
                          * 和点击后真正要去的地方一致 */
                         char resolved[BROWSER_URL_CAP];
-                        const char *show = st.browser_link_href[hl];
+                        const char *show = bs()->link_href[hl];
                         if (browser_resolve_href(&st, show, resolved, sizeof(resolved)) == 0)
                             show = resolved;
                         uint32_t bp = 0;
@@ -6291,7 +6342,7 @@ static void cmd_gui(int argc, char **argv) {
                                 } else if (hit_browser_link(w, h, &st, mx, my) >= 0) {
                                     int link_idx = hit_browser_link(w, h, &st, mx, my);
                                     char resolved[BROWSER_URL_CAP];
-                                    if (browser_resolve_href(&st, st.browser_link_href[link_idx],
+                                    if (browser_resolve_href(&st, bs()->link_href[link_idx],
                                                              resolved, sizeof(resolved)) == 0) {
                                         browser_navigate(&st, resolved);
                                     } else {
@@ -6502,10 +6553,10 @@ static void cmd_gui(int argc, char **argv) {
         }
         frame_tick++;
         /* 后台浏览器加载：任务结束后触发一帧重绘（让新内容显示出来） */
-        if (st.browser_loading) {
-            const task_t *bt = task_get_by_id(st.browser_load_tid);
+        if (bs()->loading) {
+            const task_t *bt = task_get_by_id(bs()->load_tid);
             if (!bt || bt->state == TASK_TERMINATED) {
-                if (st.browser_loading) st.browser_loading = 0; /* 防止 task_create 失败时的 loading */
+                if (bs()->loading) bs()->loading = 0; /* 防止 task_create 失败时的 loading */
                 gui_dirty_mark_full();
                 draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             } else {

@@ -76,27 +76,7 @@ typedef struct gui_state {
     char file_path[GUI_PATH_MAX];
     /* 记事本状态已迁出：app_notes.c 的私有 note_state_t。
      * 框架经 app_notes_set_name/name/invalidate/clear_buffer/set_cursor 交互。 */
-    char browser_url[BROWSER_URL_CAP];
-    uint32_t browser_url_cursor;  /* 左右键在网址栏内移动的插入点 */
-    char browser_page[BROWSER_PAGE_CAP];
-    uint32_t browser_page_len;
-    /* 带样式标记的渲染缓冲（每行首字节为 browser_blk_t 块类型），仅供屏幕渲染用；
-     * browser_page 保持纯文本供“保存网页”使用。 */
-    char browser_render[BROWSER_PAGE_CAP];
-    uint32_t browser_render_len;
-    uint64_t browser_required_caps; /* 当前文档声明/使用但后端尚未必具备的 Web 能力 */
-    int browser_loaded;
-    int browser_scroll;
-    /* 每次渲染页面时 browser_render_from_html() 填好的链接 href 表，
-     * draw_rendered_page() 按流里出现的链接块顺序对应到这里的下标
-     * （见 gui.c 里 BRK_LINK 的编码方式）。 */
-    char browser_link_href[BROWSER_LINK_MAX][96];
-    int browser_link_count;
-    /* 后退/前进历史：定长环状最近 20 条，不缓存每条的完整渲染内容
-     * （避免 * 20 的内存倍数），后退/前进时用存的 URL 重新抓取。 */
-    char browser_hist[BROWSER_HIST_MAX][BROWSER_URL_CAP];
-    int browser_hist_count;
-    int browser_hist_pos;
+    /* 浏览器状态已迁出：gui.c 内的私有 browser_state_t。 */
     /* 代码工作台状态已迁出：app_code.c 的私有 code_state_t。
      * 框架通过 app_code_set_cursor()/app_code_begin_selection() 与之交互。 */
     int rename_active;
@@ -142,9 +122,7 @@ typedef struct gui_state {
     /* 图片查看器与十六进制查看器的状态已迁出：现为各自 app_*.c 的私有
      * 结构体（imgview_state_t / hexview_state_t）。 */       /* 起始行号（每行 16 字节） */
     /* 浏览器后台异步加载 */
-    int  browser_loading;       /* 1=正在后台抓取页面，0=空闲 */
-    int  browser_push_hist;     /* 本次加载是否需要向历史压栈 */
-    uint32_t browser_load_tid;  /* 后台抓取任务的 task ID（用于检测完成） */
+    /* 浏览器状态已迁出：gui.c 内的私有 browser_state_t。 */
 } gui_state_t;
 
 #endif
