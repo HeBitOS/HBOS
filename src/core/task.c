@@ -118,8 +118,17 @@ static void task_irq_restore(uint64_t rflags) {
 }
 
 static void task_switch_tls(task_t *previous, task_t *next) {
-    if (previous) previous->fs_base = rdmsr(MSR_FS_BASE);
-    wrmsr(MSR_FS_BASE, next ? next->fs_base : 0);
+    uint64_t previous_base = rdmsr(MSR_FS_BASE);
+    if (previous) previous->fs_base = previous_base;
+
+    /*
+     * WRMSR 是序列化指令，比读贵得多。同一进程的线程通常共享同一个
+     * FS base（glibc 每线程 TLS 才各自不同），此时无需重写；只有真正
+     * 变化时才写。省掉的是上下文切换路径上一次序列化开销。
+     */
+    uint64_t next_base = next ? next->fs_base : 0;
+    if (next_base != previous_base)
+        wrmsr(MSR_FS_BASE, next_base);
 }
 
 static int task_user_address(uint64_t address) {
@@ -256,23 +265,31 @@ static void task_release_fd_table(task_t *task) {
 // ============================================================
 
 /**
- * 从循环任务链表中查找下一个 READY 状态的任务
- * @return 下一个可运行的任务，无其他任务时返回 NULL
+ * 从当前任务起，沿循环链表找到下一个 READY 状态的任务。
+ *
+ * 这是调度的唯一选择原语，task_yield() 与 task_schedule() 共用，
+ * 避免两处各自实现一套扫描而语义漂移。健壮性保证：
+ *   - 用 task_count 作为步数上界，即使循环链表因槽位复用出现意外
+ *     断链/成环，也不会无限循环或跟随野 next 指针越界；
+ *   - 遇到空 next（理论上不该出现）显式回绕到池头，而不是解引用 NULL。
+ *
+ * 复杂度: 与任务数成正比 O(MAX_TASKS)。MAX_TASKS=64 是有界小常数，
+ * 轮转扫描本身就是公平性的实现方式；这里消除的是"两套重复且其中一套
+ * 可能越界"的正确性/可维护性问题，而非渐进复杂度。
+ *
+ * @return 下一个可运行任务，没有则返回 NULL
  */
 static task_t *sched_next(void) {
-    if (task_count <= 1) return NULL;  // 只有主任务，无需切换
+    if (!current_task || task_count <= 1) return NULL;
 
-    task_t *start = current_task;
     task_t *t = current_task;
-
-    // 循环扫描链表
-    do {
+    for (int steps = 0; steps < task_count; steps++) {
         t = t->next;
-        if (!t) t = &task_pool[0];  // 回绕到链表头
+        if (!t) t = &task_pool[0];      /* 显式回绕，绝不解引用 NULL */
+        if (t == current_task) break;   /* 转了一圈回到自己 */
         if (t->state == TASK_READY) return t;
-    } while (t != start);
-
-    return NULL;  // 没有其他可运行任务
+    }
+    return NULL;
 }
 
 // ============================================================
@@ -1329,13 +1346,10 @@ void task_schedule(void) {
     smp_sched_lock();
     if (current_task->state == TASK_RUNNING)
         current_task->state = TASK_READY;
-    task_t *next = current_task->next;
-    int checked = 0;
-    while (next->state != TASK_READY && checked < task_count) {
-        next = next->next;
-        checked++;
-    }
-    if (next->state != TASK_READY) {
+    /* 与 task_yield 共用一个健壮的轮转选择原语，消除此处原先
+     * "盲跟 next 指针 + checked 兜底"的重复扫描及其越界风险。 */
+    task_t *next = sched_next();
+    if (!next) {
         smp_sched_unlock();
         task_irq_restore(irq_flags);
         return;
@@ -1379,6 +1393,20 @@ void pit_init(uint32_t freq_hz) {
 
 void task_sig_deliver(task_t *task) {
     if (!task) return;
+
+    /*
+     * 快速路径: 该任务当前没有任何 pending 信号时立即返回。
+     * 本函数在每次上下文切换（task_yield/task_schedule/task_exit）都会
+     * 被调用，而绝大多数切换时 sig_pending 是空的；原实现无条件循环
+     * 63 次逐位检查，把这个常见情况变成了固定开销。_NSIG_WORDS == 1
+     * 时这里就是一次 u64 比较，O(1) 短路。
+     */
+    bool any_pending = false;
+    for (int w = 0; w < _NSIG_WORDS; w++) {
+        if (task->sig_pending.sig[w]) { any_pending = true; break; }
+    }
+    if (!any_pending) return;
+
     for (int sig = 1; sig < _NSIG; sig++) {
         int word = (sig - 1) / 64;
         int bit = (sig - 1) % 64;

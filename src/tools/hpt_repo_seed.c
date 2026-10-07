@@ -16,13 +16,24 @@
 
 #include "vfs.h"
 #include "graphics/graphics.h"
+#include "graphics/blob_unpack.h"
 
 void hpt_repo_seed_init(void) {
     extern const uint8_t _binary_build_hpt_repo_bin_start[];
     extern const uint8_t _binary_build_hpt_repo_bin_end[];
 
-    const uint8_t *p = _binary_build_hpt_repo_bin_start;
-    const uint8_t *end = _binary_build_hpt_repo_bin_end;
+    /* 嵌入的是压缩容器（见 tools/pack_blob.py）：1.1 MB → 约 0.45 MB，
+     * 首次访问时解压到 pmm_alloc_blocks 的连续物理页并缓存。 */
+    static const uint8_t *unpacked;
+    uint32_t raw_len = 0;
+    const uint8_t *base = blob_unpack(_binary_build_hpt_repo_bin_start,
+                                      (uint32_t)(_binary_build_hpt_repo_bin_end -
+                                                 _binary_build_hpt_repo_bin_start),
+                                      &unpacked, &raw_len);
+    if (!base) return;
+
+    const uint8_t *p = base;
+    const uint8_t *end = base + raw_len;
     if (end <= p + 4) return;
 
     uint32_t count;

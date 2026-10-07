@@ -126,12 +126,24 @@ static pte_t *vmm_get_pte(uint64_t virt_addr, bool create, uint64_t flags) {
 
 /**
  * 通过重新加载 CR3 刷新整个 TLB
- * 注意: 这会刷新所有 TLB 条目，包括全局页
+ * 注意: 这会刷新所有 TLB 条目，包括全局页。
+ * 仅在页表结构发生跨页/全局性变化（如拆分大页、克隆地址空间）时使用；
+ * 单页映射/解除映射请用 vmm_invlpg()，避免把整个 TLB 冲掉。
  */
 static void vmm_flush_tlb(void) {
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+}
+
+/**
+ * 精确刷新单个虚拟地址的 TLB 条目（invlpg）。
+ * 单页 map/unmap/protect 只影响一个线性地址，无需全量刷新；
+ * 这是缺页密集路径（ELF 装载、用户堆扩展、mmap）上的关键优化。
+ */
+static inline void vmm_invlpg(uint64_t virt_addr) {
+    __asm__ volatile("invlpg (%0)" :: "r"((void *)(uintptr_t)virt_addr)
+                     : "memory");
 }
 
 // ============================================================
@@ -160,7 +172,7 @@ int vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     uint64_t permitted = flags & 0xFFFULL;
     if (g_nx_enabled) permitted |= flags & VMM_NX;
     *pte = (phys_addr & ~0xFFFULL) | permitted | VMM_P;
-    vmm_flush_tlb();
+    vmm_invlpg(virt_addr);          /* 单页精确刷新，不冲掉整个 TLB */
     return 0;
 }
 
@@ -235,7 +247,7 @@ void vmm_unmap_page(uint64_t virt_addr) {
     pte_t *pte = vmm_get_pte(virt_addr, false, 0);
     if (!pte) return;
     *pte = 0;
-    vmm_flush_tlb();
+    vmm_invlpg(virt_addr);          /* 单页精确刷新 */
 }
 
 void vmm_release_page(uint64_t virt_addr) {
@@ -438,10 +450,25 @@ void vmm_destroy_address_space(uint64_t pml4_phys) {
     pmm_free_page(pml4_phys);
 }
 
-/** 加载新 PML4 到 CR3 */
+/**
+ * 加载新 PML4 到 CR3。
+ *
+ * 优化: 若目标地址空间与当前 CR3 已加载的相同（同一进程的多个线程共享
+ * mm，线程间切换即属此列），直接返回，跳过 CR3 写入。写 CR3 会作废整个
+ * TLB（除全局页），在线程密集负载下是显著的隐性开销；地址空间未变时
+ * TLB 内容依然有效，无需刷新。
+ *
+ * 这里用"读 CR3 比较"而非缓存变量：CR3 是每核状态，全局缓存会让其他
+ * 核心错误地跳过它本该执行的写入。读 CR3 本身不刷 TLB，代价远低于写。
+ * 低 12 位是 PCID/标志位，比较时屏蔽。
+ */
 void vmm_set_pml4(uint64_t pml4_phys) {
     g_pml4_phys = pml4_phys;
     g_pml4      = (pte_t *)(uintptr_t)pml4_phys;
+    uint64_t current;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(current));
+    if ((current & ~0xFFFULL) == (pml4_phys & ~0xFFFULL))
+        return;                              /* 同一地址空间：免写 CR3 */
     __asm__ volatile("mov %0, %%cr3" :: "r"(pml4_phys) : "memory");
 }
 

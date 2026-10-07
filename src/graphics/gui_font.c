@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "gui_font.h"
+#include "blob_unpack.h"
 
 // ============================================================
 // GUI font blob — embedded via linker symbols (see gui_glyph.asm).
@@ -23,6 +24,8 @@ typedef struct {
 } gui_font_size_t;
 
 static const uint8_t  *g_blob = NULL;
+/* 解压缓冲缓存：blob_unpack 只解压一次，见 gui_font_init */
+static const uint8_t  *g_unpacked = NULL;
 static gui_font_size_t g_sizes[GUI_FONT_MAX_SIZES];
 static int             g_nsizes = 0;
 static int             g_active = 0;   // active base slot, 0..base_count-1
@@ -48,9 +51,16 @@ bool gui_font_init(void) {
 
     if (g_blob) return true;
 
-    const uint8_t *data = _binary_build_gui_font_bin_start;
+    /* 嵌入的是压缩版（tools/pack_blob.py 打的 'ZBL1' 容器）：字体 20 MB
+     * 是内核体积最大单项，压到约 47%。blob_unpack 用 pmm_alloc_blocks
+     * 拿连续物理页解压回原样（内核堆只有 2 MB，装不下），缓存后复用。 */
     size_t total = (size_t)(_binary_build_gui_font_bin_end -
                             _binary_build_gui_font_bin_start);
+    uint32_t out_len = 0;
+    const uint8_t *data = blob_unpack(_binary_build_gui_font_bin_start,
+                                      (uint32_t)total, &g_unpacked, &out_len);
+    if (!data) return false;
+    total = out_len;
     if (total < 8) return false;
     if (data[0] != 'G' || data[1] != 'F' || data[2] != 'N' || data[3] != '2')
         return false;

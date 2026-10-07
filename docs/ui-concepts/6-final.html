@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>方案 1.1 · Breeze Card（定案）</title>
+<style>
+  /* ── 设计令牌：深色（默认）──────────────────────────── */
+  :root{
+    --bg:#191c1f;        /* 桌面底（压暗，衬托卡片） */
+    --surface:#24282c;   /* 卡片面（略提亮，与底分离） */
+    --surface2:#2b3034;  /* 次级面（工具栏/输入框） */
+    --surface3:#33393f;  /* 悬浮/激活 */
+    --line:#3a4045;      /* 分隔线 */
+    --line2:#4a5158;     /* 强分隔/描边 */
+    --fg:#eff0f1;        /* 主文字 */
+    --fg2:#bdc3c7;       /* 次文字 */
+    --dim:#7f8c8d;       /* 弱文字 */
+    --accent:#3daee9;    /* Breeze 蓝 */
+    --accent-fg:#ffffff;
+    --accent-h:#4db8f0;
+    --ok:#27ae60; --warn:#f67400; --err:#da4453;
+    --sel:rgba(61,174,233,.24);
+    /* 分层柔影：贴近方案 03 的层次感，但只用两级、避免软件合成器开销 */
+    --shadow:0 1px 2px rgba(0,0,0,.32), 0 6px 18px rgba(0,0,0,.36);
+    --shadow-sm:0 1px 2px rgba(0,0,0,.26);
+    --shadow-lg:0 2px 6px rgba(0,0,0,.34), 0 14px 36px rgba(0,0,0,.44);
+    --r:10px;            /* 卡片圆角（原 Breeze 4px） */
+    --rs:7px;            /* 控件圆角 */
+    --rl:14px;           /* 大容器圆角 */
+  }
+  /* ── 浅色 ─────────────────────────────────────────── */
+  body.light{
+    --bg:#eff0f1; --surface:#fcfcfc; --surface2:#eff0f1; --surface3:#e3e5e7;
+    --line:#d5d8db; --line2:#bfc3c7;
+    --fg:#232629; --fg2:#4d5358; --dim:#7a8288;
+    --accent:#2980b9; --accent-h:#1f6da0;
+    --sel:rgba(41,128,185,.16);
+    --shadow:0 1px 2px rgba(16,24,40,.06), 0 6px 16px rgba(16,24,40,.10);
+    --shadow-sm:0 1px 2px rgba(16,24,40,.06);
+    --shadow-lg:0 2px 6px rgba(16,24,40,.08), 0 14px 32px rgba(16,24,40,.14);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 system-ui,"Noto Sans SC",sans-serif;padding:28px 20px 60px}
+  .wrap{max-width:1180px;margin:0 auto}
+  .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px}
+  h1{font-size:25px;margin:0;letter-spacing:-.01em}
+  .badge{font:600 11px/1 ui-monospace,monospace;letter-spacing:.08em;padding:5px 10px;border-radius:99px;
+         background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent);
+         border:1px solid color-mix(in srgb,var(--accent) 34%,transparent)}
+  .sub{color:var(--dim);margin:0 0 24px;font-size:13.5px}
+  button.tg{background:var(--surface2);color:var(--fg);border:1px solid var(--line2);
+            border-radius:var(--rs);padding:8px 15px;font:inherit;font-size:13px;cursor:pointer}
+  button.tg:hover{background:var(--surface3)}
+  h2{font-size:15px;margin:36px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line);
+     color:var(--fg2);font-weight:600;letter-spacing:.02em}
+  .row{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+  .box{background:var(--surface);border:1px solid var(--line);border-radius:var(--rl);padding:20px;
+       box-shadow:var(--shadow)}
+  .box h3{margin:0 0 14px;font-size:13px;color:var(--dim);font-weight:600;letter-spacing:.03em;text-transform:uppercase}
+
+  /* ── 按钮 ─────────────────────────────────────────── */
+  .btn{background:var(--surface2);color:var(--fg);border:1px solid var(--line2);border-radius:var(--rs);
+       padding:8px 17px;font:inherit;font-size:13.5px;cursor:pointer;transition:.16s;
+       box-shadow:var(--shadow-sm)}
+  .btn:hover{background:var(--surface3);border-color:var(--accent);transform:translateY(-1px);
+             box-shadow:var(--shadow)}
+  .btn:active{background:color-mix(in srgb,var(--surface3) 80%,#000);transform:translateY(0);
+              box-shadow:var(--shadow-sm)}
+  .btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);
+               box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 38%,transparent)}
+  .btn.primary:hover{background:var(--accent-h);
+               box-shadow:0 4px 14px color-mix(in srgb,var(--accent) 46%,transparent)}
+  .btn.danger{background:var(--err);color:#fff;border-color:var(--err)}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--accent)}
+  .btn.ghost:hover{background:var(--sel)}
+  .btn[disabled]{opacity:.42;cursor:not-allowed}
+  .btns{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+
+  /* ── 输入 ─────────────────────────────────────────── */
+  .inp{background:var(--surface2);border:1px solid var(--line2);border-radius:var(--rs);
+       color:var(--fg);padding:8px 12px;font:inherit;font-size:13.5px;width:100%}
+  .inp::placeholder{color:var(--dim)}
+  .inp:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--sel)}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12.5px;color:var(--fg2);margin-bottom:5px}
+  .chk{display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:9px;cursor:pointer}
+  .chk i{width:15px;height:15px;border:1px solid var(--line2);border-radius:var(--rs);
+         background:var(--surface2);display:grid;place-items:center;font-size:11px;color:transparent;font-style:normal}
+  .chk.on i{background:var(--accent);border-color:var(--accent);color:#fff}
+  .sw{width:34px;height:18px;border-radius:99px;background:var(--surface3);border:1px solid var(--line2);
+      position:relative;cursor:pointer;flex:none}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+             background:var(--dim);transition:.15s}
+  .sw.on{background:var(--accent);border-color:var(--accent)}
+  .sw.on::after{left:18px;background:#fff}
+
+  /* ── 列表 ─────────────────────────────────────────── */
+  .list{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--surface2);box-shadow:var(--shadow-sm)}
+  .li{display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:13.5px;border-bottom:1px solid var(--line)}
+  .li:last-child{border-bottom:none}
+  .li.sel{background:var(--sel);box-shadow:inset 2px 0 0 var(--accent)}
+  .li:hover:not(.sel){background:var(--surface3)}
+  .li .ic{width:18px;text-align:center;color:var(--accent);flex:none}
+  .li .meta{margin-left:auto;color:var(--dim);font-size:12px}
+  .li .sub2{color:var(--dim);font-size:12px}
+
+  /* ── 标签页 ───────────────────────────────────────── */
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:16px}
+  .tab{padding:8px 16px;font-size:13.5px;color:var(--fg2);cursor:pointer;border-bottom:2px solid transparent;
+       margin-bottom:-1px}
+  .tab:hover{color:var(--fg)}
+  .tab.on{color:var(--accent);border-bottom-color:var(--accent)}
+
+  /* ── 徽章 / 状态 ──────────────────────────────────── */
+  .pill{font-size:11.5px;padding:2px 9px;border-radius:99px;font-weight:600}
+  .pill.ok{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
+  .pill.warn{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+  .pill.err{background:color-mix(in srgb,var(--err) 20%,transparent);color:var(--err)}
+  .pill.info{background:color-mix(in srgb,var(--accent) 20%,transparent);color:var(--accent)}
+
+  /* ── 进度 ─────────────────────────────────────────── */
+  .bar{height:6px;background:var(--surface3);border-radius:99px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
+
+  /* ── 对话框 ───────────────────────────────────────── */
+  .dlg{background:var(--surface);border:1px solid var(--line2);border-radius:var(--rl);
+       box-shadow:var(--shadow-lg);overflow:hidden}
+  .dlg .hd{padding:11px 15px;background:var(--surface2);border-bottom:1px solid var(--line);
+           font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .dlg .hd .x{margin-left:auto;color:var(--dim);cursor:pointer;font-size:15px}
+  .dlg .bd{padding:16px 15px;font-size:13.5px;color:var(--fg2)}
+  .dlg .ft{padding:11px 15px;background:var(--surface2);border-top:1px solid var(--line);
+           display:flex;justify-content:flex-end;gap:9px}
+
+  /* ── 应用窗口模拟 ─────────────────────────────────── */
+  .win{background:var(--surface);border:1px solid var(--line);border-radius:var(--rl);
+       box-shadow:var(--shadow-lg);overflow:hidden;display:flex;flex-direction:column;height:360px}
+  .win .title{background:var(--surface3);padding:9px 14px;font-size:13px;display:flex;align-items:center;gap:8px;
+              border-bottom:1px solid var(--line)}
+  .win .title .dots{margin-left:auto;display:flex;gap:6px}
+  .win .title .d{width:11px;height:11px;border-radius:50%;background:var(--line2)}
+  .win .title .d.c{background:var(--err)} .win .title .d.m{background:var(--warn)} .win .title .d.o{background:var(--ok)}
+  .win .tbar{background:var(--surface2);padding:6px 9px;display:flex;gap:6px;align-items:center;
+             border-bottom:1px solid var(--line);font-size:12.5px}
+  .tb{background:transparent;border:1px solid transparent;border-radius:var(--rs);color:var(--fg2);
+      padding:4px 9px;font:inherit;font-size:12.5px;cursor:pointer}
+  .tb:hover{background:var(--surface3);color:var(--fg)}
+  .tb.on{background:var(--sel);color:var(--accent)}
+  .win .body{flex:1;display:flex;min-height:0}
+  .win .side{width:130px;background:var(--surface2);border-right:1px solid var(--line);padding:8px;font-size:12.5px}
+  .win .side .it{padding:5px 8px;border-radius:var(--rs);color:var(--fg2);cursor:pointer;display:flex;gap:7px;align-items:center}
+  .win .side .it:hover{background:var(--surface3)}
+  .win .side .it.on{background:var(--sel);color:var(--accent)}
+  .win .main{flex:1;overflow:auto}
+  .win .status{background:var(--surface2);border-top:1px solid var(--line);padding:5px 11px;
+                font-size:11.5px;color:var(--dim);display:flex;gap:14px}
+  .cr{display:grid;grid-template-columns:22px 1fr 78px 62px;gap:8px;padding:6px 11px;font-size:13px;
+      border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent);align-items:center}
+  .cr.sel{background:var(--sel);box-shadow:inset 2px 0 0 var(--accent)}
+  .cr .r{text-align:right;color:var(--dim);font-size:12px}
+  .hdr{display:grid;grid-template-columns:22px 1fr 78px 62px;gap:8px;padding:6px 11px;font-size:11.5px;
+       color:var(--dim);background:var(--surface2);border-bottom:1px solid var(--line);position:sticky;top:0}
+  .setrow{display:flex;align-items:center;gap:12px;padding:11px 14px;border-bottom:1px solid var(--line)}
+  .setrow .t{flex:1}
+  .setrow .t b{display:block;font-size:13.5px;font-weight:500}
+  .setrow .t span{font-size:12px;color:var(--dim)}
+  .seg{display:flex;border:1px solid var(--line2);border-radius:var(--rs);overflow:hidden}
+  .seg b{padding:5px 13px;font-size:12.5px;font-weight:500;color:var(--fg2);cursor:pointer;background:var(--surface2)}
+  .seg b.on{background:var(--accent);color:var(--accent-fg)}
+  .swatches{display:flex;gap:0;height:30px;border-radius:var(--rs);overflow:hidden;margin-top:6px;border:1px solid var(--line)}
+  .swatches i{flex:1}
+  .tok{font:12px/1.5 ui-monospace,monospace;color:var(--dim);font-size:11.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>方案 1.1 · Breeze Card（定案）</h1>
+    <span class="badge">定案 · 骨架 01 + 观感 03</span>
+    <button class="tg" onclick="document.body.classList.toggle('light')">切换深色 / 浅色</button>
+  </div>
+  <p class="sub"><b>定案：以方案 01 的语义与克制为骨架，向方案 03 的观感靠拢。</b>
+     保留 Breeze 的蓝色强调与语义色（迁移成本最低），把控件从小圆角平面感升级为
+     <b>中圆角 + 分层柔影 + 卡片化</b>。深色/浅色双主题，强调色可换。</p>
+
+  <h2>色彩令牌</h2>
+  <div class="row">
+    <div class="box">
+      <h3>语义色</h3>
+      <div class="swatches">
+        <i style="background:var(--bg)"></i><i style="background:var(--surface)"></i>
+        <i style="background:var(--surface2)"></i><i style="background:var(--surface3)"></i>
+        <i style="background:var(--accent)"></i><i style="background:var(--ok)"></i>
+        <i style="background:var(--warn)"></i><i style="background:var(--err)"></i>
+      </div>
+      <div class="tok" style="margin-top:10px">
+        bg · surface · surface2 · surface3 · accent · ok · warn · err
+      </div>
+    </div>
+    <div class="box">
+      <h3>文字层级</h3>
+      <div style="color:var(--fg);font-size:15px">主文字 fg — 标题与正文</div>
+      <div style="color:var(--fg2);font-size:13.5px;margin-top:6px">次文字 fg2 — 说明与副标题</div>
+      <div style="color:var(--dim);font-size:12.5px;margin-top:6px">弱文字 dim — 元信息与占位</div>
+      <div style="color:var(--accent);font-size:13px;margin-top:6px">强调 accent — 链接与选中</div>
+    </div>
+  </div>
+
+  <h2>按钮</h2>
+  <div class="box">
+    <div class="btns">
+      <button class="btn primary">主要操作</button>
+      <button class="btn">次要操作</button>
+      <button class="btn ghost">文字按钮</button>
+      <button class="btn danger">危险操作</button>
+      <button class="btn" disabled>禁用</button>
+    </div>
+  </div>
+
+  <h2>表单控件</h2>
+  <div class="row">
+    <div class="box">
+      <div class="field"><label>名称</label><input class="inp" value="hbos-disk"></div>
+      <div class="field"><label>路径</label><input class="inp" placeholder="/home/user/docs"></div>
+      <label class="chk on"><i>✓</i> 记住此设置</label>
+      <label class="chk"><i>✓</i> 开机自动挂载</label>
+    </div>
+    <div class="box">
+      <div class="setrow" style="border:none;padding-left:0;padding-right:0">
+        <div class="t"><b>深色主题</b><span>跟随系统外观</span></div>
+        <div class="sw on"></div>
+      </div>
+      <div class="setrow" style="border:none;padding-left:0;padding-right:0">
+        <div class="t"><b>动画效果</b><span>窗口过渡与淡入</span></div>
+        <div class="sw"></div>
+      </div>
+      <div class="setrow" style="border:none;padding-bottom:0;padding-left:0;padding-right:0">
+        <div class="t"><b>界面缩放</b><span>影响所有应用</span></div>
+        <div class="seg"><b>100%</b><b class="on">125%</b><b>150%</b></div>
+      </div>
+    </div>
+  </div>
+
+  <h2>列表 · 标签页 · 状态</h2>
+  <div class="row">
+    <div class="box">
+      <h3>列表（选中 / 悬浮 / 元信息）</h3>
+      <div class="list">
+        <div class="li sel"><span class="ic">▸</span> 文档<span class="meta">12 项</span></div>
+        <div class="li"><span class="ic">▸</span> 下载<span class="meta">3 项</span></div>
+        <div class="li"><span class="ic">▤</span> 报告.pdf<span class="meta">2.4 MB</span></div>
+        <div class="li"><span class="ic">▤</span> 笔记.txt<span class="meta">8 KB</span></div>
+      </div>
+      <div style="margin-top:14px" class="bar"><i style="width:68%"></i></div>
+      <div class="tok" style="margin-top:8px">进度条 68%</div>
+    </div>
+    <div class="box">
+      <h3>标签页与徽章</h3>
+      <div class="tabs">
+        <div class="tab on">常规</div><div class="tab">外观</div><div class="tab">网络</div>
+      </div>
+      <div class="btns">
+        <span class="pill ok">已连接</span>
+        <span class="pill warn">同步中</span>
+        <span class="pill err">错误</span>
+        <span class="pill info">信息</span>
+      </div>
+    </div>
+  </div>
+
+  <h2>对话框</h2>
+  <div class="row">
+    <div class="box">
+      <div class="dlg">
+        <div class="hd">确认删除<span class="x">×</span></div>
+        <div class="bd">将永久删除「报告.pdf」及其全部副本，此操作不可撤销。</div>
+        <div class="ft"><button class="btn">取消</button><button class="btn danger">删除</button></div>
+      </div>
+    </div>
+    <div class="box">
+      <div class="dlg">
+        <div class="hd">重命名<span class="x">×</span></div>
+        <div class="bd"><input class="inp" value="报告-2026.pdf"></div>
+        <div class="ft"><button class="btn">取消</button><button class="btn primary">确定</button></div>
+      </div>
+    </div>
+  </div>
+
+  <h2>应用界面：文件管理器</h2>
+  <div class="row">
+    <div class="win">
+      <div class="title">▤ 文件管理器<span class="dots"><span class="d m"></span><span class="d o"></span><span class="d c"></span></span></div>
+      <div class="tbar">
+        <button class="tb">←</button><button class="tb">→</button><button class="tb">↑</button>
+        <button class="tb on">列表</button><button class="tb">图标</button>
+        <input class="inp" style="width:auto;flex:1;padding:3px 9px;font-size:12.5px" placeholder="搜索…">
+      </div>
+      <div class="body">
+        <div class="side">
+          <div class="it on">▸ 主目录</div><div class="it">▸ 文档</div>
+          <div class="it">▸ 下载</div><div class="it">▸ 图片</div><div class="it">▸ 磁盘</div>
+        </div>
+        <div class="main">
+          <div class="hdr"><span></span><span>名称</span><span class="r">大小</span><span class="r">修改</span></div>
+          <div class="cr sel"><span>▸</span><span>文档</span><span class="r">—</span><span class="r">今天</span></div>
+          <div class="cr"><span>▸</span><span>下载</span><span class="r">—</span><span class="r">昨天</span></div>
+          <div class="cr"><span>▤</span><span>报告.pdf</span><span class="r">2.4 MB</span><span class="r">10-07</span></div>
+          <div class="cr"><span>▤</span><span>笔记.txt</span><span class="r">8 KB</span><span class="r">10-06</span></div>
+          <div class="cr"><span>▤</span><span>截图.png</span><span class="r">412 KB</span><span class="r">10-05</span></div>
+        </div>
+      </div>
+      <div class="status"><span>5 项</span><span>可用 32.5 GB</span><span style="margin-left:auto">FAT32</span></div>
+    </div>
+
+    <div class="win">
+      <div class="title">⚙ 系统设置<span class="dots"><span class="d m"></span><span class="d o"></span><span class="d c"></span></span></div>
+      <div class="body">
+        <div class="side">
+          <div class="it on">🎨 外观</div><div class="it">🖥 显示</div>
+          <div class="it">🔊 声音</div><div class="it">🌐 网络</div><div class="it">ℹ 关于</div>
+        </div>
+        <div class="main">
+          <div class="setrow"><div class="t"><b>主题模式</b><span>深色 / 浅色</span></div>
+            <div class="seg"><b class="on">深色</b><b>浅色</b></div></div>
+          <div class="setrow"><div class="t"><b>强调色</b><span>选中项与按钮</span></div>
+            <div style="display:flex;gap:5px">
+              <span style="width:17px;height:17px;border-radius:50%;background:#3daee9;border:2px solid var(--fg)"></span>
+              <span style="width:17px;height:17px;border-radius:50%;background:#27ae60"></span>
+              <span style="width:17px;height:17px;border-radius:50%;background:#f67400"></span>
+              <span style="width:17px;height:17px;border-radius:50%;background:#da4453"></span>
+            </div></div>
+          <div class="setrow"><div class="t"><b>圆角</b><span>控件圆润程度</span></div>
+            <div class="seg"><b class="on">小</b><b>中</b><b>大</b></div></div>
+          <div class="setrow"><div class="t"><b>界面缩放</b><span>影响全部应用</span></div>
+            <div class="seg"><b>100%</b><b class="on">125%</b><b>150%</b></div></div>
+        </div>
+      </div>
+      <div class="status"><span>设置</span><span style="margin-left:auto">已保存</span></div>
+    </div>
+  </div>
+
+  <h2>强调色可换（主题包变量）</h2>
+  <div class="box">
+    <p style="margin:0 0 14px;color:var(--fg2);font-size:13.5px">
+      强调色是主题包的一个变量，切换后按钮/选中/链接/焦点环联动。
+      下面是同一套 UI 在 5 种强调色下的效果：
+    </p>
+    <div style="display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))" id="accents">
+      <div data-a="#3daee9"><div style="font-size:12px;color:var(--dim);margin-bottom:7px">#3daee9 · Breeze 蓝（默认）</div>
+        <div style="display:flex;gap:7px"><button class="btn primary" style="background:#3daee9;border-color:#3daee9;box-shadow:0 2px 8px #3daee955">主要</button>
+        <button class="btn" style="border-color:#3daee9;color:#3daee9">次要</button></div></div>
+      <div data-a="#5b8def"><div style="font-size:12px;color:var(--dim);margin-bottom:7px">#5b8def · 靛蓝</div>
+        <div style="display:flex;gap:7px"><button class="btn primary" style="background:#5b8def;border-color:#5b8def;box-shadow:0 2px 8px #5b8def55">主要</button>
+        <button class="btn" style="border-color:#5b8def;color:#5b8def">次要</button></div></div>
+      <div data-a="#27ae60"><div style="font-size:12px;color:var(--dim);margin-bottom:7px">#27ae60 · 青绿</div>
+        <div style="display:flex;gap:7px"><button class="btn primary" style="background:#27ae60;border-color:#27ae60;box-shadow:0 2px 8px #27ae6055">主要</button>
+        <button class="btn" style="border-color:#27ae60;color:#27ae60">次要</button></div></div>
+      <div data-a="#8e6bd9"><div style="font-size:12px;color:var(--dim);margin-bottom:7px">#8e6bd9 · 紫罗兰</div>
+        <div style="display:flex;gap:7px"><button class="btn primary" style="background:#8e6bd9;border-color:#8e6bd9;box-shadow:0 2px 8px #8e6bd955">主要</button>
+        <button class="btn" style="border-color:#8e6bd9;color:#8e6bd9">次要</button></div></div>
+      <div data-a="#d97706"><div style="font-size:12px;color:var(--dim);margin-bottom:7px">#d97706 · 琥珀</div>
+        <div style="display:flex;gap:7px"><button class="btn primary" style="background:#d97706;border-color:#d97706;box-shadow:0 2px 8px #d9770655">主要</button>
+        <button class="btn" style="border-color:#d97706;color:#d97706">次要</button></div></div>
+    </div>
+  </div>
+
+  <h2>主题包：外部文件加载</h2>
+  <div class="row">
+    <div class="box">
+      <h3>/themes/&lt;name&gt;.theme 文件格式</h3>
+      <div class="tok" style="line-height:1.9">
+        # HBOS 主题包 v1<br>
+        name = Breeze Card Dark<br>
+        based_on = dark<br>
+        accent = #3daee9<br>
+        accent_hover = #4db8f0<br>
+        bg = #191c1f<br>
+        surface = #24282c<br>
+        surface2 = #2b3034<br>
+        surface3 = #33393f<br>
+        fg = #eff0f1<br>
+        fg2 = #bdc3c7<br>
+        dim = #7f8c8d<br>
+        ok = #27ae60<br>
+        warn = #f67400<br>
+        err = #da4453<br>
+        radius = 10<br>
+        radius_small = 7<br>
+        shadow = soft
+      </div>
+    </div>
+    <div class="box">
+      <h3>加载与回退规则</h3>
+      <ul style="margin:0;padding-left:18px;color:var(--fg2);font-size:13.5px;line-height:1.85">
+        <li>启动扫描 <code>/themes/*.theme</code>，按文件名列出可用主题</li>
+        <li>只覆盖<b>声明了的</b>键，其余继承 <code>based_on</code> 基主题</li>
+        <li>未知键忽略并告警；非法颜色回退到基主题值</li>
+        <li>所有键缺失时仍能启动（内置 dark/light 兜底）</li>
+        <li>切换主题写入 <code>/startup.cfg</code> 跨重启保留</li>
+        <li>主题只影响令牌，不改变布局与控件尺寸</li>
+      </ul>
+      <div style="margin-top:14px;padding:11px 13px;border-left:3px solid var(--accent);
+                  background:var(--surface2);border-radius:0 var(--rs) var(--rs) 0;font-size:12.5px;color:var(--fg2)">
+        <b>为什么用纯文本：</b>解析器只需 ~150 行 C，无依赖、易手改；
+        损坏的主题文件不会让系统起不来。
+      </div>
+    </div>
+  </div>
+
+  <h2>落到代码：令牌映射</h2>
+  <div class="box">
+    <div class="tok">
+      gui_theme_t {<br>
+      &nbsp;&nbsp;bg, surface, surface2, surface3,<br>
+      &nbsp;&nbsp;line, line2,<br>
+      &nbsp;&nbsp;fg, fg2, dim,<br>
+      &nbsp;&nbsp;accent, accent_fg, accent_hover,<br>
+      &nbsp;&nbsp;ok, warn, err, sel,<br>
+      &nbsp;&nbsp;radius, radius_small, shadow_alpha<br>
+      }<br><br>
+      应用只引用令牌：gui_rect(x,y,w,h, T-&gt;surface);&nbsp;&nbsp;gui_text(..., T-&gt;fg);
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -9,7 +9,7 @@ align 16
 %ifndef HBOS_BUILD_DIR
 %define HBOS_BUILD_DIR "build"
 %endif
-%strcat HBOS_GUI_WALL_PATH HBOS_BUILD_DIR, "/gui_wall.bin"
+%strcat HBOS_GUI_WALL_PATH HBOS_BUILD_DIR, "/gui_wall.pack"
 
 global _binary_build_gui_wall_bin_start
 _binary_build_gui_wall_bin_start:

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HBOS UI 风格方案 · 总览</title>
+<style>
+  :root{--bg:#0f1214;--fg:#e6ebef;--dim:#8b969e;--line:#242c31;--card:#161c20;--accent:#3daee9}
+  @media (prefers-color-scheme:light){:root{--bg:#f5f7f9;--fg:#1b2226;--dim:#5d686f;--line:#dde3e8;--card:#fff;--accent:#2980b9}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,"Noto Sans SC",sans-serif;padding:48px 24px}
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:30px;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--dim);margin:0 0 40px}
+  .grid{display:grid;gap:20px;grid-template-columns:repeat(auto-fill,minmax(310px,1fr))}
+  a.card{display:block;background:var(--card);border:1px solid var(--line);border-radius:12px;
+         padding:22px;text-decoration:none;color:inherit;transition:.18s}
+  a.card:hover{transform:translateY(-3px);border-color:var(--accent);box-shadow:0 8px 26px rgba(0,0,0,.28)}
+  .n{font:600 12px/1 ui-monospace,monospace;color:var(--accent);letter-spacing:.1em}
+  .t{font-size:19px;font-weight:650;margin:10px 0 4px}
+  .t2{font-size:13px;color:var(--dim);margin-bottom:14px}
+  .d{font-size:13.5px;color:var(--dim);margin:0 0 16px}
+  .tags{display:flex;flex-wrap:wrap;gap:6px}
+  .tag{font-size:11px;padding:3px 9px;border-radius:99px;background:color-mix(in srgb,var(--accent) 14%,transparent);
+       color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+  .note{margin-top:40px;padding:20px 22px;border-left:3px solid var(--accent);background:var(--card);
+        border-radius:0 10px 10px 0;font-size:14px;color:var(--dim)}
+  .note b{color:var(--fg)}
+  .sw{display:flex;gap:0;height:34px;border-radius:8px;overflow:hidden;margin-top:14px}
+  .sw i{flex:1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>HBOS 统一 UI 风格方案</h1>
+  <p class="sub">第一步：确定视觉语言。<b>已定案 1.1（Breeze Card）</b>——5 种候选保留作对照，均可切换深色 / 浅色。</p>
+
+  <div class="grid">
+    <a class="card" href="6-final.html" style="grid-column:1/-1;border-color:var(--accent);
+       background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 12%,var(--card)),var(--card))">
+      <div class="n">定案 · 1.1</div>
+      <div class="t">Breeze Card ★</div>
+      <div class="t2">骨架取自 01，观感向 03 靠拢 · 含主题包格式</div>
+      <p class="d">保留 Breeze 的语义色与克制（迁移成本最低），升级为<b>中圆角 + 分层柔影 + 卡片化</b>。
+         额外包含<b>强调色替换</b>与 <code>/themes/*.theme</code> 外部主题包格式、加载回退规则。这是将落地的方案。</p>
+      <div class="tags"><span class="tag">★ 定案</span><span class="tag">深/浅色</span><span class="tag">主题包</span><span class="tag">强调色可换</span></div>
+      <div class="sw"><i style="background:#191c1f"></i><i style="background:#24282c"></i><i style="background:#3daee9"></i><i style="background:#4db8f0"></i><i style="background:#eff0f1"></i></div>
+    </a>
+
+    <a class="card" href="1-breeze.html">
+      <div class="n">方案 01</div>
+      <div class="t">Breeze Continuity</div>
+      <div class="t2">延续现状 · 平面 · 蓝色强调</div>
+      <p class="d">与现有 <code>cyber_neon_*</code> 配色（KDE Breeze 取向）一脉相承，改动成本最低。平面化、细边框、克制阴影。</p>
+      <div class="tags"><span class="tag">低迁移成本</span><span class="tag">平面</span><span class="tag">蓝色系</span></div>
+      <div class="sw"><i style="background:#eff0f1"></i><i style="background:#3daee9"></i><i style="background:#2980b9"></i><i style="background:#232629"></i><i style="background:#31363b"></i></div>
+    </a>
+
+    <a class="card" href="2-neonterm.html">
+      <div class="n">方案 02</div>
+      <div class="t">Neon Terminal</div>
+      <div class="t2">终端优先 · 等宽 · 单色强调</div>
+      <p class="d">放大 HBOS 的极客气质：等宽字体、高信息密度、单色荧光强调。深色为默认，浅色是"高亮纸"。适合终端类应用为主的系统。</p>
+      <div class="tags"><span class="tag">高密度</span><span class="tag">等宽</span><span class="tag">低开销</span></div>
+      <div class="sw"><i style="background:#0b0f10"></i><i style="background:#00e0a4"></i><i style="background:#131a1d"></i><i style="background:#5a6b72"></i><i style="background:#1d2629"></i></div>
+    </a>
+
+    <a class="card" href="3-softcard.html">
+      <div class="n">方案 03</div>
+      <div class="t">Soft Card</div>
+      <div class="t2">圆角卡片 · 层次阴影 · 现代</div>
+      <p class="d">卡片化布局 + 柔和阴影 + 大圆角，观感最"当代"。对模糊/阴影绘制有要求，需评估内核渲染开销。</p>
+      <div class="tags"><span class="tag">现代感</span><span class="tag">卡片</span><span class="tag">含阴影</span></div>
+      <div class="sw"><i style="background:#f4f6fb"></i><i style="background:#5b6cff"></i><i style="background:#ffffff"></i><i style="background:#141824"></i><i style="background:#8b93ff"></i></div>
+    </a>
+
+    <a class="card" href="4-nordic.html">
+      <div class="n">方案 04</div>
+      <div class="t">Nordic Calm</div>
+      <div class="t2">低饱和 · 低对比 · 护眼</div>
+      <p class="d">北极色系，弱化色相冲突，长时间使用最舒适。强调色克制，适合办公/阅读类场景。</p>
+      <div class="tags"><span class="tag">护眼</span><span class="tag">低饱和</span><span class="tag">无障碍</span></div>
+      <div class="sw"><i style="background:#eceff4"></i><i style="background:#88c0d0"></i><i style="background:#2e3440"></i><i style="background:#4c566a"></i><i style="background:#a3be8c"></i></div>
+    </a>
+
+    <a class="card" href="5-brutalist.html">
+      <div class="n">方案 05</div>
+      <div class="t">Brutalist</div>
+      <div class="t2">硬边 · 高对比 · 零装饰</div>
+      <p class="d">直角、粗描边、无渐变无阴影。渲染开销最低，辨识度最高，适合低配/嵌入式场景。</p>
+      <div class="tags"><span class="tag">零开销</span><span class="tag">高对比</span><span class="tag">辨识度</span></div>
+      <div class="sw"><i style="background:#ffffff"></i><i style="background:#000000"></i><i style="background:#ff2d20"></i><i style="background:#ffe600"></i><i style="background:#0057ff"></i></div>
+    </a>
+  </div>
+
+  <div class="note">
+    <b>如何选择：</b>每种方案都给出了同一组组件（按钮 / 输入框 / 列表 / 标签页 / 对话框 / 工具栏 / 状态栏）
+    与同两个应用界面（文件管理器、系统设置）的深色+浅色对照，可直接横向比较。<br>
+    选定的方案将作为 <code>gui_theme_t</code> 设计令牌落地，所有系统应用改为只引用令牌、不再硬编码颜色。
+  </div>
+</div>
+</body>
+</html>

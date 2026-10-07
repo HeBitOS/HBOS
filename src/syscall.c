@@ -1585,10 +1585,31 @@ static uint64_t linux_getdents64(int fd, void *buffer, uint64_t count) {
     if (!entry->path[0]) return 0;
 
     uint64_t written = 0;
+    /*
+     * 顺序游标读取，避免 O(n²)。
+     *
+     * 原实现每轮调用 vfs_readdir_at(entry->path, entry->offset)，而该函数
+     * 内部为取第 offset 项要从 0 重扫到 offset（每次还各自 opendir/closedir）。
+     * 列一个 n 项目录就是 O(n²) 次底层 readdir。改为只 opendir 一次、用
+     * vfs_readdir 顺序推进：整体 O(n)。
+     *
+     * entry->offset 语义不变——它是"下一条目的序号"，与 Linux d_off 一致，
+     * 因此跨多次 getdents64 调用仍可正确续读。重新进入时先把游标快进到
+     * 当前 offset（seek 场景），之后顺序消费。
+     */
+    if (vfs_opendir(entry->path) < 0) return 0;
+    for (uint32_t skip = 0; skip < entry->offset; skip++) {
+        char scratch[VFS_MAX_NAME];
+        uint32_t scratch_type;
+        if (vfs_readdir(entry->path, scratch, &scratch_type) < 0) {
+            vfs_closedir(entry->path);
+            return written;
+        }
+    }
     for (;;) {
         char name[VFS_MAX_NAME];
         uint32_t type;
-        if (vfs_readdir_at(entry->path, entry->offset, name, &type) < 0)
+        if (vfs_readdir(entry->path, name, &type) < 0)
             break;
         size_t name_length = strlen(name) + 1;
         uint64_t record_length = (19 + name_length + 7) & ~(uint64_t)7;
@@ -1604,6 +1625,7 @@ static uint64_t linux_getdents64(int fd, void *buffer, uint64_t count) {
         entry->offset++;
         written += record_length;
     }
+    vfs_closedir(entry->path);   /* 与上面的 vfs_opendir 配对 */
     return written;
 }
 

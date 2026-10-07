@@ -131,6 +131,29 @@
 #define NEIGH_CACHE_SIZE 16
 /** @brief TCP 最大段大小（字节） */
 #define TCP_MSS 1460
+/**
+ * @brief net_tcp_exchange 的接收总截止时间（ms）。
+ *
+ * 旧实现在 net_tcp_exchange 里用固定 80 次迭代当"总传输量预算"，把大响应
+ * 截断在 80 个 TCP 段（PERFORMANCE.md §6.1.1）。修复后循环只由协议事件
+ * （FIN/RST/收满/缓冲写满）终止，这个截止时间仅作对端彻底挂死时的兜底，
+ * 同时顺带堵上 §5 待办 #11 说的"无 PIT 截止可卡数分钟"。
+ */
+#define NET_TCP_EXCHANGE_TIMEOUT_MS 30000u
+/**
+ * @brief "连续多久零进展"才判定对端停发（毫秒，墙钟计时）。
+ *
+ * 旧实现用固定轮数（16 轮 × 4 次 poll × 每轮 80000 自旋 + 10ms PIT tick
+ * ≈ 640ms）判空闲，这个值**小于 RFC 6298 规定的最小 RTO（1000ms）**：
+ * 合法但稍慢的服务端只要一次重传间隙超过 ~800ms（正文中途暂停、拥塞、
+ * 慢链路），就会被误判成"对端停发"并报 tcp response truncated——
+ * 对端既没停发也没丢数据，是本端提前放弃（双 ISO A/B 实测确认）。
+ *
+ * 轮数还隐含依赖"每轮耗时固定"这个不成立的假设（自旋次数、PIT 频率、
+ * 驱动实现都影响单轮墙钟），故改为直接按墙钟判定，并取 ≥3×RTO 的余量，
+ * 与 30s 绝对兜底形成两级保护。
+ */
+#define NET_TCP_EXCHANGE_IDLE_MS 5000u
 
 /**
  * @brief E1000 接收描述符结构体
@@ -2264,7 +2287,28 @@ typedef struct {
      * 语义不变：可用空间仍是 cap - rx_len，ACK/窗口/丢弃策略与旧实现一致。
      */
     uint32_t rx_head;
+    /**
+     * @brief 最近一次向对端通告的接收窗口（= 当时的 NET_TCP_RXBUF_SIZE - rx_len）。
+     *
+     * 只用于判断"应用取走数据后窗口是否重新张开"：张开时必须补发窗口更新
+     * ACK，否则对端在 win=0 之后永久停发（PERFORMANCE.md §6.1.7 约束 B5）。
+     * 发包时的窗口字段本身每次按真实空闲量现算（§6.1.5②），不复用该缓存。
+     */
+    uint16_t win_adv;
 } tcp_conn_t;
+
+/**
+ * @brief 该连接当前应通告的接收窗口 = 环形缓冲真实空闲量（§6.1.5②）。
+ *
+ * 旧实现把 win 硬编码为 4096：环有 8192 空闲却只报一半（吞吐砍半），
+ * 环满时也不收缩到 0（流控语义完全丧失，并让 §6.1.5① 的"缓冲满仍推进
+ * ACK"被锁死为不可达）。8192 < 65535，故不会溢出 TCP 窗口字段。
+ */
+static uint16_t tcp_conn_window(const tcp_conn_t *c) {
+    uint32_t space = NET_TCP_RXBUF_SIZE - c->rx_len;
+    if (space > 0xFFFFu) space = 0xFFFFu;
+    return (uint16_t)space;
+}
 
 /**
  * @brief 把载荷追加进连接的环形接收缓冲（满则丢弃多余部分，与旧实现一致）。
@@ -2332,12 +2376,15 @@ static void tcp_loopback_rx(const uint8_t *frame, uint16_t len);
  * @param seq 序列号
  * @param ack 确认号
  * @param flags TCP 标志位（SYN=0x02, ACK=0x10, FIN=0x01, RST=0x04 等）
+ * @param win 本端接收窗口通告（= 该连接环形缓冲真实空闲量，§6.1.5②；
+ *            调用方用 tcp_conn_window() 现算，为 0 时合法通告 0 窗口）
  * @param data 载荷数据（可为 NULL）
  * @param dlen 载荷长度
  * @return 0 成功，-1 失败
  */
 static int send_tcp(const uint8_t mac[6], uint32_t dst_ip, uint16_t sport, uint16_t dport,
-                    uint32_t seq, uint32_t ack, uint8_t flags, const void *data, uint16_t dlen) {
+                    uint32_t seq, uint32_t ack, uint8_t flags, uint16_t win,
+                    const void *data, uint16_t dlen) {
     uint8_t frame[1514];
     make_eth(frame, mac, ETH_TYPE_IP);
     ipv4_hdr_t *ip = (ipv4_hdr_t *)(frame + sizeof(eth_hdr_t));
@@ -2351,7 +2398,7 @@ static int send_tcp(const uint8_t mac[6], uint32_t dst_ip, uint16_t sport, uint1
     ip->src = (dst_ip == NET_LOOPBACK_V4) ? NET_LOOPBACK_V4 : primary.ip;
     ip->dst = dst_ip; ip->csum = 0; ip->csum = checksum(ip, 20);
     tcp->src = htons(sport); tcp->dst = htons(dport); tcp->seq = htonl(seq); tcp->ack = htonl(ack);
-    tcp->off_flags_hi = 5 << 4; tcp->flags = flags; tcp->win = htons(4096);
+    tcp->off_flags_hi = 5 << 4; tcp->flags = flags; tcp->win = htons(win);
     tcp->csum = 0; tcp->urg = 0; tcp->csum = tcp_checksum(ip, tcp, payload, dlen);
     if (dst_ip == primary.ip || dst_ip == NET_LOOPBACK_V4) {
         /* 回环：直接注入接收侧，不走网卡（NIC 不会把发出的帧再收回来） */
@@ -2403,20 +2450,44 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
         c->acked = 1;
     }
     if (dlen && seq == c->ack) {
-        tcp_conn_append(c, data, dlen);   /* 环形入队；满则丢弃多余部分 */
-        c->ack += dlen;
-        c->need_ack = 1;
+        /* §6.1.5①：只按"实际入队字节数"推进 ACK。旧代码丢弃
+         * tcp_conn_append 的返回值并用原始 dlen 推进，缓冲满时 ACK 会
+         * 越过被丢弃的字节 —— 对端据此不再重传，数据永久丢失。
+         * 这里只确认真正进环的部分：对端会按未确认字节重传剩余部分。 */
+        uint32_t staged = tcp_conn_append(c, data, dlen);
+        c->ack += staged;
+        if (staged) c->need_ack = 1;
         if (flags & 0x01) {
-            c->ack++;
-            c->fin = 1;
+            /* §6.1.5③：FIN 携带的序列号是"最后数据字节 + 1"，只有它的
+             * 前序数据全部就位（seq + dlen == c->ack）时才能接受；否则
+             * 缺口未补齐，不得改写 c->ack 把丢数伪装成 EOF，改为丢掉
+             * 这个 FIN 等对端重传缺口数据后再来。 */
+            if (staged == dlen && c->ack == seq + dlen) {
+                c->ack++;
+                c->fin = 1;
+                c->need_ack = 1;
+            }
         }
         return 1;
     }
     if (dlen && seq < c->ack) {
+        /* 与已确认区间重叠（对端重传）。重叠部分已确认，但**超出**已确认
+         * 末尾的新字节必须照常入环，不能只改 ACK —— 只改 ACK 而丢弃这些
+         * 字节同样是"谎报 ACK"（与 §6.1.5① 同型）。 */
+        uint32_t over = c->ack - seq;
+        if (over < dlen) {
+            uint32_t staged = tcp_conn_append(c, data + over, dlen - over);
+            c->ack += staged;
+        }
         c->need_ack = 1;
         return 1;
     }
-    if (flags & 0x01) { c->ack = seq + 1; c->fin = 1; c->need_ack = 1; return 1; }
+    if (flags & 0x01) {
+        /* 纯 FIN（无载荷）：仅当它正好接在已确认数据之后才接受，否则
+         * 说明中间有缺口，忽略（§6.1.5③，避免把丢数伪装成 EOF）。 */
+        if (c->ack == seq) { c->ack++; c->fin = 1; c->need_ack = 1; }
+        return 1;
+    }
     return 0;
 }
 
@@ -2430,16 +2501,42 @@ static void tcp_loopback_rx(const uint8_t *frame, uint16_t len) {
 
 /* 轮询循环通用收尾：把各槽里待发的 ACK 发出去。并发/回环时其他连接
  * 的数据可能已由分发器缓冲进自己的槽，当前任务（可能在 connect 或
- * 轮询别的连接）不补 ACK 的话，对端会一直等 ACK 卡死。 */
+ * 轮询别的连接）不补 ACK 的话，对端会一直等 ACK 卡死。
+ *
+ * §6.1.7 约束 B5：应用把数据取走后空闲量变大（尤其是 win=0 → 重新张开），
+ * 必须补发窗口更新 ACK，否则对端在收到 0 窗口后永久停发、双方死锁。
+ * 窗口字段每次按当前真实空闲量现算（§6.1.5②），并记录本次通告值。 */
 static void tcp_drain_acks(void) {
     for (int i = 0; i < NET_TCP_CONNS; i++) {
         tcp_conn_t *c = &tcp_conns[i];
-        if (c->used && c->need_ack) {
+        if (!c->used) continue;
+        uint16_t win = tcp_conn_window(c);
+        /* 握手期的槽（open=0）不发窗口更新：那时 c->ack 还没确定，
+         * 乱发纯 ACK 只会让对端困惑。 */
+        if (c->need_ack || (c->open && win > c->win_adv)) {
             c->need_ack = 0;
+            c->win_adv = win;
             send_tcp(c->mac, c->peer, c->sport, c->dport,
-                     c->seq, c->ack, 0x10, 0, 0);
+                     c->seq, c->ack, 0x10, win, 0, 0);
         }
     }
+}
+
+/**
+ * @brief 应用取走数据后补发窗口更新（PERFORMANCE.md §6.1.7 约束 B5）。
+ *
+ * 环形缓冲的空闲量在 recv 之后变大，尤其是"缓冲曾被填满 → 通告过 0 窗口
+ * → 应用取空"这一翻转：不补发窗口更新，对端在收到 0 窗口后会永久停发，
+ * 双方死锁。只在窗口确实张开（win > 上次通告值）时发一个纯 ACK，因此
+ * 不会为每次 recv 都多打一个包。
+ */
+static void tcp_send_window_update(tcp_conn_t *c) {
+    if (!c->used || !c->open) return;
+    uint16_t win = tcp_conn_window(c);
+    if (win <= c->win_adv) return;
+    send_tcp(c->mac, c->peer, c->sport, c->dport,
+             c->seq, c->ack, 0x10, win, 0, 0);
+    c->win_adv = win;
 }
 
 /**
@@ -2483,7 +2580,8 @@ static int net_tcp_connect_prepare(uint32_t ip, uint16_t port,
     c->dport = port;
     c->seq = conn->seq;
     memcpy(c->mac, conn->mac, 6);
-    if (send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02, 0, 0) < 0) {
+    if (send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02,
+                 tcp_conn_window(c), 0, 0) < 0) {
         tcp_conn_free(slot);
         return -1;
     }
@@ -2518,9 +2616,11 @@ int net_tcp_finish_connect(net_tcp_conn_t *conn) {
     }
     if (!c->synack) return 1;
     c->seq++;
+    uint16_t win = tcp_conn_window(c);
     if (send_tcp(c->mac, c->peer, c->sport, c->dport,
-                 c->seq, c->ack, 0x10, 0, 0) < 0)
+                 c->seq, c->ack, 0x10, win, 0, 0) < 0)
         return -1;
+    c->win_adv = win;
     c->connecting = 0;
     c->open = true;
     conn->open = true;
@@ -2545,7 +2645,8 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
             task_yield();
         }
         if (!c->synack && !c->rst)
-            send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02, 0, 0);
+            send_tcp(c->mac, ip, c->sport, port, c->seq, 0, 0x02,
+                     tcp_conn_window(c), 0, 0);
     }
     if (net_tcp_finish_connect(conn) != 0) {
         tcp_conn_free(conn->tcp_slot);
@@ -2579,9 +2680,12 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
     c->want_ack = c->seq + len;
     c->acked = 0;
     for (int attempt = 0; attempt < 3 && !c->acked && !c->rst; attempt++) {
+        /* §6.1.5②：数据段也带真实窗口，对端的在途上限不再被常量 4096 砍半 */
+        uint16_t win = tcp_conn_window(c);
         if (send_tcp(c->mac, c->peer, c->sport, c->dport,
-                     c->seq, c->ack, 0x18, data, (uint16_t)len) < 0)
+                     c->seq, c->ack, 0x18, win, data, (uint16_t)len) < 0)
             return -1;
+        c->win_adv = win;
         uint64_t deadline = net_deadline_after_ms(1000);
         while (!c->acked && !c->rst && net_before_deadline(deadline)) {
             net_poll(tcp_dispatch_cb, 0, 4096);
@@ -2637,6 +2741,8 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
     if (c->rx_len) {
         *len = tcp_conn_read(c, buf, cap);   /* 环形出队，不再搬移剩余字节 */
         conn->rx_len = c->rx_len;
+        conn->ack = c->ack;
+        tcp_send_window_update(c);           /* §6.1.7 B5：窗口张开要告诉对端 */
         return 0;
     }
     if (!c->open) {
@@ -2662,6 +2768,7 @@ int net_tcp_recv(net_tcp_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *len
     uint32_t copy = tcp_conn_read(c, buf, cap);
     conn->rx_len = c->rx_len;
     conn->ack = c->ack;
+    tcp_send_window_update(c);   /* §6.1.7 B5：轮询期间窗口可能已从 0 张开 */
     *len = copy;
     return 0;
 }
@@ -2680,10 +2787,10 @@ void net_tcp_close(net_tcp_conn_t *conn) {
          * Connection: close 等）就不必再发，但槽位必须照样释放。 */
         if (c && c->used)
             send_tcp(c->mac, c->peer, c->sport, c->dport,
-                     c->seq, c->ack, 0x11, 0, 0);
+                     c->seq, c->ack, 0x11, tcp_conn_window(c), 0, 0);
         else
             send_tcp(conn->mac, conn->peer, conn->sport, conn->dport,
-                     conn->seq, conn->ack, 0x11, 0, 0);
+                     conn->seq, conn->ack, 0x11, NET_TCP_RXBUF_SIZE, 0, 0);
         if (c) c->seq++;
         conn->seq++;
         conn->open = false;
@@ -2769,6 +2876,66 @@ int net_pkt_is_udp(const uint8_t *pkt, uint16_t len) {
 }
 
 /**
+ * @brief 解析 HTTP 响应头里的 Content-Length（十进制），返回 -1 表示没有/非法。
+ * @param hdr_end 输出头部结束偏移（"\r\n\r\n" 之后），未找到头部时为 0
+ */
+static long http_content_length(const uint8_t *resp, uint32_t len, uint32_t *hdr_end) {
+    uint32_t limit = len < 16384u ? len : 16384u;
+    for (uint32_t i = 0; i + 3 < limit; i++) {
+        if (resp[i] != '\r' || resp[i + 1] != '\n' ||
+            resp[i + 2] != '\r' || resp[i + 3] != '\n') continue;
+        uint32_t hend = i + 4;
+        if (hdr_end) *hdr_end = hend;
+        /* 在头部区域内找 Content-Length（大小写不敏感，忽略前导空白） */
+        for (uint32_t j = 0; j + 15 < hend; j++) {
+            if (resp[j] != '\r' && resp[j] != '\n') continue;
+            uint32_t k = j + 1;
+            const char *key = "content-length:";
+            uint32_t m = 0;
+            while (key[m] && k + m < hend) {
+                uint8_t ch = resp[k + m];
+                if (ch >= 'A' && ch <= 'Z') ch = (uint8_t)(ch - 'A' + 'a');
+                if (ch != (uint8_t)key[m]) break;
+                m++;
+            }
+            if (key[m]) continue;
+            k += m;
+            while (k < hend && (resp[k] == ' ' || resp[k] == '\t')) k++;
+            if (k >= hend || resp[k] < '0' || resp[k] > '9') continue;
+            long value = 0;
+            while (k < hend && resp[k] >= '0' && resp[k] <= '9') {
+                value = value * 10 + (resp[k] - '0');
+                if (value > 0x7FFFFFFF) return -1;
+                k++;
+            }
+            return value;
+        }
+        return -1;
+    }
+    return -1;
+}
+
+/**
+ * @brief HTTP 响应完整性判定（§6.1.7 约束 A2）。
+ *
+ * 旧代码只在 total==0 时报错，短读被静默当成功（正是"wget 无报错但少字节"
+ * 的来源）。这里在响应看起来是完整 HTTP 报文时校验：
+ *   - 带 Content-Length 的响应必须收满该长度；
+ *   - 头部完整但没有 Content-Length（HTTP/1.0 服务端用 close 定界）时必须
+ *     收到 FIN 才算收全；
+ *   - 头部本身就被截断在中间时判为截断。
+ * 返回 1 完整，0 明确截断。
+ */
+static int http_response_complete(const uint8_t *resp, uint32_t total, int saw_fin) {
+    uint32_t hdr_end = 0;
+    if (total < 12u || memcmp(resp, "HTTP/", 5) != 0) return 1;
+    long clen = http_content_length(resp, total, &hdr_end);
+    if (clen >= 0) return (uint32_t)clen <= total - hdr_end;
+    if (hdr_end) return saw_fin;
+    return 0;
+}
+
+/**
  * @brief 一次性完成 TCP 连接、发送请求、接收响应、关闭连接的完整交互
  * @param ip 目标 IP 地址（网络字节序）
  * @param port 目标端口号
@@ -2792,18 +2959,63 @@ int net_tcp_exchange(uint32_t ip, uint16_t port, const uint8_t *request, uint32_
         net_tcp_close(&conn);
         return -1;
     }
+    /* §6.1.1 直接原因：旧代码是 `for (int i = 0; i < 80; ...)` —— 因为
+     * e1000_poll 认领一个包就返回（589）而 tcp_dispatch_cb 对数据段返回 1，
+     * net_tcp_recv 每轮只吃进一个 TCP 段，于是 80 次迭代 = 恰好 80 段，
+     * 与文件大小/分段大小无关地把传输砍断（113760 字节 = 80 段边界）。
+     * 迭代次数绝不能当"总传输量预算"用：这里改成只由协议事件决定终止
+     * ——收到 FIN 且缓冲排空（EOF）、RST、响应缓冲写满、或响应收全
+     * （Content-Length 满足 / 无长度定界且已 FIN）；再加一个 PIT 绝对
+     * 截止时间兜底，避免对端彻底挂死时无限自旋（PERFORMANCE.md §5 待办
+     * #11：旧循环每轮 80000 自旋、无截止，这里用 4 轮 × 小自旋 + 截止）。 */
+    uint64_t deadline = net_deadline_after_ms(NET_TCP_EXCHANGE_TIMEOUT_MS);
     uint32_t total = 0;
-    for (int i = 0; i < 80 && total + 1 < response_cap; i++) {
+    uint32_t hdr_end = 0;
+    long clen = -2;   /* -2 = 头部还没收全，尚未判定；-1 = 头部完整但无 Content-Length */
+    int saw_fin = 0;
+    /* 空闲判定基于墙钟而非轮数：每轮耗时并不固定（自旋次数、PIT 频率、
+     * 驱动实现都会影响），按轮数折算出的等待时间无法保证覆盖对端 RTO。 */
+    uint64_t idle_deadline = net_deadline_after_ms(NET_TCP_EXCHANGE_IDLE_MS);
+    int saw_progress = 0;
+    while (total + 1 < response_cap && net_before_deadline(deadline)) {
         uint32_t got = 0;
         if (net_tcp_recv(&conn, response + total, response_cap - total - 1, &got, 4) < 0) break;
         total += got;
-        if (!conn.open) break;
+        if (!conn.open) { saw_fin = 1; break; }   /* 收到 FIN 且缓冲排空 = EOF */
+        if (got) {
+            saw_progress = 1;
+            /* 有进展就把空闲窗口整体后移，等价于"连续 N 毫秒零字节" */
+            idle_deadline = net_deadline_after_ms(NET_TCP_EXCHANGE_IDLE_MS);
+            /* §6.1.7 约束 A2：已知 Content-Length 时收满即完成，不再等 FIN
+             * （HTTP/1.1 keep-alive 服务端可能不关连接）。头部只解析一次。 */
+            if (clen == -2) {
+                long v = http_content_length(response, total, &hdr_end);
+                if (v >= 0) clen = v;
+                else if (hdr_end) clen = -1;
+            }
+            if (clen >= 0 && (uint32_t)clen <= total - hdr_end) break;
+        } else if (saw_progress && !net_before_deadline(idle_deadline)) {
+            /* 已有正文但连续 NET_TCP_EXCHANGE_IDLE_MS 零字节：对端停发。
+             * 必须先有进展才允许走这条：连接刚建立、请求刚发出时对端还在
+             * 处理，此时零字节是正常的（首个响应尚未到达），交给 30s 绝对
+             * 兜底，否则慢启动的服务端会被误判。 */
+            break;
+        }
     }
     net_tcp_close(&conn);
     response[total < response_cap ? total : response_cap - 1] = 0;
     *response_len = total;
     if (!total) {
         set_error("tcp response timeout");
+        return -1;
+    }
+    /* §6.1.7 约束 A2：旧代码只在 total==0 时报错，短读被静默当成功——
+     * 这正是"wget 无报错却少字节"的出处（2805-2808）。现在明确截断
+     * （头部/Content-Length 可判定且未收满）必须报错，不再伪装成功。 */
+    int complete = (clen >= 0) ? ((uint32_t)clen <= total - hdr_end)
+                               : http_response_complete(response, total, saw_fin);
+    if (!complete) {
+        set_error("tcp response truncated");
         return -1;
     }
     return 0;
@@ -2935,6 +3147,7 @@ typedef struct {
     uint8_t  peer_mac[6];
     uint32_t peer_seq;     /* 对端下一个期望序列号（= 收到的 SYN.seq + 1） */
     uint32_t isn;          /* 我们这边选的初始序列号，accept() 发 SYN-ACK 时才分配 */
+    uint16_t win_adv;      /* SYN-ACK 通告过的窗口（= 当时 rx_stage 剩余空间） */
     int      syn_acked;    /* 已经发过 SYN-ACK，等对端最后一个 ACK */
     int      established;  /* 三次握手完成，等 accept() 取走 */
     uint8_t  rx_stage[TCP_PENDING_STAGE_CAP];
@@ -3023,14 +3236,27 @@ static int tcp_accept_ingress(const uint8_t *pkt, uint16_t len) {
             const uint8_t *data = (const uint8_t *)tcp + thl;
             uint32_t dlen = ip_len > ihl + thl ? ip_len - ihl - thl : 0;
             if (dlen && seq == p->peer_seq) {
+                /* §6.1.5④（同型缺陷，约束 B7）：旧代码把 copy 夹到剩余空间
+                 * 却按原始 dlen 推进 peer_seq —— 与客户端侧 2406-2407 同型，
+                 * ACK 会越过被丢弃的字节。这里只按实际拷贝字节数推进，容量
+                 * 不足时对端按未确认字节重传，不会静默丢数。 */
                 uint32_t copy = dlen;
                 if (p->rx_stage_len + copy > TCP_PENDING_STAGE_CAP)
                     copy = TCP_PENDING_STAGE_CAP - p->rx_stage_len;
                 if (copy) {
                     memcpy(p->rx_stage + p->rx_stage_len, data, copy);
                     p->rx_stage_len += copy;
+                    p->peer_seq += copy;
+                    /* 暂存区窗口收紧/张开都要让对端知道：否则它在收到
+                     * win=0 之后永久停发（约束 B5 的服务端对称路径）。 */
+                    uint32_t stage_space = TCP_PENDING_STAGE_CAP - p->rx_stage_len;
+                    uint16_t win = (uint16_t)(stage_space > 0xFFFFu ? 0xFFFFu : stage_space);
+                    if (win < p->win_adv || copy < dlen) {
+                        send_tcp(p->peer_mac, p->peer, p->port, p->peer_port,
+                                 p->isn + 1, p->peer_seq, 0x10, win, 0, 0);
+                        p->win_adv = win;
+                    }
                 }
-                p->peer_seq += dlen;
             }
         }
         return 0;
@@ -3089,8 +3315,14 @@ int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn,
             if (p->in_use && p->port == port && !p->syn_acked) {
                 if (next_port < 49152) next_port = 49152;
                 p->isn = next_port++;
+                /* §6.1.5②：SYN-ACK 也通告真实空闲量。握手期数据先落在
+                 * rx_stage（容量 TCP_PENDING_STAGE_CAP），所以这里报的是
+                 * 该暂存区的剩余空间，不再虚报常量 4096。 */
+                uint32_t stage_space = TCP_PENDING_STAGE_CAP - p->rx_stage_len;
                 send_tcp(p->peer_mac, p->peer, port, p->peer_port,
-                         p->isn, p->peer_seq, 0x12, 0, 0);
+                         p->isn, p->peer_seq, 0x12,
+                         (uint16_t)(stage_space > 0xFFFFu ? 0xFFFFu : stage_space), 0, 0);
+                p->win_adv = (uint16_t)(stage_space > 0xFFFFu ? 0xFFFFu : stage_space);
                 p->syn_acked = 1;
             }
         }

@@ -68,6 +68,18 @@ typedef struct {
     uint32_t data_start_lba;
     uint32_t cluster_size;
     uint32_t total_clusters;
+    /**
+     * @brief 空闲簇搜索起点（"下一个可能空闲的簇号"）。
+     *
+     * fat32_alloc_cluster 原先每次都从簇 2 重扫，分配 n 个簇的总代价是
+     * O(n²/128) 次 FAT 扇区读：装一个 32 MB 的内核（2 KB 簇 = 16384 次
+     * 分配）要读约 100 万个扇区，慢到不可用。游标记住上次分配位置后，
+     * 顺序写入退化为每个 FAT 扇区只读一次。
+     *
+     * 仍保持"分配最低可用簇"的语义：释放时把游标下调到被释放的簇号
+     * （见 fat32_free_chain），所以游标之前不会遗留比它更低的空闲簇。
+     */
+    uint32_t alloc_cursor;
     int mounted;
 } fat32_fs_t;
 

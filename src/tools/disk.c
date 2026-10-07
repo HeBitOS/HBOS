@@ -278,6 +278,44 @@ static void cmd_install(int argc, char **argv) {
         return;
     }
     console_puts("\x1b[32minstall: FAT32 partition ready\x1b[0m\n");
+
+    /* 只准备存储是不够的：磁盘还需要引导器才能脱离 DVD 独立启动。
+     * 旧实现到这里就结束，MBR 前 446 字节始终为空，BIOS 读完直接报
+     * "无可引导设备"——这正是"install auto 后弹出 ISO 就起不来"的根因。
+     * 用户要求 BIOS 走 GRUB（UEFI 走 Limine），这里装 GRUB。 */
+    console_puts("\x1b[33minstall:\x1b[0m installing GRUB boot loader (BIOS)\n");
+    if (fs_install_boot_grub() < 0) {
+        console_puts("\x1b[31minstall: boot loader failed: \x1b[0m");
+        console_puts(fs_last_error());
+        console_putchar('\n');
+        console_puts("  storage is ready, but the disk is NOT bootable.\n");
+        cmd_diskmgr(0, 0);
+        return;
+    }
+
+    /* 内核镜像：引导器经 multiboot2 module2 把完整 ELF 交给我们（内核自身
+     * 在内存里只有 LOAD 段、没有 ELF 头，不能直接当文件写）。拿不到时明确
+     * 告知，磁盘仍会引导到 GRUB，但会停在菜单（找不到 /boot/hbos.bin）。 */
+    uint32_t klen = 0;
+    const uint8_t *kimg = fs_boot_module_image(&klen);
+    if (kimg && klen) {
+        console_puts("\x1b[33minstall:\x1b[0m writing kernel image to /boot/hbos.bin (");
+        print_uint(klen);
+        console_puts(" bytes)\n");
+        if (fs_install_boot_kernel(kimg, klen) < 0) {
+            console_puts("\x1b[31minstall: kernel image failed: \x1b[0m");
+            console_puts(fs_last_error());
+            console_putchar('\n');
+        } else {
+            console_puts("\x1b[32minstall: bootable disk ready\x1b[0m");
+            console_puts(" — remove the DVD and boot from the hard disk\n");
+        }
+    } else {
+        console_puts("\x1b[33minstall: warning:\x1b[0m no kernel module supplied by the boot loader\n");
+        console_puts("  GRUB is installed, but /boot/hbos.bin is missing, so the disk\n");
+        console_puts("  will stop at the GRUB menu. Boot the ISO with the kernel passed\n");
+        console_puts("  as module2 (see Makefile) and re-run install auto.\n");
+    }
     cmd_diskmgr(0, 0);
 }
 

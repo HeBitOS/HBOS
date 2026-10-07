@@ -10,7 +10,7 @@ bits 64
 %ifndef HBOS_BUILD_DIR
 %define HBOS_BUILD_DIR "build"
 %endif
-%strcat HBOS_HPT_REPO_PATH HBOS_BUILD_DIR, "/hpt-repo.bin"
+%strcat HBOS_HPT_REPO_PATH HBOS_BUILD_DIR, "/hpt-repo.pack"
 
 global _binary_build_hpt_repo_bin_start
 _binary_build_hpt_repo_bin_start:

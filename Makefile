@@ -180,9 +180,12 @@ FONT_BIN = $(BUILD_DIR)/font_cjk.bin
 # change the GUI typeface; glyph coverage is decided by tools/genfont.py.
 GUI_FONT_TTF = fonts/HarmonyOS_Sans_SC_Regular.ttf
 GUI_FONT_BIN = $(BUILD_DIR)/gui_font.bin
+# 嵌入内核的压缩版（.incbin 的是它，不是上面这份原始数据）
+GUI_FONT_PACKED = $(BUILD_DIR)/gui_font.pack
 # Desktop wallpaper. Swap GUI_WALL_IMG to change it; genwall.py decodes/resizes.
 GUI_WALL_IMG = photo/wallpaper.jpg
 GUI_WALL_BIN = $(BUILD_DIR)/gui_wall.bin
+GUI_WALL_PACKED = $(BUILD_DIR)/gui_wall.pack
 # Flat anti-aliased GUI icons. Designs live in tools/genicon.py.
 # Build-time customization: drop <name>.png (name = ICONS[] entry in
 # tools/genicon.py) into $(GUI_ICON_OVERRIDE_DIR) to replace that tile; the
@@ -232,6 +235,7 @@ C_SRCS = \
 	$(SRC_DIR)/fat32.c \
 	$(SRC_DIR)/bmp.c \
 	$(SRC_DIR)/inflate.c \
+	$(SRC_DIR)/graphics/blob_unpack.c \
 	$(SRC_DIR)/png.c \
 	$(SRC_DIR)/jpeg.c \
 	$(SRC_DIR)/wav.c \
@@ -318,6 +322,7 @@ C_SRCS += \
 
 ASM_SRCS = \
 	$(SRC_DIR)/boot.asm \
+	$(SRC_DIR)/boot/grub_blob.asm \
 	$(SRC_DIR)/core/task_switch.asm \
 	$(SRC_DIR)/core/interrupt_asm.asm \
 	$(SRC_DIR)/graphics/cjk_glyph.asm \
@@ -353,7 +358,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
 
 all: iso
 
@@ -375,6 +380,7 @@ help:
 	@echo "  make run-nogui-uefi  Build and boot the no-GUI UEFI ISO in QEMU"
 	@echo "  make nogui-smoke  Boot-test no-GUI BIOS and UEFI ISOs"
 	@echo "  make fat32-smoke  Regression-test FAT32 persistence (QEMU + host fsck/mtools)"
+	@echo "  make tcp-bulk-test  Regression-test TCP bulk responses byte-for-byte (QEMU + host http.server)"
 	@echo "  make core-only  Build HIVE-capable core without registered/HAX apps"
 	@echo "  make clean      Clean build files"
 	@echo ""
@@ -411,10 +417,19 @@ $(GUI_FONT_BIN): $(GUI_FONT_TTF) tools/genfont.py
 	python3 tools/genfont.py $(GUI_FONT_TTF) $(GUI_FONT_BIN)
 	@echo "[MAKE] GUI font: $(GUI_FONT_BIN)"
 
+# 嵌入内核的是压缩版（见 tools/pack_blob.py 与 src/graphics/blob_unpack.c）：
+# 字体 20 MB 是内核体积的最大单项，压到约 47% 后 ISO 明显变小。运行时由
+# blob_unpack() 用 pmm_alloc_blocks 拿连续物理页解压回原样。
+$(GUI_FONT_PACKED): $(GUI_FONT_BIN) tools/pack_blob.py
+	@python3 tools/pack_blob.py $(GUI_FONT_BIN) $@
+
 $(GUI_WALL_BIN): $(GUI_WALL_IMG) tools/genwall.py
 	@echo "[MAKE] Generating desktop wallpaper..."
 	python3 tools/genwall.py "$(GUI_WALL_IMG)" $(GUI_WALL_BIN)
 	@echo "[MAKE] Wallpaper: $(GUI_WALL_BIN)"
+
+$(GUI_WALL_PACKED): $(GUI_WALL_BIN) tools/pack_blob.py
+	@python3 tools/pack_blob.py $(GUI_WALL_BIN) $@
 
 $(GUI_ICON_BIN): tools/genicon.py $(wildcard $(GUI_ICON_OVERRIDE_DIR)/*.png)
 	@echo "[MAKE] Generating flat GUI icons..."
@@ -441,9 +456,42 @@ $(BUILD_DIR)/graphics/%.o: $(SRC_DIR)/graphics/%.asm | $(BUILD_DIR)
 # The incbin objects must REASSEMBLE when their embedded blob changes — a normal
 # (not order-only) prerequisite, otherwise a regenerated blob is silently stale.
 $(BUILD_DIR)/graphics/cjk_glyph.o: $(FONT_BIN)
-$(BUILD_DIR)/graphics/gui_glyph.o: $(GUI_FONT_BIN)
-$(BUILD_DIR)/graphics/gui_wallimg.o: $(GUI_WALL_BIN)
+$(BUILD_DIR)/graphics/gui_glyph.o: $(GUI_FONT_PACKED)
+$(BUILD_DIR)/graphics/gui_wallimg.o: $(GUI_WALL_PACKED)
 $(BUILD_DIR)/graphics/gui_iconsimg.o: $(GUI_ICON_BIN)
+
+# ── GRUB BIOS 引导块（供 guest 内 install 写出可引导盘）─────────────
+# 用户要求 BIOS 用 GRUB（UEFI 用 Limine）。让 `install auto` 产出的盘能
+# 独立引导，需要 MBR 引导代码（boot.img 前 446B）与 core.img（LBA1 起）。
+# 内核里没有 ISO9660/ATAPI，拿不到 CD 上的引导文件，所以构建期生成后经
+# src/boot/grub_blob.asm 的 incbin 嵌入内核。
+#
+# core.img 内嵌一段最小 config：它只负责找到 FAT 分区上的 grub.cfg 并
+# configfile 过去，真正的菜单留给盘上的 /boot/grub/grub.cfg（可由 install
+# 写出，便于版本升级而不必重刷 core.img）。
+GRUB_BLOB_DIR   = $(BUILD_DIR)/grub
+GRUB_BOOT_IMG   = $(GRUB_BLOB_DIR)/boot.img
+GRUB_CORE_IMG   = $(GRUB_BLOB_DIR)/core.img
+GRUB_EMBED_CFG  = $(GRUB_BLOB_DIR)/embedded.cfg
+GRUB_MKIMAGE_MODULES = biosdisk part_msdos fat normal multiboot2 search search_fs_file configfile
+
+$(GRUB_EMBED_CFG): | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	@printf 'set timeout=1\nset default=0\nsearch --no-floppy --set=root --file /boot/hbos.bin\nset prefix=($$root)/boot/grub\nconfigfile /boot/grub/grub.cfg\n' > $@
+
+$(GRUB_BOOT_IMG): /usr/lib/grub/i386-pc/boot.img | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	@cp $< $@
+
+$(GRUB_CORE_IMG): $(GRUB_EMBED_CFG) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	grub-mkimage -O i386-pc -o $@ -p /boot/grub -c $(GRUB_EMBED_CFG) $(GRUB_MKIMAGE_MODULES)
+	@echo "✓ GRUB core.img: $@ ($$(stat -c %s $@) bytes)"
+
+# blob 变化必须重新汇编（普通先决条件，非 order-only）
+$(BUILD_DIR)/boot/grub_blob.o: $(SRC_DIR)/boot/grub_blob.asm $(GRUB_BOOT_IMG) $(GRUB_CORE_IMG) | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD_DIR)/user/tcc_runtime_blob.o: $(SRC_DIR)/user/tcc_runtime_blob.asm $(BUILD_DIR)/tcc/hbos_runtime.o | $(BUILD_DIR)
 	@mkdir -p $(@D)
@@ -525,8 +573,8 @@ $(KERNEL_BIOS): $(ALL_OBJS) linker_bios.ld
 $(GRUB_CFG): Makefile
 	@mkdir -p $(dir $@)
 	@printf 'set timeout=$(BOOT_MENU_TIMEOUT)\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1920x1080x32,1680x1050x32,1600x900x32,1440x900x32,1366x768x32,1280x800x32,1024x768x32,auto\n' > $@
-	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n}\n' >> $@
-	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n}\n' >> $@
+	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n  module2 /boot/hbos.bin hbos-kernel\n}\n' >> $@
+	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n  module2 /boot/hbos.bin hbos-kernel\n}\n' >> $@
 
 # Limine 配置以仓库里的 limine.conf 为模板，只把 TIMEOUT 行替换成当前取值，
 # 其余内容（协议、内核路径、分辨率）保持原样。
@@ -716,6 +764,14 @@ nogui-smoke:
 # 回读 + 宿主机 fsck.fat/mtools 互认）
 fat32-smoke:
 	bash scripts/test_fat32_persist.sh
+
+# docs/PERFORMANCE.md §6/§6.1 验收流程固化：IPv4 TCP 大响应端到端回归。
+# QEMU + 宿主 python3 -m http.server，guest `wget -O -` 的串口正文与宿主
+# 源文件逐字节比对；覆盖 142000（报告用例）、115200/113760（80 段边界两侧）、
+# 42600（基准）、100000（落盘+重启回读）、分段无关性 300/600/900/1440，
+# 以及"声明 Content-Length 大于实发字节"的截断错误路径。
+tcp-bulk-test:
+	bash scripts/test_tcp_bulk.sh
 
 core-only:
 	@$(MAKE) --no-print-directory BUILD_DIR=build-core \
@@ -985,7 +1041,12 @@ $(HPT_REPO_PACKAGES): tools/genhpt_repo.py $(HAX_ALL_BINS) | $(BUILD_DIR)/hpt-re
 $(HPT_REPO_BIN): tools/genhptblob.py $(HPT_REPO_PACKAGES)
 	python3 tools/genhptblob.py $(HPT_REPO_DIR) $@
 
-$(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_BIN) | $(BUILD_DIR)
+# hpt-repo.bin 未压缩时 1.1 MB，压到约 40%。运行时由 hpt_repo_seed.c 解压。
+HPT_REPO_PACKED = $(BUILD_DIR)/hpt-repo.pack
+$(HPT_REPO_PACKED): $(HPT_REPO_BIN) tools/pack_blob.py
+	@python3 tools/pack_blob.py $(HPT_REPO_BIN) $@
+
+$(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_PACKED) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 USER_LINUX_COMPAT_OBJ = $(BUILD_DIR)/user/libc/linux.o
@@ -1443,7 +1504,13 @@ $(BUILD_DIR)/hax_manifest.o: $(HAX_MANIFEST) | $(BUILD_DIR)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 # 汇编 incbin blob —— blob 变化时必须重新汇编（普通先决条件）
-$(BUILD_DIR)/user/hax_blob.o: $(SRC_DIR)/user/hax_blob.asm $(HAX_BLOB) | $(BUILD_DIR)
+# hax_blob 未压缩时 2.8 MB，压到约 41%（zlib）。运行时由 hax.c 用
+# blob_unpack() 解压一次（种子阶段在 pmm_init 之后，内存可用）。
+HAX_BLOB_PACKED = $(BUILD_DIR)/hax_blob.pack
+$(HAX_BLOB_PACKED): $(HAX_BLOB) tools/pack_blob.py
+	@python3 tools/pack_blob.py $(HAX_BLOB) $@
+
+$(BUILD_DIR)/user/hax_blob.o: $(SRC_DIR)/user/hax_blob.asm $(HAX_BLOB_PACKED) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 

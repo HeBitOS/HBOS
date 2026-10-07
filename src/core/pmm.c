@@ -8,10 +8,17 @@
  * 位图放置在内核映像之后（_end 符号之后），紧邻内核代码。
  * 启动阶段保留低 1MB 区域（BIOS/EBDA/VGA 等）和内核自身占用的内存。
  *
- * 算法:
- *   - pmm_alloc_page(): 扫描位图找到第一个空闲页 → O(n)
- *   - pmm_alloc_blocks(): 扫描位图找到连续 n 个空闲页 → O(n)
- *   - pmm_free_page/blocks(): 清除位图中对应 bit → O(1)
+ * 算法（重构后）:
+ *   - pmm_alloc_page():  游标 + 64 位字级扫描。从上次的游标位置继续，
+ *                        用 tzcnt 在一个 64 位字里直接定位空闲 bit，
+ *                        单页分配摊还近 O(1)（不再每次从头逐位扫整图）。
+ *   - pmm_alloc_blocks(): 同按字扫描找连续 n 个空闲页；按字批测跳过
+ *                        全满字，仅边界处逐位确认 → O(n/64) 量级。
+ *   - pmm_free_page/blocks(): 清除位图中对应 bit → O(1)。
+ *
+ * 可扩展性: 位图按 64 位字组织，逻辑页数扩大 64 倍扫描耗时才线性增长；
+ * 游标避免"已分配前缀"被反复重扫。对外物理地址语义不变（仍 page<<12），
+ * 调用方零改动。
  */
 
 #include <stdint.h>
@@ -48,6 +55,14 @@ struct mb2_tag_mmap {
     uint32_t entry_version;  /**< 条目格式版本 */
     struct mb2_mmap_entry entries[];  /**< 变长条目数组 */
 } __attribute__((packed));
+
+/** Multiboot2 模块标签 (type=3)：引导器加载的模块（install 用它拿到内核镜像） */
+struct mb2_tag_module {
+    uint32_t type;           /**< 标签类型 (3) */
+    uint32_t size;           /**< 标签总大小 */
+    uint32_t mod_start;      /**< 模块起始物理地址 */
+    uint32_t mod_end;        /**< 模块结束物理地址（不含） */
+} __attribute__((packed));   /* cmdline 紧随其后，本文件不解析 */
 
 // ============================================================
 // 内部状态
@@ -90,31 +105,86 @@ static inline bool bitmap_test(size_t bit) {
 }
 
 // ============================================================
-// 位图扫描
+// 位图扫描 — 64 位字级 + 分配游标
 // ============================================================
 
+/** 位图按 64 位字寻址：一个 u64 覆盖 64 个连续页，bit=1 表示已用。 */
+#define WORD_BITS      64ULL
+#define WORD_SHIFT     6            /* log2(64) */
+#define WORD_MASK      (WORD_BITS - 1)
+
+/** 分配游标：记录下次扫描的起始页索引。已分配的前缀不会被反复重扫。 */
+static uint64_t g_cursor = 0;
+
+/** 返回第 w 个 64 位字（可能尾部越界位需调用方按 g_total_pages 截断）。 */
+static inline uint64_t bitmap_word(size_t w) {
+    return ((const uint64_t *)g_bitmap)[w];
+}
+
 /**
- * 查找第一个空闲页
+ * 从游标处查找第一个空闲页（供 pmm_alloc_page 使用，持锁调用）。
+ * 按 64 位字批量取反后用 ctz 定位，跳过全满字；走到内存末尾回绕一次。
  * @return 页索引，-1 表示内存耗尽
  */
 static int64_t bitmap_find_first(void) {
-    for (size_t i = 0; i < g_total_pages; i++)
-        if (!bitmap_test(i)) return (int64_t)i;
+    if (!g_total_pages) return -1;
+    size_t total_words = (size_t)((g_total_pages + WORD_BITS - 1) >> WORD_SHIFT);
+    size_t start_word  = (size_t)(g_cursor >> WORD_SHIFT);
+    size_t start_off   = (size_t)(g_cursor & WORD_MASK);
+
+    for (size_t pass = 0; pass < 2; pass++) {
+        for (size_t w = start_word; w < total_words; w++) {
+            uint64_t word = bitmap_word(w);
+            uint64_t free_mask = ~word;
+            if (pass == 0 && w == start_word)
+                free_mask &= (~0ULL) << start_off;   /* 跳过游标之前的位 */
+            /* 末字越界位（>= g_total_pages）强制视为已用 */
+            if (w == total_words - 1 && (g_total_pages & WORD_MASK)) {
+                size_t valid = (size_t)(g_total_pages & WORD_MASK);
+                free_mask &= (1ULL << valid) - 1;
+            }
+            if (!free_mask) continue;
+            size_t bit = (size_t)__builtin_ctzll(free_mask);
+            size_t page = (w << WORD_SHIFT) + bit;
+            if (page >= g_total_pages) return -1;
+            g_cursor = (uint64_t)page;              /* 推进游标 */
+            return (int64_t)page;
+        }
+        /* 回绕：从头扫到游标之前，覆盖因释放而变空的前缀 */
+        start_word = 0;
+        start_off  = 0;
+        total_words = (size_t)((g_cursor + WORD_BITS - 1) >> WORD_SHIFT);
+        if (!total_words) break;
+    }
     return -1;
 }
 
 /**
- * 查找连续 count 个空闲页
- * @param count  需要的连续页数
+ * 从低位起查找连续 count 个空闲页（供 pmm_alloc_blocks，持锁调用）。
+ * 连续物理块必须保证地址真正连续，不能用游标乱序，故从 0 开始按字扫描；
+ * 全满字一次跳过 64 页，仅候选区边界逐位确认。
  * @return 起始页索引，-1 表示未找到
  */
 static int64_t bitmap_find_blocks(size_t count) {
-    size_t run = 0;
-    for (size_t i = 0; i < g_total_pages; i++) {
-        if (!bitmap_test(i)) {
-            run++;
-            if (run == count) return (int64_t)(i - count + 1);
-        } else { run = 0; }
+    if (!count || count > g_total_pages) return -1;
+    size_t run = 0;             /* 当前已连续的空闲页数 */
+    size_t run_start = 0;       /* 该连续段的起始页 */
+    size_t total_words = (size_t)((g_total_pages + WORD_BITS - 1) >> WORD_SHIFT);
+
+    for (size_t w = 0; w < total_words; w++) {
+        uint64_t word = bitmap_word(w);
+        if (word == ~0ULL) { run = 0; continue; }   /* 全满：一次跳 64 页 */
+
+        for (size_t bit = 0; bit < WORD_BITS; bit++) {
+            size_t page = (w << WORD_SHIFT) + bit;
+            if (page >= g_total_pages) break;
+            if (!(word & (1ULL << bit))) {
+                if (!run) run_start = page;
+                if (++run == count) return (int64_t)run_start;
+            } else {
+                run = 0;
+            }
+        }
     }
     return -1;
 }
@@ -186,7 +256,30 @@ void pmm_init(void *mbi) {
     uint64_t kernel_end = (uint64_t)_end;
     if (kernel_end < 0x200000) kernel_end = 0x200000;  // 至少 2MB
 
-    uint64_t bitmap_phys = (kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    /* GRUB 用 module2 传进来的模块（install 需要它拿到内核镜像）通常紧跟在
+     * 内核映像之后——而位图原本就放在 _end 处，两者会重叠：位图初始化时把
+     * 那片内存当"未使用"标记，随后又被分配出去，模块内容就被踩坏。这里先
+     * 把所有模块的高地址端纳入位图放置的起点之后，模块区随即整段保留。 */
+    uint64_t modules_end = 0;
+    for (uintptr_t p = (uintptr_t)mbi + 8, total = *(uint32_t *)mbi;
+         p < (uintptr_t)mbi + total; ) {
+        uint32_t t = *(uint32_t *)p;
+        uint32_t sz = *(uint32_t *)(p + 4);
+        if (t == 0) break;
+        if (t == 3) {
+            struct mb2_tag_module *m = (struct mb2_tag_module *)p;
+            if ((uint64_t)m->mod_end > modules_end)
+                modules_end = (uint64_t)m->mod_end;
+        }
+        p += sz;
+        if (p & 7) p = (p + 7) & ~(uintptr_t)7;
+    }
+
+    uint64_t bitmap_floor = kernel_end;
+    if (modules_end > bitmap_floor)
+        bitmap_floor = (modules_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+
+    uint64_t bitmap_phys = (bitmap_floor + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     if (bitmap_phys + metadata_bytes > max_addr)
         bitmap_phys = (max_addr - metadata_bytes) & ~(PAGE_SIZE - 1);
 
@@ -237,6 +330,11 @@ void pmm_init(void *mbi) {
     // ---- 步骤 6: 保留低 1MB 和内核映像 ----
     pmm_reserve_region(0x0, 0x100000);                    // 低 1MB (BIOS/EBDA/VGA)
     pmm_reserve_region(0x100000, bitmap_phys - 0x100000); // 内核映像
+
+    /* 游标从内核映像/位图之后开始，跳过开头那段必然已被保留的前缀，
+     * 避免每次分配都从 0 重扫低 1MB + 内核 + 位图这段固定已用区。 */
+    g_cursor = (bitmap_phys >> PAGE_SHIFT) + bitmap_pages;
+    if (g_cursor >= g_total_pages) g_cursor = 0;
 }
 
 // ============================================================

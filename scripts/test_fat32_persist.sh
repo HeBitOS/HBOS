@@ -37,7 +37,9 @@ HBOS_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$HBOS_TMP_DIR"' EXIT
 
 DISK="$HBOS_TMP_DIR/data.img"
-qemu-img create -f raw "$DISK" 64M >/dev/null
+# install auto 现在会把内核镜像（约 15 MB）写进盘，外加 selftest 的临时
+# 文件：64M 会挤爆并让写入中途失败（留下孤儿 LFN，fsck 报错），故用 256M。
+qemu-img create -f raw "$DISK" 256M >/dev/null
 
 # 默认安装范围 = LBA 2048（src/fs.c 的 HBFS_DEFAULT_START_LBA，与 Makefile
 # fat32-copy 目标的 @@1048576 一致）
@@ -131,6 +133,28 @@ guest_session "$HBOS_TMP_DIR/p1.log" "$HBOS_TMP_DIR/p1.script" ||
     die_fail "boot 1 session failed" "$HBOS_TMP_DIR/p1.log"
 grep -q "install: FAT32 partition ready" "$HBOS_TMP_DIR/p1.log" ||
     die_fail "install auto did not report FAT32 partition ready" "$HBOS_TMP_DIR/p1.log"
+
+# ── 可引导性校验（此前是盲区）：install auto 必须同时装好引导器 ──────
+# 旧实现只写分区表、不写 MBR 引导代码，盘"有分区但不可引导"——弹出 DVD 就
+# 起不来。这里从两个角度钉死：① MBR 前 446 字节必须非零（有引导代码）；
+# ② 不挂 cdrom、纯硬盘启动必须能进内核（串口出现 HBOS 日志）。
+grep -q "bootable disk ready" "$HBOS_TMP_DIR/p1.log" ||
+    die_fail "install auto did not report a bootable disk" "$HBOS_TMP_DIR/p1.log"
+
+BOOTCODE_HEX="$(dd if="$DISK" bs=1 count=16 status=none | od -An -tx1 | tr -d ' \n')"
+[ "$BOOTCODE_HEX" != "00000000000000000000000000000000" ] ||
+    die_fail "MBR boot code is all zero: disk is not bootable"
+
+echo "[FAT32] boot 1b: disk-only boot (no cdrom) must reach the kernel"
+timeout 180 "$HBOS_QEMU" -m 512M \
+    -device ich9-ahci,id=ahci \
+    -drive file="$DISK",format=raw,if=none,id=hd0 \
+    -device ide-hd,drive=hd0,bus=ahci.0 \
+    -boot c -display none -serial "file:$HBOS_TMP_DIR/boot.log" \
+    -monitor none -no-reboot >/dev/null 2>&1 || true
+grep -qE "HBOS|Shell ready" "$HBOS_TMP_DIR/boot.log" ||
+    die_fail "disk did not boot standalone (no cdrom)" "$HBOS_TMP_DIR/boot.log"
+echo "[FAT32] standalone boot OK"
 
 # ── 宿主机校验：规范合规 + HBOS 写入的内容用标准工具可读 ───────────
 dd if="$DISK" of="$HBOS_TMP_DIR/part.img" bs=512 \

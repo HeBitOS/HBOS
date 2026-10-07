@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>方案 05 · Brutalist</title>
+<style>
+  /* ══════════════════════════════════════════════════════════
+     设计令牌：深色（默认）— 纯黑 / 纯白 / 0 圆角 / 无阴影 / 无透明
+     ══════════════════════════════════════════════════════════ */
+  :root{
+    --bg:#000000;          /* 桌面底：纯黑 */
+    --surface:#0b0b0b;     /* 面板/窗口 */
+    --surface2:#151515;    /* 次级面：工具栏/输入框 */
+    --surface3:#222222;    /* 悬浮/激活 */
+    --line:#ffffff;        /* 主结构线：纯白 2px */
+    --line2:#8c8c8c;       /* 次结构线：中灰 2px */
+    --line-faint:#3a3a3a;  /* 行分隔（窗内细线） */
+    --fg:#ffffff;          /* 主文字：纯白 */
+    --fg2:#cfcfcf;         /* 次文字 */
+    --dim:#8a8a8a;         /* 弱文字 */
+    --accent:#0057ff;      /* 强调：电能蓝 */
+    --accent-fg:#ffffff;
+    --accent-h:#2f77ff;
+    --ok:#00c853;          /* 生绿 */
+    --warn:#ffe600;        /* 警戒黄 */
+    --err:#ff2d20;         /* 信号红 */
+    --sel:#0057ff;         /* 选中 = 实心强调色，无透明度 */
+    --radius:0px;
+    --radius-small:0px;
+    --shadow-alpha:0;
+  }
+  /* ── 浅色：纯白底 / 纯黑字 / 纯黑 2px 边框 ─────────────── */
+  body.light{
+    --bg:#ffffff;
+    --surface:#ffffff;
+    --surface2:#f0f0f0;
+    --surface3:#e2e2e2;
+    --line:#000000;
+    --line2:#5a5a5a;
+    --line-faint:#c9c9c9;
+    --fg:#000000;
+    --fg2:#1c1c1c;
+    --dim:#5f5f5f;
+    --accent:#0057ff;
+    --accent-fg:#ffffff;
+    --accent-h:#0043c8;
+    --sel:#0057ff;
+  }
+
+  *{box-sizing:border-box;border-radius:0 !important}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 -apple-system,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+    padding:30px 18px 72px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1240px;margin:0 auto}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+
+  /* ── 页头 ─────────────────────────────────────────────── */
+  .top{
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    border:2px solid var(--line);background:var(--surface);padding:16px 18px;
+  }
+  h1{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:24px;line-height:1.1;margin:0;letter-spacing:.02em;font-weight:800;
+    text-transform:uppercase;
+  }
+  .badge{
+    font-family:ui-monospace,monospace;font-size:11px;font-weight:800;
+    letter-spacing:.16em;text-transform:uppercase;
+    background:var(--warn);color:#000;border:2px solid var(--warn);
+    padding:5px 9px;white-space:nowrap;
+  }
+  .mode{
+    font-family:ui-monospace,monospace;font-size:11px;font-weight:800;
+    letter-spacing:.16em;text-transform:uppercase;
+    border:2px solid var(--line2);color:var(--dim);padding:5px 9px;margin-left:auto;
+  }
+  .mode b{color:var(--fg)}
+  button.tg{
+    font-family:ui-monospace,monospace;font-size:12px;font-weight:800;
+    letter-spacing:.12em;text-transform:uppercase;cursor:pointer;
+    background:var(--accent);color:var(--accent-fg);border:2px solid var(--accent);
+    padding:9px 16px;
+  }
+  button.tg:hover{background:var(--accent-h);border-color:var(--accent-h)}
+  button.tg:active{transform:translate(2px,2px)}
+  .sub{
+    color:var(--fg2);margin:14px 0 0;font-size:13.5px;max-width:900px;
+    border-left:6px solid var(--accent);padding:2px 0 2px 14px;
+  }
+  .sub code{
+    font-family:ui-monospace,monospace;font-size:12.5px;
+    background:var(--surface3);color:var(--fg);padding:1px 5px;border:1px solid var(--line-faint);
+  }
+
+  /* ── 章节标题 ─────────────────────────────────────────── */
+  h2{
+    display:flex;align-items:center;gap:11px;
+    font-family:ui-monospace,monospace;font-size:13px;font-weight:800;
+    letter-spacing:.2em;text-transform:uppercase;color:var(--fg);
+    margin:44px 0 18px;padding:0 0 11px;border-bottom:2px solid var(--line);
+  }
+  h2::before{content:"";width:14px;height:14px;background:var(--accent);flex:none}
+  h2 .idx{margin-left:auto;color:var(--dim);letter-spacing:.1em;font-weight:700}
+
+  /* ── 面板 ─────────────────────────────────────────────── */
+  .row{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+  .row.two{grid-template-columns:repeat(auto-fit,minmax(440px,1fr))}
+  .box{background:var(--surface);border:2px solid var(--line2);padding:18px}
+  .box.hi{border-color:var(--line)}
+  .box>h3{
+    margin:0 0 15px;padding:0 0 9px;border-bottom:1px solid var(--line-faint);
+    font-family:ui-monospace,monospace;font-size:11px;font-weight:800;
+    letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+  }
+
+  /* ── 色板 ─────────────────────────────────────────────── */
+  .strip{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(86px,1fr))}
+  .swp{border:2px solid var(--line2)}
+  .swp i{display:block;height:62px}
+  .swp b{
+    display:block;font-family:ui-monospace,monospace;font-size:10.5px;font-weight:800;
+    letter-spacing:.08em;text-transform:uppercase;padding:6px 7px;border-top:2px solid var(--line2);
+    background:var(--surface2);
+  }
+  .swp s{display:block;text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;
+         color:var(--dim);padding:0 7px 6px;background:var(--surface2)}
+
+  .hier>div{padding:5px 0;border-bottom:1px solid var(--line-faint)}
+  .hier>div:last-child{border-bottom:none}
+  .hier .k{font-family:ui-monospace,monospace;font-size:10.5px;font-weight:800;letter-spacing:.1em;
+           color:var(--dim);text-transform:uppercase;margin-left:10px}
+
+  /* ── 按钮 ─────────────────────────────────────────────── */
+  .btns{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .btn{
+    font-family:ui-monospace,monospace;font-size:12.5px;font-weight:800;
+    letter-spacing:.1em;text-transform:uppercase;cursor:pointer;
+    padding:11px 18px;border:2px solid var(--line2);
+    background:var(--surface2);color:var(--fg);
+  }
+  .btn:hover{background:var(--surface3);border-color:var(--line)}
+  .btn:active{transform:translate(2px,2px)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+  .btn.primary:hover{background:var(--accent-h);border-color:var(--accent-h)}
+  .btn.danger{background:var(--err);border-color:var(--err);color:#000}
+  .btn.danger:hover{background:#ff5546;border-color:#ff5546}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--accent);padding-left:6px;padding-right:6px;
+             text-decoration:underline;text-underline-offset:4px;text-decoration-thickness:2px}
+  .btn.ghost:hover{background:var(--surface3);border-color:var(--line2);text-decoration:none}
+  .btn[disabled]{background:var(--surface2);border-color:var(--line-faint);color:var(--dim);
+                 cursor:not-allowed;transform:none}
+
+  /* ── 表单 ─────────────────────────────────────────────── */
+  .field{margin-bottom:14px}
+  .field>label{
+    display:block;font-family:ui-monospace,monospace;font-size:10.5px;font-weight:800;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin-bottom:6px;
+  }
+  .inp{
+    width:100%;background:var(--surface2);border:2px solid var(--line2);color:var(--fg);
+    padding:10px 12px;font:inherit;font-size:13.5px;
+  }
+  .inp::placeholder{color:var(--dim)}
+  .inp:focus{outline:none;border-color:var(--accent);background:var(--surface)}
+  .inp.on{border-color:var(--line);background:var(--surface3)}
+
+  .chk{display:flex;align-items:center;gap:10px;font-size:13.5px;margin:0 0 11px;cursor:pointer;user-select:none}
+  .chk i{
+    width:20px;height:20px;flex:none;border:2px solid var(--line2);background:var(--surface2);
+    display:grid;place-items:center;font-style:normal;font-size:13px;font-weight:800;color:transparent;
+    font-family:ui-monospace,monospace;
+  }
+  .chk:hover i{border-color:var(--line)}
+  .chk.on i{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+
+  .sw{
+    width:58px;height:26px;flex:none;border:2px solid var(--line2);background:var(--surface2);
+    position:relative;cursor:pointer;
+  }
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:18px;background:var(--dim)}
+  .sw.on{background:var(--accent);border-color:var(--accent)}
+  .sw.on::after{left:32px;background:#fff}
+  .swline{display:flex;align-items:center;gap:14px;padding:11px 0;border-bottom:1px solid var(--line-faint)}
+  .swline:last-child{border-bottom:none;padding-bottom:0}
+  .swline .t{flex:1}
+  .swline .t b{display:block;font-size:13.5px;font-weight:700}
+  .swline .t span{font-size:12px;color:var(--dim)}
+
+  .seg{display:flex;border:2px solid var(--line2);flex:none}
+  .seg b{
+    font-family:ui-monospace,monospace;font-size:12px;font-weight:800;letter-spacing:.06em;
+    padding:7px 13px;cursor:pointer;background:var(--surface2);color:var(--fg2);
+    border-right:2px solid var(--line2);
+  }
+  .seg b:last-child{border-right:none}
+  .seg b:hover{background:var(--surface3);color:var(--fg)}
+  .seg b.on{background:var(--accent);color:var(--accent-fg)}
+
+  /* ── 列表 ─────────────────────────────────────────────── */
+  .list{border:2px solid var(--line2);background:var(--surface2)}
+  .li{
+    display:flex;align-items:center;gap:12px;padding:11px 13px;font-size:13.5px;
+    border-bottom:1px solid var(--line-faint);cursor:pointer;
+  }
+  .li:last-child{border-bottom:none}
+  .li:hover{background:var(--surface3)}
+  .li.sel{background:var(--sel);color:var(--accent-fg);border-bottom-color:var(--sel)}
+  .li.sel .meta,.li.sel .ic{color:var(--accent-fg)}
+  .li.sel:hover{background:var(--accent-h)}
+  .li .ic{width:18px;flex:none;text-align:center;color:var(--accent);font-weight:800;
+          font-family:ui-monospace,monospace}
+  .li .meta{margin-left:auto;color:var(--dim);font-size:11.5px;font-family:ui-monospace,monospace;
+            font-weight:700;letter-spacing:.05em}
+
+  .bar{height:16px;border:2px solid var(--line2);background:var(--surface2);padding:2px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+  .bar.ok i{background:var(--ok)}
+  .cap{font-family:ui-monospace,monospace;font-size:11px;color:var(--dim);letter-spacing:.08em;
+       text-transform:uppercase;font-weight:700;margin-top:8px;display:flex}
+  .cap span:last-child{margin-left:auto;color:var(--fg)}
+
+  /* ── 标签页 / 状态 ────────────────────────────────────── */
+  .tabs{display:flex;border-bottom:2px solid var(--line);margin-bottom:18px}
+  .tab{
+    font-family:ui-monospace,monospace;font-size:12px;font-weight:800;letter-spacing:.1em;
+    text-transform:uppercase;padding:10px 16px;color:var(--fg2);cursor:pointer;
+    border-right:2px solid var(--line-faint);margin-bottom:-2px;border-bottom:2px solid transparent;
+  }
+  .tab:first-child{border-left:2px solid var(--line-faint)}
+  .tab:hover{background:var(--surface2);color:var(--fg)}
+  .tab.on{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+
+  .pill{
+    font-family:ui-monospace,monospace;font-size:11px;font-weight:800;letter-spacing:.1em;
+    text-transform:uppercase;padding:4px 9px;border:2px solid;display:inline-block;
+  }
+  .pill.ok{background:var(--ok);border-color:var(--ok);color:#000}
+  .pill.warn{background:var(--warn);border-color:var(--warn);color:#000}
+  .pill.err{background:var(--err);border-color:var(--err);color:#000}
+  .pill.info{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+
+  /* ── 对话框 ───────────────────────────────────────────── */
+  .dlg{background:var(--surface);border:2px solid var(--line)}
+  .dlg .hd{
+    display:flex;align-items:center;gap:10px;padding:11px 14px;
+    background:var(--surface3);border-bottom:2px solid var(--line);
+    font-family:ui-monospace,monospace;font-size:12.5px;font-weight:800;
+    letter-spacing:.12em;text-transform:uppercase;
+  }
+  .dlg.danger .hd{background:var(--err);border-bottom-color:var(--err);color:#000}
+  .dlg .hd .x{
+    margin-left:auto;font-size:14px;font-weight:800;border:2px solid currentColor;
+    width:22px;height:22px;display:grid;place-items:center;cursor:pointer;line-height:1;
+  }
+  .dlg .bd{padding:16px 14px;font-size:13.5px;color:var(--fg2)}
+  .dlg .bd .hl{color:var(--fg);font-weight:700;border-bottom:2px solid var(--warn)}
+  .dlg .ft{
+    display:flex;justify-content:flex-end;gap:10px;padding:12px 14px;
+    background:var(--surface2);border-top:2px solid var(--line-faint);
+  }
+  .warnbox{
+    display:flex;gap:10px;align-items:flex-start;border:2px solid var(--err);
+    padding:10px 12px;margin-top:4px;font-size:12.5px;
+  }
+  .warnbox b{font-family:ui-monospace,monospace;color:var(--err);font-size:12px;letter-spacing:.08em}
+
+  /* ── 应用窗口模拟 ─────────────────────────────────────── */
+  .win{background:var(--surface);border:2px solid var(--line);display:flex;flex-direction:column;height:396px}
+  .win .title{
+    display:flex;align-items:center;gap:10px;padding:9px 12px;
+    background:var(--surface3);border-bottom:2px solid var(--line);
+    font-family:ui-monospace,monospace;font-size:12px;font-weight:800;
+    letter-spacing:.12em;text-transform:uppercase;
+  }
+  .win .title .tag{background:var(--accent);color:var(--accent-fg);padding:2px 7px;font-size:10.5px;letter-spacing:.14em}
+  .win .title .wd{margin-left:auto;display:flex;gap:6px}
+  .win .title .wd span{
+    width:20px;height:18px;border:2px solid var(--line);display:grid;place-items:center;
+    font-size:11px;line-height:1;cursor:pointer;background:var(--surface2);
+  }
+  .win .title .wd span.cl{background:var(--err);border-color:var(--err);color:#000}
+  .win .tbar{
+    display:flex;gap:8px;align-items:center;padding:8px 10px;background:var(--surface2);
+    border-bottom:2px solid var(--line2);
+  }
+  .tb{
+    font-family:ui-monospace,monospace;font-size:11.5px;font-weight:800;letter-spacing:.08em;
+    text-transform:uppercase;padding:6px 10px;cursor:pointer;
+    background:var(--surface3);color:var(--fg2);border:2px solid var(--line-faint);
+  }
+  .tb:hover{color:var(--fg);border-color:var(--line2)}
+  .tb.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+  .win .body{flex:1;display:flex;min-height:0}
+  .win .side{width:142px;flex:none;background:var(--surface2);border-right:2px solid var(--line2);padding:10px 9px}
+  .win .side .grp{
+    font-family:ui-monospace,monospace;font-size:10px;font-weight:800;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--dim);padding:2px 4px 7px;
+  }
+  .win .side .it{
+    display:flex;gap:8px;align-items:center;padding:7px 8px;font-size:12.5px;color:var(--fg2);
+    cursor:pointer;margin-bottom:3px;border:2px solid transparent;
+  }
+  .win .side .it:hover{background:var(--surface3);color:var(--fg);border-color:var(--line-faint)}
+  .win .side .it.on{background:var(--accent);color:var(--accent-fg);font-weight:700;border-color:var(--accent)}
+  .win .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .win .scroll{flex:1;overflow:auto;min-height:0}
+  .win .status{
+    display:flex;gap:16px;align-items:center;padding:6px 11px;background:var(--surface2);
+    border-top:2px solid var(--line2);
+    font-family:ui-monospace,monospace;font-size:10.5px;font-weight:700;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--dim);
+  }
+  .win .status .r{margin-left:auto;color:var(--fg)}
+
+  .hdr{
+    display:grid;grid-template-columns:22px minmax(0,1fr) 82px 76px;gap:10px;padding:7px 11px;
+    background:var(--surface3);border-bottom:2px solid var(--line);
+    font-family:ui-monospace,monospace;font-size:10.5px;font-weight:800;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--dim);position:sticky;top:0;
+  }
+  .cr{
+    display:grid;grid-template-columns:22px minmax(0,1fr) 82px 76px;gap:10px;align-items:center;
+    padding:8px 11px;font-size:13px;border-bottom:1px solid var(--line-faint);cursor:pointer;
+  }
+  .cr:hover{background:var(--surface2)}
+  .cr.sel{background:var(--sel);color:var(--accent-fg);border-bottom-color:var(--sel)}
+  .cr.sel .r,.cr.sel .g{color:var(--accent-fg)}
+  .cr.sel:hover{background:var(--accent-h)}
+  .cr .g{font-family:ui-monospace,monospace;font-size:12px;font-weight:800;text-align:center;color:var(--accent)}
+  .cr .r{text-align:right;color:var(--dim);font-family:ui-monospace,monospace;font-size:11.5px;font-weight:700}
+  .hdr .r{text-align:right}
+
+  .setrow{
+    display:flex;align-items:center;gap:14px;padding:12px 13px;border-bottom:1px solid var(--line-faint);
+  }
+  .setrow:last-child{border-bottom:none}
+  .setrow .t{flex:1;min-width:0}
+  .setrow .t b{display:block;font-size:13.5px;font-weight:700}
+  .setrow .t span{font-size:11.5px;color:var(--dim);font-family:ui-monospace,monospace;letter-spacing:.03em}
+  .dots{display:flex;gap:6px;flex:none}
+  .dots i{
+    width:24px;height:24px;border:2px solid var(--line2);display:grid;place-items:center;
+    font-style:normal;font-size:13px;font-weight:800;color:#000;font-family:ui-monospace,monospace;cursor:pointer;
+  }
+  .dots i.on{border-color:var(--fg);border-width:3px;padding:0}
+  .dots i:hover{border-color:var(--fg)}
+
+  /* ── 代码块 ───────────────────────────────────────────── */
+  pre.code{
+    margin:0;background:var(--surface2);border:2px solid var(--line2);padding:16px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;
+    color:var(--fg2);overflow:auto;
+  }
+  pre.code .k{color:var(--warn);font-weight:800}
+  pre.code .t{color:var(--accent);font-weight:700}
+  pre.code .c{color:var(--dim)}
+  pre.code .s{color:var(--ok)}
+  .note{
+    display:flex;gap:12px;align-items:flex-start;border:2px solid var(--warn);
+    padding:12px 14px;margin-top:16px;font-size:13px;color:var(--fg2);
+  }
+  .note b{
+    font-family:ui-monospace,monospace;font-size:11px;font-weight:800;letter-spacing:.14em;
+    text-transform:uppercase;background:var(--warn);color:#000;padding:3px 7px;flex:none;
+  }
+  .tok{
+    font-family:ui-monospace,monospace;font-size:12px;color:var(--dim);letter-spacing:.02em;
+  }
+  .tok em{font-style:normal;background:color-mix(in srgb,var(--accent) 22%,var(--surface));
+          color:var(--fg);padding:1px 5px;border:1px solid var(--line-faint)}
+  footer{
+    margin-top:44px;border-top:2px solid var(--line);padding-top:14px;
+    font-family:ui-monospace,monospace;font-size:11px;font-weight:700;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--dim);display:flex;gap:16px;flex-wrap:wrap;
+  }
+  footer span:last-child{margin-left:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ══ 1. 页头 ══════════════════════════════════════════ -->
+  <header class="top">
+    <h1>方案 05 · Brutalist</h1>
+    <span class="badge">Raw / Render-Cheap</span>
+    <span class="mode">模式 MODE <b id="modeTxt">DARK</b></span>
+    <button class="tg" onclick="toggleTheme()">◐ 切换深色 / 浅色</button>
+  </header>
+  <p class="sub">
+    原始、硬边、零装饰：<b>0 圆角</b>、<b>2px 实心描边</b>、无渐变、无阴影、无透明、最大对比度，配少量高饱和原色。
+    结构靠边框直接说出来，而不是靠投影暗示。所有绘制都是「实心矩形 + 描边」，对软件合成器与低端 / 嵌入式目标最友好。
+  </p>
+
+  <!-- ══ 2. 色彩令牌 ══════════════════════════════════════ -->
+  <h2>色彩令牌<span class="idx">/ 01</span></h2>
+  <div class="row">
+    <div class="box hi">
+      <h3>语义色板 · Semantic Tokens</h3>
+      <div class="strip">
+        <div class="swp"><i style="background:var(--bg)"></i><b>bg</b><s>#000</s></div>
+        <div class="swp"><i style="background:var(--surface)"></i><b>surface</b><s>#0b0b0b</s></div>
+        <div class="swp"><i style="background:var(--surface2)"></i><b>surface2</b><s>#151515</s></div>
+        <div class="swp"><i style="background:var(--surface3)"></i><b>surface3</b><s>#222222</s></div>
+        <div class="swp"><i style="background:var(--accent)"></i><b>accent</b><s>#0057ff</s></div>
+        <div class="swp"><i style="background:var(--ok)"></i><b>ok</b><s>#00c853</s></div>
+        <div class="swp"><i style="background:var(--warn)"></i><b>warn</b><s>#ffe600</s></div>
+        <div class="swp"><i style="background:var(--err)"></i><b>err</b><s>#ff2d20</s></div>
+      </div>
+      <div class="tok" style="margin-top:12px">
+        bg · surface · surface2 · surface3 · accent · ok · warn · err &nbsp;—&nbsp; 浅色模式自动翻转为纯白底 / 纯黑字
+      </div>
+    </div>
+
+    <div class="box">
+      <h3>文字层级 · Text Hierarchy</h3>
+      <div class="hier">
+        <div><span style="color:var(--fg);font-size:17px;font-weight:800">主文字 fg — 标题与正文</span><span class="k">fg</span></div>
+        <div><span style="color:var(--fg2);font-size:14px">次文字 fg2 — 说明与副标题</span><span class="k">fg2</span></div>
+        <div><span style="color:var(--dim);font-size:13px">弱文字 dim — 元信息与占位符</span><span class="k">dim</span></div>
+        <div><span style="color:var(--accent);font-size:14px;font-weight:800">强调 accent — 链接、选中与焦点</span><span class="k">accent</span></div>
+        <div><span style="color:var(--warn);font-size:13px;font-weight:800">警戒 warn — 危险提示与高亮标记</span><span class="k">warn</span></div>
+      </div>
+      <div class="tok" style="margin-top:12px">
+        标签一律 <em>UPPERCASE + 等宽字体</em>，正文用系统无衬线字体。
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ 3. 按钮 ══════════════════════════════════════════ -->
+  <h2>按钮<span class="idx">/ 02</span></h2>
+  <div class="box hi">
+    <div class="btns">
+      <button class="btn primary">主要操作 Confirm</button>
+      <button class="btn">次要操作 Cancel</button>
+      <button class="btn ghost">文字按钮 Learn more</button>
+      <button class="btn danger">危险操作 Delete</button>
+      <button class="btn" disabled>禁用 Disabled</button>
+    </div>
+    <div class="tok" style="margin-top:16px">
+      全部 0 圆角、2px 描边、实心填充；按下位移 2px 代替阴影反馈（不需要 alpha 合成）。
+    </div>
+  </div>
+
+  <!-- ══ 4. 表单控件 ══════════════════════════════════════ -->
+  <h2>表单控件<span class="idx">/ 03</span></h2>
+  <div class="row">
+    <div class="box">
+      <h3>输入框 · 复选框</h3>
+      <div class="field">
+        <label>名称 Name</label>
+        <input class="inp on" value="hbos-disk">
+      </div>
+      <div class="field">
+        <label>挂载路径 Mount path</label>
+        <input class="inp" placeholder="/home/user/docs">
+      </div>
+      <label class="chk on"><i>✓</i> 记住此设置 Remember this setting</label>
+      <label class="chk"><i>✓</i> 开机自动挂载 Auto-mount at boot</label>
+    </div>
+
+    <div class="box">
+      <h3>开关 · 分段控件</h3>
+      <div class="swline">
+        <div class="t"><b>深色主题 Dark theme</b><span>跟随系统外观</span></div>
+        <div class="sw on"></div>
+      </div>
+      <div class="swline">
+        <div class="t"><b>动画效果 Animations</b><span>窗口过渡与淡入</span></div>
+        <div class="sw"></div>
+      </div>
+      <div class="swline" style="border-bottom:none;padding-bottom:0">
+        <div class="t"><b>界面缩放 Scale</b><span>影响全部 13 个应用</span></div>
+        <div class="seg"><b>100%</b><b class="on">125%</b><b>150%</b></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ 5. 列表 · 标签页 · 状态 ══════════════════════════ -->
+  <h2>列表 · 标签页 · 状态<span class="idx">/ 04</span></h2>
+  <div class="row">
+    <div class="box">
+      <h3>列表（选中 / 悬浮 / 右对齐元信息）</h3>
+      <div class="list">
+        <div class="li sel"><span class="ic">▶</span> 文档 Documents<span class="meta">12 项</span></div>
+        <div class="li"><span class="ic">▶</span> 下载 Downloads<span class="meta">3 项</span></div>
+        <div class="li"><span class="ic">■</span> 报告.pdf<span class="meta">2.4 MB</span></div>
+        <div class="li"><span class="ic">■</span> 笔记.txt<span class="meta">8 KB</span></div>
+        <div class="li"><span class="ic">■</span> 截图.png<span class="meta">412 KB</span></div>
+      </div>
+      <div style="margin-top:18px">
+        <div class="bar"><i style="width:68%"></i></div>
+        <div class="cap"><span>进度 progress</span><span>68%</span></div>
+      </div>
+      <div style="margin-top:12px">
+        <div class="bar ok"><i style="width:100%"></i></div>
+        <div class="cap"><span>校验完成 checksum</span><span>OK</span></div>
+      </div>
+    </div>
+
+    <div class="box">
+      <h3>标签页与状态胶囊</h3>
+      <div class="tabs">
+        <div class="tab on">常规</div>
+        <div class="tab">外观</div>
+        <div class="tab">网络</div>
+        <div class="tab">关于</div>
+      </div>
+      <div class="btns" style="margin-bottom:20px">
+        <span class="pill ok">已连接</span>
+        <span class="pill warn">同步中</span>
+        <span class="pill err">错误</span>
+        <span class="pill info">信息</span>
+      </div>
+      <div class="tok">
+        折叠 / 展开、行内标记、状态条一律使用实心色块 + 黑色或白色文字，绝不使用半透明叠色。
+      </div>
+      <div class="seg" style="margin-top:16px;width:max-content">
+        <b class="on">列表</b><b>图标</b><b>详情</b>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ 6. 对话框 ════════════════════════════════════════ -->
+  <h2>对话框<span class="idx">/ 05</span></h2>
+  <div class="row">
+    <div class="box">
+      <h3>破坏性确认 · Destructive</h3>
+      <div class="dlg danger">
+        <div class="hd">⚠ 确认删除 <span class="x">×</span></div>
+        <div class="bd">
+          将永久删除 <span class="hl">报告.pdf</span> 及其全部副本。
+          <div class="warnbox">
+            <b>不可撤销</b>
+            <span>此操作不会进入回收站，删除后无法恢复。</span>
+          </div>
+        </div>
+        <div class="ft">
+          <button class="btn">取消 Cancel</button>
+          <button class="btn danger">删除 Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="box">
+      <h3>重命名 · Input Dialog</h3>
+      <div class="dlg">
+        <div class="hd">✎ 重命名 <span class="x">×</span></div>
+        <div class="bd">
+          <div class="field" style="margin-bottom:0">
+            <label>新名称 New name</label>
+            <input class="inp on" value="报告-2026.pdf">
+          </div>
+        </div>
+        <div class="ft">
+          <button class="btn">取消 Cancel</button>
+          <button class="btn primary">确定 OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ 7. 应用界面模拟 ══════════════════════════════════ -->
+  <h2>应用界面：文件管理器 · 系统设置<span class="idx">/ 06</span></h2>
+  <div class="row two">
+
+    <!-- (a) 文件管理器 -->
+    <div class="win">
+      <div class="title">
+        <span class="tag">FM</span> 文件管理器
+        <span class="wd"><span>–</span><span>□</span><span class="cl">×</span></span>
+      </div>
+      <div class="tbar">
+        <button class="tb">◀</button>
+        <button class="tb">▶</button>
+        <button class="tb">▲</button>
+        <button class="tb on">列表</button>
+        <button class="tb">图标</button>
+        <input class="inp" style="flex:1;min-width:60px;padding:6px 10px;font-size:12px" placeholder="搜索 /home/user …">
+      </div>
+      <div class="body">
+        <div class="side">
+          <div class="grp">位置</div>
+          <div class="it on">▶ 主目录</div>
+          <div class="it">▶ 文档</div>
+          <div class="it">▶ 下载</div>
+          <div class="it">▶ 图片</div>
+          <div class="grp" style="padding-top:12px">设备</div>
+          <div class="it">■ 系统盘</div>
+          <div class="it">■ U 盘 HBOS</div>
+        </div>
+        <div class="main">
+          <div class="hdr">
+            <span></span><span>名称</span><span class="r">大小</span><span class="r">修改</span>
+          </div>
+          <div class="scroll">
+            <div class="cr sel"><span class="g">▶</span><span>文档</span><span class="r">—</span><span class="r">今天</span></div>
+            <div class="cr"><span class="g">▶</span><span>下载</span><span class="r">—</span><span class="r">昨天</span></div>
+            <div class="cr"><span class="g">■</span><span>报告.pdf</span><span class="r">2.4 MB</span><span class="r">10-07</span></div>
+            <div class="cr"><span class="g">■</span><span>笔记.txt</span><span class="r">8 KB</span><span class="r">10-06</span></div>
+            <div class="cr"><span class="g">■</span><span>截图.png</span><span class="r">412 KB</span><span class="r">10-05</span></div>
+            <div class="cr"><span class="g">■</span><span>kernel.elf</span><span class="r">1.1 MB</span><span class="r">10-04</span></div>
+            <div class="cr"><span class="g">■</span><span>readme.md</span><span class="r">3 KB</span><span class="r">10-03</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span>7 项 · 已选 1</span>
+        <span>可用 32.5 GB</span>
+        <span class="r">FAT32</span>
+      </div>
+    </div>
+
+    <!-- (b) 系统设置 -->
+    <div class="win">
+      <div class="title">
+        <span class="tag">SET</span> 系统设置
+        <span class="wd"><span>–</span><span>□</span><span class="cl">×</span></span>
+      </div>
+      <div class="body">
+        <div class="side" style="width:132px">
+          <div class="grp">个人</div>
+          <div class="it on">◧ 外观</div>
+          <div class="it">▣ 显示</div>
+          <div class="it">♪ 声音</div>
+          <div class="grp" style="padding-top:12px">系统</div>
+          <div class="it">◈ 网络</div>
+          <div class="it">⌨ 输入</div>
+          <div class="it">ℹ 关于</div>
+        </div>
+        <div class="main">
+          <div class="scroll">
+            <div class="setrow">
+              <div class="t"><b>主题模式</b><span>THEME MODE</span></div>
+              <div class="seg"><b class="on">深色</b><b>浅色</b></div>
+            </div>
+            <div class="setrow">
+              <div class="t"><b>强调色</b><span>ACCENT COLOR</span></div>
+              <div class="dots">
+                <i class="on" style="background:#0057ff;color:#fff">✓</i>
+                <i style="background:#ff2d20">✓</i>
+                <i style="background:#ffe600">✓</i>
+                <i style="background:#00c853">✓</i>
+              </div>
+            </div>
+            <div class="setrow">
+              <div class="t"><b>圆角</b><span>RADIUS — 本方案固定为 0</span></div>
+              <div class="seg"><b class="on">0</b><b style="color:var(--dim)">4</b><b style="color:var(--dim)">8</b></div>
+            </div>
+            <div class="setrow">
+              <div class="t"><b>窗口阴影</b><span>SHADOW — 用描边替代</span></div>
+              <div class="sw"></div>
+            </div>
+            <div class="setrow">
+              <div class="t"><b>界面缩放</b><span>SCALE — 影响全部应用</span></div>
+              <div class="seg"><b>100%</b><b class="on">125%</b><b>150%</b></div>
+            </div>
+            <div class="setrow">
+              <div class="t"><b>高对比模式</b><span>HIGH CONTRAST</span></div>
+              <div class="sw on"></div>
+            </div>
+          </div>
+          <div class="status">
+            <span>设置 · 外观</span>
+            <span class="r">已保存</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ 8. 令牌映射 ══════════════════════════════════════ -->
+  <h2>落到代码：令牌映射<span class="idx">/ 07</span></h2>
+  <div class="row two">
+    <div class="box hi">
+      <h3>gui_theme_t · C 结构体</h3>
+      <pre class="code"><span class="c">/* hbos/gui/theme.h — 全部应用共用这一份令牌 */</span>
+<span class="k">typedef struct</span> {
+    <span class="t">gui_color_t</span> bg, surface, surface2, surface3;
+    <span class="t">gui_color_t</span> line, line2;
+    <span class="t">gui_color_t</span> fg, fg2, dim;
+    <span class="t">gui_color_t</span> accent, accent_fg, accent_hover;
+    <span class="t">gui_color_t</span> ok, warn, err, sel;
+    <span class="k">int</span>         radius, radius_small;  <span class="c">/* brutalist: 0 / 0 */</span>
+    <span class="k">uint8_t</span>     shadow_alpha;         <span class="c">/* brutalist: 0   */</span>
+} <span class="t">gui_theme_t</span>;
+
+<span class="k">static const</span> <span class="t">gui_theme_t</span> theme_dark_brutal = {
+    .bg = <span class="s">0x000000</span>, .surface = <span class="s">0x0B0B0B</span>,
+    .surface2 = <span class="s">0x151515</span>, .surface3 = <span class="s">0x222222</span>,
+    .line = <span class="s">0xFFFFFF</span>, .line2 = <span class="s">0x8C8C8C</span>,
+    .fg = <span class="s">0xFFFFFF</span>, .fg2 = <span class="s">0xCFCFCF</span>, .dim = <span class="s">0x8A8A8A</span>,
+    .accent = <span class="s">0x0057FF</span>, .accent_fg = <span class="s">0xFFFFFF</span>,
+    .accent_hover = <span class="s">0x2F77FF</span>,
+    .ok = <span class="s">0x00C853</span>, .warn = <span class="s">0xFFE600</span>, .err = <span class="s">0xFF2D20</span>,
+    .sel = <span class="s">0x0057FF</span>,
+    .radius = <span class="s">0</span>, .radius_small = <span class="s">0</span>, .shadow_alpha = <span class="s">0</span>
+};</pre>
+    </div>
+
+    <div class="box">
+      <h3>应用只引用令牌 · Usage</h3>
+      <pre class="code"><span class="c">/* 一个应用一行即可换肤：不出现任何硬编码颜色 */</span>
+<span class="k">const</span> <span class="t">gui_theme_t</span> *T = gui_theme();
+
+<span class="t">gui_fill</span> (g, x, y, w, h,      T-&gt;surface);
+<span class="t">gui_frame</span>(g, x, y, w, h, <span class="s">2</span>, T-&gt;line);      <span class="c">/* 2px 实心描边 = 结构 */</span>
+<span class="t">gui_text</span> (g, x+10, y+8, lbl, T-&gt;fg);
+<span class="t">gui_fill</span> (g, x, y, w, h,      T-&gt;sel);        <span class="c">/* 选中：实心色块 */</span>
+
+<span class="c">/* ✗ 反面教材：绕过令牌，主题切换立刻失效 */</span>
+<span class="c">// gui_fill(g, x, y, w, h, 0xFF1B1E20);</span></pre>
+      <div class="note">
+        <b>渲染成本</b>
+        <span>
+          <b style="background:none;color:var(--warn);padding:0">radius = 0</b> 且
+          <b style="background:none;color:var(--warn);padding:0">shadow_alpha = 0</b>：
+          没有圆角反锯齿、没有阴影模糊、没有半透明图层，每个控件都是整数矩形填充 + 2px 描边。
+          这是 5 个方案中最便宜的一种——软件合成器只需 <em>memcpy 式行填充</em>，
+          低端机与嵌入式目标也能跑满帧率，代价是必须靠边框把层级说清楚。
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span>HBOS UI Concept 05 / 05</span>
+    <span>radius 0 · shadow 0 · alpha none</span>
+    <span>13 apps · 1 theme token set</span>
+  </footer>
+</div>
+
+<script>
+  function toggleTheme(){
+    document.body.classList.toggle('light');
+    document.getElementById('modeTxt').textContent =
+      document.body.classList.contains('light') ? 'LIGHT' : 'DARK';
+  }
+</script>
+</body>
+</html>

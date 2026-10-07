@@ -11,9 +11,28 @@
 #include "../string.h"
 #include "../core/task.h"
 #include "../vfs.h"
+#include "../graphics/blob_unpack.h"
 
-/** 由 hax_blob.asm 经 incbin 嵌入的应用二进制总 blob 起始地址 */
+/** 由 hax_blob.asm 经 incbin 嵌入的应用二进制总 blob（压缩容器） */
 extern const uint8_t _binary_build_hax_blob_bin_start[];
+extern const uint8_t _binary_build_hax_blob_bin_end[];
+
+/**
+ * @brief 取解压后的 hax 应用 blob 基址。
+ *
+ * 嵌入的是 tools/pack_blob.py 打的 'ZBL1' 压缩容器（2.8 MB → 约 1.2 MB），
+ * 首次访问时解压到 pmm_alloc_blocks 拿到的连续物理页并缓存（种子阶段在
+ * pmm_init 之后执行，内存可用）。未压缩的旧 blob 会被原样返回。
+ */
+static const uint8_t *hax_blob_data(void) {
+    static const uint8_t *cached;
+    uint32_t len = 0;
+    const uint8_t *p = blob_unpack(_binary_build_hax_blob_bin_start,
+                                   (uint32_t)(_binary_build_hax_blob_bin_end -
+                                              _binary_build_hax_blob_bin_start),
+                                   &cached, &len);
+    return p;
+}
 
 #define HAX_MAX_ARGS 32
 
@@ -38,15 +57,14 @@ const uint32_t *hax_app_icon_at(uint32_t index, int *tile) {
     const hax_app_entry_t *e = &hax_app_table[index];
     if (!e->icon_off || !e->icon_size) return 0;
     if (tile) *tile = 64;
-    return (const uint32_t *)(_binary_build_hax_blob_bin_start + e->icon_off);
+    return (const uint32_t *)(hax_blob_data() + e->icon_off);
 }
 
 int hax_seed_embedded_file(const char *name, const char *path) {
     const hax_app_entry_t *entry = hax_app_find(name);
     if (!entry) return 0;
     if (!path || !path[0]) return -1;
-    const uint8_t *image =
-        _binary_build_hax_blob_bin_start + entry->offset;
+    const uint8_t *image = hax_blob_data() + entry->offset;
     return vfs_register_static_file(path, image, entry->size) ? 1 : -1;
 }
 
@@ -66,7 +84,7 @@ static int hax_spawn_internal(const char *name, int argc, char **argv) {
     }
     spawn_argv[n] = 0;
 
-    const uint8_t *image = _binary_build_hax_blob_bin_start + e->offset;
+    const uint8_t *image = hax_blob_data() + e->offset;
     return elf64_load_and_spawn(image, e->size, spawn_argv, 0, e->name);
 }
 

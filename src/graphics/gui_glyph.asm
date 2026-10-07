@@ -10,7 +10,7 @@ align 16
 %ifndef HBOS_BUILD_DIR
 %define HBOS_BUILD_DIR "build"
 %endif
-%strcat HBOS_GUI_FONT_PATH HBOS_BUILD_DIR, "/gui_font.bin"
+%strcat HBOS_GUI_FONT_PATH HBOS_BUILD_DIR, "/gui_font.pack"
 
 global _binary_build_gui_font_bin_start
 _binary_build_gui_font_bin_start:

@@ -251,6 +251,8 @@ int fat32_mount(uint32_t partition_lba, fat32_fs_t *fs)
     fs->total_clusters = (fs->bpb.total_sectors_32 - fs->bpb.reserved_sectors -
                           fs->bpb.num_fats * fs->bpb.sectors_per_fat_32) /
                           fs->bpb.sectors_per_cluster;
+    /* 分配游标从最低可用簇起步，保持"分配最低空闲簇"的既有语义 */
+    fs->alloc_cursor = 2;
     fs->mounted = 1;
     return 0;
 }
@@ -361,38 +363,58 @@ static uint32_t fat32_alloc_cluster(fat32_fs_t *fs)
     const uint32_t per_sector   = BLOCK_SECTOR_SIZE / 4;   /* 每扇区 128 个 FAT 项 */
     const uint32_t last_cluster = fs->total_clusters + 2;  /* 开区间上界 */
 
-    for (uint32_t c = 2; c < last_cluster; ) {
-        /* FAT 项号 == 簇号：簇 c 位于第 c/128 个 FAT 扇区的第 c%128 项。
-         * 首个扇区从 c=2 对应的项开始扫，其后每个扇区都从第 0 项起扫。 */
-        uint32_t sec_idx = c / per_sector;
-        uint32_t k       = c % per_sector;
-        if (block_read_sector(fs->fat_start_lba + sec_idx, sector) < 0) {
-            c = (sec_idx + 1) * per_sector;                /* 读失败：跳过该扇区 */
-            continue;
-        }
-        for (; k < per_sector; k++) {
-            uint32_t clu = sec_idx * per_sector + k;
-            if (clu >= last_cluster) return 0;
-            uint32_t val;
-            memcpy(&val, sector + k * 4u, 4);
-            if ((val & 0x0FFFFFFF) == 0) {
-                fat32_set_cluster_entry(fs, clu, FAT32_EOC);
-                return clu;
+    /* 从上次分配位置继续（见 fat32_fs_t.alloc_cursor 的注释）：旧实现每次都
+     * 从簇 2 重扫，分配 n 个簇是 O(n²/128) 次 FAT 扇区读——写一个 32 MB 的
+     * 内核要读上百万扇区，慢到不可用。游标让顺序分配时每个 FAT 扇区只读一次。
+     * "游标之前不会留下更低空闲簇" 由释放路径下调游标保证。 */
+    uint32_t start = fs->alloc_cursor;
+    if (start < 2 || start >= last_cluster) start = 2;
+
+    for (uint32_t pass = 0; pass < 2; pass++) {
+        uint32_t from = (pass == 0) ? start : 2;
+        uint32_t to   = (pass == 0) ? last_cluster : start;
+        if (pass == 1 && start == 2) break;   /* 第一圈已覆盖全部，无需回扫 */
+
+        for (uint32_t c = from; c < to; ) {
+            /* FAT 项号 == 簇号：簇 c 位于第 c/128 个 FAT 扇区的第 c%128 项。 */
+            uint32_t sec_idx = c / per_sector;
+            uint32_t k       = c % per_sector;
+            if (block_read_sector(fs->fat_start_lba + sec_idx, sector) < 0) {
+                c = (sec_idx + 1) * per_sector;            /* 读失败：跳过该扇区 */
+                continue;
             }
+            for (; k < per_sector; k++) {
+                uint32_t clu = sec_idx * per_sector + k;
+                if (clu >= to) break;
+                uint32_t val;
+                memcpy(&val, sector + k * 4u, 4);
+                if ((val & 0x0FFFFFFF) == 0) {
+                    fat32_set_cluster_entry(fs, clu, FAT32_EOC);
+                    fs->alloc_cursor = clu + 1;            /* 下次从这里继续 */
+                    return clu;
+                }
+            }
+            c = (sec_idx + 1) * per_sector;
         }
-        c = (sec_idx + 1) * per_sector;
     }
     return 0;
 }
 
 static void fat32_free_chain(fat32_fs_t *fs, uint32_t cluster)
 {
+    /* 释放后把分配游标下调到被释放的最低簇，维持"游标之前无更低空闲簇"
+     * 这一不变式——否则 fat32_alloc_cluster 会跳过这些回收的空闲簇，
+     * 磁盘看起来写满（见 fat32_fs_t.alloc_cursor 的注释）。 */
+    uint32_t lowest = cluster;
     while (cluster >= 2 && cluster < FAT32_EOC) {
         int next = fat32_next_cluster(fs, cluster);
         fat32_set_cluster_entry(fs, cluster, 0);
+        if (cluster < lowest) lowest = cluster;
         if (next < 0) break;
         cluster = (uint32_t)next;
     }
+    if (lowest >= 2 && (fs->alloc_cursor == 0 || lowest < fs->alloc_cursor))
+        fs->alloc_cursor = lowest;
 }
 
 int fat32_read_file(fat32_fs_t *fs, uint32_t first_cluster, uint32_t file_size,
@@ -435,6 +457,394 @@ int fat32_read_file(fat32_fs_t *fs, uint32_t first_cluster, uint32_t file_size,
     return (int)done;
 }
 
+/* ─────────────────── 长文件名（LFN）支持 ───────────────────
+ *
+ * 背景（真缺陷）：写路径原来只会把调用者给的名字截断成 8+3 短名直接落盘，
+ * 从不写 LFN 目录项。`writefile persist_test.txt ...` 于是落成 `persist_ txt`，
+ * 重启后按原名 `cat persist_test.txt` 报 not found——内容一直都在盘上，只是
+ * 名字被静默截断了，看起来像"文件消失了"。读路径（fat32_readdir）本来就有
+ * LFN 解析，但从没有写过 LFN，所以永远读不回原名。
+ *
+ * 这里补齐写侧规范 LFN 条目序列 + 目录内唯一的 8.3 短名生成，并把读侧
+ * （readdir 名字输出 + lookup 匹配）对齐成同一套规则：
+ *   - 原名本身就是合法 8.3 大写名 → 不写 LFN，行为与旧版完全一致；
+ *   - 否则写 N 条 attr=0x0F 的 LFN 项（校验和基于最终短名，>13 字符多槽，
+ *     磁盘顺序为最高序号项带 0x40 标志在前、序号递减、最后紧贴短名项）；
+ *   - 短名按 Windows/mtools 惯例取"基名截断 + ~N"，并在目录内查重。
+ * 规范依据 fatgen103（Microsoft FAT 规范）的 Long Directory Entries 一节。
+ */
+
+#define FAT32_LFN_MAX_SLOTS 20                              /* 255 字符 / 13 字符每槽 */
+#define FAT32_LFN_BUF       (FAT32_LFN_MAX_SLOTS * 13 + 1)   /* 展开后的名字缓冲 */
+
+/* LFN 条目里 13 个 UTF-16 字符在 32 字节条目内的字节偏移 */
+static const uint8_t g_lfn_char_off[13] = {
+    1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30
+};
+
+/* 8.3 短名里合法的非字母数字字符（fatgen103 "Valid characters"） */
+static int fat32_short_char_ok(uint8_t c)
+{
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    switch (c) {
+    case '_': case '$': case '~': case '!': case '#': case '%': case '&':
+    case '-': case '{': case '}': case '(': case ')': case '@': case '\'':
+    case '`': case '^':
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* 按 FAT 的 8.3 语义拆名：最后一个 '.' 之后是扩展名；前导点（".foo"）不算
+ * 分隔符。'-' 与 ".." 之类的名字拆出空基名，调用方据此判定不是合法 8.3。 */
+static void fat32_split_83(const char *name, uint32_t *base_len,
+                           const char **ext, uint32_t *ext_len)
+{
+    uint32_t len = (uint32_t)strlen(name);
+    const char *dot = NULL;
+    for (uint32_t i = 0; i < len; i++)
+        if (name[i] == '.') dot = name + i;      /* 取最后一个点 */
+    if (dot && dot != name && dot != name + 1) {
+        *base_len = (uint32_t)(dot - name);
+        *ext = dot + 1;
+        *ext_len = len - *base_len - 1;
+    } else if (dot && dot == name + 1) {         /* "a.b" 正常；".x" 走 else */
+        *base_len = 1;
+        *ext = dot + 1;
+        *ext_len = len - 2;
+    } else {
+        *base_len = len;
+        *ext = name + len;
+        *ext_len = 0;
+    }
+}
+
+/**
+ * @brief 把 name 规整成"纯截断"候选短名（大写化 + 非法字符换成 '_'）。
+ *
+ * @param out            11 字节短名输出（空格补齐）
+ * @param fits_83        返回是否"装得下 8.3"（基名 1..8 且扩展名 0..3）。
+ *                       装得下才允许读侧用短名比较，装不下就只能靠 LFN 匹配，
+ *                       否则 "persist_test.txt" 会按截断后的 "PERSIST_" 误命中
+ *                       同前缀的别的文件。
+ * @return 1 表示原名本身就是合法 8.3 大写名（写侧无需 LFN），0 表示需要 LFN
+ */
+static int fat32_plain_short_name(const char *name, uint8_t out[11], int *fits_83)
+{
+    uint32_t base_len, ext_len;
+    const char *ext;
+    fat32_split_83(name, &base_len, &ext, &ext_len);
+
+    int exact = 1;
+    memset(out, ' ', 11);
+    for (uint32_t i = 0; i < base_len; i++) {
+        uint8_t c = (uint8_t)name[i];
+        if (c >= 'a' && c <= 'z') { c -= 32; exact = 0; }
+        else if (!fat32_short_char_ok(c)) { c = '_'; exact = 0; }
+        if (i < 8) out[i] = c;
+        else exact = 0;                          /* 基名超长，原名装不进 8.3 */
+    }
+    for (uint32_t i = 0; i < ext_len; i++) {
+        uint8_t c = (uint8_t)ext[i];
+        if (c >= 'a' && c <= 'z') { c -= 32; exact = 0; }
+        else if (!fat32_short_char_ok(c)) { c = '_'; exact = 0; }
+        if (i < 3) out[8 + i] = c;
+        else exact = 0;
+    }
+    if (base_len == 0 || base_len > 8 || ext_len > 3) exact = 0;
+    if (fits_83) *fits_83 = (base_len >= 1 && base_len <= 8 && ext_len <= 3);
+    return exact;
+}
+
+/* 短名是否已被目录里别的条目占用。LFN 条目（attr=0x0F）与已删除项跳过：
+ * LFN 条目里带的那份短名副本不是真实条目，不能算占用。读失败按"已占用"
+ * 处理——宁可换一个数字尾，也不要冒覆盖别人文件的风险。 */
+static int fat32_short_name_taken(fat32_fs_t *fs, uint32_t dir_cluster,
+                                  const uint8_t short_name[11])
+{
+    uint8_t *cluster_buf = g_fat32_cluster_buf; /* 见文件顶部注释：共享静态缓冲区 */
+    uint32_t cluster = dir_cluster;
+
+    while (cluster >= 2) {
+        if (fat32_read_cluster(fs, cluster, cluster_buf) < 0) return 1;
+        for (uint32_t off = 0; off < fs->cluster_size; off += 32) {
+            uint8_t *raw = cluster_buf + off;
+            if (raw[0] == 0x00) return 0;        /* 后面全是未用槽 */
+            if (raw[0] == 0xE5) continue;        /* 已删除 */
+            if (raw[11] == FAT32_ATTR_LFN) continue;
+            if (raw[11] & FAT32_ATTR_VOLUME_ID) continue;
+            if (memcmp(raw, short_name, 11) == 0) return 1;
+        }
+        int next = fat32_next_cluster(fs, cluster);
+        if (next < 0) break;
+        cluster = (uint32_t)next;
+    }
+    return 0;
+}
+
+/* 短名（11 字节，空格补齐）还原成 "NAME.EXT" 形式，用于判断"原名与短名是否
+ * 完全一致"——一致就不写 LFN，保持 8.3 老行为不变。 */
+static int fat32_short_matches_name(const uint8_t short_name[11], const char *name)
+{
+    char buf[13];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < 8 && short_name[i] != ' '; i++) buf[n++] = (char)short_name[i];
+    if (short_name[8] != ' ') {
+        buf[n++] = '.';
+        for (uint32_t i = 8; i < 11 && short_name[i] != ' '; i++) buf[n++] = (char)short_name[i];
+    }
+    buf[n] = '\0';
+    return strcmp(buf, name) == 0;
+}
+
+/**
+ * @brief 生成目录内唯一的 8.3 短名（需要时同时写 LFN 保存原名）。
+ *
+ * 规则对齐 Windows/mtools：
+ *   - 原名本身就是合法 8.3（基名 1..8、扩展名 0..3，且只含短名字符集）
+ *     且目录内没被占用 → 直接用规整后的短名，**不写 LFN**。大小写差异
+ *     不算"长名"（"persist.txt" 用掉约 250 字节 LFN 纯属浪费，且会让
+ *     `mdir` 多显示一列），大小写不敏感查找本来就能命中；
+ *   - 其余情况（基名 >8 / 扩展名 >3 / 含非法字符）→ 用"基名截断 + ~N"
+ *     （N 从 1 递增，最多 6 位）在目录内查重，避免两个长名截断到同一短名
+ *     时互相覆盖（persist_test.txt 与 persist_other.txt 都截成 "persist_"
+ *     就是这个场景）。
+ *
+ * 非法字符改成 '_' 的同时必定写 LFN：折算后的短名（"a b.txt"→"A_B.TXT"）
+ * 与原名不等，没有 LFN 就永远查不回来。
+ */
+static int fat32_make_short_name(fat32_fs_t *fs, uint32_t dir_cluster,
+                                 const char *name, uint8_t out[11])
+{
+    int fits_83 = 0;
+    fat32_plain_short_name(name, out, &fits_83);
+    if (fits_83 && !fat32_short_name_taken(fs, dir_cluster, out))
+        return 0;                                /* 纯 8.3：不需要 LFN */
+
+    /* 需要 LFN：先取出规整后的基名主干与扩展名 */
+    char stem[8];
+    uint32_t stem_len = 0;
+    for (uint32_t i = 0; i < 8 && out[i] != ' '; i++) stem[stem_len++] = (char)out[i];
+    if (stem_len == 0) { stem[0] = '_'; stem_len = 1; }   /* ".bashrc" 之类 */
+
+    uint8_t ext[3];
+    uint32_t ext_len = 0;
+    for (uint32_t i = 0; i < 3 && out[8 + i] != ' '; i++) ext[ext_len++] = (char)out[8 + i];
+
+    for (uint32_t n = 1; n <= 999999; n++) {
+        char num[8];
+        uint32_t nd = 0;
+        for (uint32_t t = n; t; t /= 10) num[nd++] = (char)('0' + (t % 10));
+        for (uint32_t i = 0; i < nd / 2; i++) {  /* 反转成正常十进制 */
+            char t = num[i]; num[i] = num[nd - 1 - i]; num[nd - 1 - i] = t;
+        }
+
+        uint32_t budget = 8 - 1 - nd;             /* "~N" 占 1+nd 字节 */
+        uint32_t use = stem_len < budget ? stem_len : budget;
+        uint8_t cand[11];
+        memset(cand, ' ', 11);
+        memcpy(cand, stem, use);
+        cand[use] = '~';
+        memcpy(cand + use + 1, num, nd);
+        memcpy(cand + 8, ext, ext_len);
+
+        if (!fat32_short_name_taken(fs, dir_cluster, cand)) {
+            memcpy(out, cand, 11);
+            return 0;
+        }
+    }
+    return -1;                                   /* 同目录里 999999 个同名截断冲突 */
+}
+
+/* LFN 校验和：对 11 字节短名做 rotate-right + add（fatgen103 的算法，读侧
+ * readdir/lookup 用同一函数复核，两边必须一致，否则长名会被判为"不可信"）。 */
+static uint8_t fat32_lfn_checksum(const uint8_t short_name[11])
+{
+    uint8_t sum = 0;
+    for (int i = 0; i < 11; i++)
+        sum = (uint8_t)(((sum & 1) << 7) + (sum >> 1) + short_name[i]);
+    return sum;
+}
+
+/**
+ * @brief 解析一条 LFN 条目里的 13 个 UTF-16 字符。
+ *
+ * @param raw        32 字节 LFN 条目
+ * @param pos        这条槽对应的原名字符偏移（(seq-1)*13）
+ * @param out        展开缓冲，需能容纳 pos+13 字节
+ * @param ascii_ok   非 ASCII（UTF-16 码位 >127）时被置 0，读侧据此退回短名
+ * @return 这条槽里名字实际占用的字符数（0..13；遇 0x0000/0xFFFF 结束，
+ *         整槽被名字填满返回 13）
+ */
+static uint32_t fat32_lfn_slot_chars(const uint8_t *raw, uint32_t pos, char *out,
+                                     int *ascii_ok)
+{
+    for (uint32_t i = 0; i < 13; i++) {
+        uint16_t ch = (uint16_t)raw[g_lfn_char_off[i]] |
+                      ((uint16_t)raw[g_lfn_char_off[i] + 1] << 8);
+        if (ch == 0x0000 || ch == 0xFFFF) return i;   /* 名字到此为止 */
+        if (ch >= 128) {
+            if (ascii_ok) *ascii_ok = 0;
+            out[pos + i] = '?';
+        } else {
+            out[pos + i] = (char)ch;
+        }
+    }
+    return 13;
+}
+
+/**
+ * @brief 生成 LFN 条目序列（不含随后的短名项）。
+ *
+ * 磁盘顺序按规范：最高序号项先落盘且带 0x40（last）标志，序号递减，最后
+ * 一条（seq=1）紧贴在短名项前面，解析方扫描时才能按 seq 归位。
+ *
+ * @param entries 至少 FAT32_LFN_MAX_SLOTS*32 字节
+ * @return 条目数（0 表示不该写——调用方只在原名装不进 8.3 时调用）
+ */
+static uint32_t fat32_build_lfn_entries(const char *long_name,
+                                        const uint8_t short_name[11],
+                                        uint8_t *entries)
+{
+    uint32_t len = (uint32_t)strlen(long_name);
+    if (len > 255) len = 255;
+    uint32_t slots = (len + 12) / 13;
+    if (slots == 0) slots = 1;
+    if (slots > FAT32_LFN_MAX_SLOTS) slots = FAT32_LFN_MAX_SLOTS;
+
+    uint8_t checksum = fat32_lfn_checksum(short_name);
+
+    for (uint32_t s = 0; s < slots; s++) {
+        uint8_t *e = entries + s * 32;
+        memset(e, 0, 32);
+        uint32_t seq = slots - s;
+        uint32_t base = (seq - 1) * 13;
+        e[0] = (uint8_t)seq;
+        if (seq == slots) e[0] |= 0x40;          /* 序列里序号最高的这条先落盘 */
+        e[11] = FAT32_ATTR_LFN;
+        e[12] = 0;                               /* LFN 条目此字节固定 0（type） */
+        e[13] = checksum;
+        e[26] = 0; e[27] = 0;                    /* 簇号字段固定 0 */
+        for (uint32_t i = 0; i < 13; i++) {
+            uint32_t idx = base + i;
+            uint16_t ch;
+            if (idx < len) ch = (uint8_t)long_name[idx];
+            else if (idx == len) ch = 0x0000;     /* 名字结束符 */
+            else ch = 0xFFFF;                     /* 补位 */
+            e[g_lfn_char_off[i]] = (uint8_t)(ch & 0xFF);
+            e[g_lfn_char_off[i] + 1] = (uint8_t)(ch >> 8);
+        }
+    }
+    return slots;
+}
+
+/**
+ * @brief 把 LFN 序列 + 短名项一共 lfn_slots+1 条连续写进目录。
+ *
+ * 两条硬约束：
+ *   1. LFN 条目必须物理紧贴在它描述的短名项前面（解析方靠顺序归位），
+ *      所以整条序列要么落在同一簇里的连续空闲槽上，要么跨簇连续写；
+ *   2. 写完之后，序列末尾之前**不能留下 0x00 未用槽**——0x00 是目录结束
+ *      标记，解析方（内核 readdir/lookup、宿主 fsck.fat/mtools）扫到它就会
+ *      掉头，后面的条目全部"消失"。目录从一簇扩到两簇时最容易踩这个坑：
+ *      先把旧簇尾巴空着、只往新簇写，旧簇里那个 0x00 会让新簇的所有条目
+ *      看不见（本实现在补长名支持的过程中实际踩到过：第二个目录簇里的
+ *      文件写成功但读不到，fsck.fat 报 "Duplicate directory entry"）。
+ *      mtools 的做法是"旧簇写满再开新簇"，这里沿用同一语义：只能从簇尾
+ *      那一段连续空闲槽开始连续写，必要时把序列跨簇铺下去。
+ */
+static int fat32_write_dir_entries(fat32_fs_t *fs, uint32_t dir_cluster,
+                                   const uint8_t *lfn_entries, uint32_t lfn_slots,
+                                   const fat32_dir_entry_t *entry)
+{
+    if (!fs || !fs->mounted || !entry) return -1;
+
+    uint8_t *cluster_buf = g_fat32_cluster_buf; /* 见文件顶部注释：共享静态缓冲区 */
+    uint32_t need = lfn_slots + 1;
+    uint32_t slots_per_cluster = fs->cluster_size / 32;
+    if (slots_per_cluster == 0 || need > slots_per_cluster) return -1;
+
+    /* 第 1 遍：优先复用某一簇内部的连续空闲槽（删除留下的洞也在此列），
+     * 不动簇链。 */
+    uint32_t cluster = dir_cluster;
+    while (cluster >= 2) {
+        if (fat32_read_cluster(fs, cluster, cluster_buf) < 0) return -1;
+
+        uint32_t run = 0;
+        for (uint32_t idx = 0; idx < slots_per_cluster; idx++) {
+            uint8_t first = cluster_buf[idx * 32];
+            if (first == 0x00 || first == 0xE5) {
+                run++;
+                if (run == need) {
+                    uint32_t start = idx + 1 - need;
+                    for (uint32_t i = 0; i < lfn_slots; i++)
+                        memcpy(cluster_buf + (start + i) * 32, lfn_entries + i * 32, 32);
+                    memcpy(cluster_buf + idx * 32, entry, 32);
+                    return fat32_write_cluster(fs, cluster, cluster_buf);
+                }
+            } else {
+                run = 0;
+            }
+        }
+
+        int next = fat32_next_cluster(fs, cluster);
+        if (next < 0) break;
+        cluster = (uint32_t)next;
+    }
+
+    /* 第 2 遍：链尾簇的"空闲尾巴"（从最后一个已占用槽之后到簇尾）起点。
+     * 从这个位置往后连续铺，必要时扩簇，保证中途不留 0x00。 */
+    uint32_t last = dir_cluster;
+    uint32_t tail_idx = 0;
+    while (last >= 2) {
+        if (fat32_read_cluster(fs, last, cluster_buf) < 0) return -1;
+        uint32_t p = slots_per_cluster;
+        while (p > 0) {
+            uint8_t f = cluster_buf[(p - 1) * 32];
+            if (f == 0x00 || f == 0xE5) p--;
+            else break;
+        }
+        int next = fat32_next_cluster(fs, last);
+        if (next < 0) { tail_idx = p; break; }
+        last = (uint32_t)next;
+    }
+    if (last < 2) return -1;
+
+    uint32_t placed = 0;
+    uint32_t idx = tail_idx;
+    uint32_t cur = last;
+    int fresh = 0;                     /* 当前簇是否刚分配（整簇全 0） */
+    while (placed < need) {
+        if (fresh) {
+            memset(cluster_buf, 0, fs->cluster_size);
+        } else if (fat32_read_cluster(fs, cur, cluster_buf) < 0) {
+            return -1;
+        }
+
+        while (idx < slots_per_cluster && placed < need) {
+            const uint8_t *src = (placed < lfn_slots)
+                                     ? lfn_entries + placed * 32
+                                     : (const uint8_t *)entry;
+            memcpy(cluster_buf + idx * 32, src, 32);
+            idx++;
+            placed++;
+        }
+
+        if (fat32_write_cluster(fs, cur, cluster_buf) < 0) return -1;
+        if (placed == need) break;
+
+        uint32_t new_clu = fat32_alloc_cluster(fs);
+        if (!new_clu) return -1;
+        fat32_set_cluster_entry(fs, cur, new_clu);
+        cur = new_clu;
+        idx = 0;
+        fresh = 1;
+    }
+    return 0;
+}
+
 int fat32_readdir(fat32_fs_t *fs, uint32_t dir_cluster, uint32_t index,
                   char *name, uint32_t *type, uint32_t *size)
 {
@@ -443,9 +853,11 @@ int fat32_readdir(fat32_fs_t *fs, uint32_t dir_cluster, uint32_t index,
     uint8_t *cluster_buf = g_fat32_cluster_buf; /* 见文件顶部注释：改用共享静态缓冲区，避免栈溢出 */
     uint32_t cluster = dir_cluster;
     uint32_t entry_idx = 0;
-    int lfn = 0;
-    char lfn_buf[256];
-    uint32_t lfn_pos = 0;
+    int lfn = 0;                  /* 上一个条目是不是 LFN（即当前短名项有长名） */
+    int lfn_ascii = 1;            /* LFN 里是否出现非 ASCII 码位（出现则退回短名） */
+    uint8_t lfn_checksum = 0;     /* 当前 LFN 序列声明的校验和（短名项的校验和） */
+    char lfn_buf[FAT32_LFN_BUF];
+    uint32_t lfn_len = 0;         /* 展开后的长名字符数（去掉 0x0000 结束符） */
 
     while (cluster >= 2) {
         if (fat32_read_cluster(fs, cluster, cluster_buf) < 0) return -1;
@@ -456,29 +868,19 @@ int fat32_readdir(fat32_fs_t *fs, uint32_t dir_cluster, uint32_t index,
 
             if (raw[0] == 0xE5) { lfn = 0; continue; }
             if (raw[11] == FAT32_ATTR_LFN) {
-                lfn = 1;
+                /* 同一条短名项前面的多槽 LFN 会连续出现；旧的逐槽写法在每槽里
+                 * 独立 break，第 13 个字符之后的 0x0000 会静默丢掉后续槽的
+                 * 内容（"名字到 13 字符就断"）。这里改成逐字符展开整个 13 槽，
+                 * 由 0x40 标志的那条决定名字总长。 */
                 uint8_t seq = raw[0] & 0x3F;
+                if (seq == 0 || seq > FAT32_LFN_MAX_SLOTS) { lfn = 0; continue; }
                 uint32_t pos = (seq - 1) * 13;
-                for (int i = 0; i < 5 && pos + i < 255; i++) {
-                    uint16_t ch = ((uint16_t)raw[1 + 2 * i]) |
-                                  ((uint16_t)raw[1 + 2 * i + 1] << 8);
-                    if (ch == 0 || ch == 0xFFFF) break;
-                    if (ch < 128) lfn_buf[pos + i] = (char)ch;
-                }
-                for (int i = 0; i < 6 && pos + 5 + i < 255; i++) {
-                    uint16_t ch = ((uint16_t)raw[14 + 2 * i]) |
-                                  ((uint16_t)raw[14 + 2 * i + 1] << 8);
-                    if (ch == 0 || ch == 0xFFFF) break;
-                    if (ch < 128) lfn_buf[pos + 5 + i] = (char)ch;
-                }
-                for (int i = 0; i < 2 && pos + 11 + i < 255; i++) {
-                    uint16_t ch = ((uint16_t)raw[28 + 2 * i]) |
-                                  ((uint16_t)raw[28 + 2 * i + 1] << 8);
-                    if (ch == 0 || ch == 0xFFFF) break;
-                    if (ch < 128) lfn_buf[pos + 11 + i] = (char)ch;
-                }
+                if (raw[0] & 0x40) lfn_ascii = 1;  /* 新序列从最高槽开始重建状态 */
+                uint32_t chars = fat32_lfn_slot_chars(raw, pos, lfn_buf, &lfn_ascii);
                 if (raw[0] & 0x40) {
-                    lfn_pos = pos + 13;
+                    lfn_len = pos + chars;       /* 最高序号槽给出精确长度 */
+                    lfn_checksum = raw[13];      /* 以及校验和（对短名项的） */
+                    lfn = 1;                     /* 但校验和要等短名项到了才验 */
                 }
                 continue;
             }
@@ -487,9 +889,15 @@ int fat32_readdir(fat32_fs_t *fs, uint32_t dir_cluster, uint32_t index,
             if (entry->attr & FAT32_ATTR_VOLUME_ID) continue;
             if (entry->name[0] == '.') continue;
 
+            /* LFN 只有在"校验和匹配 + 同一序列 + 全是 ASCII"时才可信：
+             * 校验和基于它自己的 8.3 短名，写侧/读侧用同一个算法，能挡住
+             * 被误认的槽（例如目录里残留的旧 LFN 条目）。 */
+            int lfn_ok = lfn && lfn_ascii && lfn_len > 0 &&
+                         fat32_lfn_checksum(entry->name) == lfn_checksum;
             if (entry_idx == index) {
-                if (lfn && lfn_pos > 0) {
-                    uint32_t nlen = lfn_pos < 64 ? lfn_pos : 63;
+                if (lfn_ok) {
+                    uint32_t nlen = lfn_len;
+                    if (nlen > 63) nlen = 63;
                     memcpy(name, lfn_buf, nlen);
                     name[nlen] = '\0';
                 } else {
@@ -519,6 +927,28 @@ int fat32_readdir(fat32_fs_t *fs, uint32_t dir_cluster, uint32_t index,
     return -1;
 }
 
+/* 取出短名项指向的簇号/大小/属性。走 memcpy 而不是把 uint8_t* 强转成
+ * fat32_dir_entry_t*：见文件顶部关于 -O2 严格别名死代码优化的注释。 */
+static void fat32_entry_out(const uint8_t *raw, uint32_t *out_cluster,
+                            uint32_t *out_size, uint8_t *out_attr)
+{
+    fat32_dir_entry_t e;
+    memcpy(&e, raw, sizeof(e));
+    *out_cluster = (uint32_t)e.first_cluster_low |
+                   ((uint32_t)e.first_cluster_high << 16);
+    if (out_size) *out_size = e.file_size;
+    if (out_attr) *out_attr = e.attr;
+}
+
+/**
+ * @brief 在目录里按名字定位条目（大小写不敏感）。
+ *
+ * 与写路径对称：写侧落盘时，名字装得进 8.3 的按短名匹配（老行为，含
+ * "persist.txt" 这类原名大小写不同的情况），装不进 8.3 的（基名 >8 / 扩展名
+ * >3 / 含非法字符）必须靠 LFN 原名匹配——绝不能用截断后的短名去比，否则
+ * "persist_test.txt" 会命中同前缀的 "persist_other.txt"。两种情况都排在
+ * "条目自己的长名"上比较，且 LFN 需要校验和与短名项一致才可信。
+ */
 int fat32_lookup(fat32_fs_t *fs, uint32_t dir_cluster, const char *name,
                  uint32_t *out_cluster, uint32_t *out_size, uint8_t *out_attr)
 {
@@ -527,43 +957,70 @@ int fat32_lookup(fat32_fs_t *fs, uint32_t dir_cluster, const char *name,
     uint8_t *cluster_buf = g_fat32_cluster_buf; /* 见文件顶部注释：改用共享静态缓冲区，避免栈溢出 */
     uint32_t cluster = dir_cluster;
 
-    char short_name[12];
-    uint32_t name_len = (uint32_t)strlen(name);
-    memset(short_name, ' ', 11);
-    short_name[11] = '\0';
+    /* 目标名：装得进 8.3 就规整成短名（大写化/非法字符换 '_'），否则只保留
+     * 原名走 LFN 比较。 */
+    int want_fits_83 = 0;
+    uint8_t short_name[11];
+    fat32_plain_short_name(name, short_name, &want_fits_83);
 
-    const char *dot = NULL;
-    for (uint32_t i = 0; i < name_len; i++) {
-        if (name[i] == '.') { dot = name + i; break; }
-    }
-    if (dot) {
-        uint32_t base_len = (uint32_t)(dot - name);
-        for (uint32_t i = 0; i < base_len && i < 8; i++)
-            short_name[i] = name[i];
-        for (uint32_t i = 0; i < name_len - base_len - 1 && i < 3; i++)
-            short_name[8 + i] = dot[i + 1];
-    } else {
-        for (uint32_t i = 0; i < name_len && i < 8; i++)
-            short_name[i] = name[i];
-    }
+    uint32_t name_len = (uint32_t)strlen(name);
+    int lfn = 0;
+    int lfn_ascii = 1;
+    uint8_t lfn_checksum = 0;
+    char lfn_buf[FAT32_LFN_BUF];
+    uint32_t lfn_len = 0;
 
     while (cluster >= 2) {
         if (fat32_read_cluster(fs, cluster, cluster_buf) < 0) return -1;
 
         for (uint32_t off = 0; off < fs->cluster_size; off += 32) {
-            fat32_dir_entry_t *entry = (fat32_dir_entry_t *)(cluster_buf + off);
-            if (entry->name[0] == 0x00) return -1;
-            if (entry->name[0] == 0xE5) continue;
-            if (entry->attr == FAT32_ATTR_LFN) continue;
-            if (entry->attr & FAT32_ATTR_VOLUME_ID) continue;
+            uint8_t *raw = cluster_buf + off;
+            if (raw[0] == 0x00) return -1;
+            if (raw[0] == 0xE5) { lfn = 0; continue; }
+            if (raw[11] == FAT32_ATTR_LFN) {
+                /* 同 fat32_readdir：整条 13 槽展开，长度由带 0x40 的那条给出，
+                 * 不能逐槽 break（会把 >13 字符的名字在第 13 个字符处截断）。 */
+                uint8_t seq = raw[0] & 0x3F;
+                if (seq == 0 || seq > FAT32_LFN_MAX_SLOTS) { lfn = 0; continue; }
+                uint32_t pos = (seq - 1) * 13;
+                if (raw[0] & 0x40) lfn_ascii = 1;  /* 新序列从最高槽开始重建状态 */
+                uint32_t chars = fat32_lfn_slot_chars(raw, pos, lfn_buf, &lfn_ascii);
+                if (raw[0] & 0x40) {
+                    lfn_len = pos + chars;
+                    lfn_checksum = raw[13];
+                    lfn = 1;
+                }
+                continue;
+            }
 
-            if (memcmp(entry->name, short_name, 11) == 0) {
-                *out_cluster = entry->first_cluster_low |
-                               ((uint32_t)entry->first_cluster_high << 16);
-                if (out_size) *out_size = entry->file_size;
-                if (out_attr) *out_attr = entry->attr;
+            uint8_t attr = raw[11];
+            if (attr & FAT32_ATTR_VOLUME_ID) continue;
+            if (raw[0] == '.') continue;            /* "." / ".." */
+
+            /* 短名匹配：LFN 条目、以及宏为 '.' 的项已经在上面被跳过，且只有
+             * 目标名装得进 8.3 时才允许——避免长名被截断后误命中。 */
+            if (want_fits_83 && memcmp(raw, short_name, 11) == 0) {
+                fat32_entry_out(raw, out_cluster, out_size, out_attr);
                 return 0;
             }
+
+            /* LFN 原名匹配（大小写不敏感，与短名路径的语义一致） */
+            int lfn_ok = lfn && lfn_ascii &&
+                         fat32_lfn_checksum(raw) == lfn_checksum;
+            if (lfn_ok && lfn_len == name_len) {
+                uint32_t i = 0;
+                for (; i < name_len; i++) {
+                    char a = lfn_buf[i], b = name[i];
+                    if (a >= 'A' && a <= 'Z') a += 32;
+                    if (b >= 'A' && b <= 'Z') b += 32;
+                    if (a != b) break;
+                }
+                if (i == name_len) {
+                    fat32_entry_out(raw, out_cluster, out_size, out_attr);
+                    return 0;
+                }
+            }
+            lfn = 0;
         }
 
         int next = fat32_next_cluster(fs, cluster);
@@ -640,43 +1097,6 @@ int fat32_write_file(fat32_fs_t *fs, uint32_t first_cluster, uint32_t *file_size
     return (int)done;
 }
 
-static int fat32_write_dir_entry(fat32_fs_t *fs, uint32_t dir_cluster,
-                                  fat32_dir_entry_t *entry)
-{
-    if (!fs || !fs->mounted || !entry) return -1;
-
-    uint8_t *cluster_buf = g_fat32_cluster_buf; /* 见文件顶部注释：改用共享静态缓冲区，避免栈溢出 */
-    uint32_t cluster = dir_cluster;
-
-    while (cluster >= 2) {
-        if (fat32_read_cluster(fs, cluster, cluster_buf) < 0) return -1;
-
-        for (uint32_t off = 0; off < fs->cluster_size; off += 32) {
-            uint8_t first = cluster_buf[off];
-            if (first == 0x00 || first == 0xE5) {
-                memcpy(cluster_buf + off, entry, 32);
-                if (fat32_write_cluster(fs, cluster, cluster_buf) < 0)
-                    return -1;
-                return 0;
-            }
-        }
-
-        int next = fat32_next_cluster(fs, cluster);
-        if (next < 0) {
-            uint32_t new_clu = fat32_alloc_cluster(fs);
-            if (!new_clu) return -1;
-            fat32_set_cluster_entry(fs, cluster, new_clu);
-            memset(cluster_buf, 0, fs->cluster_size);
-            memcpy(cluster_buf, entry, 32);
-            if (fat32_write_cluster(fs, new_clu, cluster_buf) < 0)
-                return -1;
-            return 0;
-        }
-        cluster = (uint32_t)next;
-    }
-    return -1;
-}
-
 int fat32_create_file(fat32_fs_t *fs, uint32_t dir_cluster, const char *name,
                       uint32_t *out_cluster)
 {
@@ -691,22 +1111,12 @@ int fat32_create_file(fat32_fs_t *fs, uint32_t dir_cluster, const char *name,
     uint32_t new_clu = fat32_alloc_cluster(fs);
     if (!new_clu) return -1;
 
-    char dir_name[11];
-    memset(dir_name, ' ', 11);
-    uint32_t name_len = (uint32_t)strlen(name);
-    const char *dot = NULL;
-    for (uint32_t i = 0; i < name_len; i++) {
-        if (name[i] == '.') { dot = name + i; break; }
-    }
-    if (dot) {
-        uint32_t base_len = (uint32_t)(dot - name);
-        for (uint32_t i = 0; i < base_len && i < 8; i++)
-            dir_name[i] = name[i];
-        for (uint32_t i = 0; i < name_len - base_len - 1 && i < 3; i++)
-            dir_name[8 + i] = dot[i + 1];
-    } else {
-        for (uint32_t i = 0; i < name_len && i < 8; i++)
-            dir_name[i] = name[i];
+    /* 短名：装得进 8.3 且目录内没占用就用原名（老行为不变）；否则按
+     * "截断 + ~N" 生成一个目录内唯一的短名，原名交给下面的 LFN 序列保存。 */
+    uint8_t dir_name[11];
+    if (fat32_make_short_name(fs, dir_cluster, name, dir_name) < 0) {
+        fat32_free_chain(fs, new_clu);
+        return -1;
     }
 
     fat32_dir_entry_t entry;
@@ -724,7 +1134,14 @@ int fat32_create_file(fat32_fs_t *fs, uint32_t dir_cluster, const char *name,
     entry.first_cluster_high = (uint16_t)((new_clu >> 16) & 0xFFFF);
     entry.file_size = 0;
 
-    if (fat32_write_dir_entry(fs, dir_cluster, &entry) < 0) {
+    /* 原名 != 短名 ⇒ 原名装不进 8.3，必须在短名项**前面**写 LFN 序列把原名
+     * 连同存盘：不写的话重启后按原名查不到，文件就像"消失"了（本缺陷的根因）。 */
+    uint8_t lfn_entries[FAT32_LFN_MAX_SLOTS * 32];
+    uint32_t lfn_slots = 0;
+    if (!fat32_short_matches_name(dir_name, name))
+        lfn_slots = fat32_build_lfn_entries(name, dir_name, lfn_entries);
+
+    if (fat32_write_dir_entries(fs, dir_cluster, lfn_entries, lfn_slots, &entry) < 0) {
         fat32_free_chain(fs, new_clu);
         return -1;
     }
@@ -755,6 +1172,16 @@ int fat32_delete_file(fat32_fs_t *fs, uint32_t dir_cluster, const char *name)
                                    ((uint32_t)entry->first_cluster_high << 16);
             if (ent_cluster == cluster && entry->name[0] != 0xE5) {
                 cluster_buf[off] = 0xE5;
+                /* 紧贴在这个短名项前面的连续 LFN 槽一并标删：留着的话它们会被
+                 * 后续解析当成下一个条目（或下一个条目的）长名前缀。文件系统对
+                 * 孤儿 LFN 的通行做法也是清除（get_long_entry_slots 同款）。 */
+                uint32_t offp = off;
+                while (offp >= 32 && cluster_buf[offp - 32] != 0x00 &&
+                       cluster_buf[offp - 32] != 0xE5 &&
+                       cluster_buf[offp - 32 + 11] == FAT32_ATTR_LFN) {
+                    offp -= 32;
+                    cluster_buf[offp] = 0xE5;
+                }
                 if (fat32_write_cluster(fs, dir_clus, cluster_buf) < 0)
                     return -1;
                 fat32_free_chain(fs, cluster);
@@ -808,20 +1235,11 @@ int fat32_mkdir(fat32_fs_t *fs, uint32_t dir_cluster, const char *name)
         return -1;
     }
 
-    /* 目录短名同 fat32_create_file 的 8.3 拆分方式 */
-    char dir_name[11];
-    memset(dir_name, ' ', 11);
-    uint32_t name_len = (uint32_t)strlen(name);
-    const char *dot_pos = NULL;
-    for (uint32_t i = 0; i < name_len; i++) {
-        if (name[i] == '.') { dot_pos = name + i; break; }
-    }
-    if (dot_pos) {
-        uint32_t base_len = (uint32_t)(dot_pos - name);
-        for (uint32_t i = 0; i < base_len && i < 8; i++) dir_name[i] = name[i];
-        for (uint32_t i = 0; i < name_len - base_len - 1 && i < 3; i++) dir_name[8 + i] = dot_pos[i + 1];
-    } else {
-        for (uint32_t i = 0; i < name_len && i < 8; i++) dir_name[i] = name[i];
+    /* 目录短名同 fat32_create_file 的 8.3 拆分方式（唯一化 + 需要时写 LFN） */
+    uint8_t dir_name[11];
+    if (fat32_make_short_name(fs, dir_cluster, name, dir_name) < 0) {
+        fat32_free_chain(fs, new_clu);
+        return -1;
     }
 
     fat32_dir_entry_t entry;
@@ -839,7 +1257,13 @@ int fat32_mkdir(fat32_fs_t *fs, uint32_t dir_cluster, const char *name)
     entry.first_cluster_high = (uint16_t)((new_clu >> 16) & 0xFFFF);
     entry.file_size = 0;
 
-    if (fat32_write_dir_entry(fs, dir_cluster, &entry) < 0) {
+    /* 目录名装不进 8.3 时同样写 LFN 序列（否则重启后按原名 cd 不进去） */
+    uint8_t lfn_entries[FAT32_LFN_MAX_SLOTS * 32];
+    uint32_t lfn_slots = 0;
+    if (!fat32_short_matches_name(dir_name, name))
+        lfn_slots = fat32_build_lfn_entries(name, dir_name, lfn_entries);
+
+    if (fat32_write_dir_entries(fs, dir_cluster, lfn_entries, lfn_slots, &entry) < 0) {
         fat32_free_chain(fs, new_clu);
         return -1;
     }
@@ -902,6 +1326,17 @@ int fat32_rmdir(fat32_fs_t *fs, uint32_t dir_cluster, const char *name)
                                    ((uint32_t)entry->first_cluster_high << 16);
             if (ent_cluster == cluster && entry->name[0] != 0xE5) {
                 cluster_buf[off] = 0xE5;
+                /* 紧贴在这个短名项前面的连续 LFN 槽必须一并标删：留着就成了
+                 * "孤儿 LFN"——fsck.fat 会报 `Orphaned long file name part`
+                 * 并自动删除，长名目录被 rmdir 后磁盘就不再是规范合规状态。
+                 * 与 fat32_delete_file() 的处理保持一致（那边已经这么做了）。 */
+                uint32_t offp = off;
+                while (offp >= 32 && cluster_buf[offp - 32] != 0x00 &&
+                       cluster_buf[offp - 32] != 0xE5 &&
+                       cluster_buf[offp - 32 + 11] == FAT32_ATTR_LFN) {
+                    offp -= 32;
+                    cluster_buf[offp] = 0xE5;
+                }
                 if (fat32_write_cluster(fs, dir_clus, cluster_buf) < 0) return -1;
                 fat32_free_chain(fs, cluster);
                 return 0;

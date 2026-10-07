@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HBOS UI 方案 03 · Soft Card</title>
+<style>
+/* ============================================================
+   HBOS 设计系统 · 方案 03 "Soft Card"
+   卡片优先 / 大圆角 / 柔和多层阴影 / 靛紫强调色
+   所有颜色均为令牌，浅色模式在 body.light 下覆盖
+   ============================================================ */
+:root{
+  /* —— 表面层级（深色：深板岩 / 藏青）—— */
+  --bg:#0f1320;
+  --surface:#181d2e;
+  --surface2:#1f2537;
+  --surface3:#262d42;
+
+  /* —— 描边 —— */
+  --line:rgba(255,255,255,.07);
+  --line2:rgba(255,255,255,.13);
+
+  /* —— 文字层级 —— */
+  --fg:#eef1f8;
+  --fg2:#b9c0d4;
+  --dim:#7f889f;
+
+  /* —— 强调色（靛紫）—— */
+  --accent:#7c8cff;
+  --accent-fg:#0f1320;
+  --accent-hover:#8f9dff;
+  --accent-soft:color-mix(in srgb, var(--accent) 16%, transparent);
+  --sel:color-mix(in srgb, var(--accent) 15%, transparent);
+
+  /* —— 语义色 —— */
+  --ok:#3ddc97;
+  --warn:#ffc061;
+  --err:#ff6b7f;
+  --info:#5bc8f5;
+
+  /* —— 几何 —— */
+  --radius:14px;
+  --radius-small:10px;
+  --radius-pill:999px;
+
+  /* —— 阴影（柔和多层）—— */
+  --shadow-alpha:.55;
+  --shadow-1:0 1px 2px rgba(0,0,0,calc(var(--shadow-alpha) * .55)),
+             0 1px 1px rgba(0,0,0,calc(var(--shadow-alpha) * .30));
+  --shadow-2:0 2px 4px rgba(0,0,0,calc(var(--shadow-alpha) * .40)),
+             0 6px 16px rgba(0,0,0,calc(var(--shadow-alpha) * .45));
+  --shadow-3:0 4px 8px rgba(0,0,0,calc(var(--shadow-alpha) * .35)),
+             0 16px 40px rgba(0,0,0,calc(var(--shadow-alpha) * .55));
+  --glow:0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ————————————————— 浅色模式 ————————————————— */
+body.light{
+  --bg:#f4f6fb;
+  --surface:#ffffff;
+  --surface2:#f7f8fc;
+  --surface3:#eceffa;
+
+  --line:rgba(20,26,54,.07);
+  --line2:rgba(20,26,54,.14);
+
+  --fg:#151a2d;
+  --fg2:#4a5468;
+  --dim:#8790a5;
+
+  --accent:#4a5ae8;
+  --accent-fg:#ffffff;
+  --accent-hover:#3f4fd8;
+  --accent-soft:color-mix(in srgb, var(--accent) 12%, transparent);
+  --sel:color-mix(in srgb, var(--accent) 11%, transparent);
+
+  --ok:#12a870;
+  --warn:#c9821a;
+  --err:#dc3b52;
+  --info:#1f8fc4;
+
+  --shadow-alpha:.13;
+  --glow:0 6px 18px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:
+    radial-gradient(1100px 620px at 88% -12%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 62%),
+    radial-gradient(820px 520px at -8% 6%, color-mix(in srgb, var(--info) 8%, transparent), transparent 58%),
+    var(--bg);
+  color:var(--fg);
+  font-family:"Inter","SF Pro Text",-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",
+              "PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  font-size:14px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  transition:background-color .28s ease, color .28s ease;
+  padding:44px 20px 96px;
+}
+.wrap{max-width:1180px;margin:0 auto}
+
+/* ————————————————— 页头 ————————————————— */
+.top{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+h1{
+  font-size:27px;line-height:1.2;margin:0;font-weight:680;letter-spacing:-.02em;
+}
+.badge{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:5px 12px;border-radius:var(--radius-pill);
+  font-size:12px;font-weight:600;letter-spacing:.01em;
+  color:var(--accent);
+  background:var(--accent-soft);
+  border:1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+}
+.badge::before{
+  content:"";width:6px;height:6px;border-radius:50%;
+  background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.tg{
+  margin-left:auto;
+  font:inherit;font-size:13px;font-weight:560;
+  color:var(--fg);background:var(--surface);
+  border:1px solid var(--line2);border-radius:var(--radius-pill);
+  padding:9px 18px;cursor:pointer;
+  box-shadow:var(--shadow-1);
+  transition:transform .16s cubic-bezier(.2,.7,.3,1), box-shadow .2s, background-color .2s, border-color .2s;
+}
+.tg:hover{transform:translateY(-1px);box-shadow:var(--shadow-2);border-color:color-mix(in srgb, var(--accent) 46%, var(--line2))}
+.tg:active{transform:translateY(0);box-shadow:var(--shadow-1)}
+.sub{color:var(--fg2);font-size:14px;max-width:74ch;margin:14px 0 0}
+.sub code,.tok code,.mono{
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:.9em;
+  background:var(--surface2);border:1px solid var(--line);
+  padding:1px 6px;border-radius:6px;color:var(--fg);
+}
+
+/* ————————————————— 分节 ————————————————— */
+h2{
+  font-size:15px;font-weight:640;letter-spacing:.01em;
+  margin:52px 0 16px;display:flex;align-items:center;gap:11px;
+  color:var(--fg);
+}
+h2::before{
+  content:"";width:4px;height:17px;border-radius:3px;
+  background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 40%, transparent));
+}
+h2::after{
+  content:"";flex:1;height:1px;
+  background:linear-gradient(90deg,var(--line2),transparent);
+}
+h3{
+  font-size:12px;font-weight:640;color:var(--dim);margin:0 0 14px;
+  letter-spacing:.07em;text-transform:uppercase;
+}
+
+/* ————————————————— 卡片与栅格 ————————————————— */
+.row{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+.box{
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  padding:22px;
+  box-shadow:var(--shadow-2);
+  transition:box-shadow .25s ease, transform .25s cubic-bezier(.2,.7,.3,1), border-color .25s;
+}
+.box:hover{box-shadow:var(--shadow-3);border-color:var(--line2)}
+.stack{display:flex;flex-direction:column;gap:18px}
+
+/* ————————————————— 色板 ————————————————— */
+.swatches{
+  display:flex;height:62px;border-radius:var(--radius-small);overflow:hidden;
+  border:1px solid var(--line2);box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+.swatches i{flex:1;position:relative;transition:flex .25s cubic-bezier(.2,.7,.3,1)}
+.swatches i:hover{flex:1.5}
+.tok{
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:11.5px;line-height:1.9;color:var(--dim);
+}
+.tok b{color:var(--fg2);font-weight:600}
+.sw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:16px}
+.sw{display:flex;align-items:center;gap:9px;font-size:11.5px;color:var(--fg2);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.sw em{width:15px;height:15px;border-radius:5px;flex:none;border:1px solid var(--line2)}
+.type-demo{display:flex;flex-direction:column;gap:13px;margin-top:2px}
+.type-demo .t1{font-size:19px;font-weight:650;color:var(--fg);letter-spacing:-.01em}
+.type-demo .t2{font-size:14px;font-weight:520;color:var(--fg)}
+.type-demo .t3{font-size:13px;color:var(--fg2)}
+.type-demo .t4{font-size:12px;color:var(--dim)}
+.type-demo .t5{font-size:13.5px;font-weight:560;color:var(--accent)}
+
+/* ————————————————— 按钮 ————————————————— */
+.btns{display:flex;flex-wrap:wrap;gap:11px;align-items:center}
+.btn{
+  font:inherit;font-size:13.5px;font-weight:560;letter-spacing:.005em;
+  padding:9px 18px;border-radius:var(--radius-small);cursor:pointer;
+  color:var(--fg);background:var(--surface2);
+  border:1px solid var(--line2);
+  box-shadow:var(--shadow-1);
+  transition:transform .16s cubic-bezier(.2,.7,.3,1), box-shadow .2s, background-color .18s,
+             border-color .18s, color .18s;
+}
+.btn:hover{transform:translateY(-1px);box-shadow:var(--shadow-2);background:var(--surface3)}
+.btn:active{transform:translateY(0);box-shadow:var(--shadow-1)}
+.btn.primary{
+  background:linear-gradient(180deg,var(--accent-hover),var(--accent));
+  color:var(--accent-fg);border-color:transparent;font-weight:620;
+  box-shadow:var(--glow),var(--shadow-1);
+}
+.btn.primary:hover{box-shadow:0 10px 26px color-mix(in srgb,var(--accent) 38%,transparent),var(--shadow-2)}
+.btn.ghost{background:transparent;border-color:transparent;box-shadow:none;color:var(--accent)}
+.btn.ghost:hover{background:var(--accent-soft);transform:translateY(-1px);box-shadow:none}
+.btn.danger{
+  background:linear-gradient(180deg, color-mix(in srgb,var(--err) 92%, white), var(--err));
+  color:#fff;border-color:transparent;font-weight:600;
+  box-shadow:0 6px 18px color-mix(in srgb,var(--err) 28%,transparent),var(--shadow-1);
+}
+body.light .btn.danger{background:var(--err)}
+.btn:disabled{
+  opacity:.42;cursor:not-allowed;transform:none!important;
+  box-shadow:none;background:var(--surface2);color:var(--dim);border-color:var(--line);
+}
+.btn.sm{padding:6px 13px;font-size:12.5px}
+
+/* ————————————————— 表单 ————————————————— */
+.field{display:flex;flex-direction:column;gap:7px;margin-bottom:16px}
+.field label{font-size:12.5px;font-weight:560;color:var(--fg2)}
+.inp{
+  font:inherit;font-size:13.5px;color:var(--fg);
+  background:var(--surface2);
+  border:1px solid var(--line2);border-radius:var(--radius-small);
+  padding:10px 13px;outline:none;width:100%;
+  transition:border-color .18s, box-shadow .2s, background-color .18s;
+}
+.inp::placeholder{color:var(--dim)}
+.inp:hover{border-color:color-mix(in srgb, var(--fg2) 42%, var(--line2))}
+.inp:focus{
+  border-color:var(--accent);
+  box-shadow:0 0 0 4px var(--accent-soft);
+  background:var(--surface);
+}
+.hint{font-size:11.5px;color:var(--dim)}
+
+.chk{
+  display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--fg2);
+  cursor:pointer;padding:7px 0;user-select:none;
+}
+.chk i{
+  width:19px;height:19px;flex:none;border-radius:6px;
+  border:1.5px solid var(--line2);background:var(--surface2);
+  display:grid;place-items:center;font-style:normal;
+  font-size:12px;color:transparent;
+  transition:background-color .18s, border-color .18s, color .18s, transform .16s;
+}
+.chk:hover i{border-color:var(--accent)}
+.chk.on i{
+  background:linear-gradient(180deg,var(--accent-hover),var(--accent));
+  border-color:transparent;color:var(--accent-fg);font-weight:800;
+  box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 32%,transparent);
+}
+.chk.on{color:var(--fg)}
+
+.sw-row{
+  display:flex;align-items:center;gap:13px;padding:11px 0;
+}
+.sw-row .t{flex:1;min-width:0}
+.sw-row .t b{display:block;font-size:13.5px;font-weight:560;color:var(--fg)}
+.sw-row .t span{display:block;font-size:12px;color:var(--dim);margin-top:1px}
+.switch{
+  width:44px;height:25px;border-radius:var(--radius-pill);flex:none;cursor:pointer;
+  background:var(--surface3);border:1px solid var(--line2);
+  position:relative;transition:background-color .22s, border-color .22s, box-shadow .22s;
+}
+.switch::after{
+  content:"";position:absolute;top:2px;left:2px;width:19px;height:19px;border-radius:50%;
+  background:var(--fg2);box-shadow:0 1px 3px rgba(0,0,0,.35);
+  transition:transform .22s cubic-bezier(.2,.8,.3,1), background-color .22s;
+}
+.switch.on{
+  background:linear-gradient(180deg,var(--accent-hover),var(--accent));
+  border-color:transparent;
+  box-shadow:0 3px 12px color-mix(in srgb,var(--accent) 34%,transparent);
+}
+.switch.on::after{transform:translateX(19px);background:#fff}
+
+.seg{
+  display:inline-flex;gap:3px;padding:3px;flex:none;
+  background:var(--surface2);border:1px solid var(--line2);
+  border-radius:var(--radius-small);
+}
+.seg b{
+  padding:6px 14px;font-size:12.5px;font-weight:540;color:var(--fg2);
+  border-radius:7px;cursor:pointer;
+  transition:background-color .2s, color .2s, box-shadow .2s;
+}
+.seg b:hover{color:var(--fg)}
+.seg b.on{
+  background:var(--surface);color:var(--fg);font-weight:620;
+  box-shadow:var(--shadow-1);
+  border:1px solid var(--line);
+}
+body.light .seg b.on{border-color:transparent;background:#fff}
+
+/* ————————————————— 列表 ————————————————— */
+.list{
+  background:var(--surface2);border:1px solid var(--line);
+  border-radius:var(--radius-small);overflow:hidden;
+}
+.li{
+  display:flex;align-items:center;gap:11px;
+  padding:10px 14px;font-size:13.5px;color:var(--fg2);cursor:pointer;
+  border-bottom:1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  transition:background-color .16s, color .16s, box-shadow .16s;
+}
+.li:last-child{border-bottom:none}
+.li:hover{background:var(--surface3);color:var(--fg)}
+.li .ic{width:17px;text-align:center;flex:none;opacity:.85}
+.li .meta{margin-left:auto;font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+.li.sel{
+  background:var(--sel);color:var(--fg);font-weight:560;
+  box-shadow:inset 3px 0 0 var(--accent);
+}
+.li.sel .meta{color:var(--accent)}
+
+/* ————————————————— 进度条 ————————————————— */
+.bar{
+  height:8px;border-radius:var(--radius-pill);overflow:hidden;
+  background:var(--surface3);border:1px solid var(--line);
+}
+.bar i{
+  display:block;height:100%;border-radius:var(--radius-pill);
+  background:linear-gradient(90deg,var(--accent),var(--accent-hover));
+  box-shadow:0 0 12px color-mix(in srgb,var(--accent) 48%,transparent);
+  transition:width .4s cubic-bezier(.2,.7,.3,1);
+}
+
+/* ————————————————— 标签页 ————————————————— */
+.tabs{
+  display:flex;gap:4px;padding:4px;margin-bottom:18px;
+  background:var(--surface2);border:1px solid var(--line);
+  border-radius:var(--radius-small);
+}
+.tab{
+  flex:1;text-align:center;padding:8px 12px;font-size:13px;font-weight:540;
+  color:var(--fg2);border-radius:7px;cursor:pointer;
+  transition:background-color .2s, color .2s, box-shadow .2s;
+}
+.tab:hover{color:var(--fg)}
+.tab.on{
+  background:var(--surface);color:var(--accent);font-weight:620;
+  box-shadow:var(--shadow-1);
+}
+
+/* ————————————————— 状态胶囊 ————————————————— */
+.pills{display:flex;flex-wrap:wrap;gap:9px}
+.pill{
+  display:inline-flex;align-items:center;gap:7px;
+  padding:5px 13px;border-radius:var(--radius-pill);
+  font-size:12px;font-weight:580;letter-spacing:.01em;
+  border:1px solid transparent;
+}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 13%,transparent);border-color:color-mix(in srgb,var(--ok) 30%,transparent)}
+.pill.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 13%,transparent);border-color:color-mix(in srgb,var(--warn) 30%,transparent)}
+.pill.err{color:var(--err);background:color-mix(in srgb,var(--err) 13%,transparent);border-color:color-mix(in srgb,var(--err) 30%,transparent)}
+.pill.info{color:var(--info);background:color-mix(in srgb,var(--info) 13%,transparent);border-color:color-mix(in srgb,var(--info) 30%,transparent)}
+
+/* ————————————————— 对话框 ————————————————— */
+.dlg{
+  background:var(--surface);
+  border:1px solid var(--line2);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow-3);
+  overflow:hidden;
+  transition:transform .22s cubic-bezier(.2,.7,.3,1), box-shadow .22s;
+}
+.dlg:hover{transform:translateY(-2px)}
+.dlg .hd{
+  display:flex;align-items:center;gap:10px;
+  padding:17px 20px 14px;font-size:15px;font-weight:620;color:var(--fg);
+}
+.dlg .hd .x{
+  margin-left:auto;color:var(--dim);cursor:pointer;font-size:17px;line-height:1;
+  width:26px;height:26px;display:grid;place-items:center;border-radius:8px;
+  transition:background-color .16s, color .16s;
+}
+.dlg .hd .x:hover{background:var(--surface3);color:var(--fg)}
+.dlg .bd{padding:0 20px 6px;font-size:13.5px;color:var(--fg2)}
+.dlg .bd strong{color:var(--fg);font-weight:600}
+.dlg .ft{
+  display:flex;justify-content:flex-end;gap:10px;
+  padding:18px 20px 19px;
+  background:color-mix(in srgb, var(--surface2) 65%, transparent);
+  border-top:1px solid var(--line);
+}
+.warnicon{
+  width:34px;height:34px;flex:none;border-radius:var(--radius-small);
+  display:grid;place-items:center;font-size:16px;
+  color:var(--err);background:color-mix(in srgb,var(--err) 14%,transparent);
+  border:1px solid color-mix(in srgb,var(--err) 26%,transparent);
+}
+
+/* ————————————————— 应用窗口 ————————————————— */
+.win{
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow-3);
+  overflow:hidden;
+  display:flex;flex-direction:column;
+  transition:transform .25s cubic-bezier(.2,.7,.3,1), box-shadow .25s;
+}
+.win:hover{transform:translateY(-2px)}
+.win .title{
+  display:flex;align-items:center;gap:10px;
+  padding:13px 16px;font-size:13px;font-weight:600;color:var(--fg);
+  border-bottom:1px solid var(--line);
+}
+.win .title .appic{
+  width:22px;height:22px;border-radius:7px;display:grid;place-items:center;
+  font-size:12px;background:var(--accent-soft);color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);
+}
+.dots{margin-left:auto;display:flex;gap:7px}
+.dots .d{width:11px;height:11px;border-radius:50%;background:var(--surface3);border:1px solid var(--line2)}
+.dots .d.m{background:color-mix(in srgb,var(--warn) 75%,transparent);border-color:transparent}
+.dots .d.o{background:color-mix(in srgb,var(--ok) 62%,transparent);border-color:transparent}
+.dots .d.c{background:color-mix(in srgb,var(--err) 62%,transparent);border-color:transparent}
+
+.tbar{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:11px 14px;border-bottom:1px solid var(--line);
+  background:color-mix(in srgb, var(--surface2) 70%, transparent);
+}
+.tb{
+  font:inherit;font-size:12.5px;font-weight:540;
+  padding:6px 12px;border-radius:8px;cursor:pointer;
+  color:var(--fg2);background:var(--surface);border:1px solid var(--line2);
+  box-shadow:var(--shadow-1);
+  transition:transform .16s, background-color .18s, color .18s, box-shadow .18s;
+}
+.tb:hover{transform:translateY(-1px);color:var(--fg);box-shadow:var(--shadow-2)}
+.tb.on{color:var(--accent-fg);background:linear-gradient(180deg,var(--accent-hover),var(--accent));border-color:transparent;font-weight:600}
+
+.win .body{display:flex;min-height:268px}
+.win .side{
+  width:150px;flex:none;padding:12px 10px;
+  background:color-mix(in srgb, var(--surface2) 78%, transparent);
+  border-right:1px solid var(--line);
+  font-size:12.5px;
+}
+.win .side .grp{font-size:10.5px;font-weight:660;color:var(--dim);letter-spacing:.08em;
+                text-transform:uppercase;padding:4px 9px 7px}
+.win .side .it{
+  padding:7px 10px;border-radius:8px;color:var(--fg2);cursor:pointer;
+  display:flex;gap:9px;align-items:center;
+  transition:background-color .16s, color .16s;
+}
+.win .side .it:hover{background:var(--surface3);color:var(--fg)}
+.win .side .it.on{
+  background:var(--accent-soft);color:var(--accent);font-weight:600;
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 24%,transparent);
+}
+.win .main{flex:1;overflow:auto;min-width:0}
+
+.hdr{
+  display:grid;grid-template-columns:22px 1fr 84px 62px;gap:10px;
+  padding:9px 15px;font-size:11px;font-weight:620;color:var(--dim);
+  letter-spacing:.05em;text-transform:uppercase;
+  background:color-mix(in srgb, var(--surface2) 60%, transparent);
+  border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:1;
+}
+.cr{
+  display:grid;grid-template-columns:22px 1fr 84px 62px;gap:10px;
+  padding:9px 15px;font-size:13px;color:var(--fg2);align-items:center;
+  border-bottom:1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  cursor:pointer;
+  transition:background-color .16s, color .16s, box-shadow .16s;
+}
+.cr:hover{background:var(--surface2);color:var(--fg)}
+.cr.sel{
+  background:var(--sel);color:var(--fg);font-weight:560;
+  box-shadow:inset 3px 0 0 var(--accent);
+}
+.cr.sel .r{color:var(--accent)}
+.cr .r{text-align:right;color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+.cr .ic{text-align:center;opacity:.9}
+
+.win .status{
+  display:flex;gap:16px;align-items:center;
+  padding:9px 16px;font-size:11.5px;color:var(--dim);
+  border-top:1px solid var(--line);
+  background:color-mix(in srgb, var(--surface2) 70%, transparent);
+}
+.win .status .right{margin-left:auto;display:flex;gap:14px}
+
+.setrow{
+  display:flex;align-items:center;gap:14px;
+  padding:14px 18px;
+  border-bottom:1px solid color-mix(in srgb, var(--line) 68%, transparent);
+  transition:background-color .16s;
+}
+.setrow:last-child{border-bottom:none}
+.setrow:hover{background:color-mix(in srgb, var(--surface2) 55%, transparent)}
+.setrow .t{flex:1;min-width:0}
+.setrow .t b{display:block;font-size:13.5px;font-weight:560;color:var(--fg)}
+.setrow .t span{display:block;font-size:12px;color:var(--dim);margin-top:2px}
+.accents{display:flex;gap:7px;align-items:center}
+.accents span{
+  width:20px;height:20px;border-radius:50%;cursor:pointer;
+  box-shadow:0 1px 4px rgba(0,0,0,.28), inset 0 0 0 1px rgba(255,255,255,.16);
+  transition:transform .18s cubic-bezier(.2,.7,.3,1);
+}
+.accents span:hover{transform:scale(1.14)}
+.accents span.on{box-shadow:0 0 0 2.5px var(--surface), 0 0 0 4.5px currentColor, 0 1px 6px rgba(0,0,0,.3)}
+
+/* ————————————————— 代码块 ————————————————— */
+.code{
+  background:color-mix(in srgb, var(--bg) 55%, var(--surface));
+  border:1px solid var(--line2);
+  border-radius:var(--radius-small);
+  padding:19px 21px;overflow-x:auto;
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:12.5px;line-height:1.85;color:var(--fg2);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+}
+.code .kw{color:var(--accent);font-weight:600}
+.code .ty{color:var(--info)}
+.code .cm{color:var(--dim);font-style:italic}
+.code .st{color:var(--ok)}
+.code .fn{color:var(--warn)}
+.note{
+  display:flex;gap:11px;align-items:flex-start;
+  margin-top:16px;padding:13px 16px;
+  font-size:12.5px;color:var(--fg2);
+  background:color-mix(in srgb,var(--warn) 9%,transparent);
+  border:1px solid color-mix(in srgb,var(--warn) 24%,transparent);
+  border-radius:var(--radius-small);
+}
+.note .ni{color:var(--warn);flex:none;font-size:14px;line-height:1.4}
+.note b{color:var(--fg)}
+
+.foot{margin-top:46px;text-align:center;font-size:12px;color:var(--dim)}
+
+@media (max-width:720px){
+  body{padding:30px 14px 70px}
+  h1{font-size:22px}
+  .box{padding:17px}
+  .win .side{width:118px}
+  .hdr,.cr{grid-template-columns:20px 1fr 62px}
+  .hdr span:nth-child(4),.cr span:nth-child(4){display:none}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ══════════════ 1. 页头 ══════════════ -->
+  <div class="top">
+    <h1>方案 03 · Soft Card</h1>
+    <span class="badge">卡片优先 · 现代桌面</span>
+    <button class="tg" onclick="document.body.classList.toggle('light')">切换深色 / 浅色</button>
+  </div>
+  <p class="sub">
+    以<strong>卡片</strong>为基本容器：大圆角（10–14px）、柔和多层阴影、克制的 1px 亮边、充足留白，
+    强调色从 Breeze 蓝换成<strong>靛紫 indigo/violet</strong>。视觉目标接近当代 Web 应用与 macOS Big Sur ——
+    让 HBOS 的 13 个应用共享同一套「浮起来的表面」语言，而不是 13 种各自为政的平面配色。
+  </p>
+
+  <!-- ══════════════ 2. 色彩令牌 ══════════════ -->
+  <h2>色彩令牌</h2>
+  <div class="row">
+    <div class="box">
+      <h3>语义色 swatch</h3>
+      <div class="swatches">
+        <i style="background:var(--bg)"></i>
+        <i style="background:var(--surface)"></i>
+        <i style="background:var(--surface2)"></i>
+        <i style="background:var(--surface3)"></i>
+        <i style="background:var(--accent)"></i>
+        <i style="background:var(--ok)"></i>
+        <i style="background:var(--warn)"></i>
+        <i style="background:var(--err)"></i>
+      </div>
+      <div class="sw-grid">
+        <div class="sw"><em style="background:var(--bg)"></em>bg 画布</div>
+        <div class="sw"><em style="background:var(--surface)"></em>surface 卡片</div>
+        <div class="sw"><em style="background:var(--surface2)"></em>surface2 内嵌</div>
+        <div class="sw"><em style="background:var(--surface3)"></em>surface3 悬浮</div>
+        <div class="sw"><em style="background:var(--accent)"></em>accent 强调</div>
+        <div class="sw"><em style="background:var(--ok)"></em>ok 成功</div>
+        <div class="sw"><em style="background:var(--warn)"></em>warn 警告</div>
+        <div class="sw"><em style="background:var(--err)"></em>err 错误</div>
+      </div>
+    </div>
+
+    <div class="box">
+      <h3>文字层级</h3>
+      <div class="type-demo">
+        <div class="t1">主标题 fg — 19px / 650</div>
+        <div class="t2">正文 fg — 14px / 520</div>
+        <div class="t3">次文字 fg2 — 说明与副标题 13px</div>
+        <div class="t4">弱文字 dim — 元信息、占位、单位 12px</div>
+        <div class="t5">强调 accent — 链接、选中态、当前项</div>
+      </div>
+      <div class="tok" style="margin-top:20px;border-top:1px solid var(--line);padding-top:14px">
+        <b>深色</b> bg #0f1320 · surface #181d2e · accent #7c8cff<br>
+        <b>浅色</b> bg #f4f6fb · surface #ffffff · accent #4a5ae8
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 3. 按钮 ══════════════ -->
+  <h2>按钮</h2>
+  <div class="box">
+    <h3>五种层级</h3>
+    <div class="btns">
+      <button class="btn primary">主要操作</button>
+      <button class="btn">次要操作</button>
+      <button class="btn ghost">文字按钮</button>
+      <button class="btn danger">危险操作</button>
+      <button class="btn" disabled>禁用</button>
+    </div>
+    <div class="btns" style="margin-top:16px">
+      <button class="btn primary sm">小号主要</button>
+      <button class="btn sm">小号次要</button>
+      <button class="btn ghost sm">小号文字</button>
+    </div>
+    <div class="tok" style="margin-top:16px">
+      悬浮时整体上抬 1px 并加深阴影（gentle hover lift），按下回落到 <b>shadow-1</b>；
+      主按钮带 <b>accent glow</b>，危险按钮用 err 的柔和外发光而非纯色块。
+    </div>
+  </div>
+
+  <!-- ══════════════ 4. 表单控件 ══════════════ -->
+  <h2>表单控件</h2>
+  <div class="row">
+    <div class="box">
+      <h3>输入</h3>
+      <div class="field">
+        <label>设备名称</label>
+        <input class="inp" value="hbos-main-disk">
+        <span class="hint">名称将显示在文件管理器侧栏</span>
+      </div>
+      <div class="field" style="margin-bottom:8px">
+        <label>挂载路径</label>
+        <input class="inp" placeholder="/home/user/docs">
+        <span class="hint">留空则挂载到 /mnt</span>
+      </div>
+      <label class="chk on"><i>✓</i> 记住此设备设置</label>
+      <label class="chk"><i>✓</i> 开机自动挂载</label>
+    </div>
+
+    <div class="box">
+      <h3>开关与分段</h3>
+      <div class="sw-row" style="padding-top:0">
+        <div class="t"><b>深色主题</b><span>跟随系统外观自动切换</span></div>
+        <div class="switch on"></div>
+      </div>
+      <div class="sw-row">
+        <div class="t"><b>柔和阴影</b><span>卡片多层投影，关闭可省渲染</span></div>
+        <div class="switch"></div>
+      </div>
+      <div class="sw-row" style="padding-bottom:0">
+        <div class="t"><b>界面缩放</b><span>影响全部 13 个应用</span></div>
+        <div class="seg"><b>100%</b><b class="on">125%</b><b>150%</b></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 5. 列表 · 进度 · 标签页 · 状态 ══════════════ -->
+  <h2>列表 · 进度 · 标签页 · 状态</h2>
+  <div class="row">
+    <div class="box">
+      <h3>列表（选中 / 悬浮 / 右侧元信息）</h3>
+      <div class="list">
+        <div class="li sel"><span class="ic">▸</span> 文档<span class="meta">12 项</span></div>
+        <div class="li"><span class="ic">▸</span> 下载<span class="meta">3 项</span></div>
+        <div class="li"><span class="ic">▤</span> 设计规范.pdf<span class="meta">2.4 MB</span></div>
+        <div class="li"><span class="ic">▤</span> 会议笔记.txt<span class="meta">8 KB</span></div>
+        <div class="li"><span class="ic">▤</span> 截图-1007.png<span class="meta">412 KB</span></div>
+      </div>
+      <div style="margin-top:20px">
+        <div class="bar"><i style="width:68%"></i></div>
+        <div class="tok" style="margin-top:9px">复制进度 <b>68%</b> · 1.7 GB / 2.5 GB</div>
+      </div>
+    </div>
+
+    <div class="box">
+      <h3>标签页</h3>
+      <div class="tabs">
+        <div class="tab on">常规</div>
+        <div class="tab">外观</div>
+        <div class="tab">存储</div>
+      </div>
+      <h3 style="margin-top:20px">状态胶囊</h3>
+      <div class="pills">
+        <span class="pill ok">已连接</span>
+        <span class="pill warn">同步中</span>
+        <span class="pill err">挂载失败</span>
+        <span class="pill info">只读</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 6. 对话框 ══════════════ -->
+  <h2>对话框</h2>
+  <div class="row">
+    <div class="box">
+      <h3>破坏性确认</h3>
+      <div class="dlg">
+        <div class="hd">
+          <span class="warnicon">!</span>
+          确认删除
+          <span class="x">×</span>
+        </div>
+        <div class="bd">
+          将永久删除 <strong>「设计规范.pdf」</strong> 及其全部副本，此操作不可撤销。
+        </div>
+        <div class="ft">
+          <button class="btn">取消</button>
+          <button class="btn danger">删除</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="box">
+      <h3>重命名输入</h3>
+      <div class="dlg">
+        <div class="hd">重命名<span class="x">×</span></div>
+        <div class="bd">
+          <input class="inp" value="设计规范-2026.pdf" style="margin:2px 0 4px">
+          <div class="hint">使用 .pdf 扩展名，保持可被 PDF 阅读器打开</div>
+        </div>
+        <div class="ft">
+          <button class="btn">取消</button>
+          <button class="btn primary">确定</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 7. 应用实景 ══════════════ -->
+  <h2>应用实景</h2>
+  <div class="row">
+    <!-- 文件管理器 -->
+    <div class="win">
+      <div class="title">
+        <span class="appic">▤</span> 文件管理器 — 主目录
+        <span class="dots"><span class="d m"></span><span class="d o"></span><span class="d c"></span></span>
+      </div>
+      <div class="tbar">
+        <button class="tb">←</button>
+        <button class="tb">→</button>
+        <button class="tb">↑</button>
+        <button class="tb on">列表</button>
+        <button class="tb">图标</button>
+        <input class="inp" style="flex:1;min-width:110px;padding:6px 12px;font-size:12.5px" placeholder="搜索文件…">
+      </div>
+      <div class="body">
+        <div class="side">
+          <div class="grp">位置</div>
+          <div class="it on">▸ 主目录</div>
+          <div class="it">▸ 文档</div>
+          <div class="it">▸ 下载</div>
+          <div class="it">▸ 图片</div>
+          <div class="grp" style="margin-top:8px">设备</div>
+          <div class="it">▣ hbos-main</div>
+          <div class="it">▣ U 盘</div>
+        </div>
+        <div class="main">
+          <div class="hdr"><span></span><span>名称</span><span class="r">大小</span><span class="r">修改</span></div>
+          <div class="cr sel"><span class="ic">▸</span><span>文档</span><span class="r">—</span><span class="r">今天</span></div>
+          <div class="cr"><span class="ic">▸</span><span>下载</span><span class="r">—</span><span class="r">昨天</span></div>
+          <div class="cr"><span class="ic">▤</span><span>设计规范.pdf</span><span class="r">2.4 MB</span><span class="r">10-07</span></div>
+          <div class="cr"><span class="ic">▤</span><span>会议笔记.txt</span><span class="r">8 KB</span><span class="r">10-06</span></div>
+          <div class="cr"><span class="ic">▤</span><span>截图-1007.png</span><span class="r">412 KB</span><span class="r">10-05</span></div>
+          <div class="cr"><span class="ic">▤</span><span>build.log</span><span class="r">61 KB</span><span class="r">10-05</span></div>
+        </div>
+      </div>
+      <div class="status">
+        <span>6 项</span><span>已选 1 项</span>
+        <span class="right"><span>可用 32.5 GB</span><span>FAT32</span></span>
+      </div>
+    </div>
+
+    <!-- 系统设置 -->
+    <div class="win">
+      <div class="title">
+        <span class="appic">⚙</span> 系统设置 — 外观
+        <span class="dots"><span class="d m"></span><span class="d o"></span><span class="d c"></span></span>
+      </div>
+      <div class="body">
+        <div class="side">
+          <div class="grp">系统</div>
+          <div class="it on">🎨 外观</div>
+          <div class="it">🖥 显示</div>
+          <div class="it">🔊 声音</div>
+          <div class="it">🌐 网络</div>
+          <div class="grp" style="margin-top:8px">其他</div>
+          <div class="it">⌨ 快捷键</div>
+          <div class="it">ℹ 关于</div>
+        </div>
+        <div class="main">
+          <div class="setrow">
+            <div class="t"><b>主题模式</b><span>深色 / 浅色 / 跟随时间</span></div>
+            <div class="seg"><b class="on">深色</b><b>浅色</b><b>自动</b></div>
+          </div>
+          <div class="setrow">
+            <div class="t"><b>强调色</b><span>按钮、选中行与焦点环</span></div>
+            <div class="accents">
+              <span class="on" style="background:#7c8cff;color:#7c8cff"></span>
+              <span style="background:#3ddc97;color:#3ddc97"></span>
+              <span style="background:#ffc061;color:#ffc061"></span>
+              <span style="background:#ff6b7f;color:#ff6b7f"></span>
+              <span style="background:#5bc8f5;color:#5bc8f5"></span>
+            </div>
+          </div>
+          <div class="setrow">
+            <div class="t"><b>圆角</b><span>控件与卡片的圆润程度</span></div>
+            <div class="seg"><b>小</b><b class="on">中</b><b>大</b></div>
+          </div>
+          <div class="setrow">
+            <div class="t"><b>界面缩放</b><span>影响全部应用</span></div>
+            <div class="seg"><b>100%</b><b class="on">125%</b><b>150%</b></div>
+          </div>
+          <div class="setrow">
+            <div class="t"><b>窗口动画</b><span>淡入与悬浮位移过渡</span></div>
+            <div class="switch on"></div>
+          </div>
+          <div class="setrow">
+            <div class="t"><b>柔和阴影</b><span>关闭可减少合成开销</span></div>
+            <div class="switch"></div>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span>设置 · 外观</span>
+        <span class="right"><span>已保存</span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 8. 令牌映射 ══════════════ -->
+  <h2>落到代码：令牌映射</h2>
+  <div class="box">
+    <div class="code"><span class="cm">/* hbos/gui/theme.h — 全部应用只读这一个结构体，禁止硬编码颜色 */</span>
+<span class="kw">typedef struct</span> <span class="ty">gui_theme_t</span> {
+    <span class="ty">gui_color_t</span> bg, surface, surface2, surface3;   <span class="cm">/* 画布与三层卡片 */</span>
+    <span class="ty">gui_color_t</span> line, line2;                     <span class="cm">/* 1px 分隔线 / 亮边 */</span>
+    <span class="ty">gui_color_t</span> fg, fg2, dim;                   <span class="cm">/* 三级文字 */</span>
+    <span class="ty">gui_color_t</span> accent, accent_fg, accent_hover; <span class="cm">/* 靛紫强调色 */</span>
+    <span class="ty">gui_color_t</span> ok, warn, err;                   <span class="cm">/* 语义色 */</span>
+    <span class="ty">gui_color_t</span> sel;                            <span class="cm">/* 选中行底色（accent 低透明度）*/</span>
+    <span class="ty">int</span>         radius, radius_small;            <span class="cm">/* 14 / 10 */</span>
+    <span class="ty">uint8_t</span>     shadow_alpha;                    <span class="cm">/* 0..255，多层阴影统一强度 */</span>
+} <span class="ty">gui_theme_t</span>;
+
+<span class="cm">/* 应用侧：只引用令牌，不写死颜色字面量 */</span>
+<span class="fn">gui_fill_round_rect</span>(x, y, w, h, T-&gt;radius, T-&gt;surface);   <span class="cm">/* 卡片 */</span>
+<span class="fn">gui_fill_round_rect</span>(rx, ry, rw, rh, T-&gt;radius_small, T-&gt;sel);  <span class="cm">/* 选中行 */</span>
+<span class="fn">gui_text</span>(x, y, name, T-&gt;fg);
+<span class="fn">gui_text</span>(x, y, meta, T-&gt;dim);
+<span class="fn">gui_round_rect_border</span>(x, y, w, h, T-&gt;radius, T-&gt;line, 1);</div>
+
+    <div class="note">
+      <span class="ni">◆</span>
+      <span>
+        <b>实现代价提示：</b>本方案的柔和多层阴影与大圆角在合成阶段更贵。内核态软件合成器没有 GPU 加速时，
+        圆角需要逐行裁剪 + alpha 混合，多层阴影要么预烘焙成九宫格位图（推荐：每种半径/强度一张，缓存复用），
+        要么退化为单层半透明描边。建议 <code>gui_theme_t</code> 里保留 <code>radius</code> 与 <code>shadow_alpha</code>，
+        让低配机器把 <code>radius</code> 拉到 4、<code>shadow_alpha</code> 拉到 0，视觉不崩但开销显著下降。
+      </span>
+    </div>
+  </div>
+
+  <div class="foot">HBOS 设计系统 · 候选方案 03 / 05 · Soft Card</div>
+</div>
+</body>
+</html>

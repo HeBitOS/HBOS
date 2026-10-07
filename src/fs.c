@@ -516,7 +516,14 @@ static void fat32_rebuild_dir(uint32_t dir_cluster, const char *prefix) {
         if (fat32_lookup(&fat32_fs, dir_cluster, name, &cluster, &fsize, &attr) < 0) { continue; }
         if (attr & (FAT32_ATTR_VOLUME_ID | FAT32_ATTR_LFN)) { continue; }
         uint32_t nlen = 0; while (name[nlen] && nlen < MAX_FILENAME - 1) nlen++;
-        if (plen + 1 + nlen >= MAX_FILENAME) continue; /* 完整路径超出扁平表可表示的长度 */
+        /* 完整路径（前缀 + 可选 '/' 分隔符 + 名字）必须装得进 MAX_FILENAME-1
+         * 个字符再加 '\0'。此前写成 `plen + 1 + nlen >= MAX_FILENAME`，
+         * 对**根目录**（plen==0，没有分隔符）恒多算 1 个字符，于是名字正好
+         * MAX_FILENAME-1=31 字符的文件被整条 continue 跳过：文件与 LFN 在盘
+         * 上都正常（宿主 mdir 可见、fat32_lookup 也能按原名命中），只是不进
+         * 扁平文件表，重启后 cat/ls 都找不到，看起来仍像“文件消失”。
+         * 分隔符只在 plen>0 时才占一个字符，故按是否真有前缀来算。 */
+        if (plen + (plen ? 1u : 0u) + nlen >= MAX_FILENAME) continue;
         char full[MAX_FILENAME];
         memcpy(full, prefix, plen);
         if (plen) full[plen++] = '/';
@@ -1280,6 +1287,187 @@ int fs_install_disk_fat32_at(uint32_t start, uint32_t sectors) {
     if (!fat32_range_valid(start, sectors)) return fs_fail("FAT32 分区范围无效");
     if (fat32_write_mbr_partition(start, sectors) < 0) return fs_fail("写入分区表失败");
     return fat32_format_range(start, sectors);
+}
+
+/* ─────────── 可引导安装（BIOS=GRUB） ───────────
+ *
+ * `install auto` 此前只准备存储（写分区表 + 格式化 FAT32），从不写 MBR 前
+ * 446 字节的引导代码，于是磁盘"有分区、不可引导"——弹出 DVD 就进不去系统。
+ *
+ * 这里补齐引导器安装。构建期已把 GRUB 的 boot.img（MBR 引导代码）与
+ * core.img（LBA1 起的核心镜像，内嵌了"找到 FAT 上的 /boot/grub/grub.cfg
+ * 并 configfile 过去"的最小配置）经 src/boot/grub_blob.asm incbin 嵌进内核
+ * （guest 内既无 ISO9660 也无 ATAPI，拿不到 CD 上的文件，必须嵌）。
+ *
+ * 写入顺序与 GRUB 的预期布局一致：
+ *   LBA 0        : boot.img 的前 446 字节（引导代码）——分区表与 55AA 保留
+ *   LBA 1 .. N   : core.img 原始字节
+ * 随后把内核镜像与 grub.cfg 放进 FAT 分区，GRUB 才能 chainload 到它。
+ */
+extern const uint8_t _binary_build_grub_boot_img_start[];
+extern const uint8_t _binary_build_grub_boot_img_end[];
+extern const uint8_t _binary_build_grub_core_img_start[];
+extern const uint8_t _binary_build_grub_core_img_end[];
+
+/* GRUB 引导代码只占 boot.img 的前 446 字节：其后是分区表(446..509)与
+ * 55AA 签名(510..511)，这两处必须保留我们自己写的分区表。 */
+#define GRUB_BOOT_CODE_LEN 446u
+
+/** 把 GRUB 引导块写入磁盘（MBR 引导代码 + core.img）。不触碰分区表。 */
+static int grub_write_boot_blocks(void) {
+    const uint8_t *boot = _binary_build_grub_boot_img_start;
+    const uint8_t *core = _binary_build_grub_core_img_start;
+    uint32_t core_len = (uint32_t)(_binary_build_grub_core_img_end - core);
+    if (core_len == 0) return fs_fail("GRUB core.img 未嵌入");
+
+    /* 先把现有 MBR 读进来，只覆盖前 446 字节，保留分区表与签名 */
+    uint8_t mbr[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+    if (block_read_sector(0, mbr) < 0) return fs_fail("读取 MBR 失败");
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA)
+        return fs_fail("分区表无效（请先 install auto）");
+    memcpy(mbr, boot, GRUB_BOOT_CODE_LEN);
+    if (block_write_sector(0, mbr) < 0) return fs_fail("写入 MBR 引导代码失败");
+
+    /* core.img 从 LBA1 起连续写入。注意不能超出第一个分区起点（通常
+     * LBA2048），否则会踩坏 FAT 引导扇区——core.img 约 160KB（313 扇区），
+     * 而空隙有 2047 扇区，正常装得下；这里显式校验以防异常布局。 */
+    uint32_t core_sectors = (core_len + BLOCK_SECTOR_SIZE - 1) / BLOCK_SECTOR_SIZE;
+    uint32_t first_part_lba = 0;
+    for (uint32_t i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        uint32_t lba = get_le32(e + 8);
+        if (e[4] != 0 && lba > 0 && (first_part_lba == 0 || lba < first_part_lba))
+            first_part_lba = lba;
+    }
+    if (first_part_lba && 1u + core_sectors > first_part_lba)
+        return fs_fail("core.img 超出 MBR 后空隙");
+
+    for (uint32_t i = 0; i < core_sectors; i++) {
+        uint8_t sec[BLOCK_SECTOR_SIZE] __attribute__((aligned(2)));
+        uint32_t off = i * BLOCK_SECTOR_SIZE;
+        uint32_t n = core_len - off;
+        if (n > BLOCK_SECTOR_SIZE) n = BLOCK_SECTOR_SIZE;
+        memset(sec, 0, sizeof(sec));
+        memcpy(sec, core + off, n);
+        if (block_write_sector(1 + i, sec) < 0) return fs_fail("写入 core.img 失败");
+    }
+    return 0;
+}
+
+/** 构建期嵌入的 GRUB 引导块字节数（供安装命令打印进度）。 */
+uint32_t fs_grub_boot_image_size(void) {
+    return (uint32_t)(_binary_build_grub_boot_img_end - _binary_build_grub_boot_img_start);
+}
+uint32_t fs_grub_core_image_size(void) {
+    return (uint32_t)(_binary_build_grub_core_img_end - _binary_build_grub_core_img_start);
+}
+
+/**
+ * 让当前磁盘可独立引导（BIOS/GRUB）。
+ *
+ * 前置：磁盘已有可用的 FAT32 分区（先跑 install auto）。
+ * 步骤：① 写 GRUB 引导块；② 确保 /boot 与 /boot/grub 存在并写出 grub.cfg。
+ * 内核镜像 /boot/hbos.bin 由调用方（install 命令）在拿得到自身镜像时写入，
+ * 因为只有它知道镜像来源（引导介质上的 module2 或内嵌副本）。
+ *
+ * @return 0 成功；-1 失败（fs_last_error() 给出原因）
+ */
+int fs_install_boot_grub(void) {
+    fs_error = "ok";
+    if (block_init() < 0) return fs_fail("未检测到可写硬盘");
+    if (fs_backend != FS_BACKEND_FAT32) return fs_fail("需要先 install auto（FAT32）");
+
+    if (grub_write_boot_blocks() < 0) return -1;
+
+    /* /boot 与 /boot/grub：GRUB 的 prefix 指向 ($root)/boot/grub */
+    if (!vfs_lookup("/boot")) {
+        if (vfs_mkdir("/boot") < 0 && !vfs_lookup("/boot"))
+            return fs_fail("创建 /boot 失败");
+    }
+    if (!vfs_lookup("/boot/grub")) {
+        if (vfs_mkdir("/boot/grub") < 0 && !vfs_lookup("/boot/grub"))
+            return fs_fail("创建 /boot/grub 失败");
+    }
+
+    /* grub.cfg：菜单与 core.img 里内嵌的最小配置衔接。用 multiboot2 加载
+     * 内核，与 ISO 路径（Makefile 的 GRUB 菜单）保持一致。 */
+    static const char cfg[] =
+        "set timeout=3\n"
+        "set default=0\n"
+        "insmod all_video\n"
+        "insmod gfxterm\n"
+        "set gfxmode=1024x768x32,auto\n"
+        "menuentry \"HBOS (disk)\" {\n"
+        "  multiboot2 /boot/hbos.bin\n"
+        "}\n"
+        "menuentry \"HBOS (text mode)\" {\n"
+        "  terminal_output console\n"
+        "  multiboot2 /boot/hbos.bin\n"
+        "}\n";
+    vfs_node_t *f = vfs_lookup("/boot/grub/grub.cfg");
+    if (!f) f = vfs_create("/boot/grub/grub.cfg");
+    if (!f) return fs_fail("创建 grub.cfg 失败");
+    if (vfs_write(f, 0, cfg, (uint32_t)strlen(cfg)) < 0)
+        return fs_fail("写入 grub.cfg 失败");
+    return 0;
+}
+
+/**
+ * 从 multiboot2 的模块标签里找引导器交给我们的内核镜像。
+ *
+ * 引导配置（Makefile 的 GRUB 菜单）把内核同时作为 module2 传进来，于是
+ * guest 内 install 可以把它原样写到目标盘的 /boot/hbos.bin——内核自身在
+ * 内存里只有 LOAD 段内容、没有 ELF 头，不能直接当文件写出去，必须用
+ * 引导器读盘得到的那份完整镜像。
+ *
+ * @param out_len 写出镜像长度
+ * @return 镜像起始地址（内核恒等映射，可直接访问）；找不到返回 NULL
+ */
+const uint8_t *fs_boot_module_image(uint32_t *out_len) {
+    extern void *g_mbi;
+    if (out_len) *out_len = 0;
+    if (!g_mbi) return NULL;
+    uintptr_t base = (uintptr_t)g_mbi;
+    uint32_t total = *(uint32_t *)base;
+    for (uintptr_t p = base + 8; p < base + total; ) {
+        uint32_t t  = *(uint32_t *)p;
+        uint32_t sz = *(uint32_t *)(p + 4);
+        if (t == 0) break;
+        if (t == 3) {
+            uint32_t start = *(uint32_t *)(p + 8);
+            uint32_t end   = *(uint32_t *)(p + 12);
+            if (end > start) {
+                if (out_len) *out_len = end - start;
+                return (const uint8_t *)(uintptr_t)start;
+            }
+        }
+        p += sz;
+        if (p & 7) p = (p + 7) & ~(uintptr_t)7;
+    }
+    return NULL;
+}
+
+/**
+ * 把一段内核镜像写入 /boot/hbos.bin（引导盘上的 payload）。
+ * @param data 内核镜像起始地址（须是可直接访问的内核虚拟地址）
+ * @param len  镜像长度（字节）
+ */
+int fs_install_boot_kernel(const uint8_t *data, uint32_t len) {
+    fs_error = "ok";
+    if (!data || len == 0) return fs_fail("内核镜像无效");
+    if (fs_backend != FS_BACKEND_FAT32) return fs_fail("需要先 install auto（FAT32）");
+    if (!vfs_lookup("/boot")) {
+        if (vfs_mkdir("/boot") < 0 && !vfs_lookup("/boot"))
+            return fs_fail("创建 /boot 失败");
+    }
+    vfs_node_t *f = vfs_lookup("/boot/hbos.bin");
+    if (!f) f = vfs_create("/boot/hbos.bin");
+    if (!f) return fs_fail("创建 /boot/hbos.bin 失败");
+    /* 先截断：旧镜像可能比新镜像长，直接覆盖会留下尾部残留，GRUB 读到的
+     * 长度虽由目录项给出，但残留数据仍会占盘且容易误判。 */
+    (void)vfs_truncate(f);
+    if (vfs_write(f, 0, data, len) < 0) return fs_fail("写入内核镜像失败");
+    return 0;
 }
 
 /** 挂载磁盘上的 HBFS 文件系统 */

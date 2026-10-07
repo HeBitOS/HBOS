@@ -61,6 +61,16 @@ int fs_install_disk_at(uint32_t start_lba, uint32_t sectors); /**< 在指定 LBA
 int fs_format_disk_fat32(void);   /**< 格式化磁盘为 FAT32（使用默认/已有范围） */
 int fs_install_disk_fat32(void);  /**< 在磁盘上安装 FAT32 文件系统（自动选择分区范围），成为新装默认格式 */
 int fs_install_disk_fat32_at(uint32_t start_lba, uint32_t sectors); /**< 在指定 LBA 范围安装 FAT32 */
+/** 让当前 FAT32 盘可独立引导（BIOS/GRUB）：写 MBR 引导代码 + core.img +
+ *  /boot/grub/grub.cfg。需先 install auto。 */
+int fs_install_boot_grub(void);
+/** 把内核镜像写入 /boot/hbos.bin（引导盘 payload，GRUB 据此 chainload）。 */
+int fs_install_boot_kernel(const uint8_t *data, uint32_t len);
+/** 取引导器经 multiboot2 module2 交来的内核镜像（install 写引导盘用）。 */
+const uint8_t *fs_boot_module_image(uint32_t *out_len);
+/** 构建期嵌入的 GRUB 引导块尺寸（进度显示用）。 */
+uint32_t fs_grub_boot_image_size(void);
+uint32_t fs_grub_core_image_size(void);
 const char *fs_last_error(void); /**< 获取最近一次错误描述 */
 int fs_read_partitions(fs_partition_info_t out[4]); /**< 读取分区表信息（最多 4 个分区） */
 int fs_mount_disk(void);         /**< 挂载磁盘上的 HBFS 文件系统 */
