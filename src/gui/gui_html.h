@@ -140,4 +140,56 @@ enum {
 void gh_css_resolve_for_tag(const char *tag, int tag_len, const char *cls,
                             const char *id, const char *inline_style, css_decl_t *out);
 
+/* ── 浏览器链接热点（排版层维护，gui.c 做命中测试）── */
+#define BROWSER_LINK_RECT_MAX 96
+typedef struct { int x, y, w, h; int link_idx; } browser_link_rect_t;
+
+void gb_img_set(int slot, int w, int h, const uint8_t *rgb, uint32_t nbytes);
+void gb_img_set_src(int slot, const char *src);
+int  gb_img_count(void);
+void gb_img_reset(void);
+
+typedef struct {
+    browser_style_t bs;
+    int link_idx;
+    uint32_t start, len;
+} br_run_t;
+typedef struct {
+    int slot;              /* 1..BR_IMG_SLOTS 已登记图片槽，0 无图占位 */
+    int link_idx;          /* -1 无链接（BR_META 解析出来） */
+    uint32_t title_start, title_len;
+    uint32_t meta_start, meta_len;
+    uint32_t dur_start, dur_len;
+    uint32_t end;          /* 块结束位置（'\n' 之后） */
+} br_card_t;
+
+void gb_browser_add_link_rect(int x, int y, int w, int h, int link_idx);
+int gb_browser_draw_segment(int x, int w, int *cy, int row_unit, int scroll, int max_lines, int *drawn_rows, const char *buf, uint32_t start, uint32_t seg_len, const browser_style_t *bsp, int link_idx);
+uint32_t gb_br_read_style(const char *buf, uint32_t len, uint32_t i, int type, browser_style_t *bs, int *link_idx);
+uint32_t gb_br_utf8_next(const char *s, uint32_t pos, uint32_t end, uint32_t *cp_out);
+int gb_br_cp_is_cjk(uint32_t cp);
+void gb_br_draw_tok(int px, int py, int rowh, int rh, const char *tok, int tw, const browser_style_t *bs, int link_idx);
+int gb_browser_flow_block(int x, int w, int *cy, int row_unit, int scroll, int max_lines, int *drawn_rows, const char *buf, const br_run_t *runs, int nrun);
+uint32_t gb_br_table_cell(const char *buf, uint32_t start, uint32_t seg_len, int col, char *out, uint32_t out_cap);
+void gb_br_table_scan(const char *buf, uint32_t len, uint32_t pos, int avail_w, int *col_w, int *ncols_out);
+int gb_br_draw_table_row(int x, int *cy, int row_unit, int scroll, int max_lines, int *drawn_rows, const char *buf, uint32_t start, uint32_t seg_len, const browser_style_t *bs, const int *col_w, int ncols, int last_row);
+uint32_t gb_br_card_read(const char *buf, uint32_t len, uint32_t i, br_card_t *c);
+void gb_br_card_text_copy(const char *buf, uint32_t start, uint32_t len, char *out, uint32_t cap);
+int gb_browser_draw_card_grid(int x, int w, int *cy, int row_unit, int scroll, int max_lines, int *drawn_rows, const char *buf, const br_card_t *cards, int ncards);
+int gb_browser_draw_hero_card(int x, int w, int *cy, int row_unit, int scroll, int max_lines, int *drawn_rows, const char *buf, const br_card_t *card);
+int gb_draw_rendered_page(int x, int y, int w, int h, const char *buf, uint32_t len, int scroll);
+void gb_br_icon_arrow(int cx, int cy, int dir, uint32_t col);
+void gb_br_icon_reload(int cx, int cy, uint32_t col, uint32_t bg);
+
+int  gb_link_rect_count(void);
+browser_link_rect_t *gb_link_rect_at(int idx);
+void gb_link_rects_reset(void);
+
+#define BR_TOOL_H 42
+#define BR_TAB_H  30
+#define BR_BTN_R  14
+#define BR_BACK_CX   6
+#define BR_FWD_CX    40
+#define BR_RELOAD_CX 74
+#define BR_BTN_CY    (BR_TAB_H + BR_TOOL_H / 2)
 #endif /* HBOS_GUI_HTML_H */

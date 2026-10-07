@@ -284,6 +284,7 @@ C_SRCS = \
 GUI_C_SRCS = \
 	$(SRC_DIR)/gui/gui_draw_impl.c \
 	$(SRC_DIR)/gui/gui_html.c \
+	$(SRC_DIR)/gui/gui_browser_layout.c \
 	$(SRC_DIR)/ui/ui_widget.c \
 	$(SRC_DIR)/ui/ui_controls.c \
 	$(SRC_DIR)/gpu.c \
@@ -301,6 +302,7 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/browser_layout.c \
 	$(SRC_DIR)/gui/gui_apps.c \
 	$(SRC_DIR)/gui/apps/app_uigallery.c \
+	$(SRC_DIR)/gui/apps/app_browser.c \
 	$(SRC_DIR)/gui/apps/app_calc.c \
 	$(SRC_DIR)/gui/apps/app_clock.c \
 	$(SRC_DIR)/gui/apps/app_settings.c \

@@ -89,6 +89,7 @@ void gd_draw_window_control_icon(int x, int y, int kind, int restore, uint32_t c
 /* 窗口控制按钮类型（gd_draw_window_control_icon 的 kind） */
 enum { GUI_CTRL_CLOSE = 0, GUI_CTRL_MAX = 1, GUI_CTRL_MIN = 2 };
 
+int *gd_text_italic_ptr(void);
 void gd_rect(int x, int y, int w, int h, uint32_t color);
 void gd_rect_alpha(int x, int y, int w, int h, uint32_t color);
 void gd_border(int x, int y, int w, int h, uint32_t color);

@@ -14,9 +14,11 @@ extern const gui_app_module_t gui_app_diag;
 extern const gui_app_module_t gui_app_notes;
 extern const gui_app_module_t gui_app_code;
 extern const gui_app_module_t gui_app_uigallery;
+extern const gui_app_module_t gui_app_browser;
 
 static const gui_app_module_t *const g_modules[] = {
     &gui_app_calc,
+    &gui_app_browser,   /* 浏览器：此前只有 mode 分支、没有模块，P6 后从菜单消失 */
     &gui_app_clock,
     &gui_app_settings,
     &gui_app_files,
