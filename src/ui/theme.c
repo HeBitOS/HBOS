@@ -4,7 +4,7 @@
  *
  * 职责边界：
  *  - 内置 dark/light 是**权威兜底**，永不依赖外部文件，保证系统总能启动。
- *  - 外部 `/themes/*.theme`（JSON）只做"覆盖"：基于某个内置主题，改它声明的键。
+ *  - 外部 /themes 下的 .theme（JSON）只做"覆盖"：基于某个内置主题，改它声明的键。
  *  - 文件系统不可用时（纯 ramfs、无盘），退化为「只有内置主题」，一切照常。
  */
 #include "theme.h"
@@ -421,8 +421,11 @@ uint32_t ui_shade(uint32_t color, int amount) {
     int g = (int)((color >> 8) & 0xFF);
     int b = (int)(color & 0xFF);
     r += amount; g += amount; b += amount;
-    if (r < 0) r = 0; if (r > 255) r = 255;
-    if (g < 0) g = 0; if (g > 255) g = 255;
-    if (b < 0) b = 0; if (b > 255) b = 255;
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
+    if (b < 0) b = 0;
+    if (b > 255) b = 255;
     return ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }

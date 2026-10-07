@@ -238,6 +238,7 @@ C_SRCS = \
 	$(SRC_DIR)/graphics/blob_unpack.c \
 	$(SRC_DIR)/lib/json.c \
 	$(SRC_DIR)/ui/theme.c \
+	$(SRC_DIR)/ui/ui_widget.c \
 	$(SRC_DIR)/png.c \
 	$(SRC_DIR)/jpeg.c \
 	$(SRC_DIR)/wav.c \
@@ -737,6 +738,12 @@ ui-test: | $(BUILD_DIR)
 		tests/host/theme_fs_stub.c tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_theme
 	$(BUILD_DIR)/test_theme
+	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
+		tests/host/test_widget.c src/ui/ui_widget.c src/ui/theme.c src/lib/json.c \
+		tests/host/theme_fs_stub.c tests/host/widget_draw_stub.c \
+		tests/host/hbos_string_wrap.c \
+		-o $(BUILD_DIR)/test_widget
+	$(BUILD_DIR)/test_widget
 
 browser-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc/gui \
