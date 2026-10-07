@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../gui_panel.h"
 #include "../../shell/shell.h"
@@ -126,11 +127,11 @@ static void app_diag_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
 
     /* Flat Breeze terminal surface. 跟随浅色/深色主题。 */
     int light = st->theme_light;
-    uint32_t term_bg  = light ? gui_rgb(243, 245, 248) : gui_rgb(27, 30, 33);
-    uint32_t term_bd  = light ? gui_rgb(188, 194, 202) : gui_rgb(60, 64, 69);
-    uint32_t term_fg  = light ? gui_rgb(38, 44, 52)    : gui_rgb(220, 226, 232);
-    uint32_t term_dim = light ? gui_rgb(118, 128, 140) : gui_rgb(160, 167, 173);
-    uint32_t term_prompt = light ? gui_rgb(16, 110, 60) : gui_rgb(39, 174, 96);
+    uint32_t term_bg  = light ? UI_FG : UI_SURFACE;
+    uint32_t term_bd  = light ? UI_FG2 : UI_LINE2;
+    uint32_t term_fg  = light ? UI_SURFACE2    : UI_FG2;
+    uint32_t term_dim = light ? UI_DIM : UI_DIM;
+    uint32_t term_prompt = light ? UI_OK : UI_OK;
     gui_rect(box_x, box_y, box_w, box_h, term_bg);
     gui_border(box_x, box_y, box_w, box_h, term_bd);
 
@@ -163,7 +164,7 @@ static void app_diag_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
         if (strncmp(line, "hbos_gui_shell:", 15) == 0) {
             color = term_prompt;
         } else if (strncmp(line, "hbos_shell:", 11) == 0) {
-            color = light ? gui_rgb(176, 48, 58) : gui_rgb(218, 68, 83);
+            color = light ? UI_ERR : UI_ERR;
         } else if (strncmp(line, "  ", 2) == 0) {
             color = term_dim;
         }
@@ -188,8 +189,8 @@ static void app_diag_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     int sb_x = box_x + box_w + 4;
     int sb_y = box_y;
     int sb_h = box_h;
-    gui_rect(sb_x, sb_y, sb_w, sb_h, light ? gui_rgb(232, 236, 241) : gui_rgb(22, 26, 30));
-    gui_border(sb_x, sb_y, sb_w, sb_h, light ? gui_rgb(196, 202, 210) : gui_rgb(50, 58, 65));
+    gui_rect(sb_x, sb_y, sb_w, sb_h, light ? UI_FG : UI_SURFACE);
+    gui_border(sb_x, sb_y, sb_w, sb_h, light ? UI_FG : UI_SURFACE3);
     if (max_scroll > 0) {
         int thumb_h = sb_h * max_lines / (total > 0 ? total : 1);
         if (thumb_h < 16) thumb_h = 16;
@@ -197,7 +198,7 @@ static void app_diag_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
         int thumb_range = sb_h - thumb_h;
         int thumb_y = sb_y + thumb_range - (thumb_range * st->console_scroll / max_scroll);
         gui_rect(sb_x + 2, thumb_y + 1, sb_w - 4, thumb_h - 2,
-                 light ? gui_rgb(70, 150, 215) : gui_rgb(61, 174, 233));
+                 light ? UI_ACCENT : UI_ACCENT);
     }
 }
 

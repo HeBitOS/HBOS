@@ -2,6 +2,7 @@
  * 偏移量 + 十六进制 + ASCII 三栏，方向键/翻页键滚动。原始字节存在静态
  * 全局数组里（不放 gui_state_t，HEXVIEW_MAX_BYTES 太大不适合塞进去）。 */
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../fs.h"
 #include "../../string.h"
@@ -66,11 +67,11 @@ static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         gui_append_uint(line, sizeof(line), &pos, st->hexview_len);
     }
     gui_append_str(line, sizeof(line), &pos, ")");
-    gui_text_clipped(tx, ty, tx + aw, line, gui_rgb(200, 214, 228), 1);
-    gui_rect(tx, ty + 20, aw, 1, gui_rgb(48, 64, 84));
+    gui_text_clipped(tx, ty, tx + aw, line, UI_FG, 1);
+    gui_rect(tx, ty + 20, aw, 1, UI_SURFACE3);
 
     if (st->hexview_len == 0) {
-        gui_text(tx, ty + HEX_LIST_TOP + 8, "（空文件或无法读取）", gui_rgb(140, 150, 160), 1);
+        gui_text(tx, ty + HEX_LIST_TOP + 8, "（空文件或无法读取）", UI_DIM, 1);
         return;
     }
 
@@ -94,7 +95,7 @@ static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         static const char hex[] = "0123456789ABCDEF";
         for (int sh = 28; sh >= 0; sh -= 4)
             gui_append_char(line, sizeof(line), &pos, hex[(base >> sh) & 0xF]);
-        gui_text(off_x, ry, line, gui_rgb(120, 160, 200), 1);
+        gui_text(off_x, ry, line, UI_ACCENT, 1);
 
         pos = 0; line[0] = 0;
         char ascii[HEX_ROW_BYTES + 1];
@@ -108,8 +109,8 @@ static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
             ascii[abytes++] = (v >= 0x20 && v < 0x7F) ? (char)v : '.';
         }
         ascii[abytes] = 0;
-        gui_text(hex_x, ry, line, gui_rgb(210, 220, 230), 1);
-        gui_text(ascii_x, ry, ascii, gui_rgb(140, 200, 150), 1);
+        gui_text(hex_x, ry, line, UI_FG, 1);
+        gui_text(ascii_x, ry, ascii, UI_FG2, 1);
     }
 }
 

@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../gui_panel.h"
 #include "../../fs.h"
@@ -28,27 +29,27 @@ static void app_uwc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) 
     (void)win_w; (void)win_h;
     char line[96];
     file_t *f = gui_selected_regular_file(st);
-    gui_text(tx, ty, "文件统计", gui_rgb(244, 194, 82), 1);
+    gui_text(tx, ty, "文件统计", UI_WARN, 1);
     if (!f) {
-        gui_text(tx, ty + 42, "未选择文件", gui_rgb(148, 162, 174), 1);
-        gui_text(tx, ty + 64, "先在文件管理器中选择或创建文件", gui_rgb(148, 162, 174), 1);
+        gui_text(tx, ty + 42, "未选择文件", UI_DIM, 1);
+        gui_text(tx, ty + 64, "先在文件管理器中选择或创建文件", UI_DIM, 1);
         return;
     }
     uint32_t pos = 0;
     line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "文件: ");
     gui_append_str(line, sizeof(line), &pos, f->name);
-    gui_text(tx, ty + 42, line, gui_rgb(210, 221, 230), 1);
+    gui_text(tx, ty + 42, line, UI_FG2, 1);
 
     pos = 0; line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "字节: ");
     gui_append_uint(line, sizeof(line), &pos, f->size);
-    gui_text(tx, ty + 64, line, gui_rgb(210, 221, 230), 1);
+    gui_text(tx, ty + 64, line, UI_FG2, 1);
 
     pos = 0; line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "行数: ");
     gui_append_uint(line, sizeof(line), &pos, uwc_count_file_lines(f));
-    gui_text(tx, ty + 86, line, gui_rgb(210, 221, 230), 1);
+    gui_text(tx, ty + 86, line, UI_FG2, 1);
 }
 
 static int app_uwc_key(gui_state_t *st, int key) {

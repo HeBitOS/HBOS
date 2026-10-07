@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../api/gui_service.h"
 #include "../../graphics/gui_font.h"
@@ -18,10 +19,10 @@ static void draw_sb(int x, int y, int w, const char *label, uint32_t color) {
                           ((color >>  8) & 0xff) + 14,
                           (color & 0xff) + 14),
                   color);
-    gui_border(x, y, w, SB_H, gui_rgb(20, 30, 42));
+    gui_border(x, y, w, SB_H, UI_SURFACE);
     int tw = gui_text_width(label, 1);
     gui_text(x + (w - tw) / 2, y + (SB_H - 10) / 2, label,
-             gui_rgb(235, 242, 250), 1);
+             UI_FG, 1);
 }
 
 /* ── hit test for row of buttons ─────────────────────────── */
@@ -35,8 +36,8 @@ static int hit_row(int mx, int my, int x, int y, int btn_w, int gap, int n) {
 
 /* ── section label ───────────────────────────────────────── */
 static void section(int x, int y, const char *s) {
-    gui_rect(x, y + 12, 280, 1, gui_rgb(40, 60, 80));
-    gui_text(x, y, s, gui_rgb(61, 174, 233), 1);
+    gui_rect(x, y + 12, 280, 1, UI_SURFACE2);
+    gui_text(x, y, s, UI_ACCENT, 1);
 }
 
 /* ── draw ────────────────────────────────────────────────── */
@@ -48,9 +49,9 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     section(x, y, "主题");
     y += 20;
     draw_sb(x,          y, SB_W + 10, st->theme_light ? "● 浅色" : "  浅色",
-            st->theme_light ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
+            st->theme_light ? UI_ACCENT : UI_SURFACE2);
     draw_sb(x + SB_W + 18, y, SB_W + 10, !st->theme_light ? "● 深色" : "  深色",
-            !st->theme_light ? gui_rgb(30, 40, 55) : gui_rgb(38, 50, 64));
+            !st->theme_light ? UI_SURFACE : UI_SURFACE2);
     y += SB_H + 14;
 
     /* ── 字体大小 ── */
@@ -60,7 +61,7 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     static const char *sz_labels[] = {"标准 (16px)", "大号 (24px)"};
     int active = gui_font_active();
     for (int i = 0; i < nbase && i < 2; i++) {
-        uint32_t bc = (i == active) ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64);
+        uint32_t bc = (i == active) ? UI_ACCENT : UI_SURFACE2;
         draw_sb(x + i * (SB_W + 8), y, SB_W + 4, sz_labels[i], bc);
     }
     y += SB_H + 14;
@@ -69,9 +70,9 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     section(x, y, "任务栏");
     y += 20;
     draw_sb(x, y, SB_W + 30, st->taskbar_show_seconds ? "● 显示秒数" : "  显示秒数",
-            st->taskbar_show_seconds ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
+            st->taskbar_show_seconds ? UI_ACCENT : UI_SURFACE2);
     y += SB_H + 6;
-    gui_text(x, y, "关闭后任务栏时钟只显示时:分，不显示秒", gui_rgb(120, 140, 160), 1);
+    gui_text(x, y, "关闭后任务栏时钟只显示时:分，不显示秒", UI_DIM, 1);
     y += 16 + 8;
 
     /* ── 开机默认启动方式 ── 第一次开机选一次后记住，之后不再询问；
@@ -81,12 +82,12 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     {
         int startup_pref = shell_get_startup_pref();
         draw_sb(x,               y, SB_W + 10, startup_pref == 'g' ? "● 图形桌面" : "  图形桌面",
-                startup_pref == 'g' ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
+                startup_pref == 'g' ? UI_ACCENT : UI_SURFACE2);
         draw_sb(x + SB_W + 18, y, SB_W + 10, startup_pref == 't' ? "● 命令行" : "  命令行",
-                startup_pref == 't' ? gui_rgb(61, 174, 233) : gui_rgb(38, 50, 64));
+                startup_pref == 't' ? UI_ACCENT : UI_SURFACE2);
     }
     y += SB_H + 6;
-    gui_text(x, y, "开机后直接进入所选模式，不再询问；也可用 startup 命令修改", gui_rgb(120, 140, 160), 1);
+    gui_text(x, y, "开机后直接进入所选模式，不再询问；也可用 startup 命令修改", UI_DIM, 1);
     y += 16 + 8;
 
     /* ── 时区与网络时间 ── */
@@ -97,16 +98,16 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
         gui_append_str(tzline, sizeof(tzline), &tpos, "当前时区: UTC");
         if (g_rtc_tz_offset_hours >= 0) gui_append_str(tzline, sizeof(tzline), &tpos, "+");
         gui_append_int(tzline, sizeof(tzline), &tpos, g_rtc_tz_offset_hours);
-        gui_text(x, y + 8, tzline, gui_rgb(200, 215, 230), 1);
+        gui_text(x, y + 8, tzline, UI_FG, 1);
     }
     y += 26;
-    draw_sb(x,      y, 40, "-", gui_rgb(38, 50, 64));
-    draw_sb(x + 48, y, 40, "+", gui_rgb(38, 50, 64));
-    draw_sb(x + 96, y, SB_W + 30, "NTP 同步", gui_rgb(61, 174, 233));
+    draw_sb(x,      y, 40, "-", UI_SURFACE2);
+    draw_sb(x + 48, y, 40, "+", UI_SURFACE2);
+    draw_sb(x + 96, y, SB_W + 30, "NTP 同步", UI_ACCENT);
     y += SB_H + 6;
-    gui_text(x, y, "QEMU 的 CMOS 时钟通常是 UTC；VMware 可能已写入本地时间，", gui_rgb(120, 140, 160), 1);
+    gui_text(x, y, "QEMU 的 CMOS 时钟通常是 UTC；VMware 可能已写入本地时间，", UI_DIM, 1);
     y += 16;
-    gui_text(x, y, "时钟不对时可在此调整时区，或点 NTP 同步网络时间校准。", gui_rgb(120, 140, 160), 1);
+    gui_text(x, y, "时钟不对时可在此调整时区，或点 NTP 同步网络时间校准。", UI_DIM, 1);
     y += 16 + 8;
 
     /* ── 系统信息 ── */
@@ -117,15 +118,15 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     uint32_t pos;
 
     /* memory - use simple placeholder if no API */
-    gui_text(x, y, "HBOS " HBOS_VERSION_TAG, gui_rgb(180, 200, 220), 1);
+    gui_text(x, y, "HBOS " HBOS_VERSION_TAG, UI_FG2, 1);
     y += 18;
-    gui_text(x, y, HIVE_VERSION_TAG, gui_rgb(160, 185, 205), 1);
+    gui_text(x, y, HIVE_VERSION_TAG, UI_FG2, 1);
     y += 18;
-    gui_text(x, y, "架构: x86_64 裸机内核", gui_rgb(140, 160, 180), 1);
+    gui_text(x, y, "架构: x86_64 裸机内核", UI_DIM, 1);
     y += 18;
-    gui_text(x, y, "引导: Limine BIOS", gui_rgb(140, 160, 180), 1);
+    gui_text(x, y, "引导: Limine BIOS", UI_DIM, 1);
     y += 18;
-    gui_text(x, y, "图形: 线性帧缓冲", gui_rgb(140, 160, 180), 1);
+    gui_text(x, y, "图形: 线性帧缓冲", UI_DIM, 1);
     y += 18;
 
     line[0] = 0; pos = 0;
@@ -133,7 +134,7 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     gui_append_int(line, sizeof(line), &pos, active);
     gui_append_str(line, sizeof(line), &pos, " / ");
     gui_append_int(line, sizeof(line), &pos, nbase - 1);
-    gui_text(x, y, line, gui_rgb(140, 160, 180), 1);
+    gui_text(x, y, line, UI_DIM, 1);
 }
 
 /* ── on_click ────────────────────────────────────────────── */

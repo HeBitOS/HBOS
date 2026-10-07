@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../gui_panel.h"
 #include "../../string.h"
@@ -138,22 +139,22 @@ static void app_snake_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     if (st->snake_len <= 0) app_snake_reset(st);
     char line[96];
     uint32_t pos = 0;
-    gui_text(tx, ty, "贪吃蛇", gui_rgb(85, 180, 120), 1);
+    gui_text(tx, ty, "贪吃蛇", UI_OK, 1);
     line[0] = 0; pos = 0;
     gui_append_str(line, sizeof(line), &pos, "分数: ");
     gui_append_uint(line, sizeof(line), &pos, (uint32_t)st->snake_score);
-    gui_text(tx, ty + 34, line, gui_rgb(210, 221, 230), 1);
+    gui_text(tx, ty + 34, line, UI_FG2, 1);
     gui_text(tx, ty + 56, st->snake_alive ? "方向键移动  吃掉蓝色食物" : "游戏结束  Enter 重新开始",
-             gui_rgb(148, 162, 174), 1);
+             UI_DIM, 1);
     int bx = tx;
     int by = ty + 84;
     int cell = 16;
-    gui_rect(bx, by, cell * SNAKE_W, cell * SNAKE_H, gui_rgb(5, 10, 16));
-    gui_border(bx, by, cell * SNAKE_W, cell * SNAKE_H, gui_rgb(85, 180, 120));
+    gui_rect(bx, by, cell * SNAKE_W, cell * SNAKE_H, UI_BG);
+    gui_border(bx, by, cell * SNAKE_W, cell * SNAKE_H, UI_OK);
     gui_rect(bx + st->snake_tx * cell + 4, by + st->snake_ty * cell + 4, cell - 8, cell - 8,
-             gui_rgb(23, 147, 209));
+             UI_ACCENT);
     for (int i = st->snake_len - 1; i >= 0; i--) {
-        uint32_t color = i == 0 ? gui_rgb(160, 245, 170) : gui_rgb(84, 190, 116);
+        uint32_t color = i == 0 ? UI_FG : UI_OK;
         gui_rect(bx + st->snake_body_x[i] * cell + 2, by + st->snake_body_y[i] * cell + 2,
                  cell - 4, cell - 4, color);
     }

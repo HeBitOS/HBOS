@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 #include "../acpi.h"
+#include "../ui/theme.h"
+#include "../ui/ui_tokens.h"
 #include "../block.h"
 #include "../core/pmm.h"
 #include "../core/task.h"
@@ -105,17 +107,40 @@ static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b);
 // Palette — dark branch follows KDE Breeze Dark (cool grays, single blue accent
 // #3daee9). The historical cyber_* names are kept so call sites need no churn;
 // only the values changed. Light branch retuned toward Breeze Light.
-static inline uint32_t cyber_bg_top(int light) { return light ? rgb(239, 240, 241) : rgb(35, 38, 41); }
-static inline uint32_t cyber_bg_bot(int light) { return light ? rgb(226, 228, 231) : rgb(27, 30, 33); }
-static inline uint32_t cyber_neon_pink(int light) { return light ? rgb(41, 128, 185) : rgb(41, 128, 185); }   // secondary blue
-static inline uint32_t cyber_neon_cyan(int light) { return light ? rgb(41, 174, 233) : rgb(61, 174, 233); }   // accent #3daee9
-static inline uint32_t cyber_neon_yellow(int light) { return light ? rgb(230, 110, 0) : rgb(246, 116, 0); }   // highlight #f67400
-static inline uint32_t cyber_neon_purple(int light) { return light ? rgb(39, 160, 90) : rgb(39, 174, 96); }   // positive green
-static inline uint32_t cyber_text(int light) { return light ? rgb(35, 38, 41) : rgb(239, 240, 241); }
-static inline uint32_t cyber_text_muted(int light) { return light ? rgb(110, 116, 122) : rgb(160, 167, 173); }
-static inline uint32_t cyber_border(int light) { return light ? rgb(188, 192, 196) : rgb(60, 64, 69); }
-static inline uint32_t cyber_card_bg_top(int light) { return light ? rgb(252, 252, 252) : rgb(49, 54, 59); }
-static inline uint32_t cyber_card_bg_bot(int light) { return light ? rgb(239, 240, 241) : rgb(42, 46, 50); }
+/*
+ * 过渡层：把这些历史函数体改为读取主题令牌。
+ *
+ * 它们原本各自硬编码深浅两套数值，是 472 处硬编码颜色的中枢——图标主题
+ * 只需改这一处，整屏就会跟着变。参数 light 保留是为了不改几百个调用点；
+ * 实际取值一律来自 ui_theme()，因此"深浅"由**当前主题**决定，而不是由
+ * 调用方传的布尔值决定。这样外部主题包（可能既非纯深也非纯浅）才能生效。
+ *
+ * 后续 P1 会把调用点逐个改成直接读令牌，届时这些函数删除。
+ */
+static inline uint32_t cyber_bg_top(int light) { (void)light; return ui_theme()->bg; }
+static inline uint32_t cyber_bg_bot(int light) { (void)light; return ui_shade(ui_theme()->bg, -8); }
+static inline uint32_t cyber_neon_pink(int light) { (void)light; return ui_theme()->accent; }
+static inline uint32_t cyber_neon_cyan(int light) { (void)light; return ui_theme()->accent; }
+static inline uint32_t cyber_neon_yellow(int light) { (void)light; return ui_theme()->warn; }
+static inline uint32_t cyber_neon_purple(int light) { (void)light; return ui_theme()->ok; }
+static inline uint32_t cyber_text(int light) { (void)light; return ui_theme()->fg; }
+static inline uint32_t cyber_text_muted(int light) { (void)light; return ui_theme()->dim; }
+static inline uint32_t cyber_border(int light) { (void)light; return ui_theme()->line2; }
+static inline uint32_t cyber_card_bg_top(int light) { (void)light; return ui_theme()->surface; }
+static inline uint32_t cyber_card_bg_bot(int light) { (void)light; return ui_theme()->surface2; }
+
+/* ── 主题应用 ──────────────────────────────────────────────
+ * 唯一的"把深浅意图落到主题层"的入口。F4、设置应用、service 跟随三条路径
+ * 都经此函数，避免任何一条漏掉导致"提示已切换但画面没变"。
+ * 记录已生效的值用于变更检测（见主循环里的说明）。 */
+static int g_applied_theme_light = -1;
+
+static void gui_apply_theme(int light) {
+    const gui_theme_t *want = light ? ui_theme_builtin_light()
+                                    : ui_theme_builtin_dark();
+    if (ui_theme_set(want->name) == 0)
+        g_applied_theme_light = light;
+}
 
 typedef struct {
     const char *name;
@@ -324,12 +349,12 @@ static void hgradient(int x, int y, int w, int h, uint32_t left, uint32_t right)
 
 static void soft_shadow(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
-    rect(x + 3, y + h, w - 1, 2, rgb(3, 6, 9));
-    rect(x + 6, y + h + 2, w - 5, 2, rgb(8, 13, 18));
-    rect(x + 10, y + h + 4, w - 12, 1, rgb(14, 20, 25));
-    rect(x + w, y + 3, 2, h - 1, rgb(3, 6, 9));
-    rect(x + w + 2, y + 6, 2, h - 5, rgb(8, 13, 18));
-    rect(x + w + 4, y + 10, 1, h - 12, rgb(14, 20, 25));
+    rect(x + 3, y + h, w - 1, 2, UI_BG);
+    rect(x + 6, y + h + 2, w - 5, 2, UI_BG);
+    rect(x + 10, y + h + 4, w - 12, 1, UI_BG);
+    rect(x + w, y + 3, 2, h - 1, UI_BG);
+    rect(x + w + 2, y + 6, 2, h - 5, UI_BG);
+    rect(x + w + 4, y + 10, 1, h - 12, UI_BG);
 }
 
 static uint32_t *g_gui_surface = 0;
@@ -594,7 +619,7 @@ static void draw_panel_shell(int x, int y, int w, int h, uint32_t top,
 
 static void draw_inset_shell(int x, int y, int w, int h, uint32_t border_c) {
     if (w <= 0 || h <= 0) return;
-    vgradient(x, y, w, h, rgb(9, 13, 16), rgb(4, 7, 10));
+    vgradient(x, y, w, h, UI_BG, UI_BG);
     rect(x, y, w, 1, rgb_lift(border_c, -28));
     rect(x, y + h - 1, w, 1, rgb_lift(border_c, 12));
     border(x, y, w, h, border_c);
@@ -1317,7 +1342,7 @@ static void draw_button(int x, int y, const char *label, uint32_t color) {
                      rgb_lift(color, 34), rgb_lift(color, -24),
                      rgb_lift(color, -46), color);
     rect(x + 7, y + 5, ACTION_W - 14, 1, rgb_lift(color, 72));
-    text(x + 13, y + 10, label, rgb(252, 254, 255), 1);
+    text(x + 13, y + 10, label, UI_FG, 1);
 }
 
 static void draw_small_button(int x, int y, int w, const char *label, uint32_t color) {
@@ -1329,16 +1354,16 @@ static void draw_small_button(int x, int y, int w, const char *label, uint32_t c
     if (tx < x + 5) tx = x + 5;
     int ty = y + (ACTION_H - gui_font_line_height()) / 2;
     if (ty < y) ty = y;
-    text_clipped(tx, ty, x + w - 4, label, rgb(252, 254, 255), 1);
+    text_clipped(tx, ty, x + w - 4, label, UI_FG, 1);
 }
 
 static uint32_t gui_file_action_color(int action) {
     // Breeze button semantics: primary action = accent blue, destructive = red,
     // everything else = neutral surface so the toolbar reads calm and flat.
-    if (action == 1) return rgb(61, 174, 233);   // 打开 — primary
-    if (action == 3) return rgb(218, 68, 83);     // 清空 — destructive
-    if (action == 4) return rgb(218, 68, 83);     // 删除 — destructive
-    return rgb(75, 81, 88);                        // neutral surface
+    if (action == 1) return UI_ACCENT;   // 打开 — primary
+    if (action == 3) return UI_ERR;     // 清空 — destructive
+    if (action == 4) return UI_ERR;     // 删除 — destructive
+    return UI_SURFACE3;                            // neutral surface（原硬编码，改用令牌）
 }
 
 static int gui_file_action_rect(int content_w, int index, int *x, int *y, int *w) {
@@ -1449,8 +1474,8 @@ static const int CURSOR_HAND_VX[10] = { 5, 8, 8, 13, 14, 12, 4, 2, 2, 5 };
 static const int CURSOR_HAND_VY[10] = { 0, 0, 7,  8, 13, 17, 17, 12, 9, 9 };
 
 static void draw_polygon_cursor(int x, int y, const int *vx, const int *vy, int n, int bw, int bh) {
-    uint32_t c = rgb(148, 148, 148);
-    uint32_t d = rgb(20, 27, 34);
+    uint32_t c = UI_DIM;
+    uint32_t d = UI_SURFACE;
     for (int row = 0; row < bh; row++) {
         for (int col = 0; col < bw; col++) {
             int k = polygon_pixel_kind(vx, vy, n, bw, bh, col, row);
@@ -1566,8 +1591,8 @@ void gui_app_text(int x, int y, const char *s, uint32_t color, int scale) {
 static void present_screen_owner_cursor(const fb_info_t *fb, int x, int y) {
     uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
     int fbw = (int)fb->width, fbh = (int)fb->height;
-    uint32_t c = rgb(148, 148, 148);
-    uint32_t d = rgb(20, 27, 34);
+    uint32_t c = UI_DIM;
+    uint32_t d = UI_SURFACE;
 #define OWNER_CURSOR_PX(px, py, col) do { \
         int _x = (px), _y = (py); \
         if (_x >= 0 && _y >= 0 && _x < fbw && _y < fbh) \
@@ -1620,7 +1645,7 @@ static void blit_wallpaper(int DW, int DH) {
     int sw = 0, sh = 0;
     const uint32_t *src = gui_wall_pixels(&sw, &sh);
     if (!src || !g_gui_surface || sw <= 0 || sh <= 0) {
-        rect(0, 0, DW, DH, rgb(31, 34, 37));
+        rect(0, 0, DW, DH, UI_SURFACE);
         return;
     }
     int cx = 0, cy = 0, cw = DW, ch = DH;
@@ -1663,14 +1688,14 @@ static void draw_wallpaper(int w, int h, int light) {
     blit_wallpaper(w, h);
     // Windows 11-style floating taskbar bar (translucent glass); its centered
     // icon cluster + clock are drawn by draw_taskbar().
-    rect_alpha(0, tb_y, w, TASKBAR_H, light ? 0xF0E9EBEE : 0xEE20242A);
-    rect(0, tb_y, w, 1, light ? rgb(206, 210, 214) : rgb(58, 63, 70));
+    rect_alpha(0, tb_y, w, TASKBAR_H, (0xF0u << 24) | (light ? 0xE9EBEEu : 0x20242Au));
+    rect(0, tb_y, w, 1, UI_SURFACE3);
 }
 
 static void draw_usage_bar(int x, int y, int w, int h, uint32_t used, uint32_t total, uint32_t color) {
     uint32_t filled = total ? (used * (uint32_t)w) / total : 0;
     if (filled > (uint32_t)w) filled = (uint32_t)w;
-    draw_inset_shell(x, y, w, h, rgb(48, 62, 66));
+    draw_inset_shell(x, y, w, h, UI_SURFACE3);
     if (filled > 0) {
         hgradient(x + 1, y + 1, (int)filled - 2, h - 2,
                   rgb_lift(color, 20), rgb_lift(color, -20));
@@ -1738,45 +1763,45 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
     int detail_x = main_x + main_w + 12;
 
     uint32_t count = gui_file_count(mst);
-    text(tx, ty, "文件管理器", rgb(124, 220, 154), 1);
+    text(tx, ty, "文件管理器", UI_OK, 1);
     line_u32(line, sizeof(line), "当前: ", count, " 项");
-    text(tx + 112, ty + 2, line, rgb(168, 188, 202), 1);
-    vgradient(tx, ty + 30, content_w, 30, rgb(34, 48, 64), rgb(20, 30, 42));
-    rect(tx, ty + 30, content_w, 1, rgb(58, 86, 110));
-    rect(tx, ty + 59, content_w, 1, rgb(8, 14, 22));
-    border(tx, ty + 30, content_w, 30, rgb(50, 72, 92));
+    text(tx + 112, ty + 2, line, UI_FG2, 1);
+    vgradient(tx, ty + 30, content_w, 30, UI_SURFACE2, UI_SURFACE);
+    rect(tx, ty + 30, content_w, 1, UI_ACCENT);
+    rect(tx, ty + 59, content_w, 1, UI_BG);
+    border(tx, ty + 30, content_w, 30, UI_ACCENT);
     line2(line, sizeof(line), "位置 ", gui_file_path(mst));
-    text_clipped(tx + 12, ty + 42, tx + content_w - 12, line, rgb(238, 246, 252), 1);
+    text_clipped(tx + 12, ty + 42, tx + content_w - 12, line, UI_FG, 1);
 
     draw_file_action_bar(tx, ty, content_w);
 
-    vgradient(tx, ty + 114, side_w, L.box_h, rgb(22, 30, 40), rgb(14, 20, 28));
-    border(tx, ty + 114, side_w, L.box_h, rgb(50, 72, 92));
-    rect(tx, ty + 114, side_w, 1, rgb(58, 86, 110));
-    text(tx + 14, ty + 128, "位置", rgb(194, 226, 242), 1);
-    vgradient(tx + 10, ty + 154, side_w - 20, 28, rgb(38, 76, 104), rgb(22, 50, 70));
-    rect(tx + 10, ty + 154, 3, 28, rgb(85, 180, 120));
-    text_clipped(tx + 22, ty + 164, tx + side_w - 10, gui_file_path(mst), rgb(244, 250, 255), 1);
-    text(tx + 22, ty + 202, "/home", rgb(132, 150, 162), 1);
-    text(tx + 22, ty + 232, "/dev  /proc", rgb(132, 150, 162), 1);
-    text(tx + 14, ty + 286, "Enter进入  Back上级", rgb(122, 142, 156), 1);
+    vgradient(tx, ty + 114, side_w, L.box_h, UI_SURFACE, UI_BG);
+    border(tx, ty + 114, side_w, L.box_h, UI_ACCENT);
+    rect(tx, ty + 114, side_w, 1, UI_ACCENT);
+    text(tx + 14, ty + 128, "位置", UI_FG, 1);
+    vgradient(tx + 10, ty + 154, side_w - 20, 28, UI_ACCENT, UI_SURFACE2);
+    rect(tx + 10, ty + 154, 3, 28, UI_OK);
+    text_clipped(tx + 22, ty + 164, tx + side_w - 10, gui_file_path(mst), UI_FG, 1);
+    text(tx + 22, ty + 202, "/home", UI_DIM, 1);
+    text(tx + 22, ty + 232, "/dev  /proc", UI_DIM, 1);
+    text(tx + 14, ty + 286, "Enter进入  Back上级", UI_DIM, 1);
 
-    vgradient(main_x, ty + 114, main_w, L.box_h, rgb(28, 40, 52), rgb(18, 26, 36));
-    border(main_x, ty + 114, main_w, L.box_h, rgb(58, 86, 110));
-    vgradient(main_x, ty + 114, main_w, 26, rgb(40, 60, 78), rgb(24, 36, 48));
-    rect(main_x, ty + 139, main_w, 1, rgb(70, 100, 116));
-    text(main_x + 14, ty + 122, "名称", rgb(218, 232, 240), 1);
-    text(main_x + main_w - 166, ty + 122, "类型", rgb(218, 232, 240), 1);
-    text(main_x + main_w - 82, ty + 122, "大小", rgb(218, 232, 240), 1);
+    vgradient(main_x, ty + 114, main_w, L.box_h, UI_SURFACE, UI_SURFACE);
+    border(main_x, ty + 114, main_w, L.box_h, UI_ACCENT);
+    vgradient(main_x, ty + 114, main_w, 26, UI_SURFACE3, UI_SURFACE);
+    rect(main_x, ty + 139, main_w, 1, UI_ACCENT);
+    text(main_x + 14, ty + 122, "名称", UI_FG, 1);
+    text(main_x + main_w - 166, ty + 122, "类型", UI_FG, 1);
+    text(main_x + main_w - 82, ty + 122, "大小", UI_FG, 1);
 
     int list_y = ty + 146;
     if (count == 0) {
-        text(main_x + 18, list_y + 18, "目录为空", rgb(190, 208, 218), 1);
-        text(main_x + 18, list_y + 42, "点击新建或按 N 创建", rgb(148, 168, 180), 1);
-        vgradient(detail_x, ty + 114, detail_w, L.box_h, rgb(22, 30, 40), rgb(14, 20, 28));
-        border(detail_x, ty + 114, detail_w, L.box_h, rgb(50, 72, 92));
-        text(detail_x + 12, ty + 130, "详细信息", rgb(194, 226, 242), 1);
-        text(detail_x + 12, ty + 164, "未选择文件", rgb(148, 162, 174), 1);
+        text(main_x + 18, list_y + 18, "目录为空", UI_FG, 1);
+        text(main_x + 18, list_y + 42, "点击新建或按 N 创建", UI_FG2, 1);
+        vgradient(detail_x, ty + 114, detail_w, L.box_h, UI_SURFACE, UI_BG);
+        border(detail_x, ty + 114, detail_w, L.box_h, UI_ACCENT);
+        text(detail_x + 12, ty + 130, "详细信息", UI_FG, 1);
+        text(detail_x + 12, ty + 164, "未选择文件", UI_FG2, 1);
         return;
     }
 
@@ -1793,22 +1818,22 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         vfs_node_t *node = 0;
         if (gui_file_entry(mst, file_idx, name, &type, &node, full, sizeof(full)) < 0) continue;
         int y = list_y + (int)i * FILE_ROW_H;
-        if ((i & 1) == 1) rect(main_x + 1, y - 8, main_w - 2, FILE_ROW_H, rgb(42, 46, 50));
+        if ((i & 1) == 1) rect(main_x + 1, y - 8, main_w - 2, FILE_ROW_H, UI_SURFACE2);
         if ((int)file_idx == selected) {
-            rect(main_x + 6, y - 7, main_w - 12, 24, rgb(61, 174, 233));
+            rect(main_x + 6, y - 7, main_w - 12, 24, UI_ACCENT);
         }
         if (type == VFS_NODE_DIR) {
             blit_icon(main_x + 14, y - 8, 20, ICON_FOLDER_ROW);
         } else {
-            uint32_t icon = type == VFS_NODE_CHARDEV ? rgb(102, 214, 255) : rgb(124, 220, 154);
+            uint32_t icon = type == VFS_NODE_CHARDEV ? UI_ACCENT : UI_OK;
             rect(main_x + 16, y - 2, 18, 14, icon);
             rect(main_x + 20, y - 7, 18, 7, rgb_lift(icon, -16));
         }
         uint32_t pos = 0;
         line[0] = 0;
         append_str(line, sizeof(line), &pos, name);
-        uint32_t row_fg = (int)file_idx == selected ? rgb(252, 254, 255) : rgb(218, 232, 240);
-        uint32_t meta_fg = (int)file_idx == selected ? rgb(228, 244, 252) : rgb(150, 170, 182);
+        uint32_t row_fg = (int)file_idx == selected ? UI_FG : UI_FG;
+        uint32_t meta_fg = (int)file_idx == selected ? UI_FG : UI_FG2;
         text_clipped(main_x + 48, y, main_x + main_w - 130, line, row_fg, 1);
         text(main_x + main_w - 126, y, gui_node_type_label(type), meta_fg, 1);
         line_u32(line, sizeof(line), "", node ? node->size : 0, "B");
@@ -1821,24 +1846,24 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         vfs_node_t *node = 0;
         if (gui_file_entry(mst, (uint32_t)selected, name, &type, &node, full, sizeof(full)) < 0)
             return;
-        vgradient(detail_x, ty + 114, detail_w, L.box_h, rgb(22, 30, 40), rgb(14, 20, 28));
-        border(detail_x, ty + 114, detail_w, L.box_h, rgb(50, 72, 92));
-        vgradient(detail_x, ty + 114, detail_w, 30, rgb(34, 50, 66), rgb(20, 30, 42));
-        rect(detail_x, ty + 143, detail_w, 1, rgb(8, 14, 22));
-        text(detail_x + 12, ty + 124, "详细信息", rgb(218, 232, 240), 1);
+        vgradient(detail_x, ty + 114, detail_w, L.box_h, UI_SURFACE, UI_BG);
+        border(detail_x, ty + 114, detail_w, L.box_h, UI_ACCENT);
+        vgradient(detail_x, ty + 114, detail_w, 30, UI_SURFACE2, UI_SURFACE);
+        rect(detail_x, ty + 143, detail_w, 1, UI_BG);
+        text(detail_x + 12, ty + 124, "详细信息", UI_FG, 1);
         if (type == VFS_NODE_DIR) {
             blit_icon(detail_x + 10, ty + 148, 32, ICON_FOLDER_ROW);
         } else {
-            uint32_t icon = type == VFS_NODE_CHARDEV ? rgb(102, 214, 255) : rgb(124, 220, 154);
+            uint32_t icon = type == VFS_NODE_CHARDEV ? UI_ACCENT : UI_OK;
             rect(detail_x + 12, ty + 156, 30, 24, icon);
             rect(detail_x + 17, ty + 150, 28, 8, rgb_lift(icon, -16));
         }
-        text_clipped(detail_x + 52, ty + 160, detail_x + detail_w - 12, name, rgb(238, 246, 255), 1);
+        text_clipped(detail_x + 52, ty + 160, detail_x + detail_w - 12, name, UI_FG, 1);
         line_u32(line, sizeof(line), "大小: ", node ? node->size : 0, "B");
-        text(detail_x + 12, ty + 194, line, rgb(210, 221, 230), 1);
+        text(detail_x + 12, ty + 194, line, UI_FG, 1);
         line2(line, sizeof(line), "类型: ", gui_node_type_label(type));
-        text(detail_x + 12, ty + 216, line, rgb(210, 221, 230), 1);
-        text(detail_x + 12, ty + 246, "预览", rgb(194, 226, 242), 1);
+        text(detail_x + 12, ty + 216, line, UI_FG, 1);
+        text(detail_x + 12, ty + 246, "预览", UI_FG, 1);
         /* 256 而非原来的 64：详情框高度现在跟随窗口，最大化后能放下更多预览 */
         char preview[256];
         uint32_t n = 0;
@@ -1868,7 +1893,7 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
             int ok = utf8_feed(&utf8, (uint8_t)preview[i], &cp);
             if (ok < 0) continue;
             if (ok == 0) cp = '?';
-            px += draw_text_codepoint(px, py, cp, rgb(210, 221, 230), 1);
+            px += draw_text_codepoint(px, py, cp, UI_FG, 1);
             if (px > detail_x + detail_w - 20) {
                 px = detail_x + 12;
                 py += 18;
@@ -1876,10 +1901,10 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         }
 
         int sy = ty + L.status_y;
-        vgradient(tx, sy - 10, content_w, 28, rgb(28, 40, 54), rgb(16, 24, 34));
-        rect(tx, sy - 10, content_w, 1, rgb(50, 72, 92));
-        rect(tx, sy + 17, content_w, 1, rgb(8, 14, 22));
-        border(tx, sy - 10, content_w, 28, rgb(46, 66, 86));
+        vgradient(tx, sy - 10, content_w, 28, UI_SURFACE, UI_SURFACE);
+        rect(tx, sy - 10, content_w, 1, UI_ACCENT);
+        rect(tx, sy + 17, content_w, 1, UI_BG);
+        border(tx, sy - 10, content_w, 28, UI_ACCENT);
         if (st->rename_active) {
             int input_x = tx + 72;
             int hint_w = 132;
@@ -1889,16 +1914,16 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
                 input_w = content_w - 84;
             }
             if (input_w < 80) input_w = 80;
-            text(tx + 12, sy, "新名称", rgb(216, 232, 244), 1);
-            draw_inset_shell(input_x, sy - 5, input_w, 18, rgb(8, 14, 22));
+            text(tx + 12, sy, "新名称", UI_FG, 1);
+            draw_inset_shell(input_x, sy - 5, input_w, 18, UI_BG);
             text_clipped(input_x + 6, sy, input_x + input_w - 8,
-                         st->rename_buf, rgb(236, 246, 252), 1);
+                         st->rename_buf, UI_FG, 1);
             int cursor_x = input_x + 6 + (int)st->rename_len * 6;
             if (cursor_x > input_x + input_w - 8) cursor_x = input_x + input_w - 8;
-            rect(cursor_x, sy - 1, 2, 12, rgb(124, 220, 154));
+            rect(cursor_x, sy - 1, 2, 12, UI_OK);
             if (hint_w > 0)
                 text(input_x + input_w + 10, sy, "Enter确认 Esc取消",
-                     rgb(148, 168, 180), 1);
+                     UI_FG2, 1);
         } else {
             uint32_t pos = 0;
             line[0] = 0;
@@ -1913,7 +1938,7 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
                 append_uint(line, sizeof(line), &pos, node ? node->size : 0);
                 append_str(line, sizeof(line), &pos, "B  Enter打开/进入  P复制 R重命名");
             }
-            text_clipped(tx + 12, sy, tx + content_w - 12, line, rgb(216, 232, 244), 1);
+            text_clipped(tx + 12, sy, tx + content_w - 12, line, UI_FG, 1);
         }
     }
     if (count > (uint32_t)L.list_rows) {
@@ -1925,7 +1950,7 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         append_uint(line, sizeof(line), &pos, start + max);
         append_str(line, sizeof(line), &pos, " / ");
         append_uint(line, sizeof(line), &pos, count);
-        text(main_x + main_w - 96, ty + L.status_y, line, rgb(148, 162, 174), 1);
+        text(main_x + main_w - 96, ty + L.status_y, line, UI_FG2, 1);
     }
 }
 
@@ -1934,15 +1959,15 @@ static void draw_disk_panel(int tx, int ty, int win_w) {
     /* 磁盘面板自愈：重扫块设备并尝试重挂载（不重置 ramfs） */
     (void)block_init();
     (void)fs_retry_mount();
-    text(tx, ty, "磁盘管理器", rgb(244, 194, 82), 1);
+    text(tx, ty, "磁盘管理器", UI_WARN, 1);
     line2(line, sizeof(line), "块设备: ", block_backend_name());
-    text(tx, ty + 38, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 38, line, UI_FG, 1);
     line_u32(line, sizeof(line), "扇区数: ", block_sector_count(), "");
-    text(tx, ty + 60, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 60, line, UI_FG, 1);
     line2(line, sizeof(line), "文件系统: ", fs_backend_name());
-    text(tx, ty + 82, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 82, line, UI_FG, 1);
     line_u32(line, sizeof(line), "起始 LBA: ", fs_disk_start_lba(), "");
-    text(tx, ty + 104, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 104, line, UI_FG, 1);
 
     uint32_t used = fs_used_bytes();
     uint32_t cap = fs_capacity_bytes();
@@ -1956,10 +1981,10 @@ static void draw_disk_panel(int tx, int ty, int win_w) {
     append_str(line, sizeof(line), &pos, "K ");
     append_uint(line, sizeof(line), &pos, pct);
     append_str(line, sizeof(line), &pos, "%");
-    text(tx, ty + 132, line, rgb(210, 221, 230), 1);
-    draw_usage_bar(tx, ty + 154, win_w - 60, 18, used, cap, rgb(244, 194, 82));
-    draw_button(tx, ty + 194, "安装 I", rgb(244, 194, 82));
-    text(tx + 120, ty + 204, fs_is_disk() ? "HBFS 持久化已就绪" : "当前使用 RAMFS", rgb(132, 196, 232), 1);
+    text(tx, ty + 132, line, UI_FG, 1);
+    draw_usage_bar(tx, ty + 154, win_w - 60, 18, used, cap, UI_WARN);
+    draw_button(tx, ty + 194, "安装 I", UI_WARN);
+    text(tx + 120, ty + 204, fs_is_disk() ? "HBFS 持久化已就绪" : "当前使用 RAMFS", UI_ACCENT, 1);
 }
 
 static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
@@ -1967,31 +1992,31 @@ static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
     uint64_t total = pmm_get_total_mem();
     uint64_t free = pmm_get_free_mem();
     uint64_t used = total > free ? total - free : 0;
-    text(tx, ty, "资源管理器", rgb(215, 152, 244), 1);
+    text(tx, ty, "资源管理器", UI_ACCENT, 1);
     line_u32(line, sizeof(line), "内存已用: ", (uint32_t)(used / 1024), "K");
-    text(tx, ty + 38, line, rgb(210, 221, 230), 1);
-    draw_usage_bar(tx, ty + 60, win_w - 60, 16, (uint32_t)(used / 1024), (uint32_t)(total / 1024), rgb(215, 152, 244));
+    text(tx, ty + 38, line, UI_FG, 1);
+    draw_usage_bar(tx, ty + 60, win_w - 60, 16, (uint32_t)(used / 1024), (uint32_t)(total / 1024), UI_ACCENT);
     line_u32(line, sizeof(line), "内存可用: ", (uint32_t)(free / 1024), "K");
-    text(tx, ty + 86, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 86, line, UI_FG, 1);
     line_u32(line, sizeof(line), "任务数: ", (uint32_t)task_get_count(), "");
-    text(tx, ty + 110, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 110, line, UI_FG, 1);
     line_u32(line, sizeof(line), "应用数: ", hbos_app_count(), "");
-    text(tx, ty + 132, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 132, line, UI_FG, 1);
     line_u32(line, sizeof(line), "文件数: ", fs_get_count(), "");
-    text(tx, ty + 154, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 154, line, UI_FG, 1);
     line2(line, sizeof(line), "文件系统: ", fs_backend_name());
-    text(tx, ty + 176, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 176, line, UI_FG, 1);
     line_u32(line, sizeof(line), "显示: ", (uint32_t)w, "X");
     uint32_t pos = 0;
     while (line[pos]) pos++;
     append_uint(line, sizeof(line), &pos, (uint32_t)h);
-    text(tx, ty + 198, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 198, line, UI_FG, 1);
     line2(line, sizeof(line), "鼠标: ", mouse_backend_name());
-    text(tx, ty + 220, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 220, line, UI_FG, 1);
     line_u32(line, sizeof(line), "USB HID: ", (uint32_t)hid_device_count(), "");
-    text(tx, ty + 242, line, rgb(210, 221, 230), 1);
+    text(tx, ty + 242, line, UI_FG, 1);
 
-    text(tx, ty + 270, "活动任务", rgb(215, 152, 244), 1);
+    text(tx, ty + 270, "活动任务", UI_ACCENT, 1);
     uint32_t max = (uint32_t)task_get_count();
     if (max > 3) max = 3;
     for (uint32_t i = 0; i < max; i++) {
@@ -2004,24 +2029,24 @@ static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
         append_str(line, sizeof(line), &pos, task->name);
         append_str(line, sizeof(line), &pos, " ");
         append_str(line, sizeof(line), &pos, task_state_name(task->state));
-        text(tx + 18, ty + 292 + (int)i * 20, line, rgb(220, 230, 238), 1);
+        text(tx + 18, ty + 292 + (int)i * 20, line, UI_FG, 1);
     }
 }
 
 static uint32_t app_accent(int mode) {
     switch (mode) {
-        case GUI_APP_NOTES:   return rgb(46, 204, 113);
-        case GUI_APP_CALC:    return rgb(52, 152, 219);
-        case GUI_APP_UWC:     return rgb(241, 196, 15);
-        case GUI_APP_SNAKE:   return rgb(39, 174, 96);
-        case GUI_APP_BROWSER: return rgb(61, 174, 233);
-        case GUI_APP_CODE:    return rgb(155, 89, 182);
-        case GUI_APP_DIAG:    return rgb(230, 126, 34);
-        case GUI_APP_CLOCK:    return rgb(231, 76, 60);
-        case GUI_APP_SETTINGS: return rgb(149, 165, 166);
-        case GUI_APP_FILES:    return rgb(52, 152, 219);
-        case GUI_APP_SHORTCUTS: return rgb(39, 174, 96);
-        default:               return rgb(61, 174, 233);
+        case GUI_APP_NOTES:   return UI_OK;
+        case GUI_APP_CALC:    return UI_ACCENT;
+        case GUI_APP_UWC:     return UI_ACCENT;
+        case GUI_APP_SNAKE:   return UI_OK;
+        case GUI_APP_BROWSER: return UI_ACCENT;
+        case GUI_APP_CODE:    return UI_ACCENT;
+        case GUI_APP_DIAG:    return UI_WARN;
+        case GUI_APP_CLOCK:    return UI_ERR;
+        case GUI_APP_SETTINGS: return UI_FG2;
+        case GUI_APP_FILES:    return UI_ACCENT;
+        case GUI_APP_SHORTCUTS: return UI_OK;
+        default:               return UI_ACCENT;
     }
 }
 
@@ -2050,9 +2075,9 @@ static void gui_app_tile_rect(int tx, int ty, int win_w, uint32_t i,
 
 static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     char line[64];
-    text(tx, ty, "应用程序", rgb(239, 240, 241), 1);
+    text(tx, ty, "应用程序", UI_FG, 1);
     line_u32(line, sizeof(line), "共 ", gui_app_count(), " 个应用");
-    text(tx + 96, ty + 2, line, rgb(160, 167, 173), 1);
+    text(tx + 96, ty + 2, line, UI_FG2, 1);
 
     int cw = win_w - 60;  // content width (panel is inset 30px each side)
 
@@ -2068,7 +2093,7 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         int sel = ((int)i == selected);
 
         // Translucent glass tile; selected gets an accent wash + ring.
-        fill_round_rect(x, y, w, h, 10, sel ? 0x99203A4A : 0x66202428, RR_ALL);
+        fill_round_rect(x, y, w, h, UI_RADIUS, ((sel ? 0x99u : 0x66u) << 24) | (UI_SURFACE3 & 0xFFFFFFu), RR_ALL);
         if (sel) {
             rect(x + 10, y, w - 20, 1, accent);
             rect(x + 10, y + h - 1, w - 20, 1, accent);
@@ -2083,13 +2108,13 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         int lx = x + (w - tw) / 2;
         if (lx < x + 4) lx = x + 4;
         text(lx, y + h - 26, app->name,
-             sel ? rgb(255, 255, 255) : rgb(228, 232, 236), 1);
+             sel ? UI_FG : UI_FG, 1);
     }
     uint32_t cols = (uint32_t)gui_app_grid_cols(cw);
     uint32_t rows = (gui_app_count() + cols - 1) / cols;
     text(tx, ty + 64 + (int)rows * 126 + 6,
          "单击图标启动 · 方向键选择 · Enter 打开",
-         rgb(200, 206, 212), 1);
+         UI_FG, 1);
 }
 
 
@@ -2378,33 +2403,33 @@ static void browser_style_get(int type, browser_style_t *s) {
     /* 亮色调色板：页面区是白底（Chrome 默认渲染就是白底黑字），正文近黑、
      * 链接 Chrome 蓝、代码块浅灰底——之前的暗色是"终端风"，不是浏览器该
      * 有的样子。 */
-    uint32_t body_col = rgb(32, 33, 36);
+    uint32_t body_col = UI_SURFACE;
     s->color = body_col; s->scale = 1; s->indent = 0; s->bullet = 0;
     s->mono = 0; s->bold = 0; s->italic = 0; s->underline = 0; s->is_hr = 0; s->gap_after = 0;
     s->has_bg = 0; s->bg_color = 0; s->left_bar = 0; s->align = 0; s->border = 0;
     switch (type) {
         case BRK_P:   s->gap_after = 1; break; /* 段落之间留白——之前没有，所以文字全堆成一片 */
-        case BRK_H1: s->color = rgb(12, 13, 16); s->scale = 2; s->bold = 1; s->gap_after = 1; break;
-        case BRK_H2: s->color = rgb(24, 26, 30); s->bold = 1; s->gap_after = 1; break;
-        case BRK_H3: s->color = rgb(40, 44, 50); s->bold = 1; s->gap_after = 1; break;
-        case BRK_H4: s->color = rgb(72, 78, 86); s->bold = 1; s->gap_after = 1; break;
+        case BRK_H1: s->color = UI_BG; s->scale = 2; s->bold = 1; s->gap_after = 1; break;
+        case BRK_H2: s->color = UI_SURFACE; s->bold = 1; s->gap_after = 1; break;
+        case BRK_H3: s->color = UI_SURFACE2; s->bold = 1; s->gap_after = 1; break;
+        case BRK_H4: s->color = UI_LINE2; s->bold = 1; s->gap_after = 1; break;
         case BRK_LI: s->color = body_col; s->indent = 16; s->bullet = 1; break;
         case BRK_LI_NUM: s->color = body_col; s->indent = 16; break;
-        case BRK_LINK: s->color = rgb(24, 90, 200); s->underline = 1; break;
+        case BRK_LINK: s->color = UI_ACCENT; s->underline = 1; break;
         case BRK_CODE:
-            s->color = rgb(36, 41, 47); s->mono = 1; s->indent = 10;
-            s->has_bg = 1; s->bg_color = rgb(243, 245, 247); s->gap_after = 1;
+            s->color = UI_SURFACE2; s->mono = 1; s->indent = 10;
+            s->has_bg = 1; s->bg_color = UI_FG; s->gap_after = 1;
             break;
         case BRK_HR: s->is_hr = 1; break;
-        case BRK_STRONG: s->color = rgb(12, 13, 16); s->bold = 1; break;
+        case BRK_STRONG: s->color = UI_BG; s->bold = 1; break;
         case BRK_EM: s->color = body_col; s->italic = 1; break;
-        case BRK_DT: s->color = rgb(12, 13, 16); s->bold = 1; break;
+        case BRK_DT: s->color = UI_BG; s->bold = 1; break;
         case BRK_DD: s->color = body_col; s->indent = 20; s->gap_after = 1; break;
         case BRK_QUOTE:
-            s->color = rgb(90, 98, 106); s->indent = 16;
-            s->has_bg = 1; s->bg_color = rgb(246, 248, 250); s->left_bar = 1; s->gap_after = 1;
+            s->color = UI_LINE2; s->indent = 16;
+            s->has_bg = 1; s->bg_color = UI_FG; s->left_bar = 1; s->gap_after = 1;
             break;
-        case BRK_IMG: s->color = rgb(130, 120, 160); s->indent = 4; break;
+        case BRK_IMG: s->color = UI_DIM; s->indent = 4; break;
         default: break;
     }
 }
@@ -4439,7 +4464,7 @@ static int browser_draw_segment(int x, int w, int *cy, int row_unit, int scroll,
 
     if (bs.is_hr) {
         if (row_unit >= scroll && *drawn_rows < max_lines) {
-            rect(x, *cy + rh / 2, w, 2, rgb(214, 218, 222));
+            rect(x, *cy + rh / 2, w, 2, UI_FG);
             *cy += rh; (*drawn_rows)++;
         }
         return row_unit + 1;
@@ -4580,7 +4605,7 @@ static void br_draw_tok(int px, int py, int rowh, int rh, const char *tok, int t
     if (link_idx >= 0) browser_add_link_rect(px, py, tw, rowh, link_idx);
 }
 
-#define BR_BORDER_COL rgb(196, 202, 208) /* CSS border 的固定颜色（浅灰） */
+#define BR_BORDER_COL UI_FG /* CSS border 的固定颜色（浅灰） */
 
 /* 流式排版一个块：把块内所有运行的词依次从左到右排，超宽按词折行（CJK
  * 按字折行），单个超长词按码点硬切。这是"行内元素不再各占一行 + 单词不再
@@ -4759,8 +4784,8 @@ static int br_draw_table_row(int x, int *cy, int row_unit, int scroll, int max_l
     int total_w = 0;
     for (int c = 0; c < ncols; c++) total_w += col_w[c];
     if (row_unit >= scroll && *drawn_rows < max_lines) {
-        uint32_t grid_col = rgb(202, 208, 214);
-        if (bs->bold) rect(x, *cy - 1, total_w, rh, rgb(241, 243, 245));
+        uint32_t grid_col = UI_FG;
+        if (bs->bold) rect(x, *cy - 1, total_w, rh, UI_FG);
         int cx = x;
         char cell[128];
         for (int c = 0; c < ncols; c++) {
@@ -4862,8 +4887,8 @@ static int browser_draw_card_grid(int x, int w, int *cy, int row_unit, int scrol
             const br_card_t *card = &cards[c];
             int cx = x + r->x;
             int ccy = *cy + r->y;
-            uint32_t bg = rgb(250, 251, 252);
-            uint32_t border = rgb(225, 229, 234);
+            uint32_t bg = UI_FG;
+            uint32_t border = UI_FG;
             rect(cx, ccy, r->w, r->h, bg);
             rect(cx, ccy, r->w, 1, border);
             rect(cx, ccy + r->h - 1, r->w, 1, border);
@@ -4876,20 +4901,20 @@ static int browser_draw_card_grid(int x, int w, int *cy, int row_unit, int scrol
                                 g_br_img_w[card->slot - 1], g_br_img_h[card->slot - 1],
                                 cx, ccy, r->w, cover_h);
             } else {
-                rect(cx, ccy, r->w, cover_h, rgb(234, 237, 241));
+                rect(cx, ccy, r->w, cover_h, UI_FG);
                 text(cx + (r->w - 16) / 2, ccy + cover_h / 2 - 8, "图",
-                     rgb(168, 174, 180), 1);
+                     UI_FG2, 1);
             }
             char title[96];
             br_card_text_copy(buf, card->title_start, card->title_len,
                               title, sizeof(title));
             text_clipped(cx + 6, ccy + cover_h + 5, cx + r->w - 6,
-                         title[0] ? title : " ", rgb(32, 33, 36), 1);
+                         title[0] ? title : " ", UI_SURFACE, 1);
             char meta[96];
             br_card_text_copy(buf, card->meta_start, card->meta_len,
                               meta, sizeof(meta));
             text_clipped(cx + 6, ccy + r->h - 20, cx + r->w - 6,
-                         meta[0] ? meta : " ", rgb(122, 128, 136), 1);
+                         meta[0] ? meta : " ", UI_DIM, 1);
             if (card->dur_len > 0) {
                 char dur[32];
                 br_card_text_copy(buf, card->dur_start, card->dur_len,
@@ -4897,8 +4922,8 @@ static int browser_draw_card_grid(int x, int w, int *cy, int row_unit, int scrol
                 int dw = text_width(dur, 1) + 10;
                 int bx = cx + r->w - dw - 4;
                 if (dw < r->w - 8) {
-                    rect(bx, ccy + cover_h - 19, dw, 16, rgb(18, 20, 24));
-                    text(bx + 5, ccy + cover_h - 17, dur, rgb(255, 255, 255), 1);
+                    rect(bx, ccy + cover_h - 19, dw, 16, UI_BG);
+                    text(bx + 5, ccy + cover_h - 17, dur, UI_FG, 1);
                 }
             }
             if (card->link_idx >= 0)
@@ -4932,8 +4957,8 @@ static int browser_draw_hero_card(int x, int w, int *cy, int row_unit, int scrol
     if (img_h > 0) card_h = cover_h + 28;
     int units = (card_h + rh - 1) / rh;
     if (row_unit >= scroll && *drawn_rows < max_lines) {
-        uint32_t border = rgb(225, 229, 234);
-        rect(x, *cy, w, card_h, rgb(250, 251, 252));
+        uint32_t border = UI_FG;
+        rect(x, *cy, w, card_h, UI_FG);
         rect(x, *cy, w, 1, border);
         rect(x + w - 1, *cy, 1, card_h, border);
         rect(x, *cy + card_h - 1, w, 1, border);
@@ -4951,11 +4976,11 @@ static int browser_draw_hero_card(int x, int w, int *cy, int row_unit, int scrol
         br_card_text_copy(buf, card->dur_start, card->dur_len,
                           dur, sizeof(dur));
         text_clipped(tx, *cy + 10, x + w - 10, title[0] ? title : " ",
-                     rgb(32, 33, 36), 1);
+                     UI_SURFACE, 1);
         if (meta[0])
-            text_clipped(tx, *cy + 36, x + w - 10, meta, rgb(122, 128, 136), 1);
+            text_clipped(tx, *cy + 36, x + w - 10, meta, UI_DIM, 1);
         if (dur[0])
-            text_clipped(tx, *cy + 58, x + w - 10, dur, rgb(90, 96, 102), 1);
+            text_clipped(tx, *cy + 58, x + w - 10, dur, UI_LINE2, 1);
         if (card->link_idx >= 0)
             browser_add_link_rect(x, *cy, w, card_h, card->link_idx);
         *cy += card_h;
@@ -5168,11 +5193,11 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     int wx = tx - 29;            /* 窗口内区左边缘（win_x+1） */
     int ww = win_w - 2;          /* 窗口内区宽度 */
     if (ww < 340) ww = 340;
-    uint32_t strip_bg = rgb(32, 33, 36);   /* Chrome 深色标签条 */
-    uint32_t tool_bg  = rgb(53, 54, 58);   /* 工具栏 = 活动标签同色 */
-    uint32_t pill_bg  = rgb(40, 41, 45);   /* 地址栏胶囊 */
-    uint32_t icon_col = rgb(198, 202, 208);
-    uint32_t icon_dis = rgb(104, 108, 114);
+    uint32_t strip_bg = UI_SURFACE;   /* Chrome 深色标签条 */
+    uint32_t tool_bg  = UI_SURFACE2;   /* 工具栏 = 活动标签同色 */
+    uint32_t pill_bg  = UI_SURFACE2;   /* 地址栏胶囊 */
+    uint32_t icon_col = UI_FG;
+    uint32_t icon_dis = UI_DIM;
 
     /* 标签页条 + 活动标签 */
     rect(wx, ty, ww, BR_TAB_H, strip_bg);
@@ -5180,11 +5205,11 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     if (tab_w > ww - 80) tab_w = ww - 80;
     int tab_x = wx + 10;
     fill_round_rect(tab_x, ty + 4, tab_w, BR_TAB_H - 4, 9, tool_bg, RR_TOP);
-    gui_fill_circle(tab_x + 16, ty + 4 + (BR_TAB_H - 4) / 2, 4, rgb(120, 170, 240)); /* favicon 占位点 */
+    gui_fill_circle(tab_x + 16, ty + 4 + (BR_TAB_H - 4) / 2, 4, UI_ACCENT); /* favicon 占位点 */
     {
         /* 标签标题直接用页面标题（没有就显示"新标签页"） */
         const char *t = g_browser_page_title[0] ? g_browser_page_title : "新标签页";
-        text_clipped(tab_x + 30, ty + 9, tab_x + tab_w - 24, t, rgb(225, 228, 232), 1);
+        text_clipped(tab_x + 30, ty + 9, tab_x + tab_w - 24, t, UI_FG, 1);
     }
     /* 标签上的 × */
     {
@@ -5199,7 +5224,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     rect(tab_x + tab_w + 17, ty + BR_TAB_H / 2 - 5, 1, 11, icon_dis);
     /* 明示当前渲染后端，避免把静态 SSR 摘要误认为 JavaScript/Vue 已运行。 */
     text_clipped(wx + ww - 62, ty + 9, wx + ww - 26,
-                 browser_backend->name, rgb(150, 156, 166), 1);
+                 browser_backend->name, UI_FG2, 1);
 
     /* 工具栏 */
     rect(wx, ty + BR_TAB_H, ww, BR_TOOL_H, tool_bg);
@@ -5240,16 +5265,16 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     int ind_x = pill_x + 14;
     int ind_cy = pill_y + pill_h / 2;
     if (st->browser_url[0] == 'h' && st->browser_url[4] == 's') {
-        rect(ind_x - 3, ind_cy - 1, 8, 6, rgb(160, 200, 170));      /* 锁体 */
-        rect(ind_x - 2, ind_cy - 4, 1, 3, rgb(160, 200, 170));      /* 锁梁 */
-        rect(ind_x + 3, ind_cy - 4, 1, 3, rgb(160, 200, 170));
-        rect(ind_x - 1, ind_cy - 5, 4, 1, rgb(160, 200, 170));
+        rect(ind_x - 3, ind_cy - 1, 8, 6, UI_FG2);      /* 锁体 */
+        rect(ind_x - 2, ind_cy - 4, 1, 3, UI_FG2);      /* 锁梁 */
+        rect(ind_x + 3, ind_cy - 4, 1, 3, UI_FG2);
+        rect(ind_x - 1, ind_cy - 5, 4, 1, UI_FG2);
     } else {
         gui_fill_circle(ind_x, ind_cy, 4, icon_dis);
         gui_fill_circle(ind_x, ind_cy, 2, pill_bg);
     }
     int url_x = pill_x + 28;
-    text_clipped(url_x, pill_y + 5, pill_r - 10, st->browser_url, rgb(208, 212, 218), 1);
+    text_clipped(url_x, pill_y + 5, pill_r - 10, st->browser_url, UI_FG, 1);
     /* 闪烁插入光标 */
     {
         uint32_t cur = st->browser_url_cursor;
@@ -5263,7 +5288,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
         static uint32_t browser_caret_ticks = 0;
         browser_caret_ticks++;
         if ((browser_caret_ticks / 15) % 2)
-            rect(caret_x + 1, pill_y + 5, 2, 18, rgb(220, 224, 230));
+            rect(caret_x + 1, pill_y + 5, 2, 18, UI_FG);
     }
 
     /* 页面区：白底（Chrome 默认渲染），铺满窗口剩余高度 */
@@ -5307,10 +5332,10 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
                 caps_list[off] = 0;
             }
         }
-        rect(wx, page_y, ww, 26, rgb(255, 244, 204));
-        text(wx + 12, page_y + 5, "Lite 未执行页面能力:", rgb(112, 78, 12), 1);
+        rect(wx, page_y, ww, 26, UI_FG);
+        text(wx + 12, page_y + 5, "Lite 未执行页面能力:", UI_WARN, 1);
         text_clipped(wx + 160, page_y + 5, wx + ww - 12, caps_list,
-                     rgb(112, 78, 12), 1);
+                     UI_WARN, 1);
         page_y += 26;
         page_h -= 26;
         if (page_h < 54) page_h = 54;
@@ -5318,7 +5343,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     int inner_h = page_h - 20;
     int total = 0, max_scroll = 0, visible_rows = 0;
     for (int pass = 0; pass < 2; pass++) {
-        rect(wx, page_y, ww, page_h, rgb(255, 255, 255));
+        rect(wx, page_y, ww, page_h, UI_FG);
         total = draw_rendered_page(wx + 18, page_y + 12, ww - 44, inner_h,
                                    st->browser_render, st->browser_render_len,
                                    st->browser_scroll);
@@ -5334,13 +5359,13 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
         int sb_x = wx + ww - 10;
         int sb_y = page_y + 2;
         int sb_h = page_h - 4;
-        rect(sb_x, sb_y, 6, sb_h, rgb(241, 243, 244));
+        rect(sb_x, sb_y, 6, sb_h, UI_FG);
         int thumb_h = sb_h * visible_rows / total;
         if (thumb_h < 20) thumb_h = 20;
         if (thumb_h > sb_h) thumb_h = sb_h;
         int thumb_y = sb_y;
         if (max_scroll > 0) thumb_y += (sb_h - thumb_h) * st->browser_scroll / max_scroll;
-        fill_round_rect(sb_x, thumb_y, 6, thumb_h, 3, rgb(154, 160, 166), RR_ALL);
+        fill_round_rect(sb_x, thumb_y, 6, thumb_h, 3, UI_FG2, RR_ALL);
     }
 }
 
@@ -5351,45 +5376,45 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
         soft_shadow(x + 2, y + 3, win_w - 4, win_h - 4);  // deeper drop shadow
     }
 
-    uint32_t body_bg  = active ? (light ? rgb(239, 240, 241) : rgb(42, 46, 50))
-                               : (light ? rgb(239, 240, 241) : rgb(35, 38, 41));
-    uint32_t title_bg = active ? (light ? rgb(214, 217, 221) : rgb(49, 54, 59))
-                               : (light ? rgb(231, 233, 235) : rgb(38, 41, 44));
-    uint32_t border_c = active ? rgb(61, 174, 233)
-                               : (light ? rgb(188, 192, 196) : rgb(60, 64, 69));
+    uint32_t body_bg  = active ? (UI_SURFACE2)
+                               : (UI_SURFACE);
+    uint32_t title_bg = active ? (UI_SURFACE2)
+                               : (UI_SURFACE2);
+    uint32_t border_c = active ? UI_ACCENT
+                               : (UI_SURFACE3);
 
     // Rounded Breeze frame: rounded body, rounded-top titlebar, 1px separator,
     // focus border on the straight edges (corners carried by the AA fill).
     fill_round_rect(x, y, win_w, win_h, R, body_bg, RR_ALL);
     fill_round_rect(x, y, win_w, WM_TITLE_H, R, title_bg, RR_TOP);
-    rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
+    rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, UI_SURFACE3);
     rect(x + R, y, win_w - 2 * R, 1, border_c);
     rect(x + R, y + win_h - 1, win_w - 2 * R, 1, border_c);
     rect(x, y + R, 1, win_h - 2 * R, border_c);
     rect(x + win_w - 1, y + R, 1, win_h - 2 * R, border_c);
 
     // Window controls: flat, close=red, min/max neutral (no accent strip).
-    uint32_t nbtn = active ? (light ? rgb(206, 209, 213) : rgb(66, 71, 77))
-                           : (light ? rgb(222, 224, 227) : rgb(54, 58, 63));
+    uint32_t nbtn = active ? (UI_SURFACE3)
+                           : (UI_SURFACE3);
     int btn_x = x + win_w - WM_BTN_W - 8;
     int btn_y = y + 7;
     draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20,
-                     rgb(218, 68, 83), rgb(218, 68, 83), rgb(160, 46, 58), 0);
+                     UI_ERR, UI_ERR, UI_ERR, 0);
     draw_window_control_icon(btn_x + 7, btn_y + 6, GUI_CTRL_CLOSE, 0,
-                             rgb(252, 238, 236));
+                             UI_FG);
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
     draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nbtn, nbtn,
-                     light ? rgb(176, 180, 184) : rgb(60, 64, 69), 0);
+                     UI_SURFACE3, 0);
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MAX,
                              state == WM_STATE_MAXIMIZED,
-                             light ? rgb(60, 64, 69) : rgb(236, 242, 240));
+                             UI_FG);
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
     draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nbtn, nbtn,
-                     light ? rgb(176, 180, 184) : rgb(60, 64, 69), 0);
+                     UI_SURFACE3, 0);
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MIN, 0,
-                             light ? rgb(60, 64, 69) : rgb(236, 242, 240));
+                             UI_FG);
 
     // Titlebar app icon (real atlas tile; fallback = rounded accent square)
     // + vertically-centered title.
@@ -5405,14 +5430,14 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
                        0x78000000u | (uint32_t)title_bg);
         }
     } else {
-        uint32_t icon_c = active ? rgb(61, 174, 233)
-                                 : (light ? rgb(150, 156, 162) : rgb(110, 118, 126));
+        uint32_t icon_c = active ? UI_ACCENT
+                                 : (UI_DIM);
         fill_round_rect(icon_x, icy, ico, ico, 3, icon_c, RR_ALL);
-        rect(icon_x + 4, icy + 5, ico - 8, ico - 9, rgb(255, 255, 255));
+        rect(icon_x + 4, icy + 5, ico - 8, ico - 9, UI_FG);
     }
     int tty = y + (WM_TITLE_H - gui_font_line_height()) / 2;
     text_clipped(x + 34, tty, x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16,
-                 title, active ? rgb(255, 255, 255) : (light ? rgb(90, 96, 102) : rgb(190, 196, 202)), 1);
+                 title, active ? UI_FG : (UI_FG2), 1);
 }
 
 static void draw_panel_window(int tx, int ty, int win_w, int win_h, int w, int h, gui_state_t *st, int panel) {
@@ -5460,11 +5485,11 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
         draw_app_window_body(tx, ty, win_w, win_h, st, win->mode);
     }
     vgradient_alpha(win_x + 1, win_y + win_h - 31, win_w - 2, 30,
-                    0xD0000000 | (st->theme_light ? rgb(220, 225, 230) : rgb(28, 34, 37)),
-                    0xD0000000 | (st->theme_light ? rgb(200, 205, 210) : rgb(13, 16, 19)));
-    rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, st->theme_light ? rgb(180, 185, 190) : rgb(75, 96, 92));
-    rect(win_x + 1, win_y + win_h - 31, win_w - 2, 1, idx == st->wm.active_window ? cyber_neon_pink(st->theme_light) : (st->theme_light ? rgb(190, 195, 200) : rgb(44, 54, 58)));
-    rect(win_x + 1, win_y + win_h - 1, win_w - 2, 1, st->theme_light ? rgb(180, 185, 190) : rgb(5, 8, 10));
+                    0xD0000000 | (UI_SURFACE),
+                    0xD0000000 | (UI_BG));
+    rect(win_x + 1, win_y + win_h - 32, win_w - 2, 1, UI_LINE2);
+    rect(win_x + 1, win_y + win_h - 31, win_w - 2, 1, idx == st->wm.active_window ? cyber_neon_pink(st->theme_light) : (UI_SURFACE2));
+    rect(win_x + 1, win_y + win_h - 1, win_w - 2, 1, UI_BG);
     text(win_x + 24, win_y + win_h - 22,
          idx == st->wm.active_window ? st->status : "单击任务栏切换",
          cyber_text_muted(st->theme_light), 1);
@@ -5609,9 +5634,9 @@ static void draw_brightness_popup(int w, int h, const gui_state_t *st) {
     int px, py;
     brightness_popup_xy(w, h, &px, &py);
     soft_shadow(px - 2, py - 2, BR_POPUP_W + 4, BR_POPUP_H + 4);
-    uint32_t bg = light ? 0xF6F5F6F8 : 0xF6202428;
+    uint32_t bg = (0xF6u << 24) | (light ? 0xF5F6F8u : 0x202428u);
     fill_round_rect(px, py, BR_POPUP_W, BR_POPUP_H, 10, bg, RR_ALL);
-    uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
+    uint32_t bd = UI_SURFACE3;
     border(px, py, BR_POPUP_W, BR_POPUP_H, bd);
 
     char line[24];
@@ -5619,23 +5644,23 @@ static void draw_brightness_popup(int w, int h, const gui_state_t *st) {
     append_str(line, sizeof(line), &pos, "亮度  ");
     append_uint(line, sizeof(line), &pos, (uint32_t)st->brightness);
     append_char(line, sizeof(line), &pos, '%');
-    text(px + 18, py + 14, line, light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+    text(px + 18, py + 14, line, UI_FG, 1);
 
     int tx0, tx1, ty;
     brightness_track_xy(px, py, &tx0, &tx1, &ty);
-    uint32_t track_bg = light ? rgb(214, 218, 222) : rgb(52, 60, 68);
+    uint32_t track_bg = UI_SURFACE3;
     fill_round_rect(tx0, ty - 3, tx1 - tx0, 6, 3, track_bg, RR_ALL);
     int fill_w = (tx1 - tx0) * (st->brightness - BR_MIN) / (BR_MAX - BR_MIN);
     if (fill_w > 0)
-        fill_round_rect(tx0, ty - 3, fill_w, 6, 3, rgb(61, 174, 233), RR_ALL);
+        fill_round_rect(tx0, ty - 3, fill_w, 6, 3, UI_ACCENT, RR_ALL);
     int thumb_x = tx0 + fill_w;
-    gui_fill_circle(thumb_x, ty, 8, rgb(255, 255, 255));
-    gui_fill_circle(thumb_x, ty, 6, rgb(61, 174, 233));
+    gui_fill_circle(thumb_x, ty, 8, UI_FG);
+    gui_fill_circle(thumb_x, ty, 6, UI_ACCENT);
 }
 
 static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int light = st->theme_light;
-    uint32_t accent = rgb(61, 174, 233);
+    uint32_t accent = UI_ACCENT;
     int wins[WM_MAX_WINDOWS];
     int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
     int item_count = 1 + TB_PIN_COUNT + n;
@@ -5645,7 +5670,7 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
         taskbar_item_xy(i, item_count, w, h, &rx, &ry);
         if (i == 0) {
             if (st->wm.start_menu_open)
-                fill_round_rect(rx, ry, TB_BTN, TB_BTN, 8, 0x44FFFFFF, RR_ALL);
+                fill_round_rect(rx, ry, TB_BTN, TB_BTN, UI_RADIUS_SM, (0x44u << 24) | 0xFFFFFFu, RR_ALL);
             int lsz = ui_s(18);
             draw_hbos_logo(rx + (TB_BTN - lsz) / 2, ry + (TB_BTN - lsz) / 2, lsz, accent);
         } else if (i <= TB_PIN_COUNT) {
@@ -5662,7 +5687,7 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
             else
                 blit_icon(ix, iy, isz, app_icon_id(win->mode));
             rect(rx + TB_BTN / 2 - 7, ry + TB_BTN - 1, 14, 3,
-                 act ? accent : (light ? rgb(150, 154, 158) : rgb(150, 155, 160)));
+                 act ? accent : (UI_FG2));
         }
     }
 
@@ -5670,14 +5695,14 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int bix, biy;
     brightness_icon_xy(w, h, &bix, &biy);
     if (st->brightness_popup_open)
-        fill_round_rect(bix - 4, biy - 4, BR_ICON_SZ + 8, BR_ICON_SZ + 8, 8, 0x44FFFFFF, RR_ALL);
-    draw_brightness_icon(bix, biy, BR_ICON_SZ, light ? cyber_text(1) : rgb(235, 238, 242));
+        fill_round_rect(bix - 4, biy - 4, BR_ICON_SZ + 8, BR_ICON_SZ + 8, UI_RADIUS_SM, (0x44u << 24) | 0xFFFFFFu, RR_ALL);
+    draw_brightness_icon(bix, biy, BR_ICON_SZ, light ? cyber_text(1) : UI_FG);
 
     /* Win11 风格：时间在上、日期在下，各自右对齐，给亮度图标+显示桌面竖条让出空间 */
     char tline[32], dline[40];
     time_line(tline, sizeof(tline), st->taskbar_show_seconds);
     date_line(dline, sizeof(dline));
-    uint32_t tcol = light ? cyber_text(1) : rgb(235, 238, 242);
+    uint32_t tcol = light ? cyber_text(1) : UI_FG;
     int lh = gui_font_line_height();
     int tw = text_width(tline, 1);
     int dw = text_width(dline, 1);
@@ -5689,7 +5714,7 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
 
     /* 显示桌面竖条（Win11 任务栏最右角）：一条分隔线提示可点 */
     rect(w - TB_SHOWDESK_W, h - TASKBAR_H + ui_s(8), 1, TASKBAR_H - ui_s(16),
-         light ? rgb(150, 156, 162) : rgb(90, 98, 106));
+         UI_LINE2);
 }
 
 static int taskbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
@@ -5764,15 +5789,15 @@ static void draw_one_app_window(winsrv_window_t *win) {
     int wx = win->x, wy = win->y, ww = win->w, wh = win->h;
     int th = APPWIN_TITLE_H;
     soft_shadow(wx - 2, wy - th - 2, ww + 4, wh + th + 6);
-    fill_round_rect(wx, wy - th, ww, th, 6, rgb(34, 40, 48), RR_TOP);
+    fill_round_rect(wx, wy - th, ww, th, 6, UI_SURFACE, RR_TOP);
     text(wx + 10, wy - th + (th - gui_font_line_height()) / 2,
-         win->title[0] ? win->title : "应用", rgb(235, 240, 245), 1);
+         win->title[0] ? win->title : "应用", UI_FG, 1);
     /* 关闭按钮 */
     int cbx = wx + ww - 20;
-    text(cbx, wy - th + (th - gui_font_line_height()) / 2, "✕", rgb(240, 120, 120), 1);
+    text(cbx, wy - th + (th - gui_font_line_height()) / 2, "✕", UI_ERR, 1);
     /* 内容 */
     blit_app_surface(wx, wy, win->surface, ww, wh);
-    border(wx, wy, ww, wh, rgb(52, 62, 74));
+    border(wx, wy, ww, wh, UI_SURFACE3);
     win->dirty = 0;
 }
 
@@ -5882,8 +5907,8 @@ static void draw_desktop_icons(void) {
             blit_icon(ix, iy, isz, app_icon_id(d->mode));
         int tw = text_width(d->label, 1);
         int lx = x + (w - tw) / 2;
-        text(lx + 1, iy + isz + 6, d->label, rgb(0, 0, 0), 1);          // shadow
-        text(lx, iy + isz + 5, d->label, rgb(245, 247, 250), 1);
+        text(lx + 1, iy + isz + 6, d->label, UI_BG, 1);          // shadow
+        text(lx, iy + isz + 5, d->label, UI_FG, 1);
     }
 }
 
@@ -5917,7 +5942,7 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
         }
         uint32_t accent = cyber_neon_cyan(st->theme_light);
         for (int yy = py + 4; yy < py + ph - 4; yy += 3)
-            rect(px + 6, yy, pw - 12, 1, st->theme_light ? rgb(200, 215, 220) : rgb(40, 70, 92));
+            rect(px + 6, yy, pw - 12, 1, UI_ACCENT);
         rect(px + 4, py + 4, pw - 8, 3, accent);
         rect(px + 4, py + ph - 7, pw - 8, 3, accent);
         rect(px + 4, py + 4, 3, ph - 8, accent);
@@ -6561,11 +6586,11 @@ static void draw_window_switcher(int w, int h, gui_state_t *st) {
         wm_window_t *win = wm_get_window(&st->wm, i);
         if (!win) continue;
         int active = (i == st->wm.active_window);
-        uint32_t accent = win->kind == WM_WIN_PANEL ? rgb(85, 180, 120) : cyber_neon_cyan(st->theme_light);
+        uint32_t accent = win->kind == WM_WIN_PANEL ? UI_OK : cyber_neon_cyan(st->theme_light);
         if (active) {
             vgradient(ox + pad, ry, ow - pad * 2, row_h - 4,
-                      st->theme_light ? rgb(230, 180, 210) : rgb(50, 0, 80),
-                      st->theme_light ? rgb(210, 150, 180) : rgb(30, 0, 50));
+                      UI_SURFACE,
+                      UI_BG);
             rect(ox + pad, ry, 3, row_h - 4, cyber_neon_pink(st->theme_light));
         }
         rect(ox + pad + 12, ry + 9, 10, 10, accent);
@@ -6898,13 +6923,13 @@ static void draw_context_menu(gui_state_t *st) {
     int mw = CTX_W, mh = n * CTX_ITEM_H + 8;
     int ox = st->ctx_x, oy = st->ctx_y;
     soft_shadow(ox, oy, mw, mh);
-    fill_round_rect(ox, oy, mw, mh, 8, light ? 0xF8F4F6F8 : 0xF8222A33, RR_ALL);
-    border(ox, oy, mw, mh, light ? rgb(200, 206, 212) : rgb(52, 62, 74));
+    fill_round_rect(ox, oy, mw, mh, UI_RADIUS_SM, (0xF8u << 24) | (light ? 0xF4F6F8u : 0x222A33u), RR_ALL);
+    border(ox, oy, mw, mh, UI_SURFACE3);
     for (int i = 0; i < n; i++) {
         int iy = oy + 4 + i * CTX_ITEM_H;
         text(ox + 14, iy + (CTX_ITEM_H - gui_font_line_height()) / 2,
              ctx_item_label(st->ctx_open, i),
-             light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+             UI_FG, 1);
     }
 }
 
@@ -6960,11 +6985,11 @@ static void draw_calendar_popup(int w, int h, gui_state_t *st) {
     int ox, oy, ow, oh, pad, cell, head_h, wk_h;
     cal_geometry(w, h, &ox, &oy, &ow, &oh, &pad, &cell, &head_h, &wk_h);
 
-    uint32_t accent = rgb(61, 174, 233);
-    uint32_t fg     = light ? rgb(40, 44, 48)    : rgb(222, 228, 234);
-    uint32_t dim    = light ? rgb(130, 138, 146) : rgb(130, 140, 150);
-    fill_round_rect(ox, oy, ow, oh, 12, light ? 0xF6F5F6F8 : 0xF6202428, RR_ALL);
-    uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
+    uint32_t accent = UI_ACCENT;
+    uint32_t fg     = UI_FG;
+    uint32_t dim    = UI_DIM;
+    fill_round_rect(ox, oy, ow, oh, UI_RADIUS, (0xF6u << 24) | (light ? 0xF5F6F8u : 0x202428u), RR_ALL);
+    uint32_t bd = UI_SURFACE3;
     rect(ox + 12, oy, ow - 24, 1, bd);
     rect(ox + 12, oy + oh - 1, ow - 24, 1, bd);
     rect(ox, oy + 12, 1, oh - 24, bd);
@@ -6988,8 +7013,8 @@ static void draw_calendar_popup(int w, int h, gui_state_t *st) {
     int nav_y = hy + (head_h - btn) / 2;
     int nx_next = ox + ow - pad - btn;
     int nx_prev = nx_next - btn - ui_s(6);
-    fill_round_rect(nx_prev, nav_y, btn, btn, 6, light ? rgb(228, 231, 234) : rgb(46, 52, 58), RR_ALL);
-    fill_round_rect(nx_next, nav_y, btn, btn, 6, light ? rgb(228, 231, 234) : rgb(46, 52, 58), RR_ALL);
+    fill_round_rect(nx_prev, nav_y, btn, btn, 6, UI_SURFACE2, RR_ALL);
+    fill_round_rect(nx_next, nav_y, btn, btn, 6, UI_SURFACE2, RR_ALL);
     text(nx_prev + (btn - text_width("‹", 1)) / 2, nav_y + (btn - lh) / 2, "‹", fg, 1);
     text(nx_next + (btn - text_width("›", 1)) / 2, nav_y + (btn - lh) / 2, "›", fg, 1);
 
@@ -7027,7 +7052,7 @@ static void draw_calendar_popup(int w, int h, gui_state_t *st) {
             fill_round_rect(cx + (cell - r) / 2, cy + (cell - r) / 2, r, r,
                             r / 2, accent, RR_ALL);
             text(cx + (cell - tw2) / 2, cy + (cell - lh) / 2, db,
-                 rgb(255, 255, 255), 1);
+                 UI_FG, 1);
         } else {
             text(cx + (cell - tw2) / 2, cy + (cell - lh) / 2, db, fg, 1);
         }
@@ -7077,9 +7102,9 @@ static void draw_start_menu(gui_state_t *st) {
     if (extra < 0) extra = 0;
 
     /* ── panel background ── */
-    uint32_t bg = light ? 0xF6F5F6F8 : 0xF6202428;
+    uint32_t bg = (0xF6u << 24) | (light ? 0xF5F6F8u : 0x202428u);
     fill_round_rect(ox, oy, SM_W, mh, 12, bg, RR_ALL);
-    uint32_t bd = light ? rgb(210, 214, 218) : rgb(52, 60, 68);
+    uint32_t bd = UI_SURFACE3;
     /* top/bottom border lines for rounded rect */
     rect(ox + 12, oy, SM_W - 24, 1, bd);
     rect(ox + 12, oy + mh - 1, SM_W - 24, 1, bd);
@@ -7090,34 +7115,34 @@ static void draw_start_menu(gui_state_t *st) {
     int sx = ox + SM_PAD, sy = oy + SM_SEARCH_TOP;
     int sw = SM_W - 2 * SM_PAD;
     vgradient(sx, sy, sw, SM_SEARCH_H,
-              light ? rgb(240, 242, 244) : rgb(34, 40, 48),
-              light ? rgb(232, 235, 238) : rgb(28, 34, 42));
-    border(sx, sy, sw, SM_SEARCH_H, light ? rgb(190, 195, 200) : rgb(55, 65, 78));
+              UI_SURFACE,
+              UI_SURFACE);
+    border(sx, sy, sw, SM_SEARCH_H, UI_SURFACE3);
     if (st->sm_search_len > 0) {
         text(sx + 12, sy + (SM_SEARCH_H - gui_font_line_height()) / 2,
-             st->sm_search, light ? rgb(30, 34, 40) : rgb(232, 238, 244), 1);
+             st->sm_search, UI_FG, 1);
         /* 光标 */
         int cxp = sx + 12 + text_width(st->sm_search, 1) + 1;
-        rect(cxp, sy + 8, 1, SM_SEARCH_H - 16, light ? rgb(60, 66, 72) : rgb(200, 206, 212));
+        rect(cxp, sy + 8, 1, SM_SEARCH_H - 16, UI_FG);
     } else {
         text(sx + 12, sy + (SM_SEARCH_H - gui_font_line_height()) / 2,
              "搜索应用…（输入名称或拼音，Enter 启动）",
-             light ? rgb(160, 166, 172) : rgb(100, 110, 122), 1);
+             UI_DIM, 1);
     }
     /* magnifier icon */
     int mg = sy + SM_SEARCH_H / 2;
     int mr = 6;
     /* simple circle + line for magnifier */
-    rect(sx + sw - 22 + mr/2 + 2, mg - mr, 1, mr * 2, light ? rgb(140,146,152) : rgb(90,100,112));
-    rect(sx + sw - 22 - mr, mg - 1, mr * 2, 1, light ? rgb(140,146,152) : rgb(90,100,112));
+    rect(sx + sw - 22 + mr/2 + 2, mg - mr, 1, mr * 2, UI_LINE2);
+    rect(sx + sw - 22 - mr, mg - 1, mr * 2, 1, UI_LINE2);
 
     /* ── "已固定" section label ── */
     int lty = oy + SM_PIN_TOP;
     text(ox + SM_PAD, lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
-         "已固定", light ? rgb(60, 66, 72) : rgb(180, 186, 192), 1);
+         "已固定", UI_FG2, 1);
     text(ox + SM_W - SM_PAD - text_width("全部 >", 1),
          lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
-         "全部 >", light ? rgb(61, 174, 233) : rgb(61, 174, 233), 1);
+         "全部 >", UI_ACCENT, 1);
 
     /* ── 应用网格（按搜索过滤后顺序排布） ── */
     int cell_w = (SM_W - 2 * SM_PAD) / SM_GRID_COLS;
@@ -7152,17 +7177,17 @@ static void draw_start_menu(gui_state_t *st) {
         int lx = cx - tw / 2;
         if (lx < ox + SM_PAD) lx = ox + SM_PAD;
         text_clipped(lx, iy + isz + 4, ox + SM_W - SM_PAD,
-                     e.name, light ? rgb(40, 44, 48) : rgb(220, 226, 232), 1);
+                     e.name, UI_FG, 1);
     }
     if (vis == 0) {
         text(ox + SM_PAD, oy + SM_GRID_TOP + 24, "无匹配应用",
-             light ? rgb(120, 126, 132) : rgb(150, 156, 162), 1);
+             UI_FG2, 1);
     }
 
     /* ── separator（随额外行下移） ── */
     int sep_y = oy + SM_SEP_Y + 2 + extra;
     rect(ox + SM_PAD, sep_y, SM_W - 2 * SM_PAD, 1,
-         light ? rgb(210, 214, 218) : rgb(48, 56, 64));
+         UI_SURFACE2);
 
     /* ── bottom bar（随额外行下移） ── */
     int bar_y = oy + SM_BAR_TOP + extra;
@@ -7170,10 +7195,10 @@ static void draw_start_menu(gui_state_t *st) {
     int uisz = ui_s(28);
     int uix = ox + SM_PAD, uiy = bar_y + (SM_BAR_H - uisz) / 2;
     draw_user_avatar(uix, uiy, uisz,
-                     light ? rgb(135, 206, 235) : rgb(90, 150, 180),
-                     rgb(140, 140, 140));
+                     UI_ACCENT,
+                     UI_DIM);
     text(uix + uisz + 8, bar_y + (SM_BAR_H - gui_font_line_height()) / 2,
-         "用户", light ? rgb(40, 44, 48) : rgb(210, 218, 226), 1);
+         "用户", UI_FG, 1);
 
     /* right: Shell + Power buttons */
     int btn_w = 88, btn_h = 30, gap = 8;
@@ -7183,34 +7208,34 @@ static void draw_start_menu(gui_state_t *st) {
 
     /* Shell button */
     vgradient(shell_x, btn_y, btn_w, btn_h,
-              light ? rgb(220, 226, 232) : rgb(44, 54, 66),
-              light ? rgb(208, 214, 220) : rgb(36, 44, 56));
-    border(shell_x, btn_y, btn_w, btn_h, light ? rgb(180, 186, 192) : rgb(60, 72, 86));
+              UI_SURFACE2,
+              UI_SURFACE2);
+    border(shell_x, btn_y, btn_w, btn_h, UI_SURFACE3);
     {
         int tw = text_width("返回Shell", 1);
         text(shell_x + (btn_w - tw) / 2, btn_y + (btn_h - gui_font_line_height()) / 2,
-             "返回Shell", light ? rgb(40, 44, 48) : rgb(200, 210, 222), 1);
+             "返回Shell", UI_FG, 1);
     }
 
     /* Power button */
     vgradient(power_x, btn_y, btn_w, btn_h,
-              light ? rgb(240, 80, 80) : rgb(180, 30, 30),
-              light ? rgb(220, 60, 60) : rgb(150, 20, 20));
-    border(power_x, btn_y, btn_w, btn_h, light ? rgb(180, 40, 40) : rgb(120, 15, 15));
+              UI_ERR,
+              UI_SURFACE3);
+    border(power_x, btn_y, btn_w, btn_h, UI_SURFACE2);
     {
         /* power symbol: circle arc + vertical bar */
         int pcx = power_x + btn_w / 2;
         int pcy = btn_y + btn_h / 2;
-        rect(pcx - 1, pcy - 7, 2, 8, rgb(255, 255, 255));
+        rect(pcx - 1, pcy - 7, 2, 8, UI_FG);
         /* arc approximation via horizontal lines */
         for (int dy = -5; dy <= 5; dy++) {
             int dx = dy < 0 ? (6 - dy/2) : (6 + dy/2);
             if (dx > 8) dx = 8;
-            rect(pcx - dx, pcy + dy, 1, 1, rgb(255, 255, 255));
-            rect(pcx + dx, pcy + dy, 1, 1, rgb(255, 255, 255));
+            rect(pcx - dx, pcy + dy, 1, 1, UI_FG);
+            rect(pcx + dx, pcy + dy, 1, 1, UI_FG);
         }
         text(power_x + 20, btn_y + (btn_h - gui_font_line_height()) / 2,
-             "关机", rgb(255, 255, 255), 1);
+             "关机", UI_FG, 1);
     }
 }
 
@@ -7223,18 +7248,18 @@ static void draw_splash_window(int w, int h, int ticks, int light) {
     int sx = (w - sw) / 2, sy = (h - sh) / 2;
     int title_h = WM_TITLE_H;
     int R = 8;
-    uint32_t accent   = rgb(61, 174, 233);
-    uint32_t body     = light ? rgb(239, 240, 241) : rgb(42, 46, 50);
-    uint32_t title_bg = light ? rgb(214, 217, 221) : rgb(49, 54, 59);
-    uint32_t tcol     = light ? rgb(40, 44, 48)    : rgb(226, 232, 238);
-    uint32_t scol     = light ? rgb(110, 120, 130) : rgb(150, 160, 170);
+    uint32_t accent   = UI_ACCENT;
+    uint32_t body     = UI_SURFACE2;
+    uint32_t title_bg = UI_SURFACE2;
+    uint32_t tcol     = UI_FG;
+    uint32_t scol     = UI_FG2;
     int lh = gui_font_line_height();
 
     soft_shadow(sx, sy, sw, sh);
     soft_shadow(sx + 2, sy + 3, sw - 4, sh - 4);
     fill_round_rect(sx, sy, sw, sh, R, body, RR_ALL);
     fill_round_rect(sx, sy, sw, title_h, R, title_bg, RR_TOP);
-    rect(sx + 1, sy + title_h, sw - 2, 1, light ? rgb(196, 200, 204) : rgb(60, 64, 69));
+    rect(sx + 1, sy + title_h, sw - 2, 1, UI_SURFACE3);
     rect(sx + R, sy, sw - 2 * R, 1, accent);
     rect(sx + R, sy + sh - 1, sw - 2 * R, 1, accent);
     rect(sx, sy + R, 1, sh - 2 * R, accent);
@@ -7243,19 +7268,19 @@ static void draw_splash_window(int w, int h, int ticks, int light) {
     /* 标题栏：圆角图标 + 标题 + 右侧版本号（与 draw_window_frame 一致） */
     int ico = 14, icy = sy + (title_h - ico) / 2;
     fill_round_rect(sx + 12, icy, ico, ico, 3, accent, RR_ALL);
-    rect(sx + 12 + 4, icy + 5, ico - 8, ico - 9, rgb(255, 255, 255));
-    text(sx + 34, sy + (title_h - lh) / 2, "欢迎使用 HBOS", rgb(255, 255, 255), 1);
+    rect(sx + 12 + 4, icy + 5, ico - 8, ico - 9, UI_FG);
+    text(sx + 34, sy + (title_h - lh) / 2, "欢迎使用 HBOS", UI_FG, 1);
     {
         const char *v = HBOS_VERSION_TAG;
         int vw = text_width(v, 1);
         text(sx + sw - 16 - vw, sy + (title_h - lh) / 2, v,
-             light ? rgb(90, 96, 102) : rgb(190, 196, 202), 1);
+             UI_FG2, 1);
     }
 
     /* 圆角 logo 方块：HBOS "H" 标志 */
     int bx = sx + 18, by = sy + title_h + 20;
     fill_round_rect(bx, by, 48, 48, 8, accent, RR_ALL);
-    draw_hbos_logo(bx + 12, by + 12, 24, rgb(255, 255, 255));
+    draw_hbos_logo(bx + 12, by + 12, 24, UI_FG);
 
     text(sx + 82, sy + title_h + 22, "HIVE 桌面环境", tcol, 1);
     text(sx + 82, sy + title_h + 44, "64 位 x86_64 · BIOS / UEFI 双启动", scol, 1);
@@ -7264,7 +7289,7 @@ static void draw_splash_window(int w, int h, int ticks, int light) {
     /* 圆角进度条 */
     int bar_x = sx + 18, bar_w = sw - 36, bar_y = sy + sh - 32, bar_h = 8;
     fill_round_rect(bar_x, bar_y, bar_w, bar_h, 4,
-                    light ? rgb(222, 227, 232) : rgb(24, 30, 38), RR_ALL);
+                    UI_SURFACE, RR_ALL);
     int filled = ticks > 0 ? bar_w * ticks / 90 : 0;
     if (filled > 8) fill_round_rect(bar_x, bar_y, filled, bar_h, 4, accent, RR_ALL);
 
@@ -7297,12 +7322,12 @@ static void draw_toast(int w, int h, gui_state_t *st) {
 
     soft_shadow(bx, by, bw, bh);
     fill_round_rect(bx, by, bw, bh, 10,
-                    light ? 0xFFF4F6F8 : 0xFF222A33, RR_ALL);
+                    light ? UI_SURFACE : UI_SURFACE2, RR_ALL);
     /* 左侧强调色条 */
-    fill_round_rect(bx, by, 5, bh, 10, rgb(61, 174, 233), RR_TL | RR_BL);
-    text(bx + 16, by + 9,  "通知", rgb(61, 174, 233), 1);
+    fill_round_rect(bx, by, 5, bh, 10, UI_ACCENT, RR_TL | RR_BL);
+    text(bx + 16, by + 9,  "通知", UI_ACCENT, 1);
     text(bx + 16, by + 30, st->toast_msg,
-         light ? rgb(40, 44, 48) : rgb(225, 230, 235), 1);
+         UI_FG, 1);
 }
 
 static void cmd_gui(int argc, char **argv) {
@@ -7316,6 +7341,11 @@ static void cmd_gui(int argc, char **argv) {
         console_puts("gui: GUI 字体加载失败\n");
         return;
     }
+
+    /* 主题层：载入内置主题并扫描 /themes/*.theme。必须在任何绘制之前调用，
+     * 之后所有颜色都来自 ui_theme()。此调用不会失败——外部主题损坏时
+     * 逐键降级，内置主题永远兜底。 */
+    ui_theme_init();
     gui_wall_init();   // 壁纸可选，失败则回退纯色背景
     gui_icons_init();  // 扁平图标图集；失败则图标不绘制（不影响其余 UI）
 
@@ -7480,10 +7510,15 @@ static void cmd_gui(int argc, char **argv) {
                 live.revision != settings_revision) {
                 settings_revision = live.revision;
                 int light = live.theme == GUI_THEME_LIGHT;
-                if (st.theme_light != light) {
-                    st.theme_light = light;
-                    st.status = light ? "已切换为浅色主题" : "已切换为深色主题";
+                /* 用"已应用到主题层的值"判断，而不是 st.theme_light：
+                 * F4 与设置应用会**先**改 st.theme_light 再写 service，等主
+                 * 循环读到时两者已相等，若拿它做条件就永远不进这个分支——
+                 * 表现为状态栏提示已切换、实际画面不变（曾复现：任务栏变浅
+                 * 但窗口与桌面仍是深色）。这里改成比较真正生效过的值。 */
+                if (g_applied_theme_light != light) {
+                    gui_apply_theme(light);
                 }
+                st.theme_light = light;
                 if (st.taskbar_show_seconds != live.taskbar_show_seconds)
                     st.taskbar_show_seconds = live.taskbar_show_seconds;
                 if (st.brightness != live.brightness) {
@@ -7527,6 +7562,8 @@ static void cmd_gui(int argc, char **argv) {
                     gui_close_window(&st, st.wm.active_window);
             } else {
                 st.theme_light = !st.theme_light;
+                /* 立即落到主题层，本帧就生效（不必等 service 同步回路） */
+                gui_apply_theme(st.theme_light);
                 /* shell 与 service 双写同步：HAX 应用窗口跟随 service，
                  * 不同步就会出现桌面浅色、窗口深色的混搭（issue #2）。 */
                 (void)gui_service_theme_set(st.theme_light);

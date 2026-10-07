@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../vfs.h"
 #include "../../string.h"
@@ -55,23 +56,23 @@ static void app_files_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
 
     /* toolbar */
     int tbh = 28;
-    gui_rect(tx - 20, ty - 4, win_w - 16, tbh, gui_rgb(22, 30, 40));
-    gui_rect(tx - 20, ty - 4 + tbh, win_w - 16, 1, gui_rgb(40, 60, 80));
+    gui_rect(tx - 20, ty - 4, win_w - 16, tbh, UI_SURFACE);
+    gui_rect(tx - 20, ty - 4 + tbh, win_w - 16, 1, UI_SURFACE2);
 
     /* up button */
     int ub_x = tx - 14, ub_y = ty - 2;
-    gui_vgradient(ub_x, ub_y, 36, 22, gui_rgb(50, 70, 90), gui_rgb(32, 46, 62));
-    gui_border(ub_x, ub_y, 36, 22, gui_rgb(20, 35, 52));
-    gui_text(ub_x + 10, ub_y + 4, "↑上", gui_rgb(200, 220, 240), 1);
+    gui_vgradient(ub_x, ub_y, 36, 22, UI_SURFACE3, UI_SURFACE2);
+    gui_border(ub_x, ub_y, 36, 22, UI_LINE2);
+    gui_text(ub_x + 10, ub_y + 4, "↑上", UI_FG2, 1);
 
     /* path breadcrumb */
-    gui_text(tx + 28, ty, st->fm_path, gui_rgb(140, 190, 220), 1);
+    gui_text(tx + 28, ty, st->fm_path, UI_INFO, 1);
 
     /* file list area */
     int lx = tx - 14, ly = ty + tbh - 2;
     int lw = win_w - 16, lh = win_h - tbh - 74;
-    gui_rect(lx, ly, lw, lh, gui_rgb(18, 24, 32));
-    gui_border(lx, ly, lw, lh, gui_rgb(40, 58, 75));
+    gui_rect(lx, ly, lw, lh, UI_SURFACE);
+    gui_border(lx, ly, lw, lh, UI_LINE2);
 
     uint32_t total = fm_count(st->fm_path);
     int visible = lh / FM_ROW_H;
@@ -90,16 +91,16 @@ static void app_files_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
         int sel = (i == st->fm_selected);
         if (sel) {
             gui_vgradient(lx + 1, row_y, lw - 2, FM_ROW_H - 1,
-                          gui_rgb(40, 80, 120), gui_rgb(25, 55, 90));
-            gui_rect(lx + 1, row_y, 3, FM_ROW_H - 1, gui_rgb(61, 174, 233));
+                          UI_ACCENT, UI_SURFACE2);
+            gui_rect(lx + 1, row_y, 3, FM_ROW_H - 1, UI_ACCENT);
         }
         /* icon dot */
-        uint32_t icon_c = (type == VFS_NODE_DIR) ? gui_rgb(255, 200, 60) : gui_rgb(100, 170, 230);
+        uint32_t icon_c = (type == VFS_NODE_DIR) ? UI_WARN : UI_ACCENT;
         gui_rect(lx + 8, row_y + 6, 8, 8, icon_c);
         /* name */
-        uint32_t tc = sel ? gui_rgb(235, 242, 250)
-                          : (type == VFS_NODE_DIR ? gui_rgb(220, 190, 80)
-                                                  : gui_rgb(180, 200, 220));
+        uint32_t tc = sel ? UI_FG
+                          : (type == VFS_NODE_DIR ? UI_FG2
+                                                  : UI_FG2);
         gui_text_clipped(lx + 22, row_y + 4, lx + lw - 8, name, tc, 1);
         row_y += FM_ROW_H;
     }
@@ -107,18 +108,18 @@ static void app_files_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     /* scrollbar */
     if ((int)total > visible && lh > 14) {
         int sb_x = lx + lw - 10, sb_y = ly + 1, sb_h = lh - 2;
-        gui_rect(sb_x, sb_y, 8, sb_h, gui_rgb(14, 20, 28));
+        gui_rect(sb_x, sb_y, 8, sb_h, UI_SURFACE);
         int th = sb_h * visible / (int)total;
         if (th < 12) th = 12;
         int ty2 = sb_y + (sb_h - th) * st->fm_scroll / ((int)total - visible);
-        gui_rect(sb_x + 1, ty2, 6, th, gui_rgb(61, 174, 233));
+        gui_rect(sb_x + 1, ty2, 6, th, UI_ACCENT);
     }
 
     /* status */
     char line[64]; uint32_t pos = 0;
     gui_append_uint(line, sizeof(line), &pos, total);
     gui_append_str(line, sizeof(line), &pos, " 项  ↑↓ 导航  Enter 打开  Backspace 返回");
-    gui_text(lx, ly + lh + 6, line, gui_rgb(100, 130, 155), 1);
+    gui_text(lx, ly + lh + 6, line, UI_DIM, 1);
 }
 
 /* ── key ──────────────────────────────────────────────────── */

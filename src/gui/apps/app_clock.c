@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../string.h"
 #include "../../rtc_tz.h"
@@ -80,10 +81,10 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     int cy = ty + cr + 8;
 
     /* face background */
-    gui_fill_circle(cx, cy, cr, gui_rgb(18, 28, 40));
+    gui_fill_circle(cx, cy, cr, UI_SURFACE);
     /* outer ring */
-    gui_draw_circle(cx, cy, cr,     gui_rgb(61, 174, 233));
-    gui_draw_circle(cx, cy, cr - 1, gui_rgb(30,  80, 120));
+    gui_draw_circle(cx, cy, cr,     UI_ACCENT);
+    gui_draw_circle(cx, cy, cr - 1, UI_ACCENT);
 
     /* 60 minute tick marks */
     for (int i = 0; i < 60; i++) {
@@ -92,7 +93,7 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
         int y0 = cy - cos60(i) * inner / 1000;
         int x1 = cx + SIN60[i] * (cr - 2) / 1000;
         int y1 = cy - cos60(i) * (cr - 2) / 1000;
-        uint32_t tc = (i % 5 == 0) ? gui_rgb(220, 235, 245) : gui_rgb(80, 110, 135);
+        uint32_t tc = (i % 5 == 0) ? UI_FG : UI_ACCENT;
         gui_draw_line(x0, y0, x1, y1, tc);
     }
 
@@ -102,7 +103,7 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     gui_draw_thick_line(cx, cy,
                         cx + SIN60[hpos % 60] * hlen / 1000,
                         cy - cos60(hpos % 60) * hlen / 1000,
-                        3, gui_rgb(235, 242, 250));
+                        3, UI_FG);
 
     /* minute hand */
     int ms = m % 60, ss = s % 60;
@@ -110,17 +111,17 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     gui_draw_thick_line(cx, cy,
                         cx + SIN60[ms] * mlen / 1000,
                         cy - cos60(ms) * mlen / 1000,
-                        2, gui_rgb(180, 210, 235));
+                        2, UI_FG);
 
     /* second hand */
     int slen = cr - 14;
     gui_draw_line(cx, cy,
                   cx + SIN60[ss] * slen / 1000,
                   cy - cos60(ss) * slen / 1000,
-                  gui_rgb(61, 174, 233));
+                  UI_ACCENT);
 
     /* center dot */
-    gui_fill_circle(cx, cy, 4, gui_rgb(61, 174, 233));
+    gui_fill_circle(cx, cy, 4, UI_ACCENT);
 
     /* digital time to the right of the face */
     int rx = cx + cr + 24;
@@ -134,16 +135,16 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     gui_append_char(line, sizeof(line), &pos, ':');
     if (s < 10) gui_append_char(line, sizeof(line), &pos, '0');
     gui_append_uint(line, sizeof(line), &pos, s);
-    gui_text(rx, ry, line, gui_rgb(120, 224, 255), 2);
+    gui_text(rx, ry, line, UI_ACCENT, 2);
 
     date_line(line, sizeof(line));
-    gui_text(rx, ry + 40, line, gui_rgb(200, 224, 240), 1);
-    gui_text(rx, ry + 62, weekday_name(), gui_rgb(160, 200, 224), 1);
+    gui_text(rx, ry + 40, line, UI_FG, 1);
+    gui_text(rx, ry + 62, weekday_name(), UI_FG2, 1);
 
     int avail_w = win_w - 76 - (rx - tx) - 8;
     if (avail_w > 60) {
-        gui_text(rx, ry + 96,  "CMOS 实时时钟", gui_rgb(90, 120, 140), 1);
-        gui_text(rx, ry + 116, "每秒自动刷新",  gui_rgb(70, 100, 120), 1);
+        gui_text(rx, ry + 96,  "CMOS 实时时钟", UI_DIM, 1);
+        gui_text(rx, ry + 116, "每秒自动刷新",  UI_ACCENT, 1);
     }
 }
 

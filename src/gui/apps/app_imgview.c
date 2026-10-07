@@ -2,6 +2,7 @@
  * RGB888 缓冲区（不用 gui_state_t 里放，几百 KB 太大），图片比窗口内容
  * 区大时用方向键平移。 */
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../bmp.h"
 #include "../../png.h"
@@ -76,8 +77,8 @@ static void app_imgview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     char line[GUI_PATH_MAX + 32];
     uint32_t pos = 0; line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, st->imgview_path[0] ? st->imgview_path : "(未选择文件)");
-    gui_text_clipped(tx, ty, tx + aw, line, gui_rgb(200, 214, 228), 1);
-    gui_rect(tx, ty + 20, aw, 1, gui_rgb(48, 64, 84));
+    gui_text_clipped(tx, ty, tx + aw, line, UI_FG, 1);
+    gui_rect(tx, ty + 20, aw, 1, UI_SURFACE3);
 
     int content_y = ty + 28;
     int content_h = ah - 28;
@@ -86,7 +87,7 @@ static void app_imgview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     if (st->imgview_error || st->imgview_w == 0) {
         gui_text(tx, content_y + 8,
                  "无法显示：不是 BMP，或不是未压缩 24 位格式，或尺寸超过 512x384",
-                 gui_rgb(220, 140, 120), 1);
+                 UI_ERR, 1);
         return;
     }
 
@@ -100,7 +101,7 @@ static void app_imgview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     gui_append_uint(line, sizeof(line), &pos, (uint32_t)st->imgview_w);
     gui_append_str(line, sizeof(line), &pos, " x ");
     gui_append_uint(line, sizeof(line), &pos, (uint32_t)st->imgview_h);
-    gui_text(tx, ty + ah - 16, line, gui_rgb(120, 140, 160), 1);
+    gui_text(tx, ty + ah - 16, line, UI_DIM, 1);
 }
 
 static int app_imgview_key(gui_state_t *st, int key) {

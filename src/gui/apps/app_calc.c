@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../string.h"
 
@@ -291,11 +292,11 @@ static void calc_dispatch(gui_state_t *st, char action) {
 /* ── button color ──────────────────────────────────────────── */
 static uint32_t btn_color(char action, int is_light) {
     (void)is_light;
-    if (action == '=') return gui_rgb(61, 174, 233);
+    if (action == '=') return UI_ACCENT;
     if (action == '+' || action == '-' || action == '*' || action == '/')
-        return gui_rgb(50, 70, 90);
-    if (action == 'C') return gui_rgb(218, 68, 83);
-    return gui_rgb(34, 46, 60);
+        return UI_SURFACE3;
+    if (action == 'C') return UI_ERR;
+    return UI_SURFACE2;
 }
 
 /* ── history helpers ───────────────────────────────────────── */
@@ -338,8 +339,8 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     /* display box */
     gui_soft_shadow(tx, ty, L.disp_w, L.disp_h);
     gui_draw_panel_shell(tx, ty, L.disp_w, L.disp_h,
-                         gui_rgb(8, 14, 22), gui_rgb(2, 6, 12),
-                         gui_rgb(48, 132, 196), gui_rgb(61, 174, 233));
+                         UI_BG, UI_BG,
+                         UI_ACCENT, UI_ACCENT);
 
     /* result number */
     line[0] = 0; pos = 0;
@@ -351,7 +352,7 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
         gui_append_ll(line, sizeof(line), &pos, st->calc_value);
     }
     gui_text_clipped(tx + 16, ty + L.disp_h - 48, tx + L.disp_w - 12, line,
-                     st->calc_error ? gui_rgb(232, 88, 96) : gui_rgb(235, 242, 250), 2);
+                     st->calc_error ? UI_ERR : UI_FG, 2);
 
     /* expression line (only when the display box is tall enough for two rows) */
     if (L.disp_h >= 80) {
@@ -371,7 +372,7 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
             gui_append_ll(line, sizeof(line), &pos, st->calc_last_rhs);
             gui_append_str(line, sizeof(line), &pos, " =");
         }
-        gui_text_clipped(tx + 16, ty + 14, tx + L.disp_w - 12, line, gui_rgb(132, 196, 232), 1);
+        gui_text_clipped(tx + 16, ty + 14, tx + L.disp_w - 12, line, UI_ACCENT, 1);
     }
 
     /* button grid */
@@ -388,33 +389,33 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
                                   (bc & 0xff) + 10),
                           bc);
             gui_border(bx, by, L.bw, L.bh,
-                       action == '=' ? gui_rgb(30, 100, 170)
-                                     : gui_rgb(55, 75, 95));
+                       action == '=' ? UI_ACCENT
+                                     : UI_ACCENT);
             int tw = gui_text_width(BTNS[row][col].label, 1);
             int lx = bx + (L.bw - tw) / 2;
             int ly = by + (L.bh - 10) / 2;
-            gui_text(lx, ly, BTNS[row][col].label, gui_rgb(235, 242, 250), 1);
+            gui_text(lx, ly, BTNS[row][col].label, UI_FG, 1);
         }
     }
 
     /* history panel (right of the keypad, only if the window is wide enough) */
     if (L.hist_w > 0) {
         int panel_x = tx + L.hist_x;
-        gui_text(panel_x, ty + 10, "历史记录", gui_rgb(132, 196, 232), 1);
+        gui_text(panel_x, ty + 10, "历史记录", UI_ACCENT, 1);
         int vis = calc_hist_visible(st);
         if (vis == 0) {
-            gui_text(panel_x, ty + CALC_HIST_TOP, "（暂无计算）", gui_rgb(110, 130, 150), 1);
+            gui_text(panel_x, ty + CALC_HIST_TOP, "（暂无计算）", UI_DIM, 1);
         } else {
             int max_rows = L.hist_rows;
             if (max_rows > vis) max_rows = vis;
             for (int r = 0; r < max_rows; r++) {
                 int ring = calc_hist_ring_idx(st, r);
                 int ry = ty + CALC_HIST_TOP + r * CALC_HIST_ROW;
-                gui_border(panel_x, ry, L.hist_w, CALC_HIST_ROW - 4, gui_rgb(40, 56, 72));
+                gui_border(panel_x, ry, L.hist_w, CALC_HIST_ROW - 4, UI_SURFACE2);
                 char hb[96];
                 calc_hist_format(st, ring, hb, sizeof(hb));
                 gui_text_clipped(panel_x + 6, ry + 5, panel_x + L.hist_w - 6, hb,
-                                 gui_rgb(210, 224, 238), 1);
+                                 UI_FG, 1);
             }
         }
     }

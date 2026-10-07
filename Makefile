@@ -723,10 +723,11 @@ inflate-bench: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/test_inflate
 	$(BUILD_DIR)/test_inflate
 
-# 主题层与 JSON 解析器的宿主单测。
+# 主题层与 JSON 解析器的宿主单测，外加"禁止硬编码颜色"的静态断言。
 # 为什么放宿主：主题文件必须能安全降级（损坏/缺键/非法色都不能让系统起不来），
 # 这类负例在 QEMU 里难以构造和观察。这里穷举畸形输入，秒级回归，不必启动虚拟机。
 ui-test: | $(BUILD_DIR)
+	@bash scripts/check_no_hardcoded_colors.sh
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
 		tests/host/test_json.c src/lib/json.c tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_json

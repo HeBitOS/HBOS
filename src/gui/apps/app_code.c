@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../gui_panel.h"
 #include "../../fs.h"
@@ -505,7 +506,7 @@ static void code_gui_run(gui_state_t *st, const fb_info_t *fb) {
     if (code_save(st) < 0) return;
     g_script_fb = fb;
     /* clear screen */
-    gui_rect(0, 0, gui_surface_width(), gui_surface_height(), gui_rgb(10, 13, 18));
+    gui_rect(0, 0, gui_surface_width(), gui_surface_height(), UI_BG);
     gui_present_surface(fb);
     cc_set_gfx(&g_sgfx);
     int rc = hbos_gcc_run_file(code_path(st), 0);
@@ -586,13 +587,13 @@ static int code_draw_span(int x, int y, int max_x, const char *s,
 static void code_draw_highlighted_line(int x, int y, int max_x, const char *line, uint32_t len) {
     uint32_t i = 0;
     if (len > 0 && line[0] == '#') {
-        (void)code_draw_span(x, y, max_x, line, 0, len, gui_rgb(190, 168, 238));
+        (void)code_draw_span(x, y, max_x, line, 0, len, UI_FG2);
         return;
     }
     while (i < len && x < max_x) {
         char c = line[i];
         if (c == '/' && i + 1 < len && line[i + 1] == '/') {
-            x = code_draw_span(x, y, max_x, line, i, len - i, gui_rgb(116, 170, 130));
+            x = code_draw_span(x, y, max_x, line, i, len - i, UI_DIM);
             break;
         }
         if (c == '/' && i + 1 < len && line[i + 1] == '*') {
@@ -600,7 +601,7 @@ static void code_draw_highlighted_line(int x, int y, int max_x, const char *line
             while (j + 1 < len && !(line[j] == '*' && line[j + 1] == '/')) j++;
             if (j + 1 < len) j += 2;
             else j = len;
-            x = code_draw_span(x, y, max_x, line, i, j - i, gui_rgb(116, 170, 130));
+            x = code_draw_span(x, y, max_x, line, i, j - i, UI_DIM);
             i = j;
             continue;
         }
@@ -614,7 +615,7 @@ static void code_draw_highlighted_line(int x, int y, int max_x, const char *line
                 }
                 if (line[j++] == quote) break;
             }
-            x = code_draw_span(x, y, max_x, line, i, j - i, gui_rgb(236, 192, 116));
+            x = code_draw_span(x, y, max_x, line, i, j - i, UI_WARN);
             i = j;
             continue;
         }
@@ -624,20 +625,20 @@ static void code_draw_highlighted_line(int x, int y, int max_x, const char *line
                    (line[j] >= 'a' && line[j] <= 'f') ||
                    (line[j] >= 'A' && line[j] <= 'F') || line[j] == 'x' || line[j] == 'X'))
                 j++;
-            x = code_draw_span(x, y, max_x, line, i, j - i, gui_rgb(122, 218, 210));
+            x = code_draw_span(x, y, max_x, line, i, j - i, UI_ACCENT);
             i = j;
             continue;
         }
         if (code_ident_start(c)) {
             uint32_t j = i + 1;
             while (j < len && code_ident_char(line[j])) j++;
-            uint32_t color = gui_rgb(228, 238, 246);
+            uint32_t color = UI_FG;
             if (code_is_keyword(line + i, j - i)) {
-                color = gui_rgb(132, 190, 255);
+                color = UI_ACCENT;
             } else {
                 uint32_t k = j;
                 while (k < len && (line[k] == ' ' || line[k] == '\t')) k++;
-                if (k < len && line[k] == '(') color = gui_rgb(150, 220, 182);
+                if (k < len && line[k] == '(') color = UI_FG2;
             }
             x = code_draw_span(x, y, max_x, line, i, j - i, color);
             i = j;
@@ -645,7 +646,7 @@ static void code_draw_highlighted_line(int x, int y, int max_x, const char *line
         }
         x = code_draw_span(x, y, max_x, line, i, 1,
                            (c == '{' || c == '}' || c == '(' || c == ')' ||
-                            c == '[' || c == ']') ? gui_rgb(250, 224, 142) : gui_rgb(196, 208, 218));
+                            c == '[' || c == ']') ? UI_FG : UI_FG);
         i++;
     }
 }
@@ -658,29 +659,29 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     st->code_view_rows = l.view_rows;
     code_clamp_scroll(st);
 
-    gui_text(tx, ty, "代码工作台", gui_rgb(102, 214, 255), 1);
+    gui_text(tx, ty, "代码工作台", UI_ACCENT, 1);
     int bx, by, bw;
     if (code_command_rect(l.content_w, CODE_CMD_SAVE, &bx, &by, &bw))
-        gui_draw_small_button(tx + bx, ty + by, bw, "保存", gui_rgb(85, 180, 120));
+        gui_draw_small_button(tx + bx, ty + by, bw, "保存", UI_OK);
     if (code_command_rect(l.content_w, CODE_CMD_RUN, &bx, &by, &bw))
-        gui_draw_small_button(tx + bx, ty + by, bw, "运行", gui_rgb(23, 147, 209));
+        gui_draw_small_button(tx + bx, ty + by, bw, "运行", UI_ACCENT);
     if (code_command_rect(l.content_w, CODE_CMD_OPEN, &bx, &by, &bw))
-        gui_draw_small_button(tx + bx, ty + by, bw, "打开", gui_rgb(244, 194, 82));
+        gui_draw_small_button(tx + bx, ty + by, bw, "打开", UI_WARN);
     if (code_command_rect(l.content_w, CODE_CMD_GUI_RUN, &bx, &by, &bw))
-        gui_draw_small_button(tx + bx, ty + by, bw, "GUI运行", gui_rgb(215, 100, 244));
+        gui_draw_small_button(tx + bx, ty + by, bw, "GUI运行", UI_ACCENT);
 
-    gui_vgradient(tx, ty + 54, l.content_w, 24, gui_rgb(34, 48, 64), gui_rgb(18, 28, 40));
-    gui_border(tx, ty + 54, l.content_w, 24, gui_rgb(48, 72, 94));
+    gui_vgradient(tx, ty + 54, l.content_w, 24, UI_SURFACE2, UI_SURFACE);
+    gui_border(tx, ty + 54, l.content_w, 24, UI_ACCENT);
     gui_line2(line, sizeof(line), "文件 ", code_path(st));
     gui_text_clipped(tx + 10, ty + 62, tx + l.content_w - 90, line,
-                 st->code_modified ? gui_rgb(255, 226, 150) : gui_rgb(232, 242, 248), 1);
+                 st->code_modified ? UI_WARN : UI_FG, 1);
     gui_text(tx + l.content_w - 78, ty + 62, st->code_modified ? "未保存" : "已保存",
-         st->code_modified ? gui_rgb(255, 190, 110) : gui_rgb(124, 220, 154), 1);
+         st->code_modified ? UI_WARN : UI_OK, 1);
 
-    gui_vgradient(tx, l.editor_y, l.side_w, l.editor_h, gui_rgb(22, 30, 40), gui_rgb(14, 20, 28));
-    gui_border(tx, l.editor_y, l.side_w, l.editor_h, gui_rgb(46, 66, 84));
-    gui_text(tx + 12, l.editor_y + 12, "资源管理器", gui_rgb(194, 226, 242), 1);
-    gui_text_clipped(tx + 12, l.editor_y + 34, tx + l.side_w - 10, gui_file_path(st), gui_rgb(132, 196, 232), 1);
+    gui_vgradient(tx, l.editor_y, l.side_w, l.editor_h, UI_SURFACE, UI_SURFACE);
+    gui_border(tx, l.editor_y, l.side_w, l.editor_h, UI_SURFACE3);
+    gui_text(tx + 12, l.editor_y + 12, "资源管理器", UI_FG2, 1);
+    gui_text_clipped(tx + 12, l.editor_y + 34, tx + l.side_w - 10, gui_file_path(st), UI_ACCENT, 1);
 
     uint32_t count = gui_file_count(st);
     int selected = st->selected_file;
@@ -697,19 +698,19 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
         if (gui_file_entry(st, file_idx, name, &type, &node, full, sizeof(full)) < 0) continue;
         int y = l.editor_y + 62 + (int)i * FILE_ROW_H;
         if ((int)file_idx == selected) {
-            gui_vgradient(tx + 8, y - 6, l.side_w - 16, 24, gui_rgb(28, 80, 116), gui_rgb(16, 50, 78));
-            gui_rect(tx + 8, y - 6, 3, 24, gui_rgb(102, 214, 255));
+            gui_vgradient(tx + 8, y - 6, l.side_w - 16, 24, UI_SURFACE3, UI_SURFACE2);
+            gui_rect(tx + 8, y - 6, 3, 24, UI_ACCENT);
         }
-        uint32_t icon = type == VFS_NODE_DIR ? gui_rgb(244, 194, 82) :
-                        gui_has_code_suffix(name) ? gui_rgb(102, 214, 255) : gui_rgb(124, 220, 154);
+        uint32_t icon = type == VFS_NODE_DIR ? UI_WARN :
+                        gui_has_code_suffix(name) ? UI_ACCENT : UI_OK;
         gui_rect(tx + 14, y + 3, 6, 6, icon);
         gui_text_clipped(tx + 26, y, tx + l.side_w - 10, name,
-                     (int)file_idx == selected ? gui_rgb(252, 254, 255) : gui_rgb(210, 222, 234), 1);
+                     (int)file_idx == selected ? UI_FG : UI_FG2, 1);
     }
 
-    gui_vgradient(l.editor_x, l.editor_y, l.editor_w, l.editor_h, gui_rgb(8, 14, 22), gui_rgb(2, 6, 12));
-    gui_border(l.editor_x, l.editor_y, l.editor_w, l.editor_h, gui_rgb(48, 132, 196));
-    gui_rect(l.editor_x + l.line_no_w, l.editor_y + 1, 1, l.editor_h - 2, gui_rgb(28, 48, 62));
+    gui_vgradient(l.editor_x, l.editor_y, l.editor_w, l.editor_h, UI_BG, UI_BG);
+    gui_border(l.editor_x, l.editor_y, l.editor_w, l.editor_h, UI_ACCENT);
+    gui_rect(l.editor_x + l.line_no_w, l.editor_y + 1, 1, l.editor_h - 2, UI_SURFACE2);
 
     uint32_t cursor_line = 0, cursor_col = 0;
     code_line_col(st, st->code_cursor, &cursor_line, &cursor_col);
@@ -739,14 +740,14 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
             int hl_w = (int)(line_sel_end - line_sel_start) * code_cell_w();
             if (sel_end > off + len) hl_w += code_cell_w();  // 选区跨行，把换行处也画出来
             if (hl_w < 1) hl_w = 1;
-            gui_rect(hl_x, y - 3, hl_w, l.row_h, gui_rgb(40, 92, 132));
+            gui_rect(hl_x, y - 3, hl_w, l.row_h, UI_SURFACE3);
         } else if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
-            gui_rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, gui_rgb(70, 24, 30));
-            gui_rect(l.editor_x + l.line_no_w + 1, y - 3, 3, l.row_h, gui_rgb(232, 86, 92));
+            gui_rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, UI_SURFACE);
+            gui_rect(l.editor_x + l.line_no_w + 1, y - 3, 3, l.row_h, UI_ERR);
         } else if (line_idx == cursor_line) {
-            gui_rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, gui_rgb(16, 28, 38));
+            gui_rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, UI_SURFACE);
         }
-        gui_text(l.editor_x + 8, y, num, gui_rgb(102, 134, 154), 1);
+        gui_text(l.editor_x + 8, y, num, UI_DIM, 1);
         code_draw_highlighted_line(l.editor_x + l.line_no_w + 10, y,
                                    l.editor_x + l.editor_w - 10, line, n);
     }
@@ -757,15 +758,15 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
         int cx = l.editor_x + l.line_no_w + 10 + (int)cursor_col * code_cell_w();
         int cy = l.editor_y + 10 + ((int)cursor_line - st->code_scroll) * l.row_h;
         if (cx > l.editor_x + l.editor_w - 12) cx = l.editor_x + l.editor_w - 12;
-        gui_rect(cx, cy - 2, 2, 14, gui_rgb(102, 214, 255));
+        gui_rect(cx, cy - 2, 2, 14, UI_ACCENT);
     }
 
-    gui_vgradient(tx, l.bottom_y, l.content_w, l.bottom_h, gui_rgb(22, 30, 40), gui_rgb(14, 20, 28));
-    gui_border(tx, l.bottom_y, l.content_w, l.bottom_h, st->code_error_line > 0 ? gui_rgb(176, 62, 72) : gui_rgb(46, 66, 84));
-    gui_text(tx + 12, l.bottom_y + 12, "输出", gui_rgb(194, 226, 242), 1);
+    gui_vgradient(tx, l.bottom_y, l.content_w, l.bottom_h, UI_SURFACE, UI_SURFACE);
+    gui_border(tx, l.bottom_y, l.content_w, l.bottom_h, st->code_error_line > 0 ? UI_ERR : UI_SURFACE3);
+    gui_text(tx + 12, l.bottom_y + 12, "输出", UI_FG2, 1);
     gui_text_clipped(tx + 62, l.bottom_y + 12, tx + l.content_w - 12,
                  g_code_output[0] ? g_code_output : "Ready",
-                 st->code_error_line > 0 ? gui_rgb(255, 188, 190) : gui_rgb(210, 221, 230), 1);
+                 st->code_error_line > 0 ? UI_FG : UI_FG2, 1);
     uint32_t pos = 0;
     line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "Ln ");
@@ -774,7 +775,7 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     gui_append_uint(line, sizeof(line), &pos, cursor_col + 1);
     gui_append_str(line, sizeof(line), &pos, "  Bytes ");
     gui_append_uint(line, sizeof(line), &pos, st->code_len);
-    gui_text(tx + 12, l.bottom_y + 34, line, gui_rgb(148, 168, 180), 1);
+    gui_text(tx + 12, l.bottom_y + 34, line, UI_FG2, 1);
 }
 
 /* ── key（桌面 handle_app_key 经模块表调用）────────────────── */

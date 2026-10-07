@@ -1,17 +1,18 @@
 /* 快捷键 —— 只读参考表，列出桌面全局和各应用内的键盘/鼠标快捷键。
  * 内容原来放在设置里的"快捷键"一节，现在独立成一个应用（原节已删除）。 */
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 
 /* ── section label：跟 app_settings.c 里的同名小工具保持一致的视觉风格 ── */
 static void sc_section(int x, int y, const char *s) {
-    gui_rect(x, y + 12, 280, 1, gui_rgb(40, 60, 80));
-    gui_text(x, y, s, gui_rgb(61, 174, 233), 1);
+    gui_rect(x, y + 12, 280, 1, UI_SURFACE2);
+    gui_text(x, y, s, UI_ACCENT, 1);
 }
 
 static void sc_row(int x, int y, const char *keys, const char *desc) {
-    gui_text(x, y, keys, gui_rgb(102, 214, 255), 1);
-    gui_text(x + 140, y, desc, gui_rgb(180, 195, 210), 1);
+    gui_text(x, y, keys, UI_ACCENT, 1);
+    gui_text(x + 140, y, desc, UI_FG2, 1);
 }
 
 static void app_shortcuts_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) {

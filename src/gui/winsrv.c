@@ -3,6 +3,7 @@
  * @brief   并发窗口服务实现（见 winsrv.h）
  */
 #include "winsrv.h"
+#include "../ui/ui_tokens.h"
 #include "../core/pmm.h"
 #include "../core/task.h"
 #include "../string.h"
@@ -68,7 +69,7 @@ static int winsrv_create_common(uint32_t owner_task, const char *title,
     }
 
     /* 默认深色背景 */
-    winsrv_clear(win, 0xFF1A1F26);
+    winsrv_clear(win, UI_SURFACE);
     return id;
 }
 
@@ -307,7 +308,7 @@ int winsrv_resize(winsrv_window_t *win, int w, int h) {
     if (!phys) return -1;
     uint32_t *surface = (uint32_t *)(uintptr_t)phys;
     for (size_t i = 0; i < (size_t)w * (size_t)h; i++)
-        surface[i] = 0xFF1A1F26;
+        surface[i] = UI_SURFACE;
     int copy_w = w < win->w ? w : win->w;
     int copy_h = h < win->h ? h : win->h;
     for (int yy = 0; yy < copy_h; yy++)

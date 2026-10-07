@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../gui_panel.h"
 #include "../../fs.h"
@@ -252,19 +253,19 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     if (content_bottom_off < 200) content_bottom_off = 200;
     int list_h = content_bottom_off - 70;
     int edit_h = content_bottom_off - 118;
-    gui_text(tx, ty, "记事本", gui_rgb(124, 220, 154), 1);
-    gui_text(tx, ty + 40, "选择左侧文件后编辑", gui_rgb(148, 162, 174), 1);
+    gui_text(tx, ty, "记事本", UI_OK, 1);
+    gui_text(tx, ty + 40, "选择左侧文件后编辑", UI_DIM, 1);
     char line[96];
 
-    gui_vgradient(tx, ty + 70, list_w, list_h, gui_rgb(22, 30, 40), gui_rgb(14, 20, 28));
-    gui_border(tx, ty + 70, list_w, list_h, gui_rgb(46, 66, 84));
-    gui_rect(tx, ty + 70, list_w, 1, gui_rgb(58, 86, 110));
-    gui_text(tx + 12, ty + 82, "文件", gui_rgb(194, 226, 242), 1);
-    gui_rect(tx + 12, ty + 100, list_w - 24, 1, gui_rgb(50, 72, 92));
+    gui_vgradient(tx, ty + 70, list_w, list_h, UI_SURFACE, UI_SURFACE);
+    gui_border(tx, ty + 70, list_w, list_h, UI_SURFACE3);
+    gui_rect(tx, ty + 70, list_w, 1, UI_SURFACE3);
+    gui_text(tx + 12, ty + 82, "文件", UI_FG2, 1);
+    gui_rect(tx + 12, ty + 100, list_w - 24, 1, UI_ACCENT);
     uint32_t count = gui_file_count(st);
     if (count == 0) {
-        gui_text(tx + 12, ty + 112, "暂无文件", gui_rgb(148, 162, 174), 1);
-        gui_text(tx + 12, ty + 134, "按 N 新建", gui_rgb(148, 162, 174), 1);
+        gui_text(tx + 12, ty + 112, "暂无文件", UI_DIM, 1);
+        gui_text(tx + 12, ty + 134, "按 N 新建", UI_DIM, 1);
     } else {
         int selected = st->selected_file;
         if (selected < 0) selected = 0;
@@ -281,12 +282,12 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
                 continue;
             int y = ty + 112 + (int)i * FILE_ROW_H;
             if ((int)file_idx == selected) {
-                gui_vgradient(tx + 8, y - 6, list_w - 16, 24, gui_rgb(28, 80, 116), gui_rgb(16, 50, 78));
-                gui_rect(tx + 8, y - 6, 3, 24, gui_rgb(124, 220, 154));
+                gui_vgradient(tx + 8, y - 6, list_w - 16, 24, UI_SURFACE3, UI_SURFACE2);
+                gui_rect(tx + 8, y - 6, 3, 24, UI_OK);
             }
-            if (node && node->type == VFS_NODE_DIR) gui_rect(tx + 14, y + 3, 5, 5, gui_rgb(244, 194, 82));
+            if (node && node->type == VFS_NODE_DIR) gui_rect(tx + 14, y + 3, 5, 5, UI_WARN);
             gui_text_clipped(tx + 24, y, tx + list_w - 12, name,
-                             (int)file_idx == selected ? gui_rgb(252, 254, 255) : gui_rgb(210, 222, 234), 1);
+                             (int)file_idx == selected ? UI_FG : UI_FG2, 1);
         }
     }
 
@@ -294,7 +295,7 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "文件: ");
     gui_append_str(line, sizeof(line), &pos, gui_note_name(st));
-    gui_text_clipped(edit_x, ty + 70, edit_x + edit_w, line, gui_rgb(210, 221, 230), 1);
+    gui_text_clipped(edit_x, ty + 70, edit_x + edit_w, line, UI_FG2, 1);
     {
         uint32_t p2 = 0;
         line[0] = 0;
@@ -304,14 +305,14 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
         if (st->note_dirty) gui_append_str(line, sizeof(line), &p2, "  ●未保存");
         else gui_append_str(line, sizeof(line), &p2, "  已保存");
     }
-    gui_text(edit_x, ty + 92, line, st->note_dirty ? gui_rgb(244, 194, 82) : gui_rgb(150, 200, 160), 1);
+    gui_text(edit_x, ty + 92, line, st->note_dirty ? UI_WARN : UI_FG2, 1);
     gui_text_clipped(edit_x, ty + 50, edit_x + edit_w,
                      "方向键移动  Ctrl+S 保存  Ctrl+A 全选",
-                     gui_rgb(120, 150, 168), 1);
-    gui_vgradient(edit_x, ty + 118, edit_w, edit_h, gui_rgb(8, 14, 22), gui_rgb(2, 6, 12));
-    gui_rect(edit_x, ty + 118, edit_w, 1, gui_rgb(28, 56, 36));
-    gui_rect(edit_x, ty + 118 + edit_h - 1, edit_w, 1, gui_rgb(8, 14, 22));
-    gui_border(edit_x, ty + 118, edit_w, edit_h, gui_rgb(85, 180, 120));
+                     UI_DIM, 1);
+    gui_vgradient(edit_x, ty + 118, edit_w, edit_h, UI_BG, UI_BG);
+    gui_rect(edit_x, ty + 118, edit_w, 1, UI_SURFACE2);
+    gui_rect(edit_x, ty + 118 + edit_h - 1, edit_w, 1, UI_BG);
+    gui_border(edit_x, ty + 118, edit_w, edit_h, UI_OK);
     int x = edit_x + 8;
     int y = ty + 126;
     int cursor_x = x;
@@ -329,7 +330,7 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
         }
         int in_sel = st->note_sel_active && i >= sel_start && i < sel_end;
         if (st->note_buf[i] == '\n') {
-            if (in_sel) gui_rect(x, y, 6, 16, gui_rgb(40, 92, 132));
+            if (in_sel) gui_rect(x, y, 6, 16, UI_SURFACE3);
             x = edit_x + 8;
             y += 18;
             utf8_init(&utf8);
@@ -341,8 +342,8 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
 
-        if (in_sel) gui_rect(x, y, gui_cp_advance(cp, 1), 16, gui_rgb(40, 92, 132));
-        int advance = gui_draw_codepoint(x, y, cp, gui_rgb(228, 238, 246), 1);
+        if (in_sel) gui_rect(x, y, gui_cp_advance(cp, 1), 16, UI_SURFACE3);
+        int advance = gui_draw_codepoint(x, y, cp, UI_FG, 1);
         x += advance;
         if (x > edit_x + edit_w - 16) {
             x = edit_x + 8;
@@ -357,7 +358,7 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     static uint32_t note_caret_ticks = 0;
     note_caret_ticks++;
     if (cursor_y < ty + content_bottom_off - 12 && (note_caret_ticks / 15) % 2) {
-        gui_rect(cursor_x, cursor_y, 2, 14, gui_rgb(124, 220, 154));
+        gui_rect(cursor_x, cursor_y, 2, 14, UI_OK);
     }
 }
 

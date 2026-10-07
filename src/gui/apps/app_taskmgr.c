@@ -1,6 +1,7 @@
 /* 任务管理器 —— 列出运行中的任务（PID/名称/状态/父PID），点击选中一行，
  * 按 Delete/Backspace 或点击底部按钮结束该任务；底部还显示物理内存占用。 */
 #include "gui_app.h"
+#include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../string.h"
 #include "../../core/task.h"
@@ -56,10 +57,10 @@ static const char *tm_state_name(int state) {
 
 static uint32_t tm_state_color(int state) {
     switch (state) {
-        case TASK_RUNNING: return gui_rgb(120, 224, 140);
-        case TASK_READY:   return gui_rgb(120, 196, 232);
-        case TASK_BLOCKED: return gui_rgb(232, 180, 90);
-        default:           return gui_rgb(140, 150, 160);
+        case TASK_RUNNING: return UI_OK;
+        case TASK_READY:   return UI_ACCENT;
+        case TASK_BLOCKED: return UI_WARN;
+        default:           return UI_DIM;
     }
 }
 
@@ -95,13 +96,13 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     int name_clip_x = tx + (show_state ? TM_COL_STATE - 8 : aw - 4);
 
     /* column headers */
-    gui_text(tx + TM_COL_PID,  ty + TM_HEADER_Y, "PID", gui_rgb(132, 196, 232), 1);
-    gui_text(tx + TM_COL_NAME, ty + TM_HEADER_Y, "名称", gui_rgb(132, 196, 232), 1);
+    gui_text(tx + TM_COL_PID,  ty + TM_HEADER_Y, "PID", UI_ACCENT, 1);
+    gui_text(tx + TM_COL_NAME, ty + TM_HEADER_Y, "名称", UI_ACCENT, 1);
     if (show_state)
-        gui_text(tx + TM_COL_STATE, ty + TM_HEADER_Y, "状态", gui_rgb(132, 196, 232), 1);
+        gui_text(tx + TM_COL_STATE, ty + TM_HEADER_Y, "状态", UI_ACCENT, 1);
     if (show_ppid)
-        gui_text(tx + TM_COL_PPID, ty + TM_HEADER_Y, "父PID", gui_rgb(132, 196, 232), 1);
-    gui_rect(tx, ty + TM_LIST_TOP - 6, aw, 1, gui_rgb(48, 64, 84));
+        gui_text(tx + TM_COL_PPID, ty + TM_HEADER_Y, "父PID", UI_ACCENT, 1);
+    gui_rect(tx, ty + TM_LIST_TOP - 6, aw, 1, UI_SURFACE3);
 
     int rows = tm_visible_rows(win_h);
     for (int i = 0; i < rows && i < count; i++) {
@@ -109,14 +110,14 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         if (!t) break;
         int ry = ty + TM_LIST_TOP + i * TM_ROW_H;
         if (i == st->taskmgr_selected) {
-            gui_rect(tx - 8, ry - 3, aw + 16, TM_ROW_H - 2, gui_rgb(40, 70, 96));
+            gui_rect(tx - 8, ry - 3, aw + 16, TM_ROW_H - 2, UI_ACCENT);
         }
         uint32_t pos = 0; line[0] = 0;
         gui_append_uint(line, sizeof(line), &pos, t->id);
-        gui_text(tx + TM_COL_PID, ry, line, gui_rgb(220, 230, 240), 1);
+        gui_text(tx + TM_COL_PID, ry, line, UI_FG2, 1);
 
         gui_text_clipped(tx + TM_COL_NAME, ry, name_clip_x,
-                         t->name[0] ? t->name : "(未命名)", gui_rgb(220, 230, 240), 1);
+                         t->name[0] ? t->name : "(未命名)", UI_FG2, 1);
 
         if (show_state)
             gui_text(tx + TM_COL_STATE, ry, tm_state_name(t->state), tm_state_color(t->state), 1);
@@ -124,11 +125,11 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         if (show_ppid) {
             pos = 0; line[0] = 0;
             gui_append_uint(line, sizeof(line), &pos, t->parent_id);
-            gui_text(tx + TM_COL_PPID, ry, line, gui_rgb(160, 180, 200), 1);
+            gui_text(tx + TM_COL_PPID, ry, line, UI_FG2, 1);
         }
     }
     if (count == 0) {
-        gui_text(tx + TM_COL_NAME, ty + TM_LIST_TOP, "（没有可显示的任务）", gui_rgb(110, 130, 150), 1);
+        gui_text(tx + TM_COL_NAME, ty + TM_LIST_TOP, "（没有可显示的任务）", UI_DIM, 1);
     }
 
     /* footer: kill hint, memory usage bar, info line -- anchored to the
@@ -136,24 +137,24 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
      * below the window's actual bottom edge. */
     int fy = ty + ah - TM_FOOTER_H;
     if (fy < ty + TM_LIST_TOP) fy = ty + TM_LIST_TOP;  /* tiny window: overlap, don't spill */
-    gui_rect(tx, fy, aw, 1, gui_rgb(48, 64, 84));
+    gui_rect(tx, fy, aw, 1, UI_SURFACE3);
 
     gui_text_clipped(tx, fy + 6, tx + aw,
                      "点击选中任务，按 Delete 结束任务（不能结束主任务 0）",
-                     gui_rgb(110, 140, 165), 1);
+                     UI_DIM, 1);
 
     uint64_t total = pmm_get_total_mem();
     uint64_t free = pmm_get_free_mem();
     uint64_t used = total > free ? total - free : 0;
     int bar_h = 14;
     int by = fy + 26;
-    gui_rect(tx, by, aw, bar_h, gui_rgb(30, 42, 56));
+    gui_rect(tx, by, aw, bar_h, UI_SURFACE2);
     if (total > 0) {
         int fill = (int)((uint64_t)aw * used / total);
         if (fill > aw) fill = aw;
-        gui_rect(tx, by, fill, bar_h, gui_rgb(61, 174, 233));
+        gui_rect(tx, by, fill, bar_h, UI_ACCENT);
     }
-    gui_border(tx, by, aw, bar_h, gui_rgb(70, 90, 110));
+    gui_border(tx, by, aw, bar_h, UI_ACCENT);
 
     uint32_t pos = 0; line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "物理内存: ");
@@ -162,7 +163,7 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     gui_append_uint(line, sizeof(line), &pos, (uint32_t)(total / (1024 * 1024)));
     gui_append_str(line, sizeof(line), &pos, " MB    任务数: ");
     gui_append_int(line, sizeof(line), &pos, count);
-    gui_text_clipped(tx, by + bar_h + 6, tx + aw, line, gui_rgb(160, 190, 215), 1);
+    gui_text_clipped(tx, by + bar_h + 6, tx + aw, line, UI_FG2, 1);
 }
 
 static void tm_kill_selected(gui_state_t *st) {
