@@ -182,6 +182,13 @@ void kmain(void *mbi) {
     web_vendor_seed_init();
     serial_print("[KERN] seed: web vendor done\n");
 
+    /* 示例主题包写进 /themes/：让主题功能开箱可验，并给用户一份可照抄的
+     * 模板（见 src/tools/theme_seed.c）。 */
+    extern void theme_seed_init(void);
+    serial_print("[KERN] seed: themes\n");
+    theme_seed_init();
+    serial_print("[KERN] seed: themes done\n");
+
     // ---- Phase 6: Shell ----
     // 注册所有内置命令（help, ls, cat, echo 等）
     // 然后进入交互式 read-eval-print 循环

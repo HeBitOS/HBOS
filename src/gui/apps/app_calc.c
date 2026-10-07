@@ -384,9 +384,7 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
             char action = BTNS[row][col].action;
             uint32_t bc = btn_color(action, 0);
             gui_vgradient(bx, by, L.bw, L.bh,
-                          gui_rgb(((bc >> 16) & 0xff) + 10,
-                                  ((bc >>  8) & 0xff) + 10,
-                                  (bc & 0xff) + 10),
+                           ui_shade(bc, 10),
                           bc);
             gui_border(bx, by, L.bw, L.bh,
                        action == '=' ? UI_ACCENT

@@ -166,6 +166,14 @@ vfs_node_t *vfs_lookup(const char *path) {
         static vfs_node_t n;
         return g_themes_exists ? &n : NULL;
     }
+    /* 主题文件也走 VFS（真实实现里静态文件存在 VFS 独立表）：返回节点，
+     * 并让下面的 vfs_read 能按路径取到内容。 */
+    for (int i = 0; i < g_file_count; i++) {
+        if (g_files[i].f.used && strcmp(g_files[i].path, path) == 0) {
+            g_files[i].f.node.size = g_files[i].f.size;
+            return &g_files[i].f.node;
+        }
+    }
     return NULL;
 }
 
@@ -182,3 +190,29 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
     *type = 0;
     return 0;
 }
+
+/* ── theme.c 改用 VFS 读写后需要的额外替身 ─────────────────── */
+int vfs_read(vfs_node_t *node, uint32_t offset, void *buffer, uint32_t count);
+int vfs_read(vfs_node_t *node, uint32_t offset, void *buffer, uint32_t count) {
+    if (!node || !buffer) return -1;
+    /* node 是 stub_file_t.f.node，反查回条目取内容 */
+    for (int i = 0; i < g_file_count; i++) {
+        if (&g_files[i].f.node == node) {
+            if (offset >= g_files[i].f.size) return 0;
+            uint32_t avail = g_files[i].f.size - offset;
+            if (count > avail) count = avail;
+            memcpy(buffer, g_files[i].data + offset, count);
+            return (int)count;
+        }
+    }
+    return -1;
+}
+
+int vfs_write(vfs_node_t *node, uint32_t offset, const void *buffer, uint32_t count);
+int vfs_write(vfs_node_t *node, uint32_t offset, const void *buffer, uint32_t count) {
+    (void)node; (void)offset; (void)buffer; (void)count;
+    return -1;
+}
+
+vfs_node_t *vfs_create(const char *path);
+vfs_node_t *vfs_create(const char *path) { (void)path; return NULL; }

@@ -176,6 +176,46 @@ static void test_tolerant(void) {
     CHECK(json_get_int(&d, "radius", -1) == 12, "未知键旁边的键仍可读");
 }
 
+/* ── 注释（主题文件是人写的，必须支持）───────────────────────── */
+static void test_comments(void) {
+    printf("[json] 注释支持\n");
+
+    /* 行注释 */
+    const char *a = "{\n"
+                    "  // 这是强调色\n"
+                    "  \"accent\": \"#00a0ff\",\n"
+                    "  \"radius\": 10 // 行尾注释\n"
+                    "}\n";
+    json_doc_t d;
+    CHECK(json_parse_object(a, (uint32_t)strlen(a), &d), "行注释可解析");
+    CHECK(strcmp(json_get_str(&d, "accent"), "#00a0ff") == 0, "行注释后的值正确");
+    CHECK(json_get_int(&d, "radius", -1) == 10, "行尾注释不影响取值");
+
+    /* 块注释 */
+    const char *b = "{\n"
+                    "  /* 深海蓝主题\n"
+                    "     跨多行说明 */\n"
+                    "  \"name\": \"Ocean\"\n"
+                    "}";
+    CHECK(json_parse_object(b, (uint32_t)strlen(b), &d), "块注释可解析");
+    CHECK(strcmp(json_get_str(&d, "name"), "Ocean") == 0, "块注释后的值正确");
+
+    /* 值之间、冒号周围的注释 */
+    const char *c = "{ \"a\" /* key */ : /* val */ 1 }";
+    CHECK(json_parse_object(c, (uint32_t)strlen(c), &d), "键值间注释");
+    CHECK(json_get_int(&d, "a", -1) == 1, "值正确");
+
+    /* 未闭合块注释：应安全收尾而不是越界读 */
+    const char *e = "{ \"a\": 1 /* 没关掉";
+    bool r = json_parse_object(e, (uint32_t)strlen(e), &d);
+    CHECK(r == d.ok, "未闭合块注释不崩且状态一致");
+
+    /* 注释里含引号/花括号不应干扰结构判断 */
+    const char *f = "{\n // 说明: 用 \" 和 } 和 { 都是注释内容\n \"a\": 2\n}";
+    CHECK(json_parse_object(f, (uint32_t)strlen(f), &d), "注释内特殊字符不影响解析");
+    CHECK(json_get_int(&d, "a", -1) == 2, "值仍正确");
+}
+
 /* ── 超长值截断（不溢出定长缓冲）─────────────────────────────── */
 static void test_overflow(void) {
     printf("[json] 超长输入\n");
@@ -213,6 +253,7 @@ int main(void) {
     test_colors();
     test_malformed();
     test_tolerant();
+    test_comments();
     test_overflow();
 
     printf("\n结果: %d 通过, %d 失败\n", g_pass, g_fail);

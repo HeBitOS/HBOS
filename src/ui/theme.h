@@ -15,6 +15,10 @@
 #ifndef HBOS_UI_THEME_H
 #define HBOS_UI_THEME_H
 
+/* 前向声明：theme.h 不直接依赖 json.h，避免把 5.4 KB 的结构
+ * 定义暴露给所有包含主题头的翻译单元。 */
+struct json_doc_t;
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -129,6 +133,22 @@ const gui_theme_t *ui_theme_builtin_light(void);
  * @return 成功覆盖的键数；-1 表示 JSON 结构完全无法解析
  */
 int ui_theme_parse_json(const char *json, uint32_t len,
+                        const gui_theme_t *base, gui_theme_t *out);
+
+/**
+ * @brief 同上，但复用调用方已解析好的 JSON 文档。
+ *
+ * 为什么要这个重载：`json_doc_t` 约 5.4 KB，而内核任务栈只有 8 KB。若
+ * 调用方先解析一次、本函数内部再解析一次，两次 doc 叠加就会栈溢出。
+ * 传入已解析的 doc 可把栈用量降到几乎为零。
+ *
+ * 参数用 `const void *` 而非 `const json_doc_t *`：theme.h 有意不包含
+ * json.h（后者会把 5.4 KB 的结构定义暴露给所有包含主题头的翻译单元），
+ * 因此这里只做不透明传递，由 theme.c 内部转回真实类型。
+ *
+ * @param doc 已解析的文档（不能为 NULL）
+ */
+int ui_theme_apply_json(const void *doc,
                         const gui_theme_t *base, gui_theme_t *out);
 
 /**

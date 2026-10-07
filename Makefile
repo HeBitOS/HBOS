@@ -276,6 +276,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/cc.c \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/tools/tcc_runtime_seed.c \
+	$(SRC_DIR)/tools/theme_seed.c \
 	$(SRC_DIR)/tools/hpt_repo_seed.c \
 	$(SRC_DIR)/tools/web_vendor_seed.c \
 	$(SRC_DIR)/tools/audio.c \
@@ -734,30 +735,35 @@ inflate-bench: | $(BUILD_DIR)
 ui-test: | $(BUILD_DIR)
 	@bash scripts/check_no_hardcoded_colors.sh
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
-		tests/host/test_json.c src/lib/json.c tests/host/hbos_string_wrap.c \
+		tests/host/test_json.c src/lib/json.c tests/host/json_alloc_stub.c \
+		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_json
 	$(BUILD_DIR)/test_json
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
 		tests/host/test_theme.c src/ui/theme.c src/lib/json.c \
-		tests/host/theme_fs_stub.c tests/host/hbos_string_wrap.c \
+		tests/host/theme_fs_stub.c tests/host/json_alloc_stub.c \
+		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_theme
 	$(BUILD_DIR)/test_theme
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
 		tests/host/test_widget.c src/ui/ui_widget.c src/ui/theme.c src/lib/json.c \
 		tests/host/theme_fs_stub.c tests/host/widget_draw_stub.c \
+		tests/host/json_alloc_stub.c \
 		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_widget
 	$(BUILD_DIR)/test_widget
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
 		tests/host/test_controls.c src/ui/ui_controls.c src/ui/ui_widget.c \
 		src/ui/theme.c src/lib/json.c tests/host/theme_fs_stub.c \
-		tests/host/widget_draw_stub.c tests/host/hbos_string_wrap.c \
+		tests/host/widget_draw_stub.c tests/host/json_alloc_stub.c \
+		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_controls
 	$(BUILD_DIR)/test_controls
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
 		tests/host/test_wm.c src/ui/ui_app.c src/ui/ui_widget.c \
 		src/ui/theme.c src/lib/json.c tests/host/theme_fs_stub.c \
 		tests/host/widget_draw_stub.c tests/host/ui_alloc_host.c \
+		tests/host/json_alloc_stub.c \
 		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_wm
 	$(BUILD_DIR)/test_wm

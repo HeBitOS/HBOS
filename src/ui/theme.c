@@ -128,33 +128,51 @@ static int slot_find(const char *name) {
  * 任何失败都只是"这个主题不可用"，绝不影响其他主题与内置兜底。
  */
 static bool load_theme_file(const char *path) {
-    file_t *f = fs_find_file(path);
-    if (!f || f->size == 0) return false;
+    /* 必须走 VFS 而不是 fs：主题文件可能来自
+     *   - vfs_register_static_file()（构建期嵌入/seed，存在 VFS 独立表里）
+     *   - 真实文件系统（用户在 /themes 下自己放的文件）
+     * 只用 fs_find_file 会漏掉前者——实测表现为 "ls 能看到主题、cat 能读，
+     * 但设置里只有内置主题"，因为扫描时读不到内容。
+     * vfs_lookup 覆盖两种来源，统一从这里读。 */
+    vfs_node_t *node = vfs_lookup(path);
+    if (!node || node->size == 0) return false;
 
-    uint32_t len = f->size;
+    uint32_t len = node->size;
     if (len > THEME_MAX_BYTES) len = THEME_MAX_BYTES;   /* 截断而非拒绝 */
 
+    /* 两个大对象都必须离开栈：
+     *   - buf 是 8 KB 静态缓冲（这个本来就在静态区，没问题）
+     *   - json_doc_t 约 5.4 KB，**绝不能放栈上**——内核任务栈只有 8 KB，
+     *     再叠上 ui_theme_parse_json 内部第二个 doc 就会溢出（实测表现为
+     *     进桌面时 page fault，故障地址落在无关的大数运算函数里）。
+     * 这里用一个堆上的 doc，解析一次后直接传给 parse_json 复用。 */
+    static json_doc_t *doc;
+    if (!doc) {
+        doc = json_alloc();
+        if (!doc) return false;
+    }
+    json_reset(doc);
+
     static char buf[THEME_MAX_BYTES + 1];
-    int got = fs_read_file_data(f, 0, buf, len);
+    int got = vfs_read(node, 0, buf, len);
     if (got <= 0) return false;
     buf[got] = '\0';
 
-    json_doc_t doc;
-    if (!json_parse_object(buf, (uint32_t)got, &doc) || !doc.ok) return false;
+    if (!json_parse_object(buf, (uint32_t)got, doc) || !doc->ok) return false;
 
     /* 基主题：based_on 指 dark/light；缺省时按文件里 is_dark 线索猜，
      * 都没有就用深色（多数人做的是深色主题）。 */
     const gui_theme_t *base = &g_dark;
-    const char *bo = json_get_str(&doc, "based_on");
+    const char *bo = json_get_str(doc, "based_on");
     if (bo && strcmp(bo, "light") == 0) base = &g_light;
     else if (bo && strcmp(bo, "dark") == 0) base = &g_dark;
     else {
-        bool d = json_get_bool(&doc, "dark", true);
+        bool d = json_get_bool(doc, "dark", true);
         base = d ? &g_dark : &g_light;
     }
 
     gui_theme_t t;
-    int applied = ui_theme_parse_json(buf, (uint32_t)got, base, &t);
+    int applied = ui_theme_apply_json(doc, base, &t);
     if (applied <= 0) return false;      /* 一个键都没覆盖：视为无效主题 */
     return slot_add(&t, false) >= 0;
 }
@@ -307,39 +325,52 @@ static int ov_u8(const json_doc_t *d, const char *key, uint8_t *dst, int lo, int
 int ui_theme_parse_json(const char *json, uint32_t len,
                         const gui_theme_t *base, gui_theme_t *out) {
     if (!json || !base || !out) return -1;
-    json_doc_t doc;
-    if (!json_parse_object(json, len, &doc) || !doc.ok) return -1;
+
+    /* 用一个堆上的 doc：本结构 5.4 KB，放栈上会撑爆 8 KB 的任务栈
+     * （见 json.h 的体积警告）。这里只解析一次，随即交给 apply 半段。 */
+    json_doc_t *doc = json_alloc();
+    if (!doc) return -1;
+    bool ok = json_parse_object(json, len, doc) && doc->ok;
+    int r = ok ? ui_theme_apply_json(doc, base, out) : -1;
+    json_free(doc);
+    return r;
+}
+
+int ui_theme_apply_json(const void *docp,
+                        const gui_theme_t *base, gui_theme_t *out) {
+    if (!docp || !base || !out) return -1;
+    const json_doc_t *doc = (const json_doc_t *)docp;
 
     *out = *base;
     int n = 0;
 
-    n += ov_color(&doc, "bg",        &out->bg);
-    n += ov_color(&doc, "surface",   &out->surface);
-    n += ov_color(&doc, "surface2",  &out->surface2);
-    n += ov_color(&doc, "surface3",  &out->surface3);
-    n += ov_color(&doc, "line",      &out->line);
-    n += ov_color(&doc, "line2",     &out->line2);
-    n += ov_color(&doc, "fg",        &out->fg);
-    n += ov_color(&doc, "fg2",       &out->fg2);
-    n += ov_color(&doc, "dim",       &out->dim);
-    n += ov_color(&doc, "accent",        &out->accent);
-    n += ov_color(&doc, "accent_fg",     &out->accent_fg);
-    n += ov_color(&doc, "accent_hover",  &out->accent_hover);
-    n += ov_color(&doc, "accent_active", &out->accent_active);
-    n += ov_color(&doc, "ok",   &out->ok);
-    n += ov_color(&doc, "warn", &out->warn);
-    n += ov_color(&doc, "err",  &out->err);
-    n += ov_color(&doc, "info", &out->info);
-    n += ov_color(&doc, "sel",  &out->sel);
+    n += ov_color(doc, "bg",        &out->bg);
+    n += ov_color(doc, "surface",   &out->surface);
+    n += ov_color(doc, "surface2",  &out->surface2);
+    n += ov_color(doc, "surface3",  &out->surface3);
+    n += ov_color(doc, "line",      &out->line);
+    n += ov_color(doc, "line2",     &out->line2);
+    n += ov_color(doc, "fg",        &out->fg);
+    n += ov_color(doc, "fg2",       &out->fg2);
+    n += ov_color(doc, "dim",       &out->dim);
+    n += ov_color(doc, "accent",        &out->accent);
+    n += ov_color(doc, "accent_fg",     &out->accent_fg);
+    n += ov_color(doc, "accent_hover",  &out->accent_hover);
+    n += ov_color(doc, "accent_active", &out->accent_active);
+    n += ov_color(doc, "ok",   &out->ok);
+    n += ov_color(doc, "warn", &out->warn);
+    n += ov_color(doc, "err",  &out->err);
+    n += ov_color(doc, "info", &out->info);
+    n += ov_color(doc, "sel",  &out->sel);
 
-    n += ov_u8(&doc, "radius",       &out->radius,       0, 40);
-    n += ov_u8(&doc, "radius_small", &out->radius_small, 0, 40);
-    n += ov_u8(&doc, "radius_large", &out->radius_large, 0, 40);
-    n += ov_u8(&doc, "border_w",     &out->border_w,     0, 4);
-    n += ov_u8(&doc, "shadow",       &out->shadow,       0, 3);
+    n += ov_u8(doc, "radius",       &out->radius,       0, 40);
+    n += ov_u8(doc, "radius_small", &out->radius_small, 0, 40);
+    n += ov_u8(doc, "radius_large", &out->radius_large, 0, 40);
+    n += ov_u8(doc, "border_w",     &out->border_w,     0, 4);
+    n += ov_u8(doc, "shadow",       &out->shadow,       0, 3);
 
     /* 主题名：允许覆盖，便于外部主题显示自己的名字 */
-    const char *nm = json_get_str(&doc, "name");
+    const char *nm = json_get_str(doc, "name");
     if (nm && nm[0]) {
         uint32_t i = 0;
         for (; nm[i] && i + 1 < UI_THEME_NAME_MAX; i++) out->name[i] = nm[i];
@@ -347,10 +378,10 @@ int ui_theme_parse_json(const char *json, uint32_t len,
         n++;
     }
     /* 明暗属性可显式声明 */
-    if (doc.ok) {
-        for (int i = 0; i < doc.count; i++) {
-            if (strcmp(doc.pairs[i].key, "dark") == 0 && doc.pairs[i].type == JSON_BOOL) {
-                out->is_dark = doc.pairs[i].boolean ? 1 : 0;
+    if (doc->ok) {
+        for (int i = 0; i < doc->count; i++) {
+            if (strcmp(doc->pairs[i].key, "dark") == 0 && doc->pairs[i].type == JSON_BOOL) {
+                out->is_dark = doc->pairs[i].boolean ? 1 : 0;
                 n++;
                 break;
             }
@@ -368,10 +399,12 @@ int ui_theme_parse_json(const char *json, uint32_t len,
 
 int ui_theme_save_choice(const char *name) {
     if (!name || !name[0]) return -1;
-    file_t *f = fs_create_file(THEME_CHOICE_FILE);
-    if (!f) return -1;                     /* 无盘：接受，仅本次生效 */
+    /* 用 VFS 创建/写入：无持久化后端时写失败属预期（仅本次开机生效） */
+    vfs_node_t *n = vfs_lookup(THEME_CHOICE_FILE);
+    if (!n) n = vfs_create(THEME_CHOICE_FILE);
+    if (!n) return -1;
     uint32_t len = (uint32_t)strlen(name);
-    if (fs_write_file_data(f, 0, name, len) < 0) return -1;
+    if (vfs_write(n, 0, name, len) < 0) return -1;
     (void)fs_sync();
     return 0;
 }
@@ -379,11 +412,11 @@ int ui_theme_save_choice(const char *name) {
 static bool ui_theme_load_choice(char *out, uint32_t cap) {
     if (!out || cap == 0) return false;
     out[0] = '\0';
-    file_t *f = fs_find_file("/theme.cfg");
-    if (!f || f->size == 0) return false;
-    uint32_t len = f->size;
+    vfs_node_t *n = vfs_lookup("/theme.cfg");
+    if (!n || n->size == 0) return false;
+    uint32_t len = n->size;
     if (len > cap - 1) len = cap - 1;
-    if (fs_read_file_data(f, 0, out, len) <= 0) return false;
+    if (vfs_read(n, 0, out, len) <= 0) return false;
     out[len] = '\0';
     /* 去掉可能的换行/回车与尾部空白 */
     for (uint32_t i = 0; i < len; i++) {

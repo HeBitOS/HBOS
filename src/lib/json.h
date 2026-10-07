@@ -46,12 +46,32 @@ typedef struct {
     bool        boolean;             /**< type==JSON_BOOL 时的值 */
 } json_pair_t;
 
-/** 解析结果：定长槽位数组，无动态分配 */
+/**
+ * @brief 解析结果：定长槽位数组。
+ *
+ * ⚠️ 体积警告：本结构约 5.4 KB（48 槽 × 112 B）。**不要放在栈上**——
+ * HBOS 的内核任务栈只有 8 KB，在栈上声明它会让深层调用链直接溢出
+ * （实测：主题扫描期间 page fault）。请用 json_alloc()/json_free()：
+ *
+ *     json_doc_t *d = json_alloc();
+ *     if (json_parse_object(text, len, d)) { ... }
+ *     json_free(d);
+ */
 typedef struct {
     json_pair_t pairs[JSON_MAX_PAIRS];
     int         count;
     bool        ok;                  /**< 顶层结构是否可解析（有 { } 且键值合法） */
 } json_doc_t;
+
+/** 从堆分配一个解析结果（失败返回 NULL）。用 json_free 释放。 */
+json_doc_t *json_alloc(void);
+void        json_free(json_doc_t *doc);
+
+/**
+ * @brief 就地重置一个解析结果（复用同一块内存，避免反复分配）。
+ *        比 json_alloc/free 更适合"每个文件解析一次"的循环。
+ */
+void json_reset(json_doc_t *doc);
 
 /**
  * @brief 解析一个扁平 JSON 对象。

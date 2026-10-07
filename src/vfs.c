@@ -507,6 +507,13 @@ int vfs_readdir(const char *path, char *name, uint32_t *type) {
 
 int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type) {
     if (!path || !name || !type) return -1;
+    /* 根目录：合成顶层目录 + 真实文件系统里的项。
+     *
+     * 早先只枚举硬编码的 roots[]（home/bin/tmp/dev/proc/sys）就返回，导致
+     * 通过 vfs_register_static_file 建在根下的目录（如 /themes）永远不出现在
+     * `ls /` 里——文件其实存在（cat /themes/ocean.theme 能读到），但列表看不见，
+     * 属于"能读不能列"的割裂。现在先给合成的顶层目录，再继续走真实 fs 枚举，
+     * 由调用方按 index 顺序取，两段都覆盖到。 */
     if (strcmp(path, "/") == 0) {
         static const char *roots[] = {"home", "bin", "tmp", "dev", "proc", "sys"};
         uint32_t root_count = sizeof(roots) / sizeof(roots[0]);
@@ -516,8 +523,10 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
             *type = VFS_NODE_DIR;
             return 0;
         }
+        /* 越过合成项后，从真实 fs 的第 0 项开始补齐（index - root_count） */
+        uint32_t want = index - root_count;
         fs_closedir("/");
-        for (uint32_t i = root_count; i <= index; i++) {
+        for (uint32_t i = 0; i <= want; i++) {
             if (fs_readdir("/", name, type) < 0) {
                 fs_closedir("/");
                 return -1;
@@ -533,15 +542,51 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
          path[3] == 'o' && path[4] == 'c' && path[5] == '/') ||
         strncmp(path, "/sys/", 5) == 0)
         return devfs_readdir(path, index, name, type);
-    if (vfs_opendir(path) < 0) return -1;
-    for (uint32_t i = 0; i <= index; i++) {
-        if (vfs_readdir(path, name, type) < 0) {
-            vfs_closedir(path);
-            return -1;
+    /* 非根路径：先列出 vfs_register_static_file 注册的条目，再补真实 fs 的。
+     *
+     * 为什么必须处理静态表：静态文件存在**独立于 ramfs 的另一个表**里
+     * （vfs_static_files[]），vfs_lookup 能找到它、cat 能读到它，但
+     * fs_readdir 完全不知道它的存在——于是 /themes 下的主题包「能读、
+     * 不能列」，进而"丢个文件进 /themes 就能换主题"这个功能实际不生效
+     * （theme.c 靠 readdir 扫描目录）。这里把两张表拼起来，并做去重
+     * （同路径以静态表为准，因为它优先被 lookup 命中）。 */
+    {
+        size_t plen = strlen(path);
+        uint32_t listed = 0;
+        for (uint32_t i = 0; i < vfs_static_file_count; i++) {
+            const char *fn = vfs_static_files[i].node.name;
+            if (strncmp(fn, path, plen) != 0) continue;
+            if (fn[plen] != '/') continue;          /* 必须是该目录的直接子项 */
+            const char *leaf = fn + plen + 1;
+            if (!leaf[0] || strchr(leaf, '/')) continue;   /* 跳过子目录内部 */
+            if (listed == index) {
+                strncpy(name, leaf, VFS_MAX_NAME);
+                name[VFS_MAX_NAME - 1] = 0;
+                *type = vfs_static_files[i].node.type;
+                return 0;
+            }
+            listed++;
         }
+
+        /* 如果请求的 index 已落在静态条目范围内，就直接返回了（上面）；
+         * 走到这里说明 index >= listed，真实 fs 的条目排在静态之后。
+         *
+         * 注意必须先判大小再相减：`index - listed` 在 index < listed 时会
+         * 无符号下溢成约 42 亿，循环随即失控（实测导致进桌面时 page fault）。
+         * 这里显式挡住，而不是依赖"上面一定 return"这个隐含前提。 */
+        if (listed > index) return -1;
+
+        if (vfs_opendir(path) < 0) return -1;
+        uint32_t want = index - listed;
+        for (uint32_t i = 0; i <= want; i++) {
+            if (vfs_readdir(path, name, type) < 0) {
+                vfs_closedir(path);
+                return -1;
+            }
+        }
+        vfs_closedir(path);
+        return 0;
     }
-    vfs_closedir(path);
-    return 0;
 }
 
 int vfs_closedir(const char *path) {

@@ -1,4 +1,5 @@
 #include "gui_app.h"
+#include "../../ui/theme.h"
 #include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
 #include "../../api/gui_service.h"
@@ -14,11 +15,11 @@
 #define SB_H  28
 
 static void draw_sb(int x, int y, int w, const char *label, uint32_t color) {
-    gui_vgradient(x, y, w, SB_H,
-                  gui_rgb(((color >> 16) & 0xff) + 14,
-                          ((color >>  8) & 0xff) + 14,
-                          (color & 0xff) + 14),
-                  color);
+    /* 提亮一档作为渐变顶色。
+     * 用 ui_shade 而不是手写逐通道 +N：后者在某通道已 255 时会溢出
+     * （如 Ocean 蓝 #00a0ff 的 B=255 → 269），打包进 RGB 后高位互相污染，
+     * 渐变会渲成彩虹色（实测踩到）。ui_shade 内部已做钳制。 */
+    gui_vgradient(x, y, w, SB_H, ui_shade(color, 14), color);
     gui_border(x, y, w, SB_H, UI_SURFACE);
     int tw = gui_text_width(label, 1);
     gui_text(x + (w - tw) / 2, y + (SB_H - 10) / 2, label,
@@ -53,6 +54,34 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     draw_sb(x + SB_W + 18, y, SB_W + 10, !st->theme_light ? "● 深色" : "  深色",
             !st->theme_light ? UI_SURFACE : UI_SURFACE2);
     y += SB_H + 14;
+
+    /* ── 主题包（/themes 下的 .theme 文件）──────────────────
+     * 列出所有可用主题：前两个是内置的深/浅色，其余来自 /themes/ 目录。
+     * 用户往 /themes/ 丢一个 .theme 文件、重开设置即可看到并选中它。 */
+    section(x, y, "主题包");
+    y += 20;
+    {
+        char names[UI_THEME_MAX_SLOTS][UI_THEME_NAME_MAX];
+        int n = ui_theme_scan(names, UI_THEME_MAX_SLOTS);
+        int cur = ui_theme_current_index();
+        int shown = 0;
+        for (int i = 0; i < n && shown < 6; i++) {
+            int sel = (i == cur);
+            /* 每行两个，避免长主题名溢出窗口宽度 */
+            int col = shown % 2;
+            int row = shown / 2;
+            int bx = x + col * (SB_W + 60 + 8);
+            int by = y + row * (SB_H + 4);
+            draw_sb(bx, by, SB_W + 60, names[i],
+                    sel ? UI_ACCENT : UI_SURFACE2);
+            shown++;
+        }
+        if (n > 6) {
+            int by = y + ((shown + 1) / 2) * (SB_H + 4);
+            gui_text(x, by, "（更多主题见 /themes/）", UI_DIM, 1);
+        }
+        y += ((shown + 1) / 2) * (SB_H + 4) + 10;
+    }
 
     /* ── 字体大小 ── */
     section(x, y, "字体大小");
@@ -154,6 +183,31 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
         return 1;
     }
     y += SB_H + 14;
+
+    /* theme pack rows */
+    {
+        char names[UI_THEME_MAX_SLOTS][UI_THEME_NAME_MAX];
+        int n = ui_theme_scan(names, UI_THEME_MAX_SLOTS);
+        int shown = 0;
+        for (int i = 0; i < n && shown < 6; i++) {
+            int col = shown % 2;
+            int row = shown / 2;
+            int bx = x + col * (SB_W + 60 + 8);
+            int by = y + row * (SB_H + 4);
+            if (mx >= bx && mx < bx + SB_W + 60 && my >= by && my < by + SB_H) {
+                if (ui_theme_set_index(i) == 0) {
+                    (void)ui_theme_save_choice(names[i]);
+                    /* 同步深浅色标志，保持与 F4/service 一致 */
+                    st->theme_light = ui_theme()->is_dark ? 0 : 1;
+                    (void)gui_service_theme_set(st->theme_light);
+                    st->status = "已应用主题包";
+                }
+                return 1;
+            }
+            shown++;
+        }
+        y += ((shown + 1) / 2) * (SB_H + 4) + 10;
+    }
 
     /* font size row */
     y += 20;

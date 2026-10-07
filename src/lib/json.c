@@ -8,6 +8,23 @@
 #include "json.h"
 
 #include "../string.h"
+#include "../core/heap.h"
+
+/* ── 分配 ─────────────────────────────────────────────────── */
+
+json_doc_t *json_alloc(void) {
+    return (json_doc_t *)kmalloc(sizeof(json_doc_t));
+}
+
+void json_free(json_doc_t *doc) {
+    if (doc) kfree(doc);
+}
+
+void json_reset(json_doc_t *doc) {
+    if (!doc) return;
+    doc->count = 0;
+    doc->ok = false;
+}
 
 /* ── 字符辅助 ─────────────────────────────────────────────── */
 
@@ -24,10 +41,30 @@ static uint32_t j_copy(char *dst, uint32_t cap, const char *src, uint32_t n) {
     return i;
 }
 
-/** 跳空白；返回新位置 */
+/**
+ * 跳过空白**与注释**。
+ *
+ * 为什么要支持注释：主题文件是给人写的，需要能标注"这行改的是强调色"。
+ * 严格 JSON 不允许注释，但让用户为了写注释去改文件名或塞假键都不合理，
+ * 所以解析器宽容处理行注释（双斜线）与块注释（斜杠星号 … 星号斜杠），
+ * 不影响值的解析）。这也是"配置文件比标准 JSON 更宽松"的常见做法。
+ */
 static uint32_t j_skip(const char *t, uint32_t p, uint32_t len) {
-    while (p < len && j_is_space(t[p])) p++;
-    return p;
+    for (;;) {
+        while (p < len && j_is_space(t[p])) p++;
+        if (p + 1 < len && t[p] == '/' && t[p + 1] == '/') {
+            p += 2;
+            while (p < len && t[p] != '\n') p++;     /* 到行尾 */
+            continue;
+        }
+        if (p + 1 < len && t[p] == '/' && t[p + 1] == '*') {
+            p += 2;
+            while (p + 1 < len && !(t[p] == '*' && t[p + 1] == '/')) p++;
+            p = (p + 1 < len) ? (p + 2) : len;        /* 未闭合则跳到末尾 */
+            continue;
+        }
+        return p;
+    }
 }
 
 /* ── 值解析 ───────────────────────────────────────────────── */
