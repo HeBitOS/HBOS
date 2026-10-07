@@ -71,6 +71,16 @@ typedef enum {
 typedef struct ui_window {
     bool     used;
     int      id;
+    /**
+     * @brief 窗口种类与模式（兼容旧 wm_window_t 的语义）。
+     *
+     * 旧实现把"这是面板还是应用窗口"（kind）与"是哪个面板/应用"（mode）
+     * 存在 wm_window_t 里；统一后仍需保留——gui.c 的绘制与命中都按它们
+     * 分发。故意用 int 而非枚举：kind/mode 的取值域由 GUI 外壳定义
+     * （WM_WIN_*、GUI_APP_*、PANEL_*），窗口系统本身不该知道。
+     */
+    int      kind;
+    int      mode;
     /* 归属：内置应用用 owner_app；hax 应用用 owner_task（0 表示内置） */
     uint32_t owner_task;
     struct ui_app *owner_app;
@@ -94,7 +104,17 @@ typedef struct ui_window {
     ui_rect_t dirty_rect;
 
     /* 动画 */
+    /**
+     * @brief 动画类型与目标窗口的关闭请求。
+     *
+     * anim_type 是 anim 的**旧字段名**（wm_window_t 用的名字）；统一后
+     * 保留同义别名以便既有 128 处调用点零改动——改名会带来 128 次机械
+     * 编辑，收益只是好看一点，不值得。
+     * want_close 由 GUI 请求关闭窗口时置位（hax 应用用它感知退出）。
+     */
+    int       want_close;
     ui_anim_t anim;
+    ui_anim_t anim_type;    /* 与 anim 同义，兼容旧名 */
     int       anim_frame;
     int       anim_total;
     ui_rect_t anim_from;

@@ -193,10 +193,10 @@ void wm_minimize_window(wm_state_t *wm, int idx) {
     wm_window_t *win = &wm->windows[idx];
     if (!win->used) return;
     if (win->state == WM_STATE_NORMAL) {
-        win->prev_x = win->x;
-        win->prev_y = win->y;
-        win->prev_w = win->w;
-        win->prev_h = win->h;
+        win->restore.x = win->x;
+        win->restore.y = win->y;
+        win->restore.w = win->w;
+        win->restore.h = win->h;
     }
 
     /* 瞬时最小化。 */
@@ -224,10 +224,10 @@ void wm_maximize_window(wm_state_t *wm, int idx) {
     wm_window_t *win = &wm->windows[idx];
     if (!win->used) return;
     if (win->state == WM_STATE_NORMAL) {
-        win->prev_x = win->x;
-        win->prev_y = win->y;
-        win->prev_w = win->w;
-        win->prev_h = win->h;
+        win->restore.x = win->x;
+        win->restore.y = win->y;
+        win->restore.w = win->w;
+        win->restore.h = win->h;
     }
     /* 瞬时最大化（几何动画反复出 bug，改为直接铺满）。 */
     win->anim_type = WM_ANIM_NONE;
@@ -246,11 +246,11 @@ void wm_restore_window(wm_state_t *wm, int idx) {
     /* 瞬时还原。 */
     win->anim_type = WM_ANIM_NONE;
     win->state = WM_STATE_NORMAL;
-    if (win->prev_w > 0 && win->prev_h > 0) {
-        win->x = win->prev_x;
-        win->y = win->prev_y;
-        win->w = win->prev_w;
-        win->h = win->prev_h;
+    if (win->restore.w > 0 && win->restore.h > 0) {
+        win->x = win->restore.x;
+        win->y = win->restore.y;
+        win->w = win->restore.w;
+        win->h = win->restore.h;
     }
 }
 
@@ -272,10 +272,10 @@ void wm_snap_window(wm_state_t *wm, int idx, int side) {
     }
     // 记录还原位置（仅在从普通态吸附时）
     if (win->state == WM_STATE_NORMAL) {
-        win->prev_x = win->x;
-        win->prev_y = win->y;
-        win->prev_w = win->w;
-        win->prev_h = win->h;
+        win->restore.x = win->x;
+        win->restore.y = win->y;
+        win->restore.w = win->w;
+        win->restore.h = win->h;
     }
     win->state = WM_STATE_NORMAL;
     int half = wm->desk_w / 2;
@@ -344,10 +344,10 @@ void wm_get_window_rect(wm_state_t *wm, int idx, int *x, int *y, int *w, int *h)
         int e = 512 - ((F * F * F) * 512) / (total * total * total);  /* 0..512 */
         int tx = win->x, ty = win->y, tw = win->w > 0 ? win->w : def_w,
             th = win->h > 0 ? win->h : def_h;
-        *x = win->anim_start_x + ((tx - win->anim_start_x) * e) / 512;
-        *y = win->anim_start_y + ((ty - win->anim_start_y) * e) / 512;
-        *w = win->anim_start_w + ((tw - win->anim_start_w) * e) / 512;
-        *h = win->anim_start_h + ((th - win->anim_start_h) * e) / 512;
+        *x = win->anim_from.x + ((tx - win->anim_from.x) * e) / 512;
+        *y = win->anim_from.y + ((ty - win->anim_from.y) * e) / 512;
+        *w = win->anim_from.w + ((tw - win->anim_from.w) * e) / 512;
+        *h = win->anim_from.h + ((th - win->anim_from.h) * e) / 512;
         if (*w < 80) *w = 80;
         if (*h < 60) *h = 60;
         return;
@@ -520,6 +520,9 @@ void wm_update_animations(wm_state_t *wm) {
             int eased_scaled = 512 - ((F * F * F) * 512) / (total * total * total);
 
             switch (win->anim_type) {
+                case WM_ANIM_NONE:
+                    break;   /* 无动画：不该走到这里，显式处理以消除 -Wswitch */
+
                 case WM_ANIM_MINIMIZE:
                     /* 最小化：淡出 */
                     win->opacity = (uint8_t)(255 * (total - frame) / total);

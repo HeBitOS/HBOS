@@ -2,6 +2,7 @@
 #define HBOS_WM_H
 
 #include <stdint.h>
+#include "../ui/ui_app.h"   /* ui_window_t：统一后的窗口类型 */
 
 /* ── DPI 缩放 ───────────────────────────────────────────────────────
  * 所有像素尺寸常量都经 ui_s() 按屏幕分辨率缩放（基准 1080p = 100%），
@@ -50,11 +51,13 @@ enum {
     WM_WIN_APP   = 1,
 };
 
-enum {
-    WM_STATE_NORMAL    = 0,
-    WM_STATE_MINIMIZED = 1,
-    WM_STATE_MAXIMIZED = 2,
-};
+/* 状态常量：直接别名到统一枚举 ui_win_state_t。
+ * 原先这里另定义一份匿名 enum，导致与 ui_win_state_t 混用时出现
+ * -Wenum-compare / -Wenum-conversion 告警（两边是不同类型）。别名后
+ * 类型一致，既有 WM_STATE_* 调用点仍可用。 */
+#define WM_STATE_NORMAL    UI_WIN_NORMAL
+#define WM_STATE_MINIMIZED UI_WIN_MINIMIZED
+#define WM_STATE_MAXIMIZED UI_WIN_MAXIMIZED
 
 enum {
     WM_EDGE_NONE  = -1,
@@ -76,31 +79,19 @@ enum {
     WM_SNAP_BOTTOM = 4,   // 底部：最小化
 };
 
-enum {
-    WM_ANIM_NONE     = 0,
-    WM_ANIM_MINIMIZE = 1,
-    WM_ANIM_MAXIMIZE = 2,
-    WM_ANIM_RESTORE  = 3,
-    WM_ANIM_OPEN     = 4,  /**< 新窗口淡入 */
-};
+/* 动画类型：别名到统一枚举 ui_anim_t（理由同 WM_STATE_*） */
+#define WM_ANIM_NONE     UI_ANIM_NONE
+#define WM_ANIM_MINIMIZE UI_ANIM_MINIMIZE
+#define WM_ANIM_MAXIMIZE UI_ANIM_MAXIMIZE
+#define WM_ANIM_RESTORE  UI_ANIM_RESTORE
+#define WM_ANIM_OPEN     UI_ANIM_OPEN
 
-typedef struct {
-    int used;
-    int kind;
-    int mode;
-    int state;
-    int x, y;
-    int w, h;
-    int prev_x, prev_y, prev_w, prev_h;
-    int anim_type;         /**< 当前动画类型 */
-    int anim_frame;        /**< 动画帧计数 */
-    int anim_total;        /**< 动画总帧数 */
-    int anim_start_x;      /**< 动画起始X */
-    int anim_start_y;      /**< 动画起始Y */
-    int anim_start_w;      /**< 动画起始宽度 */
-    int anim_start_h;      /**< 动画起始高度 */
-    uint8_t opacity;       /**< 窗口不透明度 (0-255) */
-} wm_window_t;
+/* 窗口结构已统一到 src/ui/ui_app.h 的 ui_window_t。
+ *
+ * 原先这里另有一份 wm_window_t（内置应用用）与 winsrv 的 winsrv_window_t
+ * （hax 应用用）两套定义，字段高度重复、行为不一致，同一 bug 要修两遍。
+ * 现在统一为一个类型；`wm_window_t` 保留为别名，使既有调用点零改动。 */
+typedef ui_window_t wm_window_t;
 
 typedef struct {
     wm_window_t windows[WM_MAX_WINDOWS];
