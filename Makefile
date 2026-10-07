@@ -236,6 +236,8 @@ C_SRCS = \
 	$(SRC_DIR)/bmp.c \
 	$(SRC_DIR)/inflate.c \
 	$(SRC_DIR)/graphics/blob_unpack.c \
+	$(SRC_DIR)/lib/json.c \
+	$(SRC_DIR)/ui/theme.c \
 	$(SRC_DIR)/png.c \
 	$(SRC_DIR)/jpeg.c \
 	$(SRC_DIR)/wav.c \
@@ -358,7 +360,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
 
 all: iso
 
@@ -720,6 +722,20 @@ inflate-bench: | $(BUILD_DIR)
 		tests/host/test_inflate_diff.c src/inflate.c tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_inflate
 	$(BUILD_DIR)/test_inflate
+
+# 主题层与 JSON 解析器的宿主单测。
+# 为什么放宿主：主题文件必须能安全降级（损坏/缺键/非法色都不能让系统起不来），
+# 这类负例在 QEMU 里难以构造和观察。这里穷举畸形输入，秒级回归，不必启动虚拟机。
+ui-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
+		tests/host/test_json.c src/lib/json.c tests/host/hbos_string_wrap.c \
+		-o $(BUILD_DIR)/test_json
+	$(BUILD_DIR)/test_json
+	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
+		tests/host/test_theme.c src/ui/theme.c src/lib/json.c \
+		tests/host/theme_fs_stub.c tests/host/hbos_string_wrap.c \
+		-o $(BUILD_DIR)/test_theme
+	$(BUILD_DIR)/test_theme
 
 browser-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc/gui \
