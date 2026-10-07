@@ -282,6 +282,7 @@ C_SRCS = \
 	$(APP_SRCS)
 
 GUI_C_SRCS = \
+	$(SRC_DIR)/gui/gui_draw_impl.c \
 	$(SRC_DIR)/ui/ui_widget.c \
 	$(SRC_DIR)/ui/ui_controls.c \
 	$(SRC_DIR)/gpu.c \
