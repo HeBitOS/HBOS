@@ -238,8 +238,6 @@ C_SRCS = \
 	$(SRC_DIR)/graphics/blob_unpack.c \
 	$(SRC_DIR)/lib/json.c \
 	$(SRC_DIR)/ui/theme.c \
-	$(SRC_DIR)/ui/ui_widget.c \
-	$(SRC_DIR)/ui/ui_controls.c \
 	$(SRC_DIR)/ui/ui_app.c \
 	$(SRC_DIR)/ui/ui_alloc_kernel.c \
 	$(SRC_DIR)/png.c \
@@ -284,6 +282,8 @@ C_SRCS = \
 	$(APP_SRCS)
 
 GUI_C_SRCS = \
+	$(SRC_DIR)/ui/ui_widget.c \
+	$(SRC_DIR)/ui/ui_controls.c \
 	$(SRC_DIR)/gpu.c \
 	$(SRC_DIR)/graphics/gui_font.c \
 	$(SRC_DIR)/graphics/gui_wall.c \
