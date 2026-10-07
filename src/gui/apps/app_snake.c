@@ -4,6 +4,30 @@
 #include "../gui_panel.h"
 #include "../../string.h"
 
+/* ── 贪吃蛇私有状态 ───────────────────────────────────────────
+ * 12 个字段原先挂在全局 gui_state_t 上；实测只有本文件使用（gui.c 仅在
+ * 两个位置间接引用：初始化几个坐标、以及开窗时调 app_snake_reset()）。
+ * 沿用计算器那次的模式：状态归应用，字段去掉 snake_ 前缀。
+ *
+ * 注意 gui.c 里原先直接写的 snake_x/y/tx/ty 已删除——那正是"框架知道
+ * 应用内部细节"的例子，现在由 app_snake_reset() 统一负责初始状态。 */
+typedef struct {
+    int x, y;                 /* 蛇头坐标 */
+    int tx, ty;               /* 食物坐标 */
+    int score;
+    int len;
+    int dx, dy;               /* 行进方向 */
+    int alive;
+    int last_sec;             /* 上一步的秒数（按秒推进） */
+    int body_x[SNAKE_MAX];
+    int body_y[SNAKE_MAX];
+} snake_state_t;
+
+static snake_state_t g_snake;
+
+static snake_state_t *snake(void) { return &g_snake; }
+
+
 /* ── 贪吃蛇 ─────────────────────────────────────────────────────
  * 状态仍集中在 gui_state_t 的 snake_* 字段（模块 ABI v1 模式，与其它
  * 已拆出的内置应用一致）。桌面只通过模块回调 draw/on_key/on_tick 交互，
@@ -33,99 +57,104 @@ static uint8_t snake_cmos_second(void) {
 }
 
 static void snake_place_food(gui_state_t *st) {
+    (void)st;   /* 状态已私有化 */
+    snake_state_t *s = snake();
     for (int step = 0; step < SNAKE_MAX; step++) {
-        int x = (st->snake_tx + 5 + step * 3) % SNAKE_W;
-        int y = (st->snake_ty + 3 + step * 2) % SNAKE_H;
+        int x = (s->tx + 5 + step * 3) % SNAKE_W;
+        int y = (s->ty + 3 + step * 2) % SNAKE_H;
         int hit = 0;
-        for (int i = 0; i < st->snake_len; i++) {
-            if (st->snake_body_x[i] == x && st->snake_body_y[i] == y) {
+        for (int i = 0; i < s->len; i++) {
+            if (s->body_x[i] == x && s->body_y[i] == y) {
                 hit = 1;
                 break;
             }
         }
         if (!hit) {
-            st->snake_tx = x;
-            st->snake_ty = y;
+            s->tx = x;
+            s->ty = y;
             return;
         }
     }
 }
 
 void app_snake_reset(gui_state_t *st) {
-    st->snake_len = 4;
-    st->snake_dx = 1;
-    st->snake_dy = 0;
-    st->snake_alive = 1;
-    st->snake_score = 0;
-    st->snake_body_x[0] = 5;
-    st->snake_body_y[0] = 4;
-    st->snake_body_x[1] = 4;
-    st->snake_body_y[1] = 4;
-    st->snake_body_x[2] = 3;
-    st->snake_body_y[2] = 4;
-    st->snake_body_x[3] = 2;
-    st->snake_body_y[3] = 4;
-    st->snake_x = st->snake_body_x[0];
-    st->snake_y = st->snake_body_y[0];
-    st->snake_tx = 10;
-    st->snake_ty = 4;
-    st->snake_last_sec = snake_cmos_second();
+    snake_state_t *s = snake();
+    s->len = 4;
+    s->dx = 1;
+    s->dy = 0;
+    s->alive = 1;
+    s->score = 0;
+    s->body_x[0] = 5;
+    s->body_y[0] = 4;
+    s->body_x[1] = 4;
+    s->body_y[1] = 4;
+    s->body_x[2] = 3;
+    s->body_y[2] = 4;
+    s->body_x[3] = 2;
+    s->body_y[3] = 4;
+    s->x = s->body_x[0];
+    s->y = s->body_y[0];
+    s->tx = 10;
+    s->ty = 4;
+    s->last_sec = snake_cmos_second();
     snake_place_food(st);
     st->status = "贪吃蛇已开始";
 }
 
 static void snake_turn(gui_state_t *st, int dx, int dy) {
-    if (st->snake_len <= 0) app_snake_reset(st);
-    if (!st->snake_alive) return;
-    if (st->snake_len <= 1 || dx != -st->snake_dx || dy != -st->snake_dy) {
-        st->snake_dx = dx;
-        st->snake_dy = dy;
+    snake_state_t *s = snake();
+    if (s->len <= 0) app_snake_reset(st);
+    if (!s->alive) return;
+    if (s->len <= 1 || dx != -s->dx || dy != -s->dy) {
+        s->dx = dx;
+        s->dy = dy;
     }
     st->status = "贪吃蛇已转向";
 }
 
 static void snake_move(gui_state_t *st, int dx, int dy) {
-    if (st->snake_len <= 0) app_snake_reset(st);
-    if (!st->snake_alive) return;
+    snake_state_t *s = snake();
+    if (s->len <= 0) app_snake_reset(st);
+    if (!s->alive) return;
 
     if (dx != 0 || dy != 0) {
-        if (st->snake_len <= 1 || dx != -st->snake_dx || dy != -st->snake_dy) {
-            st->snake_dx = dx;
-            st->snake_dy = dy;
+        if (s->len <= 1 || dx != -s->dx || dy != -s->dy) {
+            s->dx = dx;
+            s->dy = dy;
         }
     }
 
-    int nx = st->snake_body_x[0] + st->snake_dx;
-    int ny = st->snake_body_y[0] + st->snake_dy;
+    int nx = s->body_x[0] + s->dx;
+    int ny = s->body_y[0] + s->dy;
     if (nx < 0 || nx >= SNAKE_W || ny < 0 || ny >= SNAKE_H) {
-        st->snake_alive = 0;
+        s->alive = 0;
         st->status = "贪吃蛇撞墙";
         return;
     }
 
-    int grow = (nx == st->snake_tx && ny == st->snake_ty);
-    int check_len = grow ? st->snake_len : st->snake_len - 1;
+    int grow = (nx == s->tx && ny == s->ty);
+    int check_len = grow ? s->len : s->len - 1;
     for (int i = 0; i < check_len; i++) {
-        if (st->snake_body_x[i] == nx && st->snake_body_y[i] == ny) {
-            st->snake_alive = 0;
+        if (s->body_x[i] == nx && s->body_y[i] == ny) {
+            s->alive = 0;
             st->status = "贪吃蛇撞到自己";
             return;
         }
     }
 
-    int new_len = st->snake_len + (grow && st->snake_len < SNAKE_MAX ? 1 : 0);
+    int new_len = s->len + (grow && s->len < SNAKE_MAX ? 1 : 0);
     for (int i = new_len - 1; i > 0; i--) {
-        st->snake_body_x[i] = st->snake_body_x[i - 1];
-        st->snake_body_y[i] = st->snake_body_y[i - 1];
+        s->body_x[i] = s->body_x[i - 1];
+        s->body_y[i] = s->body_y[i - 1];
     }
-    st->snake_body_x[0] = nx;
-    st->snake_body_y[0] = ny;
-    st->snake_len = new_len;
-    st->snake_x = nx;
-    st->snake_y = ny;
+    s->body_x[0] = nx;
+    s->body_y[0] = ny;
+    s->len = new_len;
+    s->x = nx;
+    s->y = ny;
 
     if (grow) {
-        st->snake_score++;
+        s->score++;
         snake_place_food(st);
         st->status = "吃到食物";
     } else {
@@ -135,27 +164,29 @@ static void snake_move(gui_state_t *st, int dx, int dy) {
 
 /* ── draw ────────────────────────────────────────────────────── */
 static void app_snake_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) {
+    (void)st;   /* 状态已私有化 */
+    snake_state_t *s = snake();
     (void)win_w; (void)win_h;
-    if (st->snake_len <= 0) app_snake_reset(st);
+    if (s->len <= 0) app_snake_reset(st);
     char line[96];
     uint32_t pos = 0;
     gui_text(tx, ty, "贪吃蛇", UI_OK, 1);
     line[0] = 0; pos = 0;
     gui_append_str(line, sizeof(line), &pos, "分数: ");
-    gui_append_uint(line, sizeof(line), &pos, (uint32_t)st->snake_score);
+    gui_append_uint(line, sizeof(line), &pos, (uint32_t)s->score);
     gui_text(tx, ty + 34, line, UI_FG2, 1);
-    gui_text(tx, ty + 56, st->snake_alive ? "方向键移动  吃掉蓝色食物" : "游戏结束  Enter 重新开始",
+    gui_text(tx, ty + 56, s->alive ? "方向键移动  吃掉蓝色食物" : "游戏结束  Enter 重新开始",
              UI_DIM, 1);
     int bx = tx;
     int by = ty + 84;
     int cell = 16;
     gui_rect(bx, by, cell * SNAKE_W, cell * SNAKE_H, UI_BG);
     gui_border(bx, by, cell * SNAKE_W, cell * SNAKE_H, UI_OK);
-    gui_rect(bx + st->snake_tx * cell + 4, by + st->snake_ty * cell + 4, cell - 8, cell - 8,
+    gui_rect(bx + s->tx * cell + 4, by + s->ty * cell + 4, cell - 8, cell - 8,
              UI_ACCENT);
-    for (int i = st->snake_len - 1; i >= 0; i--) {
+    for (int i = s->len - 1; i >= 0; i--) {
         uint32_t color = i == 0 ? UI_FG : UI_OK;
-        gui_rect(bx + st->snake_body_x[i] * cell + 2, by + st->snake_body_y[i] * cell + 2,
+        gui_rect(bx + s->body_x[i] * cell + 2, by + s->body_y[i] * cell + 2,
                  cell - 4, cell - 4, color);
     }
 }
@@ -173,12 +204,13 @@ static int app_snake_key(gui_state_t *st, int key) {
 
 /* ── tick ────────────────────────────────────────────────────── */
 static int app_snake_tick(gui_state_t *st) {
+    snake_state_t *s = snake();
     gui_sync_focus(st);
     if (st->app_mode != GUI_APP_SNAKE) return 0;
-    if (st->snake_len <= 0) app_snake_reset(st);
+    if (s->len <= 0) app_snake_reset(st);
     uint8_t sec = snake_cmos_second();
-    if (sec == st->snake_last_sec) return 0;
-    st->snake_last_sec = sec;
+    if (sec == s->last_sec) return 0;
+    s->last_sec = sec;
     snake_move(st, 0, 0);
     return 1;
 }

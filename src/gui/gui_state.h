@@ -66,18 +66,7 @@ typedef struct gui_state {
     /* 计算器状态已迁出：现为 app_calc.c 的私有 calc_state_t（见该文件）。
      * 这是 P3"拆解上帝对象"的第一步——应用状态归应用所有，框架不再包含
      * 任何"计算器"概念。 */
-    int snake_x;
-    int snake_y;
-    int snake_tx;
-    int snake_ty;
-    int snake_score;
-    int snake_len;
-    int snake_dx;
-    int snake_dy;
-    int snake_alive;
-    uint8_t snake_last_sec;
-    int snake_body_x[SNAKE_MAX];
-    int snake_body_y[SNAKE_MAX];
+    /* 贪吃蛇状态已迁出：现为 app_snake.c 的私有 snake_state_t。 */
     int win_x;
     int win_y;
     int clicks;

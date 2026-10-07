@@ -5423,10 +5423,6 @@ static void cmd_gui(int argc, char **argv) {
     memset(&st, 0, sizeof(st));
     st.active = PANEL_FILES;
     st.app_mode = GUI_APP_NONE;
-    st.snake_x = 5;
-    st.snake_y = 3;
-    st.snake_tx = 9;
-    st.snake_ty = 5;
     st.last_clicked_file = -1;
     st.delete_confirm_index = -1;
     st.taskbar_show_seconds = 1;
