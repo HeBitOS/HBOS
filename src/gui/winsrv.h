@@ -16,6 +16,7 @@
 #define HBOS_WINSRV_H
 
 #include <stdint.h>
+#include "../ui/ui_app.h"   /* ui_window_t：统一窗口核心 */
 
 #define WINSRV_MAX      8     /**< 最多并发应用窗口数 */
 #define WINSRV_EVQ      32    /**< 每窗口事件队列深度 */
@@ -37,31 +38,36 @@ enum {
     WINEV_STATE = 7,   /**< a=WINSRV_STATE_* */
 };
 
-enum {
-    WINSRV_STATE_NORMAL = 0,
-    WINSRV_STATE_MINIMIZED = 1,
-    WINSRV_STATE_MAXIMIZED = 2,
-};
+/* 状态常量：别名到统一枚举 ui_win_state_t。
+ * 原先这里另定义一份匿名 enum，与 ui_win_state_t 混用时会产生
+ * -Wenum-compare（实测 4 处）。别名后类型一致，既有调用点不变。 */
+#define WINSRV_STATE_NORMAL    UI_WIN_NORMAL
+#define WINSRV_STATE_MINIMIZED UI_WIN_MINIMIZED
+#define WINSRV_STATE_MAXIMIZED UI_WIN_MAXIMIZED
 
 typedef struct {
     int type;
     int a, b, c;
 } winsrv_event_t;
 
+/**
+ * @brief hax 应用窗口：**内嵌统一窗口类型** + winsrv 特有的簿记。
+ *
+ * 原先这是一份完全独立的窗口结构，与 wm_window_t 字段大量重复
+ * （x/y/w/h、state、focused、dirty、surface…），两份定义容易改一处漏
+ * 一处。现在核心字段复用 `ui_window_t`，本结构只补 winsrv 独有的部分：
+ *   - generation：句柄代数，防止旧句柄误命中新窗口
+ *   - 事件队列：hax 应用通过 syscall 轮询自己的输入
+ *
+ * 注意 x/y/w/h 的语义差异（**需要留意的历史包袱**）：ui_window_t 的
+ * x/y/w/h 是"含装饰的外框"，而 winsrv 语义下是"内容区尺寸（不含装饰）"。
+ * 两者在 hax 路径上一直按后者解释，因此这里不改语义，只在 w->win 上
+ * 使用 x/y/w/h 时记住这一点——真正统一需要在 GUI 外壳里做坐标换算，
+ * 属于后续工作。
+ */
 typedef struct {
-    int       used;
-    uint32_t  generation;            /**< 句柄代数，防止旧句柄误命中新窗口 */
-    uint32_t  owner_task;            /**< 拥有此窗口的任务 ID */
-    char      title[WINSRV_TITLE];
-    int       x, y, w, h;            /**< 窗口位置与内容尺寸（不含装饰） */
-    uint32_t *surface;               /**< w*h 像素，行主序 */
-    uint64_t  surface_phys;
-    int       surface_pages;
-    int       want_close;            /**< GUI 请求关闭 */
-    int       state;                 /**< WINSRV_STATE_* */
-    int       focused;
-    int       dirty;
-    int       dirty_x, dirty_y, dirty_w, dirty_h;
+    ui_window_t win;                 /**< 统一窗口核心（含 x/y/w/h/state/surface…） */
+    uint32_t  generation;            /**< 句柄代数 */
     winsrv_event_t evq[WINSRV_EVQ];
     int       ev_head, ev_tail;
 } winsrv_window_t;

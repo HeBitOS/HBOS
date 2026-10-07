@@ -94,9 +94,9 @@ int gui_service_window_open(uint32_t owner_task, const char *title, int w, int h
 
 int gui_service_window_info(uint32_t owner_task, int *w, int *h) {
     winsrv_window_t *win = winsrv_for_task(owner_task);
-    if (!win || win->want_close) return 0;
-    if (w) *w = win->w;
-    if (h) *h = win->h;
+    if (!win || win->win.want_close) return 0;
+    if (w) *w = win->win.w;
+    if (h) *h = win->win.h;
     return 1;
 }
 
@@ -187,11 +187,11 @@ int gui_service_window_v2(uint32_t owner_task, uint32_t operation,
                                        sizeof(*state)))
                 return -1;
             state->abi_minor = HBOS_GUI_SERVICE_ABI_MINOR;
-            state->x = win->x; state->y = win->y;
-            state->width = win->w; state->height = win->h;
-            state->window_state = win->state;
-            state->flags = (win->focused ? 1u : 0u) |
-                           (win->want_close ? 2u : 0u);
+            state->x = win->win.x; state->y = win->win.y;
+            state->width = win->win.w; state->height = win->win.h;
+            state->window_state = win->win.state;
+            state->flags = (win->win.focused ? 1u : 0u) |
+                           (win->win.want_close ? 2u : 0u);
             return 0;
         }
         case GUI_SERVICE_V2_SET_TITLE:
@@ -201,23 +201,25 @@ int gui_service_window_v2(uint32_t owner_task, uint32_t operation,
         case GUI_SERVICE_V2_SET_GEOMETRY: {
             gui_service_rect_t *rect = (gui_service_rect_t *)data;
             if (!rect) return -1;
-            int moved = rect->x != win->x || rect->y != win->y;
-            win->x = rect->x; win->y = rect->y;
+            int moved = rect->x != win->win.x || rect->y != win->win.y;
+            win->win.x = rect->x; win->win.y = rect->y;
             if (winsrv_resize(win, rect->width, rect->height) < 0) return -1;
             if (moved) {
-                win->dirty = 1;
-                winsrv_push_event(win, WINEV_MOVE, win->x, win->y, 0);
+                win->win.dirty = 1;
+                winsrv_push_event(win, WINEV_MOVE, win->win.x, win->win.y, 0);
             }
             return 0;
         }
         case GUI_SERVICE_V2_SET_WINDOW_STATE: {
             if (!data) return -1;
+            /* 状态来自用户态（int），统一枚举是 ui_win_state_t；
+             * 显式转换避免 -Wsign-compare（两者底层都是整数）。 */
             int state = *(const int *)data;
-            if (state < WINSRV_STATE_NORMAL ||
-                state > WINSRV_STATE_MAXIMIZED) return -1;
-            if (state != win->state) {
-                win->state = state;
-                win->dirty = 1;
+            if (state < (int)WINSRV_STATE_NORMAL ||
+                state > (int)WINSRV_STATE_MAXIMIZED) return -1;
+            if ((ui_win_state_t)state != win->win.state) {
+                win->win.state = (ui_win_state_t)state;
+                win->win.dirty = 1;
                 winsrv_push_event(win, WINEV_STATE, state, 0, 0);
             }
             return 0;

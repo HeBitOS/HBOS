@@ -31,7 +31,7 @@ static int winsrv_create_common(uint32_t owner_task, const char *title,
 
     int id = -1;
     for (int i = 0; i < WINSRV_MAX; i++) {
-        if (!g_wins[i].used) { id = i; break; }
+        if (!g_wins[i].win.used) { id = i; break; }
     }
     if (id < 0) return -1;
 
@@ -42,30 +42,30 @@ static int winsrv_create_common(uint32_t owner_task, const char *title,
 
     winsrv_window_t *win = &g_wins[id];
     memset(win, 0, sizeof(*win));
-    win->used = 1;
+    win->win.used = 1;
     win->generation = g_next_generation++;
     if (g_next_generation == 0 || g_next_generation > 0x007FFFFFu)
         g_next_generation = 1;
-    win->owner_task = owner_task;
-    win->w = w;
-    win->h = h;
+    win->win.owner_task = owner_task;
+    win->win.w = w;
+    win->win.h = h;
     /* 简单层叠初始位置 */
-    win->x = 90 + id * 36;
-    win->y = 70 + id * 30;
-    win->surface = (uint32_t *)(uintptr_t)phys;
-    win->surface_phys = phys;
-    win->surface_pages = (int)pages;
-    win->want_close = 0;
-    win->state = WINSRV_STATE_NORMAL;
-    win->dirty = 1;
-    win->dirty_w = w;
-    win->dirty_h = h;
+    win->win.x = 90 + id * 36;
+    win->win.y = 70 + id * 30;
+    win->win.surface = (uint32_t *)(uintptr_t)phys;
+    win->win.surface_phys = phys;
+    win->win.surface_pages = (int)pages;
+    win->win.want_close = 0;
+    win->win.state = WINSRV_STATE_NORMAL;
+    win->win.dirty = 1;
+    win->win.dirty_rect.w = w;
+    win->win.dirty_rect.h = h;
     win->ev_head = win->ev_tail = 0;
 
     if (title) {
         int n = 0;
-        while (title[n] && n < WINSRV_TITLE - 1) { win->title[n] = title[n]; n++; }
-        win->title[n] = 0;
+        while (title[n] && n < WINSRV_TITLE - 1) { win->win.title[n] = title[n]; n++; }
+        win->win.title[n] = 0;
     }
 
     /* 默认深色背景 */
@@ -85,33 +85,33 @@ int winsrv_create_handle(uint32_t owner_task, const char *title, int w, int h) {
 void winsrv_destroy(int id) {
     if (id < 0 || id >= WINSRV_MAX) return;
     winsrv_window_t *win = &g_wins[id];
-    if (!win->used) return;
-    if (win->surface_phys && win->surface_pages > 0)
-        pmm_free_blocks(win->surface_phys, (size_t)win->surface_pages);
+    if (!win->win.used) return;
+    if (win->win.surface_phys && win->win.surface_pages > 0)
+        pmm_free_blocks(win->win.surface_phys, (size_t)win->win.surface_pages);
     memset(win, 0, sizeof(*win));
     g_scene_dirty = 1;
 }
 
 void winsrv_close_for_task(uint32_t owner_task) {
     for (int i = 0; i < WINSRV_MAX; i++)
-        if (g_wins[i].used && g_wins[i].owner_task == owner_task)
+        if (g_wins[i].win.used && g_wins[i].win.owner_task == owner_task)
             { winsrv_destroy(i); return; }
 }
 
 winsrv_window_t *winsrv_get(int id) {
     if (id < 0 || id >= WINSRV_MAX) return 0;
-    return g_wins[id].used ? &g_wins[id] : 0;
+    return g_wins[id].win.used ? &g_wins[id] : 0;
 }
 
 winsrv_window_t *winsrv_for_task(uint32_t owner_task) {
     for (int i = 0; i < WINSRV_MAX; i++)
-        if (g_wins[i].used && g_wins[i].owner_task == owner_task)
+        if (g_wins[i].win.used && g_wins[i].win.owner_task == owner_task)
             return &g_wins[i];
     return 0;
 }
 
 int winsrv_handle(const winsrv_window_t *win) {
-    if (!win || !win->used || win < g_wins || win >= g_wins + WINSRV_MAX)
+    if (!win || !win->win.used || win < g_wins || win >= g_wins + WINSRV_MAX)
         return -1;
     uint32_t id = (uint32_t)(win - g_wins);
     return (int)((win->generation << 8) | id);
@@ -124,14 +124,14 @@ winsrv_window_t *winsrv_for_handle(uint32_t owner_task, int handle) {
     uint32_t generation = raw >> 8;
     if (id >= WINSRV_MAX) return 0;
     winsrv_window_t *win = &g_wins[id];
-    if (!win->used || win->owner_task != owner_task ||
+    if (!win->win.used || win->win.owner_task != owner_task ||
         win->generation != generation) return 0;
     return win;
 }
 
 int winsrv_count(void) {
     int c = 0;
-    for (int i = 0; i < WINSRV_MAX; i++) if (g_wins[i].used) c++;
+    for (int i = 0; i < WINSRV_MAX; i++) if (g_wins[i].win.used) c++;
     return c;
 }
 
@@ -141,7 +141,7 @@ int winsrv_has_dirty(void) {
         return 1;
     }
     for (int i = 0; i < WINSRV_MAX; i++)
-        if (g_wins[i].used && g_wins[i].dirty)
+        if (g_wins[i].win.used && g_wins[i].win.dirty)
             return 1;
     return 0;
 }
@@ -149,8 +149,8 @@ int winsrv_has_dirty(void) {
 int winsrv_reap_dead(void) {
     int reaped = 0;
     for (int i = 0; i < WINSRV_MAX; i++) {
-        if (!g_wins[i].used) continue;
-        const task_t *t = task_get_by_id(g_wins[i].owner_task);
+        if (!g_wins[i].win.used) continue;
+        const task_t *t = task_get_by_id(g_wins[i].win.owner_task);
         if (!t || t->state == TASK_TERMINATED) {
             winsrv_destroy(i);
             reaped++;
@@ -162,22 +162,22 @@ int winsrv_reap_dead(void) {
 /* ── 表面绘制原语 ───────────────────────────────────────────── */
 
 void winsrv_clear(winsrv_window_t *win, uint32_t color) {
-    if (!win || !win->surface) return;
-    int n = win->w * win->h;
-    uint32_t *p = win->surface;
+    if (!win || !win->win.surface) return;
+    int n = win->win.w * win->win.h;
+    uint32_t *p = win->win.surface;
     for (int i = 0; i < n; i++) p[i] = color;
-    winsrv_mark_dirty(win, 0, 0, win->w, win->h);
+    winsrv_mark_dirty(win, 0, 0, win->win.w, win->win.h);
 }
 
 void winsrv_fill(winsrv_window_t *win, int x, int y, int w, int h, uint32_t color) {
-    if (!win || !win->surface) return;
+    if (!win || !win->win.surface) return;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
-    if (x + w > win->w) w = win->w - x;
-    if (y + h > win->h) h = win->h - y;
+    if (x + w > win->win.w) w = win->win.w - x;
+    if (y + h > win->win.h) h = win->win.h - y;
     if (w <= 0 || h <= 0) return;
     for (int yy = 0; yy < h; yy++) {
-        uint32_t *row = win->surface + (uint32_t)(y + yy) * win->w + (uint32_t)x;
+        uint32_t *row = win->win.surface + (uint32_t)(y + yy) * win->win.w + (uint32_t)x;
         for (int xx = 0; xx < w; xx++) row[xx] = color;
     }
     winsrv_mark_dirty(win, x, y, w, h);
@@ -190,12 +190,12 @@ static void ws_blit_glyph(winsrv_window_t *win, int x, int y,
     uint32_t sr = (color >> 16) & 0xFF, sg = (color >> 8) & 0xFF, sb = color & 0xFF;
     for (int yy = 0; yy < (int)g->height; yy++) {
         int py = y + yy;
-        if (py < 0 || py >= win->h) continue;
+        if (py < 0 || py >= win->win.h) continue;
         const uint8_t *cov = g->coverage + (uint32_t)yy * g->width;
-        uint32_t *row = win->surface + (uint32_t)py * win->w;
+        uint32_t *row = win->win.surface + (uint32_t)py * win->win.w;
         for (int xx = 0; xx < (int)g->width; xx++) {
             int px = x + xx;
-            if (px < 0 || px >= win->w) continue;
+            if (px < 0 || px >= win->win.w) continue;
             uint32_t a = cov[xx];
             if (a == 0) continue;
             uint32_t dst = row[px];
@@ -210,7 +210,7 @@ static void ws_blit_glyph(winsrv_window_t *win, int x, int y,
 }
 
 void winsrv_text(winsrv_window_t *win, int x, int y, const char *s, uint32_t color) {
-    if (!win || !win->surface || !s) return;
+    if (!win || !win->win.surface || !s) return;
     int start_x = x;
     int ascent = gui_font_ascent_n(0);
     while (*s) {
@@ -244,38 +244,38 @@ void winsrv_mark_dirty(winsrv_window_t *win, int x, int y, int w, int h) {
     if (!win || w <= 0 || h <= 0) return;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
-    if (x + w > win->w) w = win->w - x;
-    if (y + h > win->h) h = win->h - y;
+    if (x + w > win->win.w) w = win->win.w - x;
+    if (y + h > win->win.h) h = win->win.h - y;
     if (w <= 0 || h <= 0) return;
-    if (!win->dirty) {
-        win->dirty_x = x; win->dirty_y = y;
-        win->dirty_w = w; win->dirty_h = h;
-        win->dirty = 1;
+    if (!win->win.dirty) {
+        win->win.dirty_rect.x = x; win->win.dirty_rect.y = y;
+        win->win.dirty_rect.w = w; win->win.dirty_rect.h = h;
+        win->win.dirty = 1;
         return;
     }
-    int x0 = x < win->dirty_x ? x : win->dirty_x;
-    int y0 = y < win->dirty_y ? y : win->dirty_y;
-    int x1 = x + w > win->dirty_x + win->dirty_w
-                 ? x + w : win->dirty_x + win->dirty_w;
-    int y1 = y + h > win->dirty_y + win->dirty_h
-                 ? y + h : win->dirty_y + win->dirty_h;
-    win->dirty_x = x0; win->dirty_y = y0;
-    win->dirty_w = x1 - x0; win->dirty_h = y1 - y0;
+    int x0 = x < win->win.dirty_rect.x ? x : win->win.dirty_rect.x;
+    int y0 = y < win->win.dirty_rect.y ? y : win->win.dirty_rect.y;
+    int x1 = x + w > win->win.dirty_rect.x + win->win.dirty_rect.w
+                 ? x + w : win->win.dirty_rect.x + win->win.dirty_rect.w;
+    int y1 = y + h > win->win.dirty_rect.y + win->win.dirty_rect.h
+                 ? y + h : win->win.dirty_rect.y + win->win.dirty_rect.h;
+    win->win.dirty_rect.x = x0; win->win.dirty_rect.y = y0;
+    win->win.dirty_rect.w = x1 - x0; win->win.dirty_rect.h = y1 - y0;
 }
 
 void winsrv_blit_argb(winsrv_window_t *win, int x, int y, int w, int h,
                       const uint32_t *pixels, int stride) {
-    if (!win || !win->surface || !pixels || w <= 0 || h <= 0) return;
+    if (!win || !win->win.surface || !pixels || w <= 0 || h <= 0) return;
     if (stride <= 0) stride = w;
     int src_x = 0, src_y = 0;
     if (x < 0) { src_x = -x; w += x; x = 0; }
     if (y < 0) { src_y = -y; h += y; y = 0; }
-    if (x + w > win->w) w = win->w - x;
-    if (y + h > win->h) h = win->h - y;
+    if (x + w > win->win.w) w = win->win.w - x;
+    if (y + h > win->win.h) h = win->win.h - y;
     if (w <= 0 || h <= 0) return;
     for (int yy = 0; yy < h; yy++) {
         const uint32_t *src = pixels + (src_y + yy) * stride + src_x;
-        uint32_t *dst = win->surface + (y + yy) * win->w + x;
+        uint32_t *dst = win->win.surface + (y + yy) * win->win.w + x;
         for (int xx = 0; xx < w; xx++) {
             uint32_t s = src[xx];
             uint32_t a = s >> 24;
@@ -296,12 +296,12 @@ void winsrv_blit_argb(winsrv_window_t *win, int x, int y, int w, int h,
 }
 
 int winsrv_resize(winsrv_window_t *win, int w, int h) {
-    if (!win || !win->surface) return -1;
+    if (!win || !win->win.surface) return -1;
     if (w < WINSRV_MIN_W) w = WINSRV_MIN_W;
     if (h < WINSRV_MIN_H) h = WINSRV_MIN_H;
     if (w > WINSRV_MAX_W) w = WINSRV_MAX_W;
     if (h > WINSRV_MAX_H) h = WINSRV_MAX_H;
-    if (w == win->w && h == win->h) return 0;
+    if (w == win->win.w && h == win->win.h) return 0;
     size_t bytes = (size_t)w * (size_t)h * 4u;
     size_t pages = (bytes + WS_PAGE - 1) / WS_PAGE;
     uint64_t phys = pmm_alloc_blocks(pages);
@@ -309,17 +309,17 @@ int winsrv_resize(winsrv_window_t *win, int w, int h) {
     uint32_t *surface = (uint32_t *)(uintptr_t)phys;
     for (size_t i = 0; i < (size_t)w * (size_t)h; i++)
         surface[i] = UI_SURFACE;
-    int copy_w = w < win->w ? w : win->w;
-    int copy_h = h < win->h ? h : win->h;
+    int copy_w = w < win->win.w ? w : win->win.w;
+    int copy_h = h < win->win.h ? h : win->win.h;
     for (int yy = 0; yy < copy_h; yy++)
-        memcpy(surface + yy * w, win->surface + yy * win->w,
+        memcpy(surface + yy * w, win->win.surface + yy * win->win.w,
                (size_t)copy_w * sizeof(uint32_t));
-    pmm_free_blocks(win->surface_phys, (size_t)win->surface_pages);
-    win->surface = surface;
-    win->surface_phys = phys;
-    win->surface_pages = (int)pages;
-    win->w = w; win->h = h;
-    win->dirty = 0;
+    pmm_free_blocks(win->win.surface_phys, (size_t)win->win.surface_pages);
+    win->win.surface = surface;
+    win->win.surface_phys = phys;
+    win->win.surface_pages = (int)pages;
+    win->win.w = w; win->win.h = h;
+    win->win.dirty = 0;
     winsrv_mark_dirty(win, 0, 0, w, h);
     winsrv_push_event(win, WINEV_RESIZE, w, h, 0);
     return 0;
@@ -330,11 +330,11 @@ void winsrv_set_title(winsrv_window_t *win, const char *title) {
     int n = 0;
     if (title)
         while (title[n] && n < WINSRV_TITLE - 1) {
-            win->title[n] = title[n];
+            win->win.title[n] = title[n];
             n++;
         }
-    win->title[n] = 0;
-    win->dirty = 1;
+    win->win.title[n] = 0;
+    win->win.dirty = 1;
 }
 
 /* ── 事件队列（单生产者 GUI / 单消费者 app，环形缓冲） ───────── */

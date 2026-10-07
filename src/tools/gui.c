@@ -3777,23 +3777,23 @@ static void blit_app_surface(int dx, int dy, const uint32_t *src, int sw, int sh
 /* 画一个应用窗口：标题栏（标题 + 关闭按钮）+ 内容表面 + 边框 */
 static void draw_one_app_window(winsrv_window_t *win) {
     if (!win) return;
-    if (win->state == WINSRV_STATE_MINIMIZED) {
-        win->dirty = 0;
+    if (win->win.state == WINSRV_STATE_MINIMIZED) {
+        win->win.dirty = 0;
         return;
     }
-    int wx = win->x, wy = win->y, ww = win->w, wh = win->h;
+    int wx = win->win.x, wy = win->win.y, ww = win->win.w, wh = win->win.h;
     int th = APPWIN_TITLE_H;
     soft_shadow(wx - 2, wy - th - 2, ww + 4, wh + th + 6);
     fill_round_rect(wx, wy - th, ww, th, 6, UI_SURFACE, RR_TOP);
     text(wx + 10, wy - th + (th - gui_font_line_height()) / 2,
-         win->title[0] ? win->title : "应用", UI_FG, 1);
+         win->win.title[0] ? win->win.title : "应用", UI_FG, 1);
     /* 关闭按钮 */
     int cbx = wx + ww - 20;
     text(cbx, wy - th + (th - gui_font_line_height()) / 2, "✕", UI_ERR, 1);
     /* 内容 */
-    blit_app_surface(wx, wy, win->surface, ww, wh);
+    blit_app_surface(wx, wy, win->win.surface, ww, wh);
     border(wx, wy, ww, wh, UI_SURFACE3);
-    win->dirty = 0;
+    win->win.dirty = 0;
 }
 
 static void draw_app_windows(void) {
@@ -5637,10 +5637,10 @@ static void cmd_gui(int argc, char **argv) {
          * F2/F3/F4 已在上面处理，不受影响。 */
         if (key && winsrv_count() > 0 && !st.wm.start_menu_open) {
             winsrv_window_t *fw = winsrv_get(appwin_focus);
-            if (fw && fw->state == WINSRV_STATE_MINIMIZED) fw = 0;
+            if (fw && fw->win.state == WINSRV_STATE_MINIMIZED) fw = 0;
             for (int i = WINSRV_MAX - 1; !fw && i >= 0; i--) {
                 fw = winsrv_get(i);
-                if (fw && fw->state == WINSRV_STATE_MINIMIZED) fw = 0;
+                if (fw && fw->win.state == WINSRV_STATE_MINIMIZED) fw = 0;
                 else if (fw) appwin_focus = i;
             }
             if (fw) {
@@ -5754,9 +5754,9 @@ static void cmd_gui(int argc, char **argv) {
                     for (int i = WINSRV_MAX - 1; i >= 0; i--) {
                         winsrv_window_t *candidate = winsrv_get(i);
                         if (!candidate ||
-                            candidate->state == WINSRV_STATE_MINIMIZED) continue;
-                        if (mx >= candidate->x && mx < candidate->x + candidate->w &&
-                            my >= candidate->y && my < candidate->y + candidate->h) {
+                            candidate->win.state == WINSRV_STATE_MINIMIZED) continue;
+                        if (mx >= candidate->win.x && mx < candidate->win.x + candidate->win.w &&
+                            my >= candidate->win.y && my < candidate->win.y + candidate->win.h) {
                             target = i;
                             target_win = candidate;
                             break;
@@ -5770,7 +5770,7 @@ static void cmd_gui(int argc, char **argv) {
                 }
                 if (target_win) {
                     winsrv_push_event(target_win, WINEV_MOUSE,
-                                      mx - target_win->x, my - target_win->y,
+                                      mx - target_win->win.x, my - target_win->win.y,
                                       st.buttons);
                 }
                 appwin_mouse_hover = target;
@@ -5827,17 +5827,17 @@ static void cmd_gui(int argc, char **argv) {
             if (appwin_drag >= 0) {
                 winsrv_window_t *win = left_down ? winsrv_get(appwin_drag) : 0;
                 if (win) {
-                    win->x = mx - appwin_drag_dx;
-                    win->y = my - appwin_drag_dy;
-                    if (win->y < APPWIN_TITLE_H) win->y = APPWIN_TITLE_H;
-                    if (win->x < 0) win->x = 0;
-                    if (win->x > w - 40) win->x = w - 40;
+                    win->win.x = mx - appwin_drag_dx;
+                    win->win.y = my - appwin_drag_dy;
+                    if (win->win.y < APPWIN_TITLE_H) win->win.y = APPWIN_TITLE_H;
+                    if (win->win.x < 0) win->win.x = 0;
+                    if (win->win.x > w - 40) win->win.x = w - 40;
                     redraw = 1;
                 } else {
                     winsrv_window_t *ended = winsrv_get(appwin_drag);
                     if (ended)
                         winsrv_push_event(ended, WINEV_MOVE,
-                                          ended->x, ended->y, 0);
+                                          ended->win.x, ended->win.y, 0);
                     appwin_drag = -1;
                 }
             }
@@ -6007,36 +6007,36 @@ static void cmd_gui(int argc, char **argv) {
                 int appwin_hit = 0;
                 for (int i = WINSRV_MAX - 1; i >= 0 && !appwin_hit && !popup_open; i--) {
                     winsrv_window_t *win = winsrv_get(i);
-                    if (!win || win->state == WINSRV_STATE_MINIMIZED) continue;
+                    if (!win || win->win.state == WINSRV_STATE_MINIMIZED) continue;
                     int th = APPWIN_TITLE_H;
-                    int cbx = win->x + win->w - 22;
-                    if (mx >= cbx && mx < win->x + win->w &&
-                        my >= win->y - th && my < win->y) {            /* 关闭按钮 */
-                        win->want_close = 1;
+                    int cbx = win->win.x + win->win.w - 22;
+                    if (mx >= cbx && mx < win->win.x + win->win.w &&
+                        my >= win->win.y - th && my < win->win.y) {            /* 关闭按钮 */
+                        win->win.want_close = 1;
                         winsrv_push_event(win, WINEV_CLOSE, 0, 0, 0);
                         appwin_hit = 1;
-                    } else if (mx >= win->x && mx < win->x + win->w &&
-                               my >= win->y - th && my < win->y) {     /* 标题栏→拖动 */
+                    } else if (mx >= win->win.x && mx < win->win.x + win->win.w &&
+                               my >= win->win.y - th && my < win->win.y) {     /* 标题栏→拖动 */
                         appwin_drag = i;
-                        appwin_drag_dx = mx - win->x;
-                        appwin_drag_dy = my - win->y;
+                        appwin_drag_dx = mx - win->win.x;
+                        appwin_drag_dy = my - win->win.y;
                         appwin_hit = 1;
-                    } else if (mx >= win->x && mx < win->x + win->w &&
-                               my >= win->y && my < win->y + win->h) { /* 内容→鼠标事件 */
+                    } else if (mx >= win->win.x && mx < win->win.x + win->win.w &&
+                               my >= win->win.y && my < win->win.y + win->win.h) { /* 内容→鼠标事件 */
                         appwin_mouse_capture = i;
                         appwin_mouse_hover = i;
                         winsrv_push_event(win, WINEV_MOUSE,
-                                          mx - win->x, my - win->y, st.buttons);
+                                          mx - win->win.x, my - win->win.y, st.buttons);
                         appwin_hit = 1;
                     }
                     if (appwin_hit && appwin_focus != i) {
                         winsrv_window_t *old_focus = winsrv_get(appwin_focus);
                         if (old_focus) {
-                            old_focus->focused = 0;
+                            old_focus->win.focused = 0;
                             winsrv_push_event(old_focus, WINEV_FOCUS, 0, 0, 0);
                         }
                         appwin_focus = i;
-                        win->focused = 1;
+                        win->win.focused = 1;
                         winsrv_push_event(win, WINEV_FOCUS, 1, 0, 0);
                     }
                 }
