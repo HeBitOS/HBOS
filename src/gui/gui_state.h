@@ -149,10 +149,7 @@ typedef struct gui_state {
     uint32_t console_cursor;
     int console_history_idx;
     int console_scroll;
-    /* file manager */
-    char fm_path[GUI_PATH_MAX];
-    int  fm_selected;
-    int  fm_scroll;
+    /* 文件管理器状态已迁出：app_files.c 的私有 fm_state_t。 */
     /* 图片查看器（BMP）：解码后的像素数据是静态全局数组（见 app_imgview.c），
      * 这里只放路径/状态这些小元数据，避免把几百 KB 的像素缓冲塞进
      * gui_state_t */
