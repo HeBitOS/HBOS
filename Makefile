@@ -283,6 +283,7 @@ C_SRCS = \
 
 GUI_C_SRCS = \
 	$(SRC_DIR)/gui/gui_draw_impl.c \
+	$(SRC_DIR)/gui/gui_html.c \
 	$(SRC_DIR)/ui/ui_widget.c \
 	$(SRC_DIR)/ui/ui_controls.c \
 	$(SRC_DIR)/gpu.c \
@@ -768,6 +769,12 @@ ui-test: | $(BUILD_DIR)
 		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_wm
 	$(BUILD_DIR)/test_wm
+	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
+		tests/host/test_html.c src/gui/gui_html.c src/ui/theme.c src/lib/json.c \
+		tests/host/theme_fs_stub.c tests/host/json_alloc_stub.c \
+		tests/host/hbos_string_wrap.c \
+		-o $(BUILD_DIR)/test_html
+	$(BUILD_DIR)/test_html
 
 browser-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc/gui \
