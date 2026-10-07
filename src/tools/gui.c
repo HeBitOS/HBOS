@@ -54,6 +54,13 @@ void app_code_open_selected(gui_state_t *st);
 void app_code_gui_run(gui_state_t *st, const fb_info_t *fb);
 void app_code_command(gui_state_t *st, int cmd);
 void app_code_set_cursor(gui_state_t *st, uint32_t off, int keep_selection);
+/* 记事本接口：框架只表达"发生了什么"，不直接读写其内部字段 */
+void app_notes_set_name(gui_state_t *st, const char *name);
+const char *app_notes_name(gui_state_t *st);
+void app_notes_invalidate(void);
+void app_notes_clear_buffer(gui_state_t *st);
+void app_notes_set_cursor(gui_state_t *st, uint32_t off, int keep_selection);
+void app_notes_begin_selection(gui_state_t *st, uint32_t off);
 void app_code_begin_selection(gui_state_t *st, uint32_t off);
 int  app_code_hit_command(int w, int h, const gui_state_t *st, int mx, int my);
 int  app_code_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off);
@@ -516,19 +523,11 @@ static void gui_go_parent(gui_state_t *st) {
 }
 
 void gui_set_note_name(gui_state_t *st, const char *name) {
-    uint32_t i = 0;
-    while (name && name[i] && i + 1 < sizeof(st->note_name)) {
-        st->note_name[i] = name[i];
-        i++;
-    }
-    st->note_name[i] = 0;
-    st->note_loaded = 0;
-    st->note_sel_active = 0;
+    app_notes_set_name(st, name);
 }
 
 const char *gui_note_name(gui_state_t *st) {
-    if (!st->note_name[0]) gui_set_note_name(st, "gui-note");
-    return st->note_name;
+    return app_notes_name(st);
 }
 
 static uint8_t bcd_to_bin(uint8_t v) {
@@ -4013,10 +4012,7 @@ static void gui_delete_selected(gui_state_t *st) {
         st->status = "设备不能删除";
     }
     if (strcmp(full, gui_note_name(st)) == 0) {
-        st->note_len = 0;
-        st->note_buf[0] = 0;
-        st->note_name[0] = 0;
-        st->note_loaded = 1;
+        app_notes_clear_buffer(st);
     }
     if (gui_file_count(st) > 0) gui_select_file(st, st->selected_file > 0 ? st->selected_file - 1 : 0);
     else st->selected_file = 0;
@@ -4035,7 +4031,7 @@ static void gui_truncate_selected(gui_state_t *st) {
         st->status = "清空失败";
         return;
     }
-    st->note_loaded = 0;
+    app_notes_invalidate();
     (void)fs_sync();
     st->status = "文件已清空";
 }
@@ -4147,7 +4143,7 @@ static void gui_commit_rename(gui_state_t *st) {
     }
     if (strcmp(old_full, gui_note_name(st)) == 0) {
         gui_set_note_name(st, new_full);
-        st->note_loaded = 0;
+        app_notes_invalidate();
     }
     (void)gui_select_path(st, new_full);
     st->rename_active = 0;
@@ -5815,8 +5811,7 @@ static void cmd_gui(int argc, char **argv) {
                 if (left_down) {
                     uint32_t off = 0;
                     if (app_notes_hit_editor(w, h, &st, mx, my, &off)) {
-                        st.note_cursor = off;
-                        st.note_sel_active = (st.note_sel_anchor != st.note_cursor);
+                        app_notes_set_cursor(&st, off, 1);
                         redraw = 1;
                     }
                 } else {
@@ -6326,9 +6321,7 @@ static void cmd_gui(int argc, char **argv) {
                                                 app_code_ensure_visible(&st);
                                                 st.status = "已移动代码光标";
                                             } else if (app_notes_hit_editor(w, h, &st, mx, my, &note_off)) {
-                                                st.note_cursor = note_off;
-                                                st.note_sel_anchor = note_off;
-                                                st.note_sel_active = 0;
+                                                app_notes_begin_selection(&st, note_off);
                                                 note_text_dragging = 1;
                                                 st.status = "已移动笔记光标";
                                             } else {

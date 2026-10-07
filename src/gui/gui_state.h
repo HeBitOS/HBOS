@@ -74,14 +74,8 @@ typedef struct gui_state {
     wm_state_t wm;
     int last_clicked_file;
     char file_path[GUI_PATH_MAX];
-    char note_buf[NOTE_EDIT_CAP];
-    uint32_t note_len;
-    uint32_t note_cursor;
-    int note_sel_active;    /* 是否存在选区（Shift+方向键 或 Ctrl+A 产生） */
-    uint32_t note_sel_anchor; /* 选区固定端；note_cursor 是移动端 */
-    int note_dirty;
-    int note_loaded;
-    char note_name[MAX_FILENAME];
+    /* 记事本状态已迁出：app_notes.c 的私有 note_state_t。
+     * 框架经 app_notes_set_name/name/invalidate/clear_buffer/set_cursor 交互。 */
     char browser_url[BROWSER_URL_CAP];
     uint32_t browser_url_cursor;  /* 左右键在网址栏内移动的插入点 */
     char browser_page[BROWSER_PAGE_CAP];

@@ -6,6 +6,36 @@
 #include "../../string.h"
 #include "../../graphics/font_cjk.h"
 
+/* ── 记事本私有状态 ───────────────────────────────────────────
+ * 8 个字段原先挂在全局 gui_state_t（"上帝对象"）上。gui.c 的 18 处访问
+ * 收敛为语义化接口，框架不再直接读写字段——原先它要自己按正确顺序更新
+ * cursor / sel_anchor / sel_active 三者，漏一个就会出现"有选区但锚点陈旧"。
+ *
+ * 结构体必须定义在文件靠前处：本文件多个早于原定义位置的函数都要用它。
+ */
+typedef struct {
+    char buf[NOTE_EDIT_CAP];
+    uint32_t len;
+    uint32_t cursor;
+    int  sel_active;
+    uint32_t sel_anchor;
+    int  dirty;
+    int  loaded;
+    char name[MAX_FILENAME];
+} note_state_t;
+
+static note_state_t g_note;
+static note_state_t *nt(void) { return &g_note; }
+
+/* ── 记事本私有状态 ───────────────────────────────────────────
+ * 8 个字段原先挂在全局 gui_state_t 上。gui.c 的 18 处访问分三类，各对应
+ * 一个语义化接口（而不是让框架直接读写字段）：
+ *   - 文件名相关 → app_notes_set_name / app_notes_name
+ *   - "磁盘上的文件变了，我的缓冲已失效" → app_notes_invalidate
+ *   - 鼠标选字/定位光标 → app_notes_set_cursor / app_notes_begin_selection
+ * 这样框架只需表达"发生了什么"，不必知道记事本内部怎么维护缓冲与选区。 */
+
+
 /* ── 记事本 ─────────────────────────────────────────────────────
  * 编辑状态在 gui_state_t 的 note_* 字段；编辑缓冲/光标/选区操作与
  * 渲染、命中测试都在本模块。文件列表来自文件面板（gui_panel.h 接口），
@@ -16,140 +46,148 @@
 /* Ctrl+A 全选后，Backspace/Delete/输入字符 都应先清空整篇笔记（相当于替换选区）
  * 删除 [start,end) 字节范围（Shift+方向键选区 或 Ctrl+A 全选后，输入/退格替换选中内容） */
 static void note_delete_range(gui_state_t *st, uint32_t start, uint32_t end) {
-    if (end > st->note_len) end = st->note_len;
-    st->note_sel_active = 0;
-    if (start >= end) { st->note_cursor = start; return; }
+    if (end > nt()->len) end = nt()->len;
+    nt()->sel_active = 0;
+    if (start >= end) { nt()->cursor = start; return; }
     uint32_t removed = end - start;
-    for (uint32_t i = start; i + removed <= st->note_len; i++)
-        st->note_buf[i] = st->note_buf[i + removed];
-    st->note_len -= removed;
-    st->note_cursor = start;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
+    for (uint32_t i = start; i + removed <= nt()->len; i++)
+        nt()->buf[i] = nt()->buf[i + removed];
+    nt()->len -= removed;
+    nt()->cursor = start;
+    nt()->buf[nt()->len] = 0;
+    nt()->dirty = 1;
     st->status = "编辑中（Ctrl+S 保存）";
 }
 
 /* 选区范围 [*start,*end)；anchor==cursor 时无实际选中内容 */
 static void note_sel_range(const gui_state_t *st, uint32_t *start, uint32_t *end) {
-    uint32_t a = st->note_sel_anchor, b = st->note_cursor;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    uint32_t a = nt()->sel_anchor, b = nt()->cursor;
     *start = a < b ? a : b;
     *end   = a < b ? b : a;
 }
 
 /* 在光标处插入一个字节，仅修改内存缓冲，标记 dirty（Ctrl+S 才落盘） */
 static void note_insert(gui_state_t *st, char c) {
-    if (st->note_len + 1 >= NOTE_EDIT_CAP) {
+    if (nt()->len + 1 >= NOTE_EDIT_CAP) {
         st->status = "笔记已满";
         return;
     }
-    if (st->note_cursor > st->note_len) st->note_cursor = st->note_len;
-    for (uint32_t i = st->note_len; i > st->note_cursor; i--)
-        st->note_buf[i] = st->note_buf[i - 1];
-    st->note_buf[st->note_cursor] = c;
-    st->note_len++;
-    st->note_cursor++;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
+    if (nt()->cursor > nt()->len) nt()->cursor = nt()->len;
+    for (uint32_t i = nt()->len; i > nt()->cursor; i--)
+        nt()->buf[i] = nt()->buf[i - 1];
+    nt()->buf[nt()->cursor] = c;
+    nt()->len++;
+    nt()->cursor++;
+    nt()->buf[nt()->len] = 0;
+    nt()->dirty = 1;
     st->status = "编辑中（Ctrl+S 保存）";
 }
 
 /* 删除光标前的一个 UTF-8 字符 */
 static void note_backspace(gui_state_t *st) {
-    if (st->note_cursor == 0) return;
-    uint32_t start = st->note_cursor - 1;
-    while (start > 0 && ((uint8_t)st->note_buf[start] & 0xC0) == 0x80) start--;
-    uint32_t removed = st->note_cursor - start;
-    for (uint32_t i = start; i + removed <= st->note_len; i++)
-        st->note_buf[i] = st->note_buf[i + removed];
-    st->note_len -= removed;
-    st->note_cursor = start;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
+    if (nt()->cursor == 0) return;
+    uint32_t start = nt()->cursor - 1;
+    while (start > 0 && ((uint8_t)nt()->buf[start] & 0xC0) == 0x80) start--;
+    uint32_t removed = nt()->cursor - start;
+    for (uint32_t i = start; i + removed <= nt()->len; i++)
+        nt()->buf[i] = nt()->buf[i + removed];
+    nt()->len -= removed;
+    nt()->cursor = start;
+    nt()->buf[nt()->len] = 0;
+    nt()->dirty = 1;
     st->status = "编辑中（Ctrl+S 保存）";
 }
 
 /* 删除光标后的一个 UTF-8 字符 */
 static void note_delete_forward(gui_state_t *st) {
-    if (st->note_cursor >= st->note_len) return;
-    uint32_t end = st->note_cursor + 1;
-    while (end < st->note_len && ((uint8_t)st->note_buf[end] & 0xC0) == 0x80) end++;
-    uint32_t removed = end - st->note_cursor;
-    for (uint32_t i = st->note_cursor; i + removed <= st->note_len; i++)
-        st->note_buf[i] = st->note_buf[i + removed];
-    st->note_len -= removed;
-    st->note_buf[st->note_len] = 0;
-    st->note_dirty = 1;
+    if (nt()->cursor >= nt()->len) return;
+    uint32_t end = nt()->cursor + 1;
+    while (end < nt()->len && ((uint8_t)nt()->buf[end] & 0xC0) == 0x80) end++;
+    uint32_t removed = end - nt()->cursor;
+    for (uint32_t i = nt()->cursor; i + removed <= nt()->len; i++)
+        nt()->buf[i] = nt()->buf[i + removed];
+    nt()->len -= removed;
+    nt()->buf[nt()->len] = 0;
+    nt()->dirty = 1;
     st->status = "编辑中（Ctrl+S 保存）";
 }
 
 /* 光标按 UTF-8 边界左移 */
 static void note_cursor_left(gui_state_t *st) {
-    if (st->note_cursor == 0) return;
-    st->note_cursor--;
-    while (st->note_cursor > 0 &&
-           ((uint8_t)st->note_buf[st->note_cursor] & 0xC0) == 0x80)
-        st->note_cursor--;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (nt()->cursor == 0) return;
+    nt()->cursor--;
+    while (nt()->cursor > 0 &&
+           ((uint8_t)nt()->buf[nt()->cursor] & 0xC0) == 0x80)
+        nt()->cursor--;
 }
 
 /* 光标按 UTF-8 边界右移 */
 static void note_cursor_right(gui_state_t *st) {
-    if (st->note_cursor >= st->note_len) return;
-    st->note_cursor++;
-    while (st->note_cursor < st->note_len &&
-           ((uint8_t)st->note_buf[st->note_cursor] & 0xC0) == 0x80)
-        st->note_cursor++;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (nt()->cursor >= nt()->len) return;
+    nt()->cursor++;
+    while (nt()->cursor < nt()->len &&
+           ((uint8_t)nt()->buf[nt()->cursor] & 0xC0) == 0x80)
+        nt()->cursor++;
 }
 
 /* 返回光标所在行的起始偏移 */
 static uint32_t note_line_start(gui_state_t *st, uint32_t off) {
-    while (off > 0 && st->note_buf[off - 1] != '\n') off--;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    while (off > 0 && nt()->buf[off - 1] != '\n') off--;
     return off;
 }
 
 static void note_cursor_home(gui_state_t *st) {
-    st->note_cursor = note_line_start(st, st->note_cursor);
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    nt()->cursor = note_line_start(st, nt()->cursor);
 }
 
 static void note_cursor_end(gui_state_t *st) {
-    while (st->note_cursor < st->note_len && st->note_buf[st->note_cursor] != '\n')
-        st->note_cursor++;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    while (nt()->cursor < nt()->len && nt()->buf[nt()->cursor] != '\n')
+        nt()->cursor++;
 }
 
 /* 上/下移动光标，尽量保持当前列 */
 static void note_cursor_vertical(gui_state_t *st, int dir) {
-    uint32_t ls = note_line_start(st, st->note_cursor);
-    uint32_t col = st->note_cursor - ls;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    uint32_t ls = note_line_start(st, nt()->cursor);
+    uint32_t col = nt()->cursor - ls;
     if (dir < 0) {
-        if (ls == 0) { st->note_cursor = 0; return; }
+        if (ls == 0) { nt()->cursor = 0; return; }
         uint32_t prev = note_line_start(st, ls - 1);
         uint32_t prev_len = (ls - 1) - prev;
-        st->note_cursor = prev + (col < prev_len ? col : prev_len);
+        nt()->cursor = prev + (col < prev_len ? col : prev_len);
     } else {
-        uint32_t nl = st->note_cursor;
-        while (nl < st->note_len && st->note_buf[nl] != '\n') nl++;
-        if (nl >= st->note_len) { st->note_cursor = st->note_len; return; }
+        uint32_t nl = nt()->cursor;
+        while (nl < nt()->len && nt()->buf[nl] != '\n') nl++;
+        if (nl >= nt()->len) { nt()->cursor = nt()->len; return; }
         uint32_t next = nl + 1;
         uint32_t next_end = next;
-        while (next_end < st->note_len && st->note_buf[next_end] != '\n') next_end++;
+        while (next_end < nt()->len && nt()->buf[next_end] != '\n') next_end++;
         uint32_t next_len = next_end - next;
-        st->note_cursor = next + (col < next_len ? col : next_len);
+        nt()->cursor = next + (col < next_len ? col : next_len);
     }
 }
 
 static void note_load(gui_state_t *st) {
-    if (st->note_loaded) return;
-    st->note_len = 0;
-    st->note_buf[0] = 0;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (nt()->loaded) return;
+    nt()->len = 0;
+    nt()->buf[0] = 0;
     file_t *f = fs_find_file(gui_note_name(st));
     if (f) {
         uint32_t n = f->size;
         if (n >= NOTE_EDIT_CAP) n = NOTE_EDIT_CAP - 1;
-        st->note_len = fs_read_file_data(f, 0, st->note_buf, n);
-        st->note_buf[st->note_len] = 0;
+        nt()->len = fs_read_file_data(f, 0, nt()->buf, n);
+        nt()->buf[nt()->len] = 0;
     }
-    st->note_cursor = st->note_len;
-    st->note_dirty = 0;
-    st->note_loaded = 1;
+    nt()->cursor = nt()->len;
+    nt()->dirty = 0;
+    nt()->loaded = 1;
 }
 
 static void note_save(gui_state_t *st) {
@@ -161,12 +199,12 @@ static void note_save(gui_state_t *st) {
         return;
     }
     if (fs_truncate_file(f) < 0 ||
-        fs_write_file_data(f, 0, st->note_buf, st->note_len) < 0) {
+        fs_write_file_data(f, 0, nt()->buf, nt()->len) < 0) {
         st->status = "笔记保存失败";
         return;
     }
     (void)fs_sync();
-    st->note_dirty = 0;
+    nt()->dirty = 0;
     st->status = "笔记已保存";
 }
 
@@ -199,13 +237,13 @@ void app_notes_create(gui_state_t *st) {
         st->status = "已创建新笔记";
         uint32_t len = sizeof(msg) - 1;
         if (len >= NOTE_EDIT_CAP) len = NOTE_EDIT_CAP - 1;
-        for (uint32_t i = 0; i < len; i++) st->note_buf[i] = msg[i];
-        st->note_buf[len] = 0;
-        st->note_len = len;
-        st->note_cursor = len;
-        st->note_dirty = 0;
+        for (uint32_t i = 0; i < len; i++) nt()->buf[i] = msg[i];
+        nt()->buf[len] = 0;
+        nt()->len = len;
+        nt()->cursor = len;
+        nt()->dirty = 0;
         gui_set_note_name(st, f->name);   /* 会置 note_loaded=0 */
-        st->note_loaded = 1;              /* 预填内容已就位，跳过 note_load 重读 */
+        nt()->loaded = 1;              /* 预填内容已就位，跳过 note_load 重读 */
     }
     (void)fs_sync();
     /* 在文件面板里选中新文件（与 gui_select_path 语义一致：比较完整路径） */
@@ -233,7 +271,7 @@ void app_notes_append(gui_state_t *st) {
     if (fs_write_file_data(f, f->size, msg, sizeof(msg) - 1) < 0) st->status = "追加失败";
     else {
         st->status = "已追加内容";
-        st->note_loaded = 0;
+        nt()->loaded = 0;
     }
     (void)fs_sync();
 }
@@ -300,12 +338,12 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
         uint32_t p2 = 0;
         line[0] = 0;
         gui_append_str(line, sizeof(line), &p2, "大小: ");
-        gui_append_uint(line, sizeof(line), &p2, st->note_len);
+        gui_append_uint(line, sizeof(line), &p2, nt()->len);
         gui_append_str(line, sizeof(line), &p2, "B");
-        if (st->note_dirty) gui_append_str(line, sizeof(line), &p2, "  ●未保存");
+        if (nt()->dirty) gui_append_str(line, sizeof(line), &p2, "  ●未保存");
         else gui_append_str(line, sizeof(line), &p2, "  已保存");
     }
-    gui_text(edit_x, ty + 92, line, st->note_dirty ? UI_WARN : UI_FG2, 1);
+    gui_text(edit_x, ty + 92, line, nt()->dirty ? UI_WARN : UI_FG2, 1);
     gui_text_clipped(edit_x, ty + 50, edit_x + edit_w,
                      "方向键移动  Ctrl+S 保存  Ctrl+A 全选",
                      UI_DIM, 1);
@@ -319,17 +357,17 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     int cursor_y = y;
     int cursor_drawn = 0;
     uint32_t sel_start = 0, sel_end = 0;
-    if (st->note_sel_active) note_sel_range(st, &sel_start, &sel_end);
+    if (nt()->sel_active) note_sel_range(st, &sel_start, &sel_end);
     utf8_state_t utf8;
     utf8_init(&utf8);
-    for (uint32_t i = 0; i < st->note_len && y < ty + content_bottom_off - 12; i++) {
-        if (i == st->note_cursor) {
+    for (uint32_t i = 0; i < nt()->len && y < ty + content_bottom_off - 12; i++) {
+        if (i == nt()->cursor) {
             cursor_x = x;
             cursor_y = y;
             cursor_drawn = 1;
         }
-        int in_sel = st->note_sel_active && i >= sel_start && i < sel_end;
-        if (st->note_buf[i] == '\n') {
+        int in_sel = nt()->sel_active && i >= sel_start && i < sel_end;
+        if (nt()->buf[i] == '\n') {
             if (in_sel) gui_rect(x, y, 6, 16, UI_SURFACE3);
             x = edit_x + 8;
             y += 18;
@@ -338,7 +376,7 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
         }
 
         uint32_t cp = 0;
-        int ok = utf8_feed(&utf8, (uint8_t)st->note_buf[i], &cp);
+        int ok = utf8_feed(&utf8, (uint8_t)nt()->buf[i], &cp);
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
 
@@ -366,33 +404,33 @@ static void app_notes_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
 static int app_notes_key(gui_state_t *st, int key) {
     note_load(st);
     if (key == 1) {  /* Ctrl+A：全选 */
-        if (st->note_len > 0) {
-            st->note_sel_anchor = 0;
-            st->note_cursor = st->note_len;
-            st->note_sel_active = 1;
+        if (nt()->len > 0) {
+            nt()->sel_anchor = 0;
+            nt()->cursor = nt()->len;
+            nt()->sel_active = 1;
             st->status = "已全选（Backspace/输入 可替换）";
         } else {
-            st->note_sel_active = 0;
+            nt()->sel_active = 0;
             st->status = "笔记为空";
         }
         return 1;
     }
-    int had_sel = st->note_sel_active;
+    int had_sel = nt()->sel_active;
     uint32_t sel_start = 0, sel_end = 0;
     if (had_sel) note_sel_range(st, &sel_start, &sel_end);
 
     /* Shift+方向键：开始/延伸选区，光标移动端跟随移动，锚点端不动 */
     if (key == GUI_KEY_SHIFT_LEFT || key == GUI_KEY_SHIFT_RIGHT ||
         key == GUI_KEY_SHIFT_UP   || key == GUI_KEY_SHIFT_DOWN) {
-        if (!had_sel) st->note_sel_anchor = st->note_cursor;
+        if (!had_sel) nt()->sel_anchor = nt()->cursor;
         if (key == GUI_KEY_SHIFT_LEFT) note_cursor_left(st);
         else if (key == GUI_KEY_SHIFT_RIGHT) note_cursor_right(st);
         else if (key == GUI_KEY_SHIFT_UP) note_cursor_vertical(st, -1);
         else note_cursor_vertical(st, 1);
-        st->note_sel_active = (st->note_sel_anchor != st->note_cursor);
+        nt()->sel_active = (nt()->sel_anchor != nt()->cursor);
         return 1;
     }
-    st->note_sel_active = 0;  /* 除 Shift+方向键/Ctrl+A 外任何按键都取消选中 */
+    nt()->sel_active = 0;  /* 除 Shift+方向键/Ctrl+A 外任何按键都取消选中 */
     if (key == 19) {  /* Ctrl+S */
         note_save(st);
     } else if (key == GUI_KEY_BACKSPACE || key == GUI_KEY_DELETE) {
@@ -483,9 +521,9 @@ int app_notes_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t
     utf8_state_t utf8;
     utf8_init(&utf8);
     uint32_t i;
-    for (i = 0; i < st->note_len && y < ty + content_bottom_off - 12; i++) {
+    for (i = 0; i < nt()->len && y < ty + content_bottom_off - 12; i++) {
         int row_top = y, row_bot = y + 18;
-        if (st->note_buf[i] == '\n') {
+        if (nt()->buf[i] == '\n') {
             if (my >= row_top && my < row_bot) { if (off) *off = i; return 1; }
             x = edit_x + 8;
             y += 18;
@@ -493,7 +531,7 @@ int app_notes_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t
             continue;
         }
         uint32_t cp = 0;
-        int ok = utf8_feed(&utf8, (uint8_t)st->note_buf[i], &cp);
+        int ok = utf8_feed(&utf8, (uint8_t)nt()->buf[i], &cp);
         if (ok < 0) continue;
         if (ok == 0) cp = '?';
         int advance = gui_cp_advance(cp, 1);
@@ -522,3 +560,58 @@ const gui_app_module_t gui_app_notes = {
     .on_tick  = 0,
     .on_click = 0,
 };
+
+/* ── 记事本私有状态与对外接口 ─────────────────────────────────
+ * 8 个字段原挂全局 gui_state_t（"上帝对象"）。gui.c 的 18 处访问收敛为
+ * 下列语义接口，框架不再直接读写字段——原先它要自己按正确顺序更新
+ * cursor/sel_anchor/sel_active 三者，漏一个就会出现"有选区但锚点陈旧"。
+ */
+
+
+void app_notes_set_name(gui_state_t *st, const char *name) {
+    (void)st;
+    note_state_t *n = nt();
+    uint32_t i = 0;
+    if (name) for (; name[i] && i + 1 < sizeof(n->name); i++) n->name[i] = name[i];
+    n->name[i] = 0;
+    n->loaded = 0;        /* 换了文件：磁盘内容未知，作废 */
+    n->sel_active = 0;
+}
+
+const char *app_notes_name(gui_state_t *st) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    (void)st;
+    if (!nt()->name[0]) app_notes_set_name(NULL, "gui-note");
+    return nt()->name;
+}
+
+void app_notes_invalidate(void) {
+    note_state_t *n = nt();
+    n->loaded = 0;
+}
+
+void app_notes_clear_buffer(gui_state_t *st) {
+    (void)st;
+    note_state_t *n = nt();
+    n->len = 0;
+    n->buf[0] = 0;
+    n->name[0] = 0;
+    n->loaded = 1;        /* 缓冲已明确置空，视为已加载 */
+}
+
+void app_notes_set_cursor(gui_state_t *st, uint32_t off, int keep_selection) {
+    (void)st;
+    note_state_t *n = nt();
+    if (off > n->len) off = n->len;
+    n->cursor = off;
+    n->sel_active = (keep_selection && n->sel_anchor != n->cursor) ? 1 : 0;
+}
+
+void app_notes_begin_selection(gui_state_t *st, uint32_t off) {
+    (void)st;
+    note_state_t *n = nt();
+    if (off > n->len) off = n->len;
+    n->cursor = off;
+    n->sel_anchor = off;
+    n->sel_active = 0;
+}
