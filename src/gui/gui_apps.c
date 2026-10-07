@@ -13,6 +13,7 @@ extern const gui_app_module_t gui_app_uwc;
 extern const gui_app_module_t gui_app_diag;
 extern const gui_app_module_t gui_app_notes;
 extern const gui_app_module_t gui_app_code;
+extern const gui_app_module_t gui_app_uigallery;
 
 static const gui_app_module_t *const g_modules[] = {
     &gui_app_calc,
@@ -28,6 +29,7 @@ static const gui_app_module_t *const g_modules[] = {
     &gui_app_diag,
     &gui_app_notes,
     &gui_app_code,
+    &gui_app_uigallery,
 };
 
 const gui_app_module_t *gui_app_by_mode(int mode) {

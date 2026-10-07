@@ -146,6 +146,11 @@ typedef struct {
     const char *name;
     const char *description;
     int mode;
+    /* 建议窗口尺寸（0 = 用框架默认值 790x430）。
+     * 此前应用无法表达"我需要更高的窗口"，只能忍受默认尺寸导致内容被
+     * 裁掉（UI 组件页就踩到了）。让它随注册一起声明，避免在别处再开一张
+     * 尺寸表——那正是旧设计里"三处清单不同步"的成因。 */
+    int want_w, want_h;
 } gui_app_meta_t;
 
 typedef struct {
@@ -154,17 +159,18 @@ typedef struct {
 } gui_file_action_t;
 
 static const gui_app_meta_t gui_apps[] = {
-    {"记事本", "编辑笔记文件", GUI_APP_NOTES},
-    {"计算器", "方向键调整数值", GUI_APP_CALC},
-    {"文件统计", "统计选中文件行数和字节", GUI_APP_UWC},
-    {"贪吃蛇", "方向键移动", GUI_APP_SNAKE},
-    {"浏览器", "打开 HTTP/HTTPS 网页", GUI_APP_BROWSER},
-    {"代码工作台", "编辑、保存、运行 C 文件", GUI_APP_CODE},
-    {"控制台终端", "运行命令与系统交互", GUI_APP_DIAG},
-    {"时钟", "实时时钟与日期", GUI_APP_CLOCK},
-    {"设置", "主题与字体", GUI_APP_SETTINGS},
-    {"任务管理器", "查看运行中的任务，结束任务", GUI_APP_TASKMGR},
-    {"快捷键", "查看全局和各应用的键盘快捷键", GUI_APP_SHORTCUTS},
+    {"记事本", "编辑笔记文件", GUI_APP_NOTES, 0, 0},
+    {"计算器", "方向键调整数值", GUI_APP_CALC, 0, 0},
+    {"文件统计", "统计选中文件行数和字节", GUI_APP_UWC, 0, 0},
+    {"贪吃蛇", "方向键移动", GUI_APP_SNAKE, 0, 0},
+    {"浏览器", "打开 HTTP/HTTPS 网页", GUI_APP_BROWSER, 0, 0},
+    {"代码工作台", "编辑、保存、运行 C 文件", GUI_APP_CODE, 0, 0},
+    {"控制台终端", "运行命令与系统交互", GUI_APP_DIAG, 0, 0},
+    {"时钟", "实时时钟与日期", GUI_APP_CLOCK, 0, 0},
+    {"设置", "主题与字体", GUI_APP_SETTINGS, 0, 0},
+    {"任务管理器", "查看运行中的任务，结束任务", GUI_APP_TASKMGR, 0, 0},
+    {"快捷键", "查看全局和各应用的键盘快捷键", GUI_APP_SHORTCUTS, 0, 0},
+    {"UI 组件", "统一控件库与主题令牌的预览", GUI_APP_UIGALLERY, 620, 700},
 };
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
@@ -265,6 +271,22 @@ static void gui_toast(gui_state_t *st, const char *a, const char *b) {
 static int gui_open_window(gui_state_t *st, int kind, int mode, int unique) {
     int idx = wm_open_window(&st->wm, kind, mode, unique);
     if (idx >= 0) {
+        /* 套用注册表里声明的建议尺寸：应用自己知道内容需要多大，比在
+         * 框架里维护一张尺寸表更不容易漏配（新增应用自动带上）。 */
+        if (kind == WM_WIN_APP) {
+            for (uint32_t i = 0; i < gui_app_count(); i++) {
+                if (gui_apps[i].mode == mode &&
+                    (gui_apps[i].want_w > 0 || gui_apps[i].want_h > 0)) {
+                    wm_window_t *w = wm_get_window(&st->wm, idx);
+                    if (w) {
+                        wm_resize_window(&st->wm, idx,
+                                         gui_apps[i].want_w > 0 ? gui_apps[i].want_w : w->w,
+                                         gui_apps[i].want_h > 0 ? gui_apps[i].want_h : w->h);
+                    }
+                    break;
+                }
+            }
+        }
         gui_sync_focus(st);
         const char *t = wm_window_title(wm_get_window(&st->wm, idx));
         gui_toast(st, "已打开 ", t ? t : "窗口");
@@ -6752,6 +6774,11 @@ static const sm_entry_t sm_builtin[] = {
     {"设置",       "settings config shezhi",   SM_K_APP,   GUI_APP_SETTINGS,ICON_SYS},
     {"任务管理器", "task taskmgr process renwu guanli", SM_K_APP, GUI_APP_TASKMGR, ICON_SYS},
     {"快捷键",     "shortcuts keys kuaijiejian",        SM_K_APP, GUI_APP_SHORTCUTS, ICON_SHORTCUTS},
+    /* UI 组件：控件库与主题令牌的预览页。
+     * 注意（重构待办）：这张表与 gui_apps[] 各维护一份应用清单，新增应用
+     * 必须两处都改，漏一处就会出现"应用存在但开始菜单搜不到"。这正是
+     * "缺乏拓展性"的具体表现，P6 会把两张表合并为单一注册源。 */
+    {"UI 组件",    "ui widget component kongjian ui",    SM_K_APP, GUI_APP_UIGALLERY, ICON_APPS},
 };
 #define SM_BUILTIN_N ((int)(sizeof(sm_builtin) / sizeof(sm_builtin[0])))
 
@@ -7452,6 +7479,15 @@ static void cmd_gui(int argc, char **argv) {
     wm_set_app_title(GUI_APP_SHORTCUTS, "快捷键");
     wm_set_app_title(GUI_APP_IMGVIEW, "图片查看器");
     wm_set_app_title(GUI_APP_HEXVIEW, "十六进制查看器");
+
+    /* 兜底：凡在 gui_apps[] 里登记过、但上面没有显式标题的应用，统一
+     * 用登记表里的名字。这样新增应用只需改 gui_apps[] 一处就能拥有正确
+     * 标题，不会出现"功能可用但窗口标题是'应用'"的漏配。
+     * （上面那些显式设置保留：它们的中文名与菜单 label 不完全一致。） */
+    for (uint32_t i = 0; i < gui_app_count(); i++) {
+        const char *nm = wm_window_title_by_mode(gui_apps[i].mode);
+        if (!nm) wm_set_app_title(gui_apps[i].mode, gui_apps[i].name);
+    }
 
     (void)block_init();
     if (mouse_init() < 0) st.status = "未检测到鼠标";

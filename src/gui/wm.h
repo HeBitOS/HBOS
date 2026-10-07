@@ -115,6 +115,7 @@ typedef struct {
 void wm_init(wm_state_t *wm, int desk_w, int desk_h);
 void wm_set_panel_title(int panel, const char *title);
 void wm_set_app_title(int mode, const char *title);
+const char *wm_window_title_by_mode(int mode);
 int  wm_open_window(wm_state_t *wm, int kind, int mode, int unique);
 void wm_close_window(wm_state_t *wm, int idx);
 void wm_focus_window(wm_state_t *wm, int idx);

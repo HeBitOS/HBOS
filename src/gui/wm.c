@@ -21,6 +21,15 @@ void wm_set_app_title(int mode, const char *title) {
     g_titles_ready = 1;
 }
 
+/** 查询某 mode 是否已显式设置过标题（未设置返回 NULL）。
+ * 供桌面初始化时"只给缺标题的应用补默认值"，避免覆盖精心设定的中文名。 */
+const char *wm_window_title_by_mode(int mode);
+
+const char *wm_window_title_by_mode(int mode) {
+    if (mode < 0 || mode >= WM_APP_TITLE_COUNT) return 0;
+    return app_titles[mode];
+}
+
 const char *wm_window_title(wm_window_t *win) {
     if (!win || !win->used) return "窗口";
     if (win->kind == WM_WIN_PANEL) {
