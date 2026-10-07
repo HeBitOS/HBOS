@@ -34,3 +34,26 @@ uint32_t gui_rgb(uint8_t r, uint8_t g, uint8_t b);
 uint32_t gui_rgb(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
+
+/* 控件库还用到文本与字体度量：给最小替身（固定 8px 字宽、16px 行高），
+ * 使单测不依赖真实字体资源，同时也让"文字宽度计算"这类逻辑可被确定性断言。 */
+void gui_text(int x, int y, const char *s, uint32_t color, int scale);
+void gui_text(int x, int y, const char *s, uint32_t color, int scale) {
+    (void)x; (void)y; (void)s; (void)color; (void)scale;
+}
+
+void gui_text_clipped(int x, int y, int max_x, const char *s, uint32_t color, int scale);
+void gui_text_clipped(int x, int y, int max_x, const char *s, uint32_t color, int scale) {
+    (void)x; (void)y; (void)max_x; (void)s; (void)color;
+    (void)scale;
+}
+
+int gui_text_width(const char *s, int scale);
+int gui_text_width(const char *s, int scale) {
+    int n = 0;
+    if (s) while (s[n]) n++;
+    return n * 8 * (scale > 0 ? scale : 1);
+}
+
+int gui_font_line_height(void);
+int gui_font_line_height(void) { return 16; }

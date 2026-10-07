@@ -5370,6 +5370,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
 }
 
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int icon_id, int active, int state, int light) {
+    (void)light;
     int R = (state == WM_STATE_MAXIMIZED) ? 0 : 8;
     if (state != WM_STATE_MAXIMIZED) {
         soft_shadow(x, y, win_w, win_h);
@@ -7244,6 +7245,7 @@ static void draw_start_menu(gui_state_t *st) {
 // 栏 + 强调色边框 + 左上角圆角图标），让欢迎窗口看起来就是桌面里的一个普通
 // 窗口，而不是一张单独的强调色卡片。
 static void draw_splash_window(int w, int h, int ticks, int light) {
+    (void)light;
     int sw = ui_s(440), sh = ui_s(208);
     int sx = (w - sw) / 2, sy = (h - sh) / 2;
     int title_h = WM_TITLE_H;
@@ -7342,7 +7344,7 @@ static void cmd_gui(int argc, char **argv) {
         return;
     }
 
-    /* 主题层：载入内置主题并扫描 /themes/*.theme。必须在任何绘制之前调用，
+    /* 主题层：载入内置主题并扫描 /themes 下的 .theme。必须在任何绘制之前调用，
      * 之后所有颜色都来自 ui_theme()。此调用不会失败——外部主题损坏时
      * 逐键降级，内置主题永远兜底。 */
     ui_theme_init();
