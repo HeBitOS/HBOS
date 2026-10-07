@@ -103,16 +103,8 @@ typedef struct gui_state {
     char browser_hist[BROWSER_HIST_MAX][BROWSER_URL_CAP];
     int browser_hist_count;
     int browser_hist_pos;
-    char code_path[GUI_PATH_MAX];
-    uint32_t code_len;
-    uint32_t code_cursor;
-    int code_sel_active;    /* 是否存在选区（Shift+方向键 或 Ctrl+A 产生） */
-    uint32_t code_sel_anchor; /* 选区固定端；code_cursor 是移动端 */
-    int code_loaded;
-    int code_modified;
-    int code_scroll;
-    int code_error_line;
-    int code_view_rows;
+    /* 代码工作台状态已迁出：app_code.c 的私有 code_state_t。
+     * 框架通过 app_code_set_cursor()/app_code_begin_selection() 与之交互。 */
     int rename_active;
     char rename_buf[MAX_FILENAME];
     uint32_t rename_len;

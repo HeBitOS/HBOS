@@ -10,6 +10,30 @@
 #include "../../shell/shell.h"
 #include "../../tools/cc.h"
 
+/* ── 代码工作台私有状态 ───────────────────────────────────────
+ * 10 个字段原先挂在全局 gui_state_t 上。gui.c 里只有 5 处访问
+ * （拖拽选字与点击定位光标），已改为经下面的 app_code_set_cursor() /
+ * app_code_begin_selection() 调用——框架不再直接读写本应用的内部字段。
+ *
+ * 这正是拆解上帝对象要达到的效果：框架与应用的交互收敛成少量语义明确的
+ * 函数（"把光标移到这个偏移"），而不是"随便改对方的结构体字段"。 */
+typedef struct {
+    char path[GUI_PATH_MAX];
+    uint32_t len;
+    uint32_t cursor;
+    int  sel_active;         /* 是否存在选区（Shift+方向键 或 Ctrl+A） */
+    uint32_t sel_anchor;     /* 选区固定端；cursor 是移动端 */
+    int  loaded;
+    int  modified;
+    int  scroll;
+    int  error_line;
+    int  view_rows;
+} code_state_t;
+
+static code_state_t g_code;
+static code_state_t *cs(void) { return &g_code; }
+
+
 extern int hbos_gcc_run_file_capture(const char *path, char *out, uint32_t out_cap);
 extern int hbos_gcc_run_file(const char *path, int verbose);
 extern const char *hbos_gcc_last_error(void);
@@ -97,28 +121,30 @@ static void code_append_sanitized(char *buf, uint32_t cap, uint32_t *pos, const 
 }
 
 static void code_set_path(gui_state_t *st, const char *path) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t i = 0;
-    while (path && path[i] && i + 1 < sizeof(st->code_path)) {
-        st->code_path[i] = path[i];
+    while (path && path[i] && i + 1 < sizeof(cs()->path)) {
+        cs()->path[i] = path[i];
         i++;
     }
     if (i == 0) {
-        strcpy(st->code_path, "/home/main.c");
+        strcpy(cs()->path, "/home/main.c");
     } else {
-        st->code_path[i] = 0;
+        cs()->path[i] = 0;
     }
-    st->code_loaded = 0;
-    st->code_modified = 0;
-    st->code_scroll = 0;
-    st->code_cursor = 0;
-    st->code_sel_active = 0;
-    st->code_error_line = 0;
-    st->code_view_rows = 0;
+    cs()->loaded = 0;
+    cs()->modified = 0;
+    cs()->scroll = 0;
+    cs()->cursor = 0;
+    cs()->sel_active = 0;
+    cs()->error_line = 0;
+    cs()->view_rows = 0;
 }
 
 static const char *code_path(gui_state_t *st) {
-    if (!st->code_path[0]) code_set_path(st, "/home/main.c");
-    return st->code_path;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (!cs()->path[0]) code_set_path(st, "/home/main.c");
+    return cs()->path;
 }
 
 static void code_insert_template(void) {
@@ -146,42 +172,43 @@ static int code_save(gui_state_t *st) {
         return -1;
     }
     if (vfs_truncate(node) < 0 ||
-        vfs_write(node, 0, g_code_buf, st->code_len) < 0) {
+        vfs_write(node, 0, g_code_buf, cs()->len) < 0) {
         code_set_output("Save failed: VFS write error");
         st->status = "代码保存失败";
         return -1;
     }
     (void)fs_sync();
-    st->code_modified = 0;
-    st->code_error_line = 0;
+    cs()->modified = 0;
+    cs()->error_line = 0;
     code_set_output("Saved");
     st->status = "代码已保存";
     return 0;
 }
 
 static void code_load(gui_state_t *st) {
-    if (st->code_loaded) return;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (cs()->loaded) return;
     const char *path = code_path(st);
     g_code_buf[0] = 0;
-    st->code_len = 0;
-    st->code_cursor = 0;
-    st->code_scroll = 0;
-    st->code_modified = 0;
-    st->code_error_line = 0;
+    cs()->len = 0;
+    cs()->cursor = 0;
+    cs()->scroll = 0;
+    cs()->modified = 0;
+    cs()->error_line = 0;
     vfs_node_t *node = vfs_lookup(path);
     if (!node) {
         code_insert_template();
-        st->code_len = (uint32_t)strlen(g_code_buf);
-        st->code_cursor = st->code_len;
-        st->code_modified = 1;
+        cs()->len = (uint32_t)strlen(g_code_buf);
+        cs()->cursor = cs()->len;
+        cs()->modified = 1;
         code_set_output("New C file template");
         (void)code_save(st);
-        st->code_loaded = 1;
+        cs()->loaded = 1;
         return;
     }
     if (node->type != VFS_NODE_FILE) {
         code_set_output("Open failed: selected path is not a file");
-        st->code_loaded = 1;
+        cs()->loaded = 1;
         return;
     }
     uint32_t n = node->size;
@@ -190,14 +217,14 @@ static void code_load(gui_state_t *st) {
     if (got < 0) {
         g_code_buf[0] = 0;
         code_set_output("Open failed: VFS read error");
-        st->code_loaded = 1;
+        cs()->loaded = 1;
         return;
     }
-    st->code_len = (uint32_t)got;
-    g_code_buf[st->code_len] = 0;
-    st->code_cursor = 0;
+    cs()->len = (uint32_t)got;
+    g_code_buf[cs()->len] = 0;
+    cs()->cursor = 0;
     code_set_output(node->size >= CODE_EDIT_CAP ? "Opened with truncation" : "Opened");
-    st->code_loaded = 1;
+    cs()->loaded = 1;
 }
 
 static void code_open_selected(gui_state_t *st) {
@@ -225,7 +252,8 @@ static void code_open_selected(gui_state_t *st) {
 }
 
 static void code_line_col(gui_state_t *st, uint32_t off, uint32_t *line, uint32_t *col) {
-    if (off > st->code_len) off = st->code_len;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (off > cs()->len) off = cs()->len;
     uint32_t l = 0, c = 0;
     for (uint32_t i = 0; i < off; i++) {
         if (g_code_buf[i] == '\n') {
@@ -240,36 +268,41 @@ static void code_line_col(gui_state_t *st, uint32_t off, uint32_t *line, uint32_
 }
 
 static uint32_t code_line_count(gui_state_t *st) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t lines = 1;
-    for (uint32_t i = 0; i < st->code_len; i++) {
+    for (uint32_t i = 0; i < cs()->len; i++) {
         if (g_code_buf[i] == '\n') lines++;
     }
     return lines;
 }
 
 static int code_visible_rows(gui_state_t *st) {
-    return st->code_view_rows > 0 ? st->code_view_rows : CODE_VIEW_ROWS;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    return cs()->view_rows > 0 ? cs()->view_rows : CODE_VIEW_ROWS;
 }
 
 static void code_clamp_scroll(gui_state_t *st) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     int max_scroll = (int)code_line_count(st) - code_visible_rows(st);
     if (max_scroll < 0) max_scroll = 0;
-    if (st->code_scroll < 0) st->code_scroll = 0;
-    if (st->code_scroll > max_scroll) st->code_scroll = max_scroll;
+    if (cs()->scroll < 0) cs()->scroll = 0;
+    if (cs()->scroll > max_scroll) cs()->scroll = max_scroll;
 }
 
 static uint32_t code_find_line_start(gui_state_t *st, uint32_t target_line) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t line = 0;
-    for (uint32_t i = 0; i < st->code_len; i++) {
+    for (uint32_t i = 0; i < cs()->len; i++) {
         if (line == target_line) return i;
         if (g_code_buf[i] == '\n') line++;
     }
-    return line == target_line ? st->code_len : st->code_len;
+    return line == target_line ? cs()->len : cs()->len;
 }
 
 static uint32_t code_line_len_at(gui_state_t *st, uint32_t start) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t len = 0;
-    while (start + len < st->code_len && g_code_buf[start + len] != '\n') len++;
+    while (start + len < cs()->len && g_code_buf[start + len] != '\n') len++;
     return len;
 }
 
@@ -281,106 +314,113 @@ static uint32_t code_offset_for_line_col(gui_state_t *st, uint32_t line, uint32_
 }
 
 static void code_jump_to_line(gui_state_t *st, int one_based_line) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     if (one_based_line <= 0) return;
     uint32_t line = (uint32_t)(one_based_line - 1);
-    st->code_cursor = code_offset_for_line_col(st, line, 0);
-    if ((int)line < st->code_scroll) st->code_scroll = (int)line;
-    if ((int)line >= st->code_scroll + code_visible_rows(st))
-        st->code_scroll = (int)line - code_visible_rows(st) + 1;
+    cs()->cursor = code_offset_for_line_col(st, line, 0);
+    if ((int)line < cs()->scroll) cs()->scroll = (int)line;
+    if ((int)line >= cs()->scroll + code_visible_rows(st))
+        cs()->scroll = (int)line - code_visible_rows(st) + 1;
     code_clamp_scroll(st);
 }
 
 static void code_ensure_visible(gui_state_t *st) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
+    code_line_col(st, cs()->cursor, &line, &col);
     (void)col;
-    if ((int)line < st->code_scroll) st->code_scroll = (int)line;
-    if ((int)line >= st->code_scroll + code_visible_rows(st))
-        st->code_scroll = (int)line - code_visible_rows(st) + 1;
+    if ((int)line < cs()->scroll) cs()->scroll = (int)line;
+    if ((int)line >= cs()->scroll + code_visible_rows(st))
+        cs()->scroll = (int)line - code_visible_rows(st) + 1;
     code_clamp_scroll(st);
 }
 
 static void code_move_vertical(gui_state_t *st, int dir) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
+    code_line_col(st, cs()->cursor, &line, &col);
     if (dir < 0 && line == 0) return;
     uint32_t lines = code_line_count(st);
     if (dir > 0 && line + 1 >= lines) return;
     if (dir > 0) line++;
     else line--;
-    st->code_cursor = code_offset_for_line_col(st, line, col);
+    cs()->cursor = code_offset_for_line_col(st, line, col);
     code_ensure_visible(st);
 }
 
 static void code_move_line_edge(gui_state_t *st, int end) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
+    code_line_col(st, cs()->cursor, &line, &col);
     (void)col;
     uint32_t start = code_find_line_start(st, line);
-    st->code_cursor = start + (end ? code_line_len_at(st, start) : 0);
+    cs()->cursor = start + (end ? code_line_len_at(st, start) : 0);
     code_ensure_visible(st);
 }
 
 static void code_move_page(gui_state_t *st, int dir) {
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
     uint32_t line = 0, col = 0;
-    code_line_col(st, st->code_cursor, &line, &col);
+    code_line_col(st, cs()->cursor, &line, &col);
     int target = (int)line + dir * code_visible_rows(st);
     int max_line = (int)code_line_count(st) - 1;
     if (target < 0) target = 0;
     if (target > max_line) target = max_line;
-    st->code_cursor = code_offset_for_line_col(st, (uint32_t)target, col);
+    cs()->cursor = code_offset_for_line_col(st, (uint32_t)target, col);
     code_ensure_visible(st);
 }
 
 // 删除 [start,end) 字节范围（Shift+方向键选区 或 Ctrl+A 全选后，输入/退格替换选中内容）
 static void code_delete_range(gui_state_t *st, uint32_t start, uint32_t end) {
-    if (end > st->code_len) end = st->code_len;
-    st->code_sel_active = 0;
-    if (start >= end) { st->code_cursor = start; code_ensure_visible(st); return; }
-    memmove(g_code_buf + start, g_code_buf + end, st->code_len - end + 1);
-    st->code_len -= (end - start);
-    st->code_cursor = start;
-    st->code_modified = 1;
-    st->code_error_line = 0;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    if (end > cs()->len) end = cs()->len;
+    cs()->sel_active = 0;
+    if (start >= end) { cs()->cursor = start; code_ensure_visible(st); return; }
+    memmove(g_code_buf + start, g_code_buf + end, cs()->len - end + 1);
+    cs()->len -= (end - start);
+    cs()->cursor = start;
+    cs()->modified = 1;
+    cs()->error_line = 0;
     code_ensure_visible(st);
 }
 
 // 选区范围 [*start,*end)；anchor==cursor 时无实际选中内容
 static void code_sel_range(const gui_state_t *st, uint32_t *start, uint32_t *end) {
-    uint32_t a = st->code_sel_anchor, b = st->code_cursor;
+    (void)st;   /* 状态已私有化，不再需要框架状态 */
+    uint32_t a = cs()->sel_anchor, b = cs()->cursor;
     *start = a < b ? a : b;
     *end   = a < b ? b : a;
 }
 
 static void code_insert_char(gui_state_t *st, char c) {
-    if (st->code_len + 1 >= CODE_EDIT_CAP) {
+    if (cs()->len + 1 >= CODE_EDIT_CAP) {
         code_set_output("Buffer full");
         st->status = "代码缓冲已满";
         return;
     }
-    if (st->code_cursor > st->code_len) st->code_cursor = st->code_len;
-    memmove(g_code_buf + st->code_cursor + 1,
-            g_code_buf + st->code_cursor,
-            st->code_len - st->code_cursor + 1);
-    g_code_buf[st->code_cursor++] = c;
-    st->code_len++;
-    st->code_modified = 1;
-    st->code_error_line = 0;
+    if (cs()->cursor > cs()->len) cs()->cursor = cs()->len;
+    memmove(g_code_buf + cs()->cursor + 1,
+            g_code_buf + cs()->cursor,
+            cs()->len - cs()->cursor + 1);
+    g_code_buf[cs()->cursor++] = c;
+    cs()->len++;
+    cs()->modified = 1;
+    cs()->error_line = 0;
     code_ensure_visible(st);
 }
 
 static void code_insert_newline(gui_state_t *st) {
-    uint32_t start = st->code_cursor;
+    uint32_t start = cs()->cursor;
     char indent_buf[32];
     while (start > 0 && g_code_buf[start - 1] != '\n') start--;
     uint32_t indent = 0;
-    while (start + indent < st->code_len &&
+    while (start + indent < cs()->len &&
            (g_code_buf[start + indent] == ' ' || g_code_buf[start + indent] == '\t') &&
            indent < 32) {
         indent_buf[indent] = g_code_buf[start + indent];
         indent++;
     }
-    int block_indent = st->code_cursor > 0 && g_code_buf[st->code_cursor - 1] == '{';
+    int block_indent = cs()->cursor > 0 && g_code_buf[cs()->cursor - 1] == '{';
     code_insert_char(st, '\n');
     for (uint32_t i = 0; i < indent; i++) code_insert_char(st, indent_buf[i]);
     if (block_indent) {
@@ -389,25 +429,25 @@ static void code_insert_newline(gui_state_t *st) {
 }
 
 static void code_backspace(gui_state_t *st) {
-    if (st->code_cursor == 0 || st->code_len == 0) return;
-    memmove(g_code_buf + st->code_cursor - 1,
-            g_code_buf + st->code_cursor,
-            st->code_len - st->code_cursor + 1);
-    st->code_cursor--;
-    st->code_len--;
-    st->code_modified = 1;
-    st->code_error_line = 0;
+    if (cs()->cursor == 0 || cs()->len == 0) return;
+    memmove(g_code_buf + cs()->cursor - 1,
+            g_code_buf + cs()->cursor,
+            cs()->len - cs()->cursor + 1);
+    cs()->cursor--;
+    cs()->len--;
+    cs()->modified = 1;
+    cs()->error_line = 0;
     code_ensure_visible(st);
 }
 
 static void code_delete_forward(gui_state_t *st) {
-    if (st->code_cursor >= st->code_len || st->code_len == 0) return;
-    memmove(g_code_buf + st->code_cursor,
-            g_code_buf + st->code_cursor + 1,
-            st->code_len - st->code_cursor);
-    st->code_len--;
-    st->code_modified = 1;
-    st->code_error_line = 0;
+    if (cs()->cursor >= cs()->len || cs()->len == 0) return;
+    memmove(g_code_buf + cs()->cursor,
+            g_code_buf + cs()->cursor + 1,
+            cs()->len - cs()->cursor);
+    cs()->len--;
+    cs()->modified = 1;
+    cs()->error_line = 0;
     code_ensure_visible(st);
 }
 
@@ -428,7 +468,7 @@ static void code_run_current(gui_state_t *st) {
             gui_append_str(line, sizeof(line), &pos, " return ");
             gui_append_int(line, sizeof(line), &pos, hbos_gcc_last_return());
         }
-        st->code_error_line = 0;
+        cs()->error_line = 0;
         code_set_output(line);
         st->status = "代码运行成功";
     } else {
@@ -441,11 +481,11 @@ static void code_run_current(gui_state_t *st) {
             gui_append_str(line, sizeof(line), &pos, "Line ");
             gui_append_uint(line, sizeof(line), &pos, (uint32_t)err_line);
             gui_append_str(line, sizeof(line), &pos, ": ");
-            st->code_error_line = err_line;
+            cs()->error_line = err_line;
             code_jump_to_line(st, err_line);
         } else {
             gui_append_str(line, sizeof(line), &pos, "GCC failed: ");
-            st->code_error_line = 0;
+            cs()->error_line = 0;
         }
         gui_append_str(line, sizeof(line), &pos, err && err[0] ? err : "unknown error");
         code_set_output(line);
@@ -518,7 +558,7 @@ static void code_gui_run(gui_state_t *st, const fb_info_t *fb) {
         const char *em = hbos_gcc_last_error();
         gui_append_str(line,sizeof(line),&pos,em&&em[0]?em:"error");
         code_set_output(line);
-        st->code_error_line = el;
+        cs()->error_line = el;
         st->status = "GUI 脚本错误";
     } else {
         code_set_output("GUI OK");
@@ -656,7 +696,7 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     char line[128];
     code_layout_t l;
     code_make_layout(tx, ty, win_w, win_h, &l);
-    st->code_view_rows = l.view_rows;
+    cs()->view_rows = l.view_rows;
     code_clamp_scroll(st);
 
     gui_text(tx, ty, "代码工作台", UI_ACCENT, 1);
@@ -674,9 +714,9 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     gui_border(tx, ty + 54, l.content_w, 24, UI_ACCENT);
     gui_line2(line, sizeof(line), "文件 ", code_path(st));
     gui_text_clipped(tx + 10, ty + 62, tx + l.content_w - 90, line,
-                 st->code_modified ? UI_WARN : UI_FG, 1);
-    gui_text(tx + l.content_w - 78, ty + 62, st->code_modified ? "未保存" : "已保存",
-         st->code_modified ? UI_WARN : UI_OK, 1);
+                 cs()->modified ? UI_WARN : UI_FG, 1);
+    gui_text(tx + l.content_w - 78, ty + 62, cs()->modified ? "未保存" : "已保存",
+         cs()->modified ? UI_WARN : UI_OK, 1);
 
     gui_vgradient(tx, l.editor_y, l.side_w, l.editor_h, UI_SURFACE, UI_SURFACE);
     gui_border(tx, l.editor_y, l.side_w, l.editor_h, UI_SURFACE3);
@@ -713,16 +753,16 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     gui_rect(l.editor_x + l.line_no_w, l.editor_y + 1, 1, l.editor_h - 2, UI_SURFACE2);
 
     uint32_t cursor_line = 0, cursor_col = 0;
-    code_line_col(st, st->code_cursor, &cursor_line, &cursor_col);
+    code_line_col(st, cs()->cursor, &cursor_line, &cursor_col);
     uint32_t total_lines = code_line_count(st);
     uint32_t sel_start = 0, sel_end = 0;
-    if (st->code_sel_active) code_sel_range(st, &sel_start, &sel_end);
+    if (cs()->sel_active) code_sel_range(st, &sel_start, &sel_end);
     for (int row = 0; row < l.view_rows; row++) {
-        uint32_t line_idx = (uint32_t)(st->code_scroll + row);
+        uint32_t line_idx = (uint32_t)(cs()->scroll + row);
         if (line_idx >= total_lines) break;
         uint32_t off = code_find_line_start(st, line_idx);
         uint32_t len = code_line_len_at(st, off);
-        if (off > st->code_len) break;
+        if (off > cs()->len) break;
         uint32_t n = len;
         if (n >= sizeof(line)) n = sizeof(line) - 1;
         memcpy(line, g_code_buf + off, n);
@@ -733,7 +773,7 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
         num[0] = 0;
         gui_append_uint(num, sizeof(num), &pos, line_idx + 1);
         int y = l.editor_y + 10 + row * l.row_h;
-        if (st->code_sel_active && sel_end > off && sel_start < off + len) {
+        if (cs()->sel_active && sel_end > off && sel_start < off + len) {
             uint32_t line_sel_start = sel_start > off ? sel_start - off : 0;
             uint32_t line_sel_end = sel_end < off + len ? sel_end - off : len;
             int hl_x = l.editor_x + l.line_no_w + 10 + (int)line_sel_start * code_cell_w();
@@ -741,7 +781,7 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
             if (sel_end > off + len) hl_w += code_cell_w();  // 选区跨行，把换行处也画出来
             if (hl_w < 1) hl_w = 1;
             gui_rect(hl_x, y - 3, hl_w, l.row_h, UI_SURFACE3);
-        } else if (st->code_error_line > 0 && (int)(line_idx + 1) == st->code_error_line) {
+        } else if (cs()->error_line > 0 && (int)(line_idx + 1) == cs()->error_line) {
             gui_rect(l.editor_x + l.line_no_w + 1, y - 3, l.editor_w - l.line_no_w - 4, l.row_h, UI_SURFACE);
             gui_rect(l.editor_x + l.line_no_w + 1, y - 3, 3, l.row_h, UI_ERR);
         } else if (line_idx == cursor_line) {
@@ -753,20 +793,20 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     }
     static uint32_t code_caret_ticks = 0;
     code_caret_ticks++;
-    if ((int)cursor_line >= st->code_scroll && (int)cursor_line < st->code_scroll + l.view_rows &&
+    if ((int)cursor_line >= cs()->scroll && (int)cursor_line < cs()->scroll + l.view_rows &&
         (code_caret_ticks / 15) % 2) {
         int cx = l.editor_x + l.line_no_w + 10 + (int)cursor_col * code_cell_w();
-        int cy = l.editor_y + 10 + ((int)cursor_line - st->code_scroll) * l.row_h;
+        int cy = l.editor_y + 10 + ((int)cursor_line - cs()->scroll) * l.row_h;
         if (cx > l.editor_x + l.editor_w - 12) cx = l.editor_x + l.editor_w - 12;
         gui_rect(cx, cy - 2, 2, 14, UI_ACCENT);
     }
 
     gui_vgradient(tx, l.bottom_y, l.content_w, l.bottom_h, UI_SURFACE, UI_SURFACE);
-    gui_border(tx, l.bottom_y, l.content_w, l.bottom_h, st->code_error_line > 0 ? UI_ERR : UI_SURFACE3);
+    gui_border(tx, l.bottom_y, l.content_w, l.bottom_h, cs()->error_line > 0 ? UI_ERR : UI_SURFACE3);
     gui_text(tx + 12, l.bottom_y + 12, "输出", UI_FG2, 1);
     gui_text_clipped(tx + 62, l.bottom_y + 12, tx + l.content_w - 12,
                  g_code_output[0] ? g_code_output : "Ready",
-                 st->code_error_line > 0 ? UI_FG : UI_FG2, 1);
+                 cs()->error_line > 0 ? UI_FG : UI_FG2, 1);
     uint32_t pos = 0;
     line[0] = 0;
     gui_append_str(line, sizeof(line), &pos, "Ln ");
@@ -774,7 +814,7 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     gui_append_str(line, sizeof(line), &pos, ", Col ");
     gui_append_uint(line, sizeof(line), &pos, cursor_col + 1);
     gui_append_str(line, sizeof(line), &pos, "  Bytes ");
-    gui_append_uint(line, sizeof(line), &pos, st->code_len);
+    gui_append_uint(line, sizeof(line), &pos, cs()->len);
     gui_text(tx + 12, l.bottom_y + 34, line, UI_FG2, 1);
 }
 
@@ -782,40 +822,40 @@ static void app_code_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
 static int app_code_key(gui_state_t *st, int key) {
         code_load(st);
         if (key == 1) {  // Ctrl+A：全选
-            if (st->code_len > 0) {
-                st->code_sel_anchor = 0;
-                st->code_cursor = st->code_len;
-                st->code_sel_active = 1;
+            if (cs()->len > 0) {
+                cs()->sel_anchor = 0;
+                cs()->cursor = cs()->len;
+                cs()->sel_active = 1;
                 st->status = "已全选（Backspace/输入 可替换）";
             } else {
-                st->code_sel_active = 0;
+                cs()->sel_active = 0;
                 st->status = "代码为空";
             }
             return 1;
         }
-        int had_sel = st->code_sel_active;
+        int had_sel = cs()->sel_active;
         uint32_t sel_start = 0, sel_end = 0;
         if (had_sel) code_sel_range(st, &sel_start, &sel_end);
 
         // Shift+方向键：开始/延伸选区，光标移动端跟随移动，锚点端不动
         if (key == GUI_KEY_SHIFT_LEFT || key == GUI_KEY_SHIFT_RIGHT ||
             key == GUI_KEY_SHIFT_UP   || key == GUI_KEY_SHIFT_DOWN) {
-            if (!had_sel) st->code_sel_anchor = st->code_cursor;
+            if (!had_sel) cs()->sel_anchor = cs()->cursor;
             if (key == GUI_KEY_SHIFT_LEFT) {
-                if (st->code_cursor > 0) st->code_cursor--;
+                if (cs()->cursor > 0) cs()->cursor--;
                 code_ensure_visible(st);
             } else if (key == GUI_KEY_SHIFT_RIGHT) {
-                if (st->code_cursor < st->code_len) st->code_cursor++;
+                if (cs()->cursor < cs()->len) cs()->cursor++;
                 code_ensure_visible(st);
             } else if (key == GUI_KEY_SHIFT_UP) {
                 code_move_vertical(st, -1);
             } else {
                 code_move_vertical(st, 1);
             }
-            st->code_sel_active = (st->code_sel_anchor != st->code_cursor);
+            cs()->sel_active = (cs()->sel_anchor != cs()->cursor);
             return 1;
         }
-        st->code_sel_active = 0;  // 除 Shift+方向键/Ctrl+A 外任何按键都取消选中
+        cs()->sel_active = 0;  // 除 Shift+方向键/Ctrl+A 外任何按键都取消选中
         if (key == 19) {
             (void)code_save(st);
         } else if (key == 18) {
@@ -823,10 +863,10 @@ static int app_code_key(gui_state_t *st, int key) {
         } else if (key == 15) {
             code_open_selected(st);
         } else if (key == GUI_KEY_LEFT) {
-            if (st->code_cursor > 0) st->code_cursor--;
+            if (cs()->cursor > 0) cs()->cursor--;
             code_ensure_visible(st);
         } else if (key == GUI_KEY_RIGHT) {
-            if (st->code_cursor < st->code_len) st->code_cursor++;
+            if (cs()->cursor < cs()->len) cs()->cursor++;
             code_ensure_visible(st);
         } else if (key == GUI_KEY_UP) {
             code_move_vertical(st, -1);
@@ -899,7 +939,7 @@ int app_code_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t 
     int row = (my - (l.editor_y + 10)) / l.row_h;
     if (row < 0) row = 0;
     if (row >= l.view_rows) row = l.view_rows - 1;
-    uint32_t line = (uint32_t)(st->code_scroll + row);
+    uint32_t line = (uint32_t)(cs()->scroll + row);
     uint32_t total = code_line_count(st);
     if (line >= total) line = total ? total - 1 : 0;
     int col = (mx - (l.editor_x + l.line_no_w + 10)) / code_cell_w();
@@ -944,7 +984,7 @@ void app_code_gui_run(gui_state_t *st, const fb_info_t *fb) { code_gui_run(st, f
 void app_code_command(gui_state_t *st, int cmd) { handle_code_command(st, cmd); }
 int  app_code_wheel(gui_state_t *st, int steps) {
     code_load(st);
-    st->code_scroll += steps;
+    cs()->scroll += steps;
     code_clamp_scroll(st);
     st->status = "滚动代码";
     return 1;
@@ -961,3 +1001,26 @@ const gui_app_module_t gui_app_code = {
     .on_tick  = 0,
     .on_click = 0,
 };
+
+/* ── 对外 API（供 gui.c 的鼠标交互调用）───────────────────────
+ * 框架不再直接读写 code_* 字段，而是通过语义明确的入口：
+ *   - set_cursor：把光标移到指定字节偏移（keep_selection 决定是否保留选区）
+ *   - begin_selection：从这里开始拖拽选字（锚点=光标=偏移）
+ * 用函数而非暴露结构体，是因为"移动光标"还要维护 sel_active 与锚点的一致性，
+ * 让调用方自己改那两个字段迟早会漏一个。 */
+void app_code_set_cursor(gui_state_t *st, uint32_t off, int keep_selection) {
+    (void)st;
+    code_state_t *c = cs();
+    if (off > c->len) off = c->len;
+    c->cursor = off;
+    c->sel_active = (keep_selection && c->sel_anchor != c->cursor) ? 1 : 0;
+}
+
+void app_code_begin_selection(gui_state_t *st, uint32_t off) {
+    (void)st;
+    code_state_t *c = cs();
+    if (off > c->len) off = c->len;
+    c->cursor = off;
+    c->sel_anchor = off;
+    c->sel_active = 0;
+}

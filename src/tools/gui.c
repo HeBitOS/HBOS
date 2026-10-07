@@ -53,6 +53,8 @@ void app_code_ensure_visible(gui_state_t *st);
 void app_code_open_selected(gui_state_t *st);
 void app_code_gui_run(gui_state_t *st, const fb_info_t *fb);
 void app_code_command(gui_state_t *st, int cmd);
+void app_code_set_cursor(gui_state_t *st, uint32_t off, int keep_selection);
+void app_code_begin_selection(gui_state_t *st, uint32_t off);
 int  app_code_hit_command(int w, int h, const gui_state_t *st, int mx, int my);
 int  app_code_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t *off);
 int  app_code_hit_file(int w, int h, const gui_state_t *st, int mx, int my);
@@ -5799,8 +5801,7 @@ static void cmd_gui(int argc, char **argv) {
                 if (left_down) {
                     uint32_t off = 0;
                     if (app_code_hit_editor(w, h, &st, mx, my, &off)) {
-                        st.code_cursor = off;
-                        st.code_sel_active = (st.code_sel_anchor != st.code_cursor);
+                        app_code_set_cursor(&st, off, 1);
                         app_code_ensure_visible(&st);
                         redraw = 1;
                     }
@@ -6320,9 +6321,7 @@ static void cmd_gui(int argc, char **argv) {
                                         } else {
                                             uint32_t code_off = 0, note_off = 0;
                                             if (app_code_hit_editor(w, h, &st, mx, my, &code_off)) {
-                                                st.code_cursor = code_off;
-                                                st.code_sel_anchor = code_off;
-                                                st.code_sel_active = 0;
+                                                app_code_begin_selection(&st, code_off);
                                                 code_text_dragging = 1;
                                                 app_code_ensure_visible(&st);
                                                 st.status = "已移动代码光标";
