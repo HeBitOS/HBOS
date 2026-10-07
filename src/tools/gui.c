@@ -214,6 +214,7 @@ typedef struct {
  * 列表里。现在自动跟随 g_modules[]，只保留"排序偏好"这种真正属于视图的
  * 信息。gui_app_meta_t 保留是为了兼容既有调用点（selected_gui_app 等）。 */
 static uint32_t gui_app_count(void);
+static int gui_app_grid_cols(int win_w);
 
 static const gui_app_meta_t *gui_app_meta_at(uint32_t i) {
     static gui_app_meta_t m;
@@ -325,6 +326,32 @@ static void gui_toast(gui_state_t *st, const char *a, const char *b) {
 static int gui_open_window(gui_state_t *st, int kind, int mode, int unique) {
     int idx = wm_open_window(&st->wm, kind, mode, unique);
     if (idx >= 0) {
+        /* 面板按内容自适应高度。
+         *
+         * "应用"面板列出全部应用（当前 15 个），瓦片 5 列 × 112px 高 +
+         * 间距，需要约 428px 内容高度；而窗口默认只有 430px 总高（扣掉
+         * 标题栏 42 与状态栏 32 后仅剩 356px 可用），第三行瓦片必然被
+         * 截断。原先没有客户区裁剪，超出的瓦片会直接画到窗口外、盖在
+         * 桌面上（表现为"按钮飘在窗口外面"）。
+         *
+         * 现在两件事一起做：① 内容裁剪（见 draw_one_window）；② 面板
+         * 高度随内容增长。这样既不会画出去，也不会被截断。 */
+        if (kind == WM_WIN_PANEL && mode == PANEL_APPS) {
+            wm_window_t *w = wm_get_window(&st->wm, idx);
+            if (w) {
+                int win_w = w->w > 0 ? w->w : 790;
+                int cols = gui_app_grid_cols(win_w - 60);
+                int n = (int)gui_app_count();
+                int rows = (n + cols - 1) / cols;
+                if (rows < 1) rows = 1;
+                int need_h = 64 + rows * (112 + 14) - 14   /* 瓦片区 */
+                           + 42 + 32 + 12;                 /* 标题栏+状态栏+余量 */
+                int desk_h = st->wm.desk_h;
+                if (need_h > desk_h - 20) need_h = desk_h - 20;
+                wm_resize_window(&st->wm, idx, win_w, need_h);
+            }
+        }
+
         /* 套用注册表里声明的建议尺寸：应用自己知道内容需要多大，比在
          * 框架里维护一张尺寸表更不容易漏配（新增应用自动带上）。 */
         if (kind == WM_WIN_APP) {
@@ -3522,6 +3549,24 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 
     int tx = win_x + 30;
     int ty = win_y + 42;
+
+    /* 客户区裁剪：内容必须被限制在窗口内部。
+     *
+     * 这是个真实的显示缺陷：面板/应用若画得比窗口高（例如"应用"面板
+     * 15 个瓦片在 790x430 的窗口里要 442px 内容高度），超出的部分会直接
+     * 画到窗口边框之外、盖在桌面壁纸上，看起来像"按钮飘在窗口外面"。
+     *
+     * 原先只有 gui_dirty_* 层面的裁剪（按脏矩形），那不是窗口边界。
+     * 这里按客户区设置裁剪区，并在画完后恢复（与脏矩形裁剪取交集，
+     * 因此不会削弱原有的脏区优化）。 */
+    int cx = win_x + 1;
+    int cy = win_y + 1;
+    int cw = win_w - 2;
+    int ch = win_h - 34;            /* 底部 32px 状态栏 + 1px 分隔线留给框架 */
+    if (cw < 0) cw = 0;
+    if (ch < 0) ch = 0;
+    (void)gui_clip_push(cx, cy, cw, ch);
+
     if (win->kind == WM_WIN_PANEL) {
         st->active = win->mode;
         st->app_mode = GUI_APP_NONE;
@@ -3531,6 +3576,10 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
         st->app_mode = win->mode;
         draw_app_window_body(tx, ty, win_w, win_h, st, win->mode);
     }
+
+    /* 恢复上层（脏矩形）裁剪：客户区裁剪只覆盖内容绘制这一段，
+     * 状态栏/边框/标题栏仍按原样绘制。 */
+    gui_clip_pop();
     vgradient_alpha(win_x + 1, win_y + win_h - 31, win_w - 2, 30,
                     0xD0000000 | (UI_SURFACE),
                     0xD0000000 | (UI_BG));

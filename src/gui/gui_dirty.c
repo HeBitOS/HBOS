@@ -113,3 +113,42 @@ void gui_dirty_expand(int *x, int *y, int *w, int *h, int pad, int max_w, int ma
     if (*w < 0) *w = 0;
     if (*h < 0) *h = 0;
 }
+
+/* ── 裁剪区栈 ───────────────────────────────────────────────
+ * gui_clip_set 是替换语义；窗口内容需要"在脏矩形裁剪内再收缩到客户区"，
+ * 因此提供 push/pop。深度小（嵌套只发生在窗口内容一层），定长数组足够。 */
+#define GUI_CLIP_STACK_MAX 8
+static struct { int on, x, y, w, h; } g_clip_stack[GUI_CLIP_STACK_MAX];
+static int g_clip_depth;
+
+int gui_clip_push(int x, int y, int w, int h) {
+    if (g_clip_depth >= GUI_CLIP_STACK_MAX) return -1;
+    g_clip_stack[g_clip_depth].on = g_clip_on;
+    g_clip_stack[g_clip_depth].x = g_clip_x;
+    g_clip_stack[g_clip_depth].y = g_clip_y;
+    g_clip_stack[g_clip_depth].w = g_clip_w;
+    g_clip_stack[g_clip_depth].h = g_clip_h;
+    g_clip_depth++;
+
+    /* 与现有裁剪区求交集：现有区关闭时直接用新矩形 */
+    if (g_clip_on) {
+        int nx = x > g_clip_x ? x : g_clip_x;
+        int ny = y > g_clip_y ? y : g_clip_y;
+        int rx = (x + w) < (g_clip_x + g_clip_w) ? (x + w) : (g_clip_x + g_clip_w);
+        int ry = (y + h) < (g_clip_y + g_clip_h) ? (y + h) : (g_clip_y + g_clip_h);
+        gui_clip_set(nx, ny, rx - nx, ry - ny);
+    } else {
+        gui_clip_set(x, y, w, h);
+    }
+    return g_clip_depth;
+}
+
+void gui_clip_pop(void) {
+    if (g_clip_depth <= 0) return;
+    g_clip_depth--;
+    if (g_clip_stack[g_clip_depth].on)
+        gui_clip_set(g_clip_stack[g_clip_depth].x, g_clip_stack[g_clip_depth].y,
+                     g_clip_stack[g_clip_depth].w, g_clip_stack[g_clip_depth].h);
+    else
+        gui_clip_clear();
+}
