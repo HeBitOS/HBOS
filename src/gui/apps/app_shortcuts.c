@@ -60,6 +60,8 @@ static void app_shortcuts_draw(gui_state_t *st, int tx, int ty, int win_w, int w
 
 const gui_app_module_t gui_app_shortcuts = {
     .mode     = GUI_APP_SHORTCUTS,
+    .kw       = "shortcuts keys kuaijiejian",
+    .icon     = ICON_SHORTCUTS,
     .name     = "快捷键",
     .desc     = "查看全局和各应用的键盘快捷键",
     .draw     = app_shortcuts_draw,

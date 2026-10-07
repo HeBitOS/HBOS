@@ -215,6 +215,8 @@ static int app_taskmgr_tick(gui_state_t *st) {
 
 const gui_app_module_t gui_app_taskmgr = {
     .mode     = GUI_APP_TASKMGR,
+    .kw       = "task taskmgr process renwu guanli",
+    .icon     = ICON_SYS,
     .name     = "任务管理器",
     .desc     = "查看运行中的任务，结束任务",
     .draw     = app_taskmgr_draw,

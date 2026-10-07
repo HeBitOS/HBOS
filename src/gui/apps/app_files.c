@@ -196,6 +196,8 @@ static int app_files_click(gui_state_t *st, int mx, int my,
 
 const gui_app_module_t gui_app_files = {
     .mode     = GUI_APP_FILES,
+    .kw       = "file files fm wenjian",
+    .icon     = ICON_FILES,
     .name     = "文件管理器",
     .desc     = "浏览文件系统",
     .draw     = app_files_draw,

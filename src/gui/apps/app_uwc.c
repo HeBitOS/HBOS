@@ -68,6 +68,8 @@ static int app_uwc_key(gui_state_t *st, int key) {
 
 const gui_app_module_t gui_app_uwc = {
     .mode     = GUI_APP_UWC,
+    .kw       = 0,
+    .icon     = ICON_APPS,
     .name     = "文件统计",
     .desc     = "统计选中文件行数和字节",
     .draw     = app_uwc_draw,

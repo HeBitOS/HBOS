@@ -952,6 +952,8 @@ int  app_code_wheel(gui_state_t *st, int steps) {
 
 const gui_app_module_t gui_app_code = {
     .mode     = GUI_APP_CODE,
+    .kw       = "code daima",
+    .icon     = ICON_CODE,
     .name     = "代码工作台",
     .desc     = "编辑、保存、运行 C 文件",
     .draw     = app_code_draw,

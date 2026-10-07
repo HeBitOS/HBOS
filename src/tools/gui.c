@@ -158,20 +158,24 @@ typedef struct {
     int action;
 } gui_file_action_t;
 
-static const gui_app_meta_t gui_apps[] = {
-    {"记事本", "编辑笔记文件", GUI_APP_NOTES, 0, 0},
-    {"计算器", "方向键调整数值", GUI_APP_CALC, 0, 0},
-    {"文件统计", "统计选中文件行数和字节", GUI_APP_UWC, 0, 0},
-    {"贪吃蛇", "方向键移动", GUI_APP_SNAKE, 0, 0},
-    {"浏览器", "打开 HTTP/HTTPS 网页", GUI_APP_BROWSER, 0, 0},
-    {"代码工作台", "编辑、保存、运行 C 文件", GUI_APP_CODE, 0, 0},
-    {"控制台终端", "运行命令与系统交互", GUI_APP_DIAG, 0, 0},
-    {"时钟", "实时时钟与日期", GUI_APP_CLOCK, 0, 0},
-    {"设置", "主题与字体", GUI_APP_SETTINGS, 0, 0},
-    {"任务管理器", "查看运行中的任务，结束任务", GUI_APP_TASKMGR, 0, 0},
-    {"快捷键", "查看全局和各应用的键盘快捷键", GUI_APP_SHORTCUTS, 0, 0},
-    {"UI 组件", "统一控件库与主题令牌的预览", GUI_APP_UIGALLERY, 620, 700},
-};
+/* 应用列表：**直接由模块注册表派生**，不再手工维护第二份清单。
+ *
+ * 重构前这里是独立的一张表，新增应用必须同步改它，漏改就不出现在应用
+ * 列表里。现在自动跟随 g_modules[]，只保留"排序偏好"这种真正属于视图的
+ * 信息。gui_app_meta_t 保留是为了兼容既有调用点（selected_gui_app 等）。 */
+static uint32_t gui_app_count(void);
+
+static const gui_app_meta_t *gui_app_meta_at(uint32_t i) {
+    static gui_app_meta_t m;
+    const gui_app_module_t *mod = gui_app_module_at((int)i);
+    if (!mod) return 0;
+    m.name = mod->name;
+    m.description = mod->desc;
+    m.mode = mod->mode;
+    m.want_w = mod->want_w;
+    m.want_h = mod->want_h;
+    return &m;
+}
 
 static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
     {"新建",   0},
@@ -184,7 +188,7 @@ static const gui_file_action_t gui_file_actions[FILE_ACTION_COUNT] = {
 };
 
 static uint32_t gui_app_count(void) {
-    return (uint32_t)(sizeof(gui_apps) / sizeof(gui_apps[0]));
+    return (uint32_t)gui_app_module_count();
 }
 
 static file_t *selected_file(gui_state_t *st);
@@ -275,13 +279,13 @@ static int gui_open_window(gui_state_t *st, int kind, int mode, int unique) {
          * 框架里维护一张尺寸表更不容易漏配（新增应用自动带上）。 */
         if (kind == WM_WIN_APP) {
             for (uint32_t i = 0; i < gui_app_count(); i++) {
-                if (gui_apps[i].mode == mode &&
-                    (gui_apps[i].want_w > 0 || gui_apps[i].want_h > 0)) {
+                if (gui_app_meta_at(i)->mode == mode &&
+                    (gui_app_meta_at(i)->want_w > 0 || gui_app_meta_at(i)->want_h > 0)) {
                     wm_window_t *w = wm_get_window(&st->wm, idx);
                     if (w) {
                         wm_resize_window(&st->wm, idx,
-                                         gui_apps[i].want_w > 0 ? gui_apps[i].want_w : w->w,
-                                         gui_apps[i].want_h > 0 ? gui_apps[i].want_h : w->h);
+                                         gui_app_meta_at(i)->want_w > 0 ? gui_app_meta_at(i)->want_w : w->w,
+                                         gui_app_meta_at(i)->want_h > 0 ? gui_app_meta_at(i)->want_h : w->h);
                     }
                     break;
                 }
@@ -2108,7 +2112,7 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
     if ((uint32_t)selected >= gui_app_count()) selected = (int)gui_app_count() - 1;
 
     for (uint32_t i = 0; i < gui_app_count(); i++) {
-        const gui_app_meta_t *app = &gui_apps[i];
+        const gui_app_meta_t *app = gui_app_meta_at(i);
         int x, y, w, h;
         gui_app_tile_rect(tx, ty, cw, i, &x, &y, &w, &h);
         uint32_t accent = app_accent(app->mode);
@@ -6223,7 +6227,7 @@ static const gui_app_meta_t *selected_gui_app(gui_state_t *st) {
     }
     if (st->selected_app < 0) st->selected_app = 0;
     if ((uint32_t)st->selected_app >= count) st->selected_app = (int)count - 1;
-    return &gui_apps[(uint32_t)st->selected_app];
+    return gui_app_meta_at((uint32_t)st->selected_app);
 }
 
 static void gui_open_selected_app(gui_state_t *st) {
@@ -6759,37 +6763,52 @@ typedef struct {
     const char *name; const char *kw; int kind; int mode; int icon;
 } sm_entry_t;
 
+/* 开始菜单条目：只保留 4 个"面板"（它们是 GUI 内部模式，不是应用模块）。
+ * 应用条目**不再硬编码**——由 sm_entry_at() 动态从模块注册表派生。
+ *
+ * 重构前这里是第二份应用清单，新增应用必须同步，漏掉就"搜不到"（实测
+ * 踩到 UI 组件页）。现在应用的名称/关键词/图标全部来自 gui_app_module_t。 */
 static const sm_entry_t sm_builtin[] = {
     {"文件管理器", "file files fm wenjian",    SM_K_PANEL, PANEL_FILES,     ICON_FILES},
     {"磁盘",       "disk cipan",               SM_K_PANEL, PANEL_DISK,      ICON_DISK},
     {"资源",       "resource sys ziyuan",      SM_K_PANEL, PANEL_SYS,       ICON_SYS},
     {"应用",       "app apps yingyong",        SM_K_PANEL, PANEL_APPS,      ICON_APPS},
-    {"记事本",     "note notes jishi",         SM_K_APP,   GUI_APP_NOTES,   ICON_NOTES},
-    {"计算器",     "calc calculator jisuan",   SM_K_APP,   GUI_APP_CALC,    ICON_CALC},
-    {"贪吃蛇",     "snake game tanchishe",     SM_K_APP,   GUI_APP_SNAKE,   ICON_SNAKE},
-    {"浏览器",     "web browser liulan",       SM_K_APP,   GUI_APP_BROWSER, ICON_BROWSER},
-    {"代码",       "code daima",               SM_K_APP,   GUI_APP_CODE,    ICON_CODE},
-    {"终端",       "term terminal shell",      SM_K_APP,   GUI_APP_DIAG,    ICON_TERM},
-    {"时钟",       "clock time shizhong",      SM_K_APP,   GUI_APP_CLOCK,   ICON_CLOCK},
-    {"设置",       "settings config shezhi",   SM_K_APP,   GUI_APP_SETTINGS,ICON_SYS},
-    {"任务管理器", "task taskmgr process renwu guanli", SM_K_APP, GUI_APP_TASKMGR, ICON_SYS},
-    {"快捷键",     "shortcuts keys kuaijiejian",        SM_K_APP, GUI_APP_SHORTCUTS, ICON_SHORTCUTS},
-    /* UI 组件：控件库与主题令牌的预览页。
-     * 注意（重构待办）：这张表与 gui_apps[] 各维护一份应用清单，新增应用
-     * 必须两处都改，漏一处就会出现"应用存在但开始菜单搜不到"。这正是
-     * "缺乏拓展性"的具体表现，P6 会把两张表合并为单一注册源。 */
-    {"UI 组件",    "ui widget component kongjian ui",    SM_K_APP, GUI_APP_UIGALLERY, ICON_APPS},
 };
 #define SM_BUILTIN_N ((int)(sizeof(sm_builtin) / sizeof(sm_builtin[0])))
 
 static int sm_total_entries(void) {
-    return SM_BUILTIN_N + gui_hax_count() + disk_app_count;
+    return SM_BUILTIN_N + gui_app_module_count() + gui_hax_count() + disk_app_count;
 }
+
+static int sm_entry_tail_at(int k, sm_entry_t *out);
 
 static int sm_entry_at(int idx, sm_entry_t *out) {
     if (idx < 0) return 0;
     if (idx < SM_BUILTIN_N) { *out = sm_builtin[idx]; return 1; }
-    int k = idx - SM_BUILTIN_N;
+
+    /* 应用条目从模块注册表派生：name/kw/icon 都在那里，只有一份来源 */
+    {
+        int k = idx - SM_BUILTIN_N;
+        int app_n = gui_app_module_count();
+        if (k < app_n) {
+            const gui_app_module_t *m = gui_app_module_at(k);
+            if (!m) return 0;
+            out->name = m->name;
+            out->kw   = (m->kw && m->kw[0]) ? m->kw : m->name;
+            out->kind = SM_K_APP;
+            out->mode = m->mode;
+            out->icon = m->icon;
+            return 1;
+        }
+        k -= app_n;
+        /* 其余（hax / 磁盘应用）沿用原逻辑 */
+        return sm_entry_tail_at(k, out);
+    }
+}
+
+/** 注册表之后的部分：hax 应用与磁盘应用（原逻辑，抽出来保持可读） */
+static int sm_entry_tail_at(int k, sm_entry_t *out) {
+    if (k < 0) return 0;
     const hax_app_entry_t *e = gui_hax_at(k);
     if (e) {
         out->name = e->name; out->kw = e->name;
@@ -7485,8 +7504,8 @@ static void cmd_gui(int argc, char **argv) {
      * 标题，不会出现"功能可用但窗口标题是'应用'"的漏配。
      * （上面那些显式设置保留：它们的中文名与菜单 label 不完全一致。） */
     for (uint32_t i = 0; i < gui_app_count(); i++) {
-        const char *nm = wm_window_title_by_mode(gui_apps[i].mode);
-        if (!nm) wm_set_app_title(gui_apps[i].mode, gui_apps[i].name);
+        const char *nm = wm_window_title_by_mode(gui_app_meta_at(i)->mode);
+        if (!nm) wm_set_app_title(gui_app_meta_at(i)->mode, gui_app_meta_at(i)->name);
     }
 
     (void)block_init();

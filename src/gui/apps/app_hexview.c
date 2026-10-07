@@ -131,6 +131,8 @@ static int app_hexview_key(gui_state_t *st, int key) {
 
 const gui_app_module_t gui_app_hexview = {
     .mode     = GUI_APP_HEXVIEW,
+    .kw       = 0,
+    .icon     = ICON_CODE,
     .name     = "十六进制查看器",
     .desc     = "以十六进制/ASCII 双栏查看任意文件",
     .draw     = app_hexview_draw,

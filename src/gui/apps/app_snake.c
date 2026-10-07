@@ -185,6 +185,8 @@ static int app_snake_tick(gui_state_t *st) {
 
 const gui_app_module_t gui_app_snake = {
     .mode     = GUI_APP_SNAKE,
+    .kw       = "snake game tanchishe",
+    .icon     = ICON_SNAKE,
     .name     = "贪吃蛇",
     .desc     = "方向键移动",
     .draw     = app_snake_draw,

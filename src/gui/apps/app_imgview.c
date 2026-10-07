@@ -121,6 +121,8 @@ static int app_imgview_key(gui_state_t *st, int key) {
 
 const gui_app_module_t gui_app_imgview = {
     .mode     = GUI_APP_IMGVIEW,
+    .kw       = 0,
+    .icon     = ICON_FILES,
     .name     = "图片查看器",
     .desc     = "查看未压缩 24 位 BMP 图片",
     .draw     = app_imgview_draw,

@@ -310,6 +310,10 @@ static int app_gallery_key(gui_state_t *st, int key) {
 
 const gui_app_module_t gui_app_uigallery = {
     .mode     = GUI_APP_UIGALLERY,
+    .kw       = "ui widget component kongjian ui",
+    .icon     = ICON_APPS,
+    .want_w   = 620,
+    .want_h   = 700,
     .name     = "UI 组件",
     .desc     = "统一控件库与主题令牌的预览",
     .draw     = app_gallery_draw,

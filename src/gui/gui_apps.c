@@ -32,6 +32,15 @@ static const gui_app_module_t *const g_modules[] = {
     &gui_app_uigallery,
 };
 
+int gui_app_module_count(void) {
+    return (int)(sizeof(g_modules) / sizeof(g_modules[0]));
+}
+
+const gui_app_module_t *gui_app_module_at(int index) {
+    if (index < 0 || index >= gui_app_module_count()) return 0;
+    return g_modules[index];
+}
+
 const gui_app_module_t *gui_app_by_mode(int mode) {
     for (uint32_t i = 0; i < sizeof(g_modules) / sizeof(g_modules[0]); i++) {
         if (g_modules[i]->mode == mode) return g_modules[i];

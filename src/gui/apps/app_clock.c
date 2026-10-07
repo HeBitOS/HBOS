@@ -157,6 +157,8 @@ static int app_clock_tick(gui_state_t *st) {
 
 const gui_app_module_t gui_app_clock = {
     .mode     = GUI_APP_CLOCK,
+    .kw       = "clock time shizhong",
+    .icon     = ICON_CLOCK,
     .name     = "时钟",
     .desc     = "模拟时钟",
     .draw     = app_clock_draw,

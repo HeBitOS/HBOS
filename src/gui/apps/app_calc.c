@@ -486,6 +486,8 @@ static int app_calc_click(gui_state_t *st, int mx, int my, int tx, int ty, int w
 
 const gui_app_module_t gui_app_calc = {
     .mode     = GUI_APP_CALC,
+    .kw       = "calc calculator jisuan",
+    .icon     = ICON_CALC,
     .name     = "计算器",
     .desc     = "可点击按钮的整数计算器",
     .draw     = app_calc_draw,

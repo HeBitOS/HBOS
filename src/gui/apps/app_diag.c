@@ -281,6 +281,8 @@ static int app_diag_key(gui_state_t *st, int key) {
 
 const gui_app_module_t gui_app_diag = {
     .mode     = GUI_APP_DIAG,
+    .kw       = "term terminal shell",
+    .icon     = ICON_TERM,
     .name     = "控制台终端",
     .desc     = "运行命令与系统交互",
     .draw     = app_diag_draw,

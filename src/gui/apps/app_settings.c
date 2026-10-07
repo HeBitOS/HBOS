@@ -269,6 +269,8 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
 
 const gui_app_module_t gui_app_settings = {
     .mode     = GUI_APP_SETTINGS,
+    .kw       = "settings config shezhi",
+    .icon     = ICON_SYS,
     .name     = "设置",
     .desc     = "主题、字体、系统信息",
     .draw     = app_settings_draw,

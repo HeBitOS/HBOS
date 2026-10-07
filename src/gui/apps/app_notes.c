@@ -513,6 +513,8 @@ int app_notes_hit_editor(int w, int h, gui_state_t *st, int mx, int my, uint32_t
 
 const gui_app_module_t gui_app_notes = {
     .mode     = GUI_APP_NOTES,
+    .kw       = "note notes jishi",
+    .icon     = ICON_NOTES,
     .name     = "记事本",
     .desc     = "编辑笔记文件",
     .draw     = app_notes_draw,
