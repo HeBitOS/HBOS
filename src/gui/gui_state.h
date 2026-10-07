@@ -156,17 +156,8 @@ typedef struct gui_state {
     /* 图片查看器（BMP）：解码后的像素数据是静态全局数组（见 app_imgview.c），
      * 这里只放路径/状态这些小元数据，避免把几百 KB 的像素缓冲塞进
      * gui_state_t */
-    char imgview_path[GUI_PATH_MAX];
-    int  imgview_loaded;
-    int  imgview_error;      /* 解码失败（非 BMP/非 24 位/太大等） */
-    int  imgview_w, imgview_h;
-    int  imgview_scroll_x, imgview_scroll_y;
-    /* 十六进制查看器：原始字节同样是静态全局数组（见 app_hexview.c） */
-    char hexview_path[GUI_PATH_MAX];
-    int  hexview_loaded;
-    uint32_t hexview_len;      /* 实际读取的字节数（可能因超过上限被截断） */
-    uint32_t hexview_file_size;/* 文件真实大小，用于判断是否被截断 */
-    int  hexview_scroll;       /* 起始行号（每行 16 字节） */
+    /* 图片查看器与十六进制查看器的状态已迁出：现为各自 app_*.c 的私有
+     * 结构体（imgview_state_t / hexview_state_t）。 */       /* 起始行号（每行 16 字节） */
     /* 浏览器后台异步加载 */
     int  browser_loading;       /* 1=正在后台抓取页面，0=空闲 */
     int  browser_push_hist;     /* 本次加载是否需要向历史压栈 */

@@ -7,6 +7,20 @@
 #include "../../fs.h"
 #include "../../string.h"
 
+/* 十六进制查看器私有状态。原先挂在全局 gui_state_t 上；只有本文件使用
+ * （gui.c 仅在打开文件时调用 app_hexview_set_path()）。 */
+typedef struct {
+    char path[GUI_PATH_MAX];
+    int  loaded;
+    uint32_t len;             /* 实际读取的字节数（可能因超上限被截断） */
+    uint32_t file_size;       /* 文件真实大小，用于判断是否被截断 */
+    int  scroll;              /* 起始行号（每行 16 字节） */
+} hexview_state_t;
+
+static hexview_state_t g_hexview;
+static hexview_state_t *hv(void) { return &g_hexview; }
+
+
 static uint8_t g_hexview_buf[HEXVIEW_MAX_BYTES];
 
 #define HEX_ROW_BYTES 16
@@ -14,32 +28,35 @@ static uint8_t g_hexview_buf[HEXVIEW_MAX_BYTES];
 #define HEX_LIST_TOP  28
 
 void app_hexview_set_path(gui_state_t *st, const char *path) {
+    (void)st;   /* 状态已私有化 */
     uint32_t i = 0;
-    while (path && path[i] && i + 1 < sizeof(st->hexview_path)) {
-        st->hexview_path[i] = path[i];
+    while (path && path[i] && i + 1 < sizeof(hv()->path)) {
+        hv()->path[i] = path[i];
         i++;
     }
-    st->hexview_path[i] = 0;
-    st->hexview_loaded = 0;
-    st->hexview_scroll = 0;
+    hv()->path[i] = 0;
+    hv()->loaded = 0;
+    hv()->scroll = 0;
 }
 
 static void hexview_load(gui_state_t *st) {
-    if (st->hexview_loaded) return;
-    st->hexview_loaded = 1;
-    st->hexview_len = 0;
-    st->hexview_file_size = 0;
+    (void)st;   /* 状态已私有化 */
+    if (hv()->loaded) return;
+    hv()->loaded = 1;
+    hv()->len = 0;
+    hv()->file_size = 0;
 
-    file_t *f = fs_find_file(st->hexview_path);
+    file_t *f = fs_find_file(hv()->path);
     if (!f) return;
-    st->hexview_file_size = f->size;
+    hv()->file_size = f->size;
     uint32_t n = f->size;
     if (n > HEXVIEW_MAX_BYTES) n = HEXVIEW_MAX_BYTES;
-    st->hexview_len = fs_read_file_data(f, 0, g_hexview_buf, n);
+    hv()->len = fs_read_file_data(f, 0, g_hexview_buf, n);
 }
 
 static int hexview_total_rows(gui_state_t *st) {
-    return (int)((st->hexview_len + HEX_ROW_BYTES - 1) / HEX_ROW_BYTES);
+    (void)st;   /* 状态已私有化 */
+    return (int)((hv()->len + HEX_ROW_BYTES - 1) / HEX_ROW_BYTES);
 }
 
 static void hex_append_byte(char *buf, uint32_t cap, uint32_t *pos, uint8_t v) {
@@ -49,6 +66,7 @@ static void hex_append_byte(char *buf, uint32_t cap, uint32_t *pos, uint8_t v) {
 }
 
 static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) {
+    (void)st;   /* 状态已私有化 */
     hexview_load(st);
 
     int aw = win_w - 60;
@@ -58,19 +76,19 @@ static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
 
     char line[GUI_PATH_MAX + 32];
     uint32_t pos = 0; line[0] = 0;
-    gui_append_str(line, sizeof(line), &pos, st->hexview_path[0] ? st->hexview_path : "(未选择文件)");
+    gui_append_str(line, sizeof(line), &pos, hv()->path[0] ? hv()->path : "(未选择文件)");
     gui_append_str(line, sizeof(line), &pos, "  (");
-    gui_append_uint(line, sizeof(line), &pos, st->hexview_file_size);
+    gui_append_uint(line, sizeof(line), &pos, hv()->file_size);
     gui_append_str(line, sizeof(line), &pos, " 字节");
-    if (st->hexview_file_size > st->hexview_len) {
+    if (hv()->file_size > hv()->len) {
         gui_append_str(line, sizeof(line), &pos, "，只显示前 ");
-        gui_append_uint(line, sizeof(line), &pos, st->hexview_len);
+        gui_append_uint(line, sizeof(line), &pos, hv()->len);
     }
     gui_append_str(line, sizeof(line), &pos, ")");
     gui_text_clipped(tx, ty, tx + aw, line, UI_FG, 1);
     gui_rect(tx, ty + 20, aw, 1, UI_SURFACE3);
 
-    if (st->hexview_len == 0) {
+    if (hv()->len == 0) {
         gui_text(tx, ty + HEX_LIST_TOP + 8, "（空文件或无法读取）", UI_DIM, 1);
         return;
     }
@@ -78,17 +96,17 @@ static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     int rows = (ah - HEX_LIST_TOP) / HEX_ROW_H;
     if (rows < 1) rows = 1;
     int total_rows = hexview_total_rows(st);
-    if (st->hexview_scroll > total_rows - 1) st->hexview_scroll = total_rows - 1;
-    if (st->hexview_scroll < 0) st->hexview_scroll = 0;
+    if (hv()->scroll > total_rows - 1) hv()->scroll = total_rows - 1;
+    if (hv()->scroll < 0) hv()->scroll = 0;
 
     int off_x   = tx;
     int hex_x   = tx + 76;
     int ascii_x = tx + 76 + HEX_ROW_BYTES * 3 * 8 + 12;
 
     for (int r = 0; r < rows; r++) {
-        int row = st->hexview_scroll + r;
+        int row = hv()->scroll + r;
         uint32_t base = (uint32_t)row * HEX_ROW_BYTES;
-        if (base >= st->hexview_len) break;
+        if (base >= hv()->len) break;
         int ry = ty + HEX_LIST_TOP + r * HEX_ROW_H;
 
         pos = 0; line[0] = 0;
@@ -102,7 +120,7 @@ static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         uint32_t abytes = 0;
         for (int c = 0; c < HEX_ROW_BYTES; c++) {
             uint32_t idx = base + (uint32_t)c;
-            if (idx >= st->hexview_len) break;
+            if (idx >= hv()->len) break;
             uint8_t v = g_hexview_buf[idx];
             hex_append_byte(line, sizeof(line), &pos, v);
             gui_append_char(line, sizeof(line), &pos, ' ');
@@ -115,17 +133,18 @@ static void app_hexview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
 }
 
 static int app_hexview_key(gui_state_t *st, int key) {
+    (void)st;   /* 状态已私有化 */
     int total_rows = hexview_total_rows(st);
-    if (key == GUI_KEY_UP)        { st->hexview_scroll -= 1; }
-    else if (key == GUI_KEY_DOWN) { st->hexview_scroll += 1; }
-    else if (key == GUI_KEY_PGUP)   { st->hexview_scroll -= 16; }
-    else if (key == GUI_KEY_PGDOWN) { st->hexview_scroll += 16; }
-    else if (key == GUI_KEY_HOME) { st->hexview_scroll = 0; }
-    else if (key == GUI_KEY_END)  { st->hexview_scroll = total_rows - 1; }
+    if (key == GUI_KEY_UP)        { hv()->scroll -= 1; }
+    else if (key == GUI_KEY_DOWN) { hv()->scroll += 1; }
+    else if (key == GUI_KEY_PGUP)   { hv()->scroll -= 16; }
+    else if (key == GUI_KEY_PGDOWN) { hv()->scroll += 16; }
+    else if (key == GUI_KEY_HOME) { hv()->scroll = 0; }
+    else if (key == GUI_KEY_END)  { hv()->scroll = total_rows - 1; }
     else return 0;
 
-    if (st->hexview_scroll < 0) st->hexview_scroll = 0;
-    if (st->hexview_scroll > total_rows - 1) st->hexview_scroll = total_rows > 0 ? total_rows - 1 : 0;
+    if (hv()->scroll < 0) hv()->scroll = 0;
+    if (hv()->scroll > total_rows - 1) hv()->scroll = total_rows > 0 ? total_rows - 1 : 0;
     return 1;
 }
 

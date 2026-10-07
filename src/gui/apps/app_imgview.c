@@ -10,29 +10,46 @@
 #include "../../fs.h"
 #include "../../string.h"
 
+/* 图片查看器私有状态。原先挂在全局 gui_state_t 上；实测只有本文件使用
+ * （gui.c 仅在打开文件时调用 app_imgview_set_path()）。字段去 imgview_
+ * 前缀，结构体内已无歧义。 */
+typedef struct {
+    char path[GUI_PATH_MAX];
+    int  loaded;
+    int  error;              /* 解码失败（非 BMP/非 24 位/太大等） */
+    int  w, h;
+    int  scroll_x, scroll_y;
+} imgview_state_t;
+
+static imgview_state_t g_imgview;
+static imgview_state_t *iv(void) { return &g_imgview; }
+
+
 static uint8_t g_imgview_rgb[IMGVIEW_MAX_W * IMGVIEW_MAX_H * 3];
 
 void app_imgview_set_path(gui_state_t *st, const char *path) {
+    (void)st;   /* 状态已私有化 */
     uint32_t i = 0;
-    while (path && path[i] && i + 1 < sizeof(st->imgview_path)) {
-        st->imgview_path[i] = path[i];
+    while (path && path[i] && i + 1 < sizeof(iv()->path)) {
+        iv()->path[i] = path[i];
         i++;
     }
-    st->imgview_path[i] = 0;
-    st->imgview_loaded = 0;
-    st->imgview_error = 0;
-    st->imgview_scroll_x = 0;
-    st->imgview_scroll_y = 0;
+    iv()->path[i] = 0;
+    iv()->loaded = 0;
+    iv()->error = 0;
+    iv()->scroll_x = 0;
+    iv()->scroll_y = 0;
 }
 
 static void imgview_load(gui_state_t *st) {
-    if (st->imgview_loaded) return;
-    st->imgview_loaded = 1;
-    st->imgview_error = 1;
-    st->imgview_w = 0;
-    st->imgview_h = 0;
+    (void)st;   /* 状态已私有化 */
+    if (iv()->loaded) return;
+    iv()->loaded = 1;
+    iv()->error = 1;
+    iv()->w = 0;
+    iv()->h = 0;
 
-    file_t *f = fs_find_file(st->imgview_path);
+    file_t *f = fs_find_file(iv()->path);
     if (!f || f->size < 8) return;
 
     /* 借用像素缓冲区末尾的空间当读取暂存区不合适（解码时还要用），
@@ -61,12 +78,13 @@ static void imgview_load(gui_state_t *st) {
                         IMGVIEW_MAX_W, IMGVIEW_MAX_H, &w, &h);
     }
     if (ok < 0) return;
-    st->imgview_w = w;
-    st->imgview_h = h;
-    st->imgview_error = 0;
+    iv()->w = w;
+    iv()->h = h;
+    iv()->error = 0;
 }
 
 static void app_imgview_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) {
+    (void)st;   /* 状态已私有化 */
     imgview_load(st);
 
     int aw = win_w - 60;
@@ -76,7 +94,7 @@ static void app_imgview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
 
     char line[GUI_PATH_MAX + 32];
     uint32_t pos = 0; line[0] = 0;
-    gui_append_str(line, sizeof(line), &pos, st->imgview_path[0] ? st->imgview_path : "(未选择文件)");
+    gui_append_str(line, sizeof(line), &pos, iv()->path[0] ? iv()->path : "(未选择文件)");
     gui_text_clipped(tx, ty, tx + aw, line, UI_FG, 1);
     gui_rect(tx, ty + 20, aw, 1, UI_SURFACE3);
 
@@ -84,7 +102,7 @@ static void app_imgview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     int content_h = ah - 28;
     if (content_h < 0) content_h = 0;
 
-    if (st->imgview_error || st->imgview_w == 0) {
+    if (iv()->error || iv()->w == 0) {
         gui_text(tx, content_y + 8,
                  "无法显示：不是 BMP，或不是未压缩 24 位格式，或尺寸超过 512x384",
                  UI_ERR, 1);
@@ -92,30 +110,31 @@ static void app_imgview_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     }
 
     /* 图片比可视区域大时按滚动偏移平移显示；on_key 里做边界钳制 */
-    int draw_x = tx - st->imgview_scroll_x;
-    int draw_y = content_y - st->imgview_scroll_y;
-    gui_blit_rgb888(draw_x, draw_y, g_imgview_rgb, st->imgview_w, st->imgview_h,
+    int draw_x = tx - iv()->scroll_x;
+    int draw_y = content_y - iv()->scroll_y;
+    gui_blit_rgb888(draw_x, draw_y, g_imgview_rgb, iv()->w, iv()->h,
                      tx, content_y, aw, content_h);
 
     pos = 0; line[0] = 0;
-    gui_append_uint(line, sizeof(line), &pos, (uint32_t)st->imgview_w);
+    gui_append_uint(line, sizeof(line), &pos, (uint32_t)iv()->w);
     gui_append_str(line, sizeof(line), &pos, " x ");
-    gui_append_uint(line, sizeof(line), &pos, (uint32_t)st->imgview_h);
+    gui_append_uint(line, sizeof(line), &pos, (uint32_t)iv()->h);
     gui_text(tx, ty + ah - 16, line, UI_DIM, 1);
 }
 
 static int app_imgview_key(gui_state_t *st, int key) {
+    (void)st;   /* 状态已私有化 */
     int step = 24;
-    if (key == GUI_KEY_LEFT)  { st->imgview_scroll_x -= step; }
-    else if (key == GUI_KEY_RIGHT) { st->imgview_scroll_x += step; }
-    else if (key == GUI_KEY_UP)    { st->imgview_scroll_y -= step; }
-    else if (key == GUI_KEY_DOWN)  { st->imgview_scroll_y += step; }
+    if (key == GUI_KEY_LEFT)  { iv()->scroll_x -= step; }
+    else if (key == GUI_KEY_RIGHT) { iv()->scroll_x += step; }
+    else if (key == GUI_KEY_UP)    { iv()->scroll_y -= step; }
+    else if (key == GUI_KEY_DOWN)  { iv()->scroll_y += step; }
     else return 0;
 
-    if (st->imgview_scroll_x < 0) st->imgview_scroll_x = 0;
-    if (st->imgview_scroll_y < 0) st->imgview_scroll_y = 0;
-    if (st->imgview_scroll_x > st->imgview_w) st->imgview_scroll_x = st->imgview_w;
-    if (st->imgview_scroll_y > st->imgview_h) st->imgview_scroll_y = st->imgview_h;
+    if (iv()->scroll_x < 0) iv()->scroll_x = 0;
+    if (iv()->scroll_y < 0) iv()->scroll_y = 0;
+    if (iv()->scroll_x > iv()->w) iv()->scroll_x = iv()->w;
+    if (iv()->scroll_y > iv()->h) iv()->scroll_y = iv()->h;
     return 1;
 }
 
