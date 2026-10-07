@@ -7,6 +7,12 @@
 #include "../../core/task.h"
 #include "../../core/pmm.h"
 
+/* 任务管理器私有状态：原先挂在全局 gui_state_t。
+ * 选中行 + 每秒刷新节流，只有本文件使用。 */
+static int g_taskmgr_selected;
+static uint8_t g_taskmgr_last_sec;
+
+
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -79,10 +85,11 @@ static int tm_visible_rows(int win_h) {
 }
 
 static void tm_clamp_selection(gui_state_t *st) {
+    (void)st;   /* 状态已私有化 */
     int count = task_get_count();
-    if (count <= 0) { st->taskmgr_selected = 0; return; }
-    if (st->taskmgr_selected >= count) st->taskmgr_selected = count - 1;
-    if (st->taskmgr_selected < 0) st->taskmgr_selected = 0;
+    if (count <= 0) { g_taskmgr_selected = 0; return; }
+    if (g_taskmgr_selected >= count) g_taskmgr_selected = count - 1;
+    if (g_taskmgr_selected < 0) g_taskmgr_selected = 0;
 }
 
 static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) {
@@ -109,7 +116,7 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         const task_t *t = task_get_active((uint32_t)i);
         if (!t) break;
         int ry = ty + TM_LIST_TOP + i * TM_ROW_H;
-        if (i == st->taskmgr_selected) {
+        if (i == g_taskmgr_selected) {
             gui_rect(tx - 8, ry - 3, aw + 16, TM_ROW_H - 2, UI_ACCENT);
         }
         uint32_t pos = 0; line[0] = 0;
@@ -168,7 +175,7 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
 
 static void tm_kill_selected(gui_state_t *st) {
     tm_clamp_selection(st);
-    const task_t *t = task_get_active((uint32_t)st->taskmgr_selected);
+    const task_t *t = task_get_active((uint32_t)g_taskmgr_selected);
     if (!t || t->id == 0) { st->status = "无法结束该任务"; return; }
     if (task_kill(t->id, 15) == 0) st->status = "已发送结束信号";
     else st->status = "结束任务失败";
@@ -177,11 +184,11 @@ static void tm_kill_selected(gui_state_t *st) {
 static int app_taskmgr_key(gui_state_t *st, int key) {
     int count = task_get_count();
     if (key == GUI_KEY_UP) {
-        if (st->taskmgr_selected > 0) st->taskmgr_selected--;
+        if (g_taskmgr_selected > 0) g_taskmgr_selected--;
         return 1;
     }
     if (key == GUI_KEY_DOWN) {
-        if (st->taskmgr_selected < count - 1) st->taskmgr_selected++;
+        if (g_taskmgr_selected < count - 1) g_taskmgr_selected++;
         return 1;
     }
     if (key == GUI_KEY_DELETE || key == GUI_KEY_BACKSPACE) {
@@ -192,6 +199,7 @@ static int app_taskmgr_key(gui_state_t *st, int key) {
 }
 
 static int app_taskmgr_click(gui_state_t *st, int mx, int my, int tx, int ty, int win_w, int win_h) {
+    (void)st;   /* 状态已私有化 */
     int aw = tm_avail_w(win_w);
     int rows = tm_visible_rows(win_h);
     int count = task_get_count();
@@ -199,7 +207,7 @@ static int app_taskmgr_click(gui_state_t *st, int mx, int my, int tx, int ty, in
         int ry = ty + TM_LIST_TOP + i * TM_ROW_H;
         if (my >= ry - 3 && my < ry + TM_ROW_H - 2 &&
             mx >= tx - 8 && mx < tx + aw + 8) {
-            st->taskmgr_selected = i;
+            g_taskmgr_selected = i;
             return 1;
         }
     }
@@ -208,8 +216,8 @@ static int app_taskmgr_click(gui_state_t *st, int mx, int my, int tx, int ty, in
 
 static int app_taskmgr_tick(gui_state_t *st) {
     uint8_t sec = tm_cmos_second();
-    if (sec == st->taskmgr_last_sec) return 0;
-    st->taskmgr_last_sec = sec;
+    if (sec == g_taskmgr_last_sec) return 0;
+    g_taskmgr_last_sec = sec;
     return tm_window_visible(st);
 }
 

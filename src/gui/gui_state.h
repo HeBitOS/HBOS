@@ -120,12 +120,9 @@ typedef struct gui_state {
     const char *status;
     int splash_ticks;
     int snap_preview;
-    uint8_t clock_last_sec;
+    /* 时钟状态已迁出：app_clock.c 的 g_clock_last_sec。 */
     int switcher_ticks;
-    /* 任务管理器：选中行 + 每秒刷新节流（复用 CMOS 秒计数思路，见
-     * app_clock.c 的 clock_last_sec，taskmgr 单独一份避免和时钟耦合） */
-    int taskmgr_selected;
-    uint8_t taskmgr_last_sec;
+    /* 任务管理器状态已迁出：app_taskmgr.c 的私有变量。 */
     int  toast_ticks;       /* >0 时显示 toast 通知（每帧自减） */
     char toast_msg[80];     /* toast 文本 */
     /* 开始菜单搜索 */

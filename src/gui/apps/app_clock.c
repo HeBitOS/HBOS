@@ -4,6 +4,11 @@
 #include "../../string.h"
 #include "../../rtc_tz.h"
 
+/* 时钟私有状态：原先挂在全局 gui_state_t 的 clock_last_sec。
+ * 只有本文件使用（gui.c 对该字段零引用），故一并迁出。 */
+static uint8_t g_clock_last_sec;
+
+
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -150,8 +155,8 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
 
 static int app_clock_tick(gui_state_t *st) {
     uint8_t sec = cmos_second();
-    if (sec == st->clock_last_sec) return 0;
-    st->clock_last_sec = sec;
+    if (sec == g_clock_last_sec) return 0;
+    g_clock_last_sec = sec;
     return clock_visible(st);
 }
 
