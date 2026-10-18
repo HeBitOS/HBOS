@@ -10,7 +10,10 @@
 	url = https://github.com/Mbed-TLS/mbedtls.git
 [submodule "third_party/lwip"]
 	path = third_party/lwip
-	url = https://https.git.savannah.gnu.org/git/lwip.git
+	url = https://git.savannah.gnu.org/git/lwip.git
 [submodule "HIVE"]
 	path = HIVE
 	url = https://github.com/HeBitOS/HIVE.git
+[submodule "HAX-Compile"]
+	path = HAX-Compile
+	url = https://github.com/HeBitOS/HAX-Compile.git

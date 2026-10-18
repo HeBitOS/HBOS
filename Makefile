@@ -336,7 +336,12 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke xhci-smoke chromium-baseline browser-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke xhci-smoke chromium-baseline browser-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps
+
+# 全新 clone 的第一站：递归拉子模块（含 mbedtls 嵌套）+ 检查宿主机工具。
+# 幂等，不发 sudo、不装包，缺包时只打印安装命令。
+deps:
+	bash scripts/fetch-deps.sh
 
 all: iso
 
@@ -350,6 +355,7 @@ help:
 	@echo "  make xhci-smoke Boot-test xHCI keyboard and mouse enumeration"
 	@echo "  make chromium-baseline  Check module/API compatibility baseline"
 	@echo "  make browser-test  Run browser backend capability-gate tests"
+	@echo "  make deps       Check/complete submodules and host build dependencies"
 	@echo "  make hive-test  Run HIVE widget event/layout unit tests"
 	@echo "  make hive-sync  Export the transitional runtime/SDK mirror to HIVE_REPO"
 	@echo "  make linux-compat-lib  Build opt-in Linux source compatibility library"
@@ -849,7 +855,7 @@ HAX_APPS_MK := $(wildcard $(HAX_COMPILE_DIR)/mk/hax-apps.mk)
 ifneq ($(strip $(HAX_APPS_MK)),)
 include $(HAX_APPS_MK)
 else
-$(error HAX-Compile 模块缺失：找不到 $(HAX_COMPILE_DIR)/mk/hax-apps.mk。请 clone 到 HAX-Compile/ 子模块或 ../HAX-Compile 兄弟目录（https://github.com/HeBitOS/HAX-Compile.git）)
+$(error HAX-Compile 模块缺失：找不到 $(HAX_COMPILE_DIR)/mk/hax-apps.mk。修法：make deps（等价于 git submodule update --init --recursive），或 make HBOS_BUNDLE_APPS=0 先跳过 .hax 应用；详见 README「全新 clone 构建不动」)
 endif
 HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_DIR_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax \
 	$(BUILD_DIR)/app/js.hax $(BUSYBOX_HAX)
