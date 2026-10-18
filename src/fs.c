@@ -9,6 +9,7 @@
 #include "fat32.h"
 #include "fs.h"
 #include "partition.h"
+#include "exfat.h"
 #include "graphics/graphics.h"
 #include "string.h"
 #include "sys/stat.h"
@@ -29,6 +30,7 @@ typedef enum {
     FS_BACKEND_HBFS,    /**< 磁盘文件系统后端 */
     FS_BACKEND_EXT2,    /**< EXT2 文件系统后端 */
     FS_BACKEND_FAT32,   /**< FAT32 文件系统后端 */
+    FS_BACKEND_EXFAT,   /**< exFAT 文件系统后端（只读） */
 } fs_backend_t;
 
 /** HBFS 超级块结构，存储在分区第一个扇区 */
@@ -601,6 +603,86 @@ static int fat32_try_mount(void) {
     return -1;
 }
 
+
+/* ── exFAT 后端（只读）──────────────────────────────────────────
+ * 只提供 read：写入涉及分配位图与目录项校验和，尚未实现。文件表只展开
+ * 根目录，子目录后续再说（先满足"插上 U 盘能看能读"）。 */
+static exfat_fs_t exfat_fs;
+
+static int exfat_part_read(void *ctx, uint64_t lba, void *buf) {
+    (void)ctx;
+    if (lba > 0xFFFFFFFFull) return -1;
+    return block_read_sector((uint32_t)lba, (uint8_t *)buf);
+}
+
+static int exfat_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count) {
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used || !buf) return 0;
+    int n = exfat_read_file(&exfat_fs, f->disk_slot, f->size, offset, buf, count);
+    return n < 0 ? 0 : n;
+}
+
+static int exfat_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count) {
+    (void)node; (void)offset; (void)buf; (void)count;
+    return -1;   /* 只读 */
+}
+static int exfat_vfs_truncate(vfs_node_t *node) { (void)node; return -1; }
+static int exfat_vfs_unlink(vfs_node_t *node) { (void)node; return -1; }
+
+static const vfs_ops_t exfat_ops = {
+    .read = exfat_vfs_read,
+    .write = exfat_vfs_write,
+    .truncate = exfat_vfs_truncate,
+    .unlink = exfat_vfs_unlink,
+};
+
+static void exfat_rebuild_files(void) {
+    static exfat_dirent_t ents[64];
+    fs.file_count = 0;
+    int n = exfat_list_root(&exfat_fs, ents, 64);
+    if (n < 0) return;
+
+    for (int i = 0; i < n && fs.file_count < MAX_FILES; i++) {
+        if (ents[i].attr & 0x10) continue;          /* 目录：暂不展开 */
+        file_t *f = &fs.files[fs.file_count];
+        f->size = ents[i].size > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)ents[i].size;
+        f->capacity = f->size;
+        f->data = NULL;
+        f->disk_slot = ents[i].first_cluster;
+        f->used = 1;
+        f->type = 0;
+        f->node.type = VFS_NODE_FILE;
+        f->node.size = f->size;
+        f->node.capacity = f->capacity;
+        f->node.private_data = f;
+        f->node.ops = &exfat_ops;
+        f->node.uid = 0;
+        f->node.gid = 0;
+        f->node.mode = S_IFREG | 0444;
+        strncpy(f->name, ents[i].name, MAX_FILENAME - 1);
+        f->name[MAX_FILENAME - 1] = 0;
+        fs.file_count++;
+    }
+}
+
+/* exFAT 与 NTFS 共用 0x07（MS basic data），靠签名区分。 */
+static int exfat_try_mount(void) {
+    static partition_entry_t parts[PART_MAX_ENTRIES];
+    int n = partition_parse(fs_part_read, NULL, parts, PART_MAX_ENTRIES);
+    if (n < 0) return -1;
+
+    for (int i = 0; i < n; i++) {
+        if (parts[i].type != 0x07) continue;
+        if (parts[i].start_lba > 0xFFFFFFFFull) continue;
+        if (exfat_mount(&exfat_fs, exfat_part_read, NULL, parts[i].start_lba) == 0) {
+            hbfs_start_lba = (uint32_t)parts[i].start_lba;
+            hbfs_total_sectors = (uint32_t)parts[i].sectors;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 /**
  * 从磁盘读取文件数据
  * @param f      目标文件
@@ -1047,6 +1129,13 @@ int fs_retry_mount(void) {
         fs.total_sectors = block_sector_count();
         return 0;
     }
+    if (exfat_try_mount() == 0) {
+        console_write("fs: exfat mounted\n", 18);
+        fs_backend = FS_BACKEND_EXFAT;
+        exfat_rebuild_files();
+        fs.total_sectors = hbfs_total_sectors;
+        return 0;
+    }
     if (fat32_try_mount() == 0) {
         console_write("fs: fat32 mounted\n", 18);
         fs_backend = FS_BACKEND_FAT32;
@@ -1080,6 +1169,12 @@ int fs_mount_partition(int index) {
     hbfs_start_lba = start;
     hbfs_total_sectors = secs;
 
+    if (exfat_mount(&exfat_fs, exfat_part_read, NULL, start) == 0) {
+        fs_backend = FS_BACKEND_EXFAT;
+        exfat_rebuild_files();
+        fs.total_sectors = secs;
+        return 0;
+    }
     if (fat32_mount(start, &fat32_fs) == 0) {
         fs_backend = FS_BACKEND_FAT32;
         fat32_rebuild_files();
@@ -1582,13 +1677,15 @@ int fs_sync(void) {
 
 /** 判断当前后端是否为磁盘文件系统 */
 int fs_is_disk(void) {
-    return fs_backend == FS_BACKEND_HBFS || fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_FAT32;
+    return fs_backend == FS_BACKEND_HBFS || fs_backend == FS_BACKEND_EXT2 ||
+           fs_backend == FS_BACKEND_FAT32 || fs_backend == FS_BACKEND_EXFAT;
 }
 
 /** 获取当前后端名称字符串 */
 const char *fs_backend_name(void) {
     static char name[16];
     if (fs_backend == FS_BACKEND_EXT2) return "ext2";
+    if (fs_backend == FS_BACKEND_EXFAT) return "exfat";
     if (fs_backend == FS_BACKEND_FAT32) return "fat32";
     if (fs_backend != FS_BACKEND_HBFS) return "ramfs";
     const char *blk = block_backend_name();
@@ -1619,6 +1716,10 @@ uint32_t fs_capacity_bytes(void) {
      * uint32_t，超过 4GiB 的分区饱和到 0xFFFFFFFF。 */
     if (fs_backend == FS_BACKEND_FAT32) {
         uint64_t bytes = (uint64_t)fat32_fs.bpb.total_sectors_32 * BLOCK_SECTOR_SIZE;
+        return bytes > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)bytes;
+    }
+    if (fs_backend == FS_BACKEND_EXFAT) {
+        uint64_t bytes = (uint64_t)hbfs_total_sectors * BLOCK_SECTOR_SIZE;
         return bytes > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)bytes;
     }
     return MAX_FILES * RAMFS_MAX_FILE_SIZE;
@@ -1701,6 +1802,10 @@ file_t *fs_create_file(const char *name) {
     if (!normalize_path(name, norm)) return NULL;
     file_t *existing = fs_find_file(norm);
     if (existing) return existing;
+    if (fs_backend == FS_BACKEND_EXFAT) {   /* 只读后端 */
+        (void)fs_fail("exFAT 当前为只读");
+        return NULL;
+    }
 
     if (fs_backend == FS_BACKEND_EXT2) {
         char basename[MAX_FILENAME];
