@@ -478,12 +478,12 @@ static int utf8_to_utf16(const char *s, uint16_t *out, int cap) {
 }
 
 /* 找一段能放下 entries 个 32B 目录项的空位（必须在同一扇区内）。 */
-static int find_dir_slots(exfat_fs_t *fs, uint32_t entries,
+static int find_dir_slots(exfat_fs_t *fs, uint32_t dir_cluster, uint32_t entries,
                           uint64_t *lba_out, uint32_t *off_out) {
     uint8_t sec[1024];
     if (fs->bytes_per_sector > sizeof(sec)) return -1;
     uint32_t need = entries * 32;
-    uint32_t cluster = fs->root_cluster;
+    uint32_t cluster = dir_cluster;
     for (uint32_t guard = 0; guard < fs->cluster_count; guard++) {
         uint64_t base = cluster_lba(fs, cluster);
         for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
@@ -503,8 +503,8 @@ static int find_dir_slots(exfat_fs_t *fs, uint32_t entries,
     return -1;
 }
 
-int exfat_create_file(exfat_fs_t *fs, const char *name,
-                      const void *data, uint32_t size) {
+static int create_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
+                         const void *data, uint32_t size) {
     if (!fs || !fs->wr || !name || !name[0]) return -1;
 
     uint16_t uname[256];
@@ -578,7 +578,7 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
 
     uint64_t lba = 0;
     uint32_t off = 0;
-    if (find_dir_slots(fs, 3, &lba, &off) < 0) return -1;
+    if (find_dir_slots(fs, dir_cluster, 3, &lba, &off) < 0) return -1;
 
     uint8_t sec[1024];
     if (fs->bytes_per_sector > sizeof(sec)) return -1;
@@ -586,6 +586,18 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
     for (int i = 0; i < 96; i++) sec[off + i] = set[i];
     if (write_sector(fs, lba, sec) < 0) return -1;
     return 0;
+}
+
+int exfat_create_file(exfat_fs_t *fs, const char *name,
+                      const void *data, uint32_t size) {
+    if (!fs) return -1;
+    return create_in_dir(fs, fs->root_cluster, name, data, size);
+}
+
+int exfat_create_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
+                        const void *data, uint32_t size) {
+    if (!fs || dir_cluster < 2) return -1;
+    return create_in_dir(fs, dir_cluster, name, data, size);
 }
 
 /* ── 在已有文件上写（可扩展）────────────────────────────────── */
@@ -599,11 +611,12 @@ typedef struct {
 
 /* 在根目录里按名字找文件项集合。名字项必须和 0x85/0xC0 在同一扇区
  * （创建路径就是这么写的；更长的名字后续再支持）。 */
-static int find_file_entry(exfat_fs_t *fs, const uint16_t *want, int wlen,
+static int find_file_entry(exfat_fs_t *fs, uint32_t dir_cluster,
+                           const uint16_t *want, int wlen,
                            entry_loc_t *out) {
     uint8_t sec[1024];
     if (fs->bytes_per_sector > sizeof(sec)) return -1;
-    uint32_t cluster = fs->root_cluster;
+    uint32_t cluster = dir_cluster;
 
     for (uint32_t guard = 0; guard < fs->cluster_count; guard++) {
         uint64_t base = cluster_lba(fs, cluster);
@@ -658,8 +671,8 @@ static int chain_count(exfat_fs_t *fs, uint32_t first) {
     return (int)n;
 }
 
-int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
-                     const void *data, uint32_t len) {
+static int write_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
+                        uint64_t offset, const void *data, uint32_t len) {
     if (!fs || !fs->wr || !name) return -1;
     if (offset && !data) return -1;
 
@@ -667,7 +680,7 @@ int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
     int nlen = utf8_to_utf16(name, uname, 255);
     if (nlen <= 0) return -1;
     entry_loc_t loc;
-    if (find_file_entry(fs, uname, nlen, &loc) < 0) return -1;
+    if (find_file_entry(fs, dir_cluster, uname, nlen, &loc) < 0) return -1;
     if (offset > loc.size) return -1;
 
     uint64_t new_size = loc.size;
@@ -729,4 +742,16 @@ int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
     fe[3] = (uint8_t)(sum >> 8);
 
     return write_sector(fs, loc.lba, sec);
+}
+
+int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
+                     const void *data, uint32_t len) {
+    if (!fs) return -1;
+    return write_in_dir(fs, fs->root_cluster, name, offset, data, len);
+}
+
+int exfat_write_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
+                       uint64_t offset, const void *data, uint32_t len) {
+    if (!fs || dir_cluster < 2) return -1;
+    return write_in_dir(fs, dir_cluster, name, offset, data, len);
 }

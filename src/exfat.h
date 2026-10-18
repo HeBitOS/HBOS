@@ -79,6 +79,14 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
 int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
                      const void *data, uint32_t len);
 
+/** 在指定目录（起始簇）里创建文件；exfat_create_file 等价于根目录。 */
+int exfat_create_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
+                        const void *data, uint32_t size);
+
+/** 在指定目录里按偏移写；exfat_write_file 等价于根目录。 */
+int exfat_write_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
+                       uint64_t offset, const void *data, uint32_t len);
+
 /** 卷标（最多 11 个 UTF-16 字符），无卷标返回空串。 */
 void exfat_volume_label(exfat_fs_t *fs, char *out, int cap);
 

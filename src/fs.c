@@ -621,6 +621,27 @@ static int exfat_part_write(void *ctx, uint64_t lba, const void *buf) {
     return block_write_sector((uint32_t)lba, (const uint8_t *)buf);
 }
 
+/* 把 "dir/file" 拆成父目录簇 + 叶子名。根目录返回 exfat_fs.root_cluster。
+ * 父目录必须在文件表里存在且是目录——exFAT 的目录项只存首簇，够了。 */
+static int exfat_split(const char *path, char *base, uint32_t *dir_cluster) {
+    const char *slash = strrchr(path, '/');
+    if (!slash) {
+        strcpy(base, path);
+        *dir_cluster = exfat_fs.root_cluster;
+        return 0;
+    }
+    uint32_t n = (uint32_t)(slash - path);
+    if (n == 0 || n >= MAX_FILENAME) return -1;
+    char parent[MAX_FILENAME];
+    memcpy(parent, path, n);
+    parent[n] = 0;
+    file_t *p = fs_find_file(parent);
+    if (!p || p->type != 1) return -1;
+    strcpy(base, slash + 1);
+    *dir_cluster = p->disk_slot;
+    return 0;
+}
+
 static int exfat_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used || !buf) return 0;
@@ -631,7 +652,10 @@ static int exfat_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t
 static int exfat_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used || (!buf && count)) return -1;
-    if (exfat_write_file(&exfat_fs, f->name, offset, buf, count) < 0) return -1;
+    char base[MAX_FILENAME];
+    uint32_t dir = 0;
+    if (exfat_split(f->name, base, &dir) < 0) return -1;
+    if (exfat_write_in_dir(&exfat_fs, dir, base, offset, buf, count) < 0) return -1;
     uint32_t end = offset + count;
     if (end > f->size) {
         f->size = end;
@@ -1871,9 +1895,13 @@ file_t *fs_create_file(const char *name) {
     file_t *existing = fs_find_file(norm);
     if (existing) return existing;
     if (fs_backend == FS_BACKEND_EXFAT) {
-        /* 只支持根目录、ASCII 名字（exfat_create_file 的限制） */
-        if (strchr(norm, '/')) { (void)fs_fail("exFAT 暂不支持子目录"); return NULL; }
-        if (exfat_create_file(&exfat_fs, norm, NULL, 0) < 0) {
+        char base[MAX_FILENAME];
+        uint32_t dir = 0;
+        if (exfat_split(norm, base, &dir) < 0) {
+            (void)fs_fail("exFAT 父目录不存在");
+            return NULL;
+        }
+        if (exfat_create_in_dir(&exfat_fs, dir, base, NULL, 0) < 0) {
             (void)fs_fail("exFAT 创建文件失败");
             return NULL;
         }

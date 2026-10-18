@@ -17,6 +17,13 @@ static uint8_t g_img[IMG_SECS * SEC];
 static int failures;
 #define CHECK(e) do { if (!(e)) { printf("  [FAIL] %s:%d %s\n", __FILE__, __LINE__, #e); failures++; } } while (0)
 
+static int mem_wr(void *ctx, uint64_t lba, const void *buf) {
+    (void)ctx;
+    if (lba >= IMG_SECS) return -1;
+    memcpy(g_img + (size_t)lba * SEC, buf, SEC);
+    return 0;
+}
+
 static int mem_rd(void *ctx, uint64_t lba, void *buf) {
     (void)ctx;
     if (lba >= IMG_SECS) return -1;
@@ -128,6 +135,19 @@ static void build_volume(void) {
     for (int i = 0; i < 6; i++) put16(fn + 2 + i * 2, (uint16_t)"IN.TXT"[i]);
     uint8_t *subdata = g_img + (HEAP_LBA + 19) * SEC;  /* 簇 21 */
     memcpy(subdata, "sub!\n", 5);
+
+    /* 分配位图（0x81）：簇 30，长度 8 字节，覆盖 64 个簇。
+     * 已用：2,3（根目录）、10（HI.TXT）、20（SUB）、21（IN.TXT）、30（位图） */
+    uint8_t *bmde = root + 224;
+    bmde[0] = 0x81;
+    put32(bmde + 20, 30);
+    put64(bmde + 24, 8);
+    uint8_t *bm = g_img + (HEAP_LBA + 28) * SEC;       /* 簇 30 */
+    int used[] = {2, 3, 10, 20, 21, 30};
+    for (unsigned i = 0; i < sizeof(used) / sizeof(used[0]); i++) {
+        int bit = used[i] - 2;
+        bm[bit / 8] |= (uint8_t)(1u << (bit % 8));
+    }
 }
 
 int main(int argc, char **argv) {
@@ -138,6 +158,7 @@ int main(int argc, char **argv) {
     build_volume();
     printf("[EXFAT] 挂载合成卷\n");
     CHECK(exfat_mount(&fs, mem_rd, NULL, 0) == 0);
+    fs.wr = mem_wr;
     CHECK(fs.bytes_per_sector == 512);
     CHECK(fs.root_cluster == 2);
 
@@ -173,6 +194,22 @@ int main(int argc, char **argv) {
     memset(buf, 0, sizeof(buf));
     CHECK(exfat_read_file(&fs, 21, 5, 0, buf, 5) == 5);
     CHECK(memcmp(buf, "sub!\n", 5) == 0);
+
+    printf("[EXFAT] 在子目录里创建\n");
+    CHECK(exfat_create_in_dir(&fs, 20, "IN2.TXT", "abc\n", 4) == 0);
+    exfat_dirent_t sub2[8];
+    int sn2 = exfat_list_dir(&fs, 20, sub2, 8);
+    CHECK(sn2 == 2);
+    int f2 = -1;
+    for (int i = 0; i < sn2; i++)
+        if (strcmp(sub2[i].name, "IN2.TXT") == 0) f2 = i;
+    CHECK(f2 >= 0);
+    if (f2 >= 0) {
+        memset(buf, 0, sizeof(buf));
+        CHECK(exfat_read_file(&fs, sub2[f2].first_cluster, sub2[f2].size,
+                              0, buf, 4) == 4);
+        CHECK(memcmp(buf, "abc\n", 4) == 0);
+    }
 
     printf("[EXFAT] 非 exFAT 镜像被拒绝\n");
     memset(g_img, 0, sizeof(g_img));
