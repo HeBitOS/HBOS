@@ -8,6 +8,8 @@
 #include "ext2.h"
 #include "fat32.h"
 #include "fs.h"
+#include "partition.h"
+#include "graphics/graphics.h"
 #include "string.h"
 #include "sys/stat.h"
 
@@ -89,6 +91,13 @@ static int fat32_vfs_unlink(vfs_node_t *node);
 static int fs_fail(const char *msg) {
     fs_error = msg;
     return -1;
+}
+
+/* 分区表解析用的读扇区回调（partition.c 与块设备解耦，见 partition.h）。 */
+static int fs_part_read(void *ctx, uint64_t lba, void *buf) {
+    (void)ctx;
+    if (lba > 0xFFFFFFFFull) return -1;
+    return block_read_sector((uint32_t)lba, (uint8_t *)buf);
 }
 
 /** 获取最近一次错误描述 */
@@ -559,15 +568,20 @@ static void fat32_rebuild_files(void) {
 
 /** 尝试挂载 FAT32 分区（扫描 MBR 中类型 0x0C 的分区） */
 static int fat32_try_mount(void) {
-    uint8_t mbr[512] __attribute__((aligned(2)));
-    if (block_read_sector(0, mbr) < 0) return -1;
-    for (int i = 0; i < 4; i++) {
-        uint8_t *e = mbr + 446 + i * 16;
-        uint8_t type = e[4];
-        if (type != 0x0B && type != 0x0C) continue;
-        uint32_t p_start = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
-                           ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
-        if (p_start == 0) continue;
+    static partition_entry_t parts[PART_MAX_ENTRIES];
+    int n = partition_parse(fs_part_read, NULL, parts, PART_MAX_ENTRIES);
+    if (n < 0) return -1;
+
+    /* 有分区表：按条目挂（MBR 0x0B/0x0C；GPT 的 MS basic data 也映射到 0x07，
+     * 这里只认 FAT32 类型，避免把 NTFS/exFAT 当 FAT32 挂）。 */
+    for (int i = 0; i < n; i++) {
+        uint8_t type = parts[i].type;
+        /* GPT 上 FAT32 通常落在 "MS basic data"（映射成 0x07），ESP 也是
+         * FAT；类型码不足以区分，直接让 fat32_mount 用 BPB 去验。 */
+        if (!(type == 0x0B || type == 0x0C || type == 0x07 || type == 0xEF))
+            continue;
+        if (parts[i].start_lba > 0xFFFFFFFFull) continue;
+        uint32_t p_start = (uint32_t)parts[i].start_lba;
         if (fat32_mount(p_start, &fat32_fs) == 0) {
             /* diskmgr 的 part/usage 行读 hbfs_* 全局（fs_disk_start_lba 等），
              * 挂上 FAT32 后同步成真实分区范围，别让它们停留在 HBFS 探测时
@@ -576,6 +590,13 @@ static int fat32_try_mount(void) {
             hbfs_total_sectors = fat32_fs.bpb.total_sectors_32;
             return 0;
         }
+    }
+
+    /* 无分区表（superfloppy）：整盘就是 FAT32。 */
+    if (n == 0 && fat32_mount(0, &fat32_fs) == 0) {
+        hbfs_start_lba = 0;
+        hbfs_total_sectors = fat32_fs.bpb.total_sectors_32;
+        return 0;
     }
     return -1;
 }
@@ -1020,12 +1041,14 @@ int fs_retry_mount(void) {
     if (block_init() < 0) return -1;
     if (fs_mount_disk() == 0) return 0;
     if (ext2_try_mount() == 0) {
+        console_write("fs: ext2 mounted\n", 17);
         fs_backend = FS_BACKEND_EXT2;
         ext2_rebuild_files();
         fs.total_sectors = block_sector_count();
         return 0;
     }
     if (fat32_try_mount() == 0) {
+        console_write("fs: fat32 mounted\n", 18);
         fs_backend = FS_BACKEND_FAT32;
         fat32_rebuild_files();
         fs.total_sectors = block_sector_count();
@@ -1493,16 +1516,14 @@ int fs_mount_disk(void) {
 
 /** 尝试挂载 EXT2 分区（扫描 MBR 中类型 0x83 的分区） */
 static int ext2_try_mount(void) {
-    uint8_t mbr[512] __attribute__((aligned(2)));
-    if (block_read_sector(0, mbr) < 0) return -1;
-    for (int i = 0; i < 4; i++) {
-        uint8_t *e = mbr + 446 + i * 16;
-        uint8_t type = e[4];
-        if (type != 0x83) continue;
-        uint32_t p_start = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
-                           ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
-        if (p_start == 0) continue;
-        if (ext2_mount(p_start, &ext2_fs) == 0) return 0;
+    static partition_entry_t parts[PART_MAX_ENTRIES];
+    int n = partition_parse(fs_part_read, NULL, parts, PART_MAX_ENTRIES);
+    if (n < 0) return -1;
+
+    for (int i = 0; i < n; i++) {
+        if (parts[i].type != 0x83) continue;   /* Linux 数据分区（含 GPT 映射） */
+        if (parts[i].start_lba > 0xFFFFFFFFull) continue;
+        if (ext2_mount((uint32_t)parts[i].start_lba, &ext2_fs) == 0) return 0;
     }
     return -1;
 }
