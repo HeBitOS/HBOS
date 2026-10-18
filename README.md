@@ -31,7 +31,7 @@ HBOS 从引导、内核、驱动、文件系统、网络栈到桌面环境均以
 | 终端 | framebuffer/VGA 输出、ANSI 颜色、UTF-8/CJK、Shell 与命令历史 |
 | 桌面 | [HIVE](https://github.com/HeBitOS/HIVE) 桌面、窗口管理、合成器、应用启动器 |
 | 应用 | TinyCC、BusyBox applets、文件管理器、终端、编辑器、计算器、浏览器等 |
-| 存储 | ramfs、FAT32、HBFS、AHCI 优先并回退 ATA PIO |
+| 存储 | ramfs、FAT32、HBFS、NVMe → AHCI → ATA PIO → USB MSC 自动选择 |
 | 网络 | E1000、DHCP、ARP、ICMP、DNS、TCP、HTTP/HTTPS、用户态 socket API |
 | 输入 | PS/2 键鼠、USB xHCI + EHCI HID 键鼠（含 HID 报告描述符解析） |
 

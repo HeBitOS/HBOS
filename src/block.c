@@ -11,6 +11,7 @@
 #include "block.h"
 #include "xhci.h"
 #include "usb_msc.h"
+#include "nvme.h"
 
 /** 当前选中的块设备后端 */
 static block_backend_t backend = BLOCK_BACKEND_NONE;
@@ -24,6 +25,13 @@ static uint32_t sectors = 0;
  * @return 0 成功，-1 无可用设备
  */
 int block_init(void) {
+    /* NVMe 优先：现代真机上通常只有 NVMe，AHCI/ATA 是兼容路径 */
+    if (nvme_init() == 0 && nvme_sector_count() > 0) {
+        backend = BLOCK_BACKEND_NVME;
+        sectors = nvme_sector_count();
+        return 0;
+    }
+
     /* Initialize xHCI early to support USB storage detection during mount */
     (void)xhci_init();
     if (msc_init() > 0 && msc_get_block_count(0) > 0 &&
@@ -76,6 +84,8 @@ int block_read_sectors(uint32_t lba, uint8_t *buffer, uint32_t count) {
         }
         return 0;
     }
+    if (backend == BLOCK_BACKEND_NVME)
+        return nvme_read_sectors(lba, buffer, count);
     if (backend == BLOCK_BACKEND_AHCI)
         return ahci_read_sectors(lba, buffer, count);
     if (backend == BLOCK_BACKEND_ATA) {
@@ -110,6 +120,8 @@ int block_write_sectors(uint32_t lba, const uint8_t *buffer, uint32_t count) {
         }
         return 0;
     }
+    if (backend == BLOCK_BACKEND_NVME)
+        return nvme_write_sectors(lba, buffer, count);
     if (backend == BLOCK_BACKEND_AHCI)
         return ahci_write_sectors(lba, buffer, count);
     if (backend == BLOCK_BACKEND_ATA) {
@@ -133,6 +145,7 @@ block_backend_t block_backend(void) {
 
 /** 获取当前块设备后端名称字符串 */
 const char *block_backend_name(void) {
+    if (backend == BLOCK_BACKEND_NVME) return "nvme";
     if (backend == BLOCK_BACKEND_USB) return "usb";
     if (backend == BLOCK_BACKEND_AHCI) return "ahci";
     if (backend == BLOCK_BACKEND_ATA) return "ata";

@@ -219,6 +219,7 @@ C_SRCS = \
 	$(SRC_DIR)/tls.c \
 	$(SRC_DIR)/block.c \
 	$(SRC_DIR)/ahci.c \
+	$(SRC_DIR)/nvme.c \
 	$(SRC_DIR)/fs.c \
 	$(SRC_DIR)/vfs.c \
 	$(SRC_DIR)/ata.c \
