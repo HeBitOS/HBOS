@@ -34,4 +34,8 @@ void gui_window_metrics(gui_state_t *st, int w, int h, const wm_window_t *win,
 /* 把 st->app_mode / active 同步到当前活跃窗口（键盘/定时器分发前调用） */
 void gui_sync_focus(gui_state_t *st);
 
+/* 打开文件面板窗口。文件统计（UWC）这类"需要先选一个文件"的应用靠它
+ * 提供站内入口，不必让用户自己去开文件管理器（issue #8）。 */
+void gui_open_files_panel(gui_state_t *st);
+
 #endif

@@ -97,7 +97,15 @@ typedef struct ui_window {
      * 记为常规"的错配（实测：宽度回到最大化值而状态是 NORMAL）。
      */
     ui_win_state_t state_before_min;
-    ui_rect_t     restore;               /**< 最大化前的几何 */
+    ui_rect_t     restore;               /**< 最大化/吸附前的几何 */
+    /**
+     * @brief 当前吸附方向（WM_SNAP_*，0 表示未吸附）。
+     *
+     * 单独记一个字段，是因为吸附后的 state 仍然是 NORMAL——只看 state 无法
+     * 区分"用户手拖成半屏"和"系统吸附成半屏"。拖标题栏时据此把窗口还原到
+     * 吸附前的宽高，否则窗口会一直卡在半屏尺寸。
+     */
+    int           snap_side;
 
     bool     focused;
     bool     dirty;

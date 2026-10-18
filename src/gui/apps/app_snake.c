@@ -3,6 +3,7 @@
 #include "gui_draw.h"
 #include "../gui_panel.h"
 #include "../../string.h"
+#include "../../core/cpu.h"   /* pit_get_ticks / pit_ticks_from_ms */
 
 /* ── 贪吃蛇私有状态 ───────────────────────────────────────────
  * 12 个字段原先挂在全局 gui_state_t 上；实测只有本文件使用（gui.c 仅在
@@ -18,7 +19,7 @@ typedef struct {
     int len;
     int dx, dy;               /* 行进方向 */
     int alive;
-    int last_sec;             /* 上一步的秒数（按秒推进） */
+    uint64_t last_tick;       /* 上一步的 PIT tick（按毫秒推进，不再按秒） */
     int body_x[SNAKE_MAX];
     int body_y[SNAKE_MAX];
 } snake_state_t;
@@ -96,7 +97,7 @@ void app_snake_reset(gui_state_t *st) {
     s->y = s->body_y[0];
     s->tx = 10;
     s->ty = 4;
-    s->last_sec = snake_cmos_second();
+    s->last_tick = 0;
     snake_place_food(st);
     st->status = "贪吃蛇已开始";
 }
@@ -208,9 +209,21 @@ static int app_snake_tick(gui_state_t *st) {
     gui_sync_focus(st);
     if (st->app_mode != GUI_APP_SNAKE) return 0;
     if (s->len <= 0) app_snake_reset(st);
-    uint8_t sec = snake_cmos_second();
-    if (sec == s->last_sec) return 0;
-    s->last_sec = sec;
+
+    /* 原来一步一秒（借 CMOS 秒做节拍），实测慢到没法玩（issue #8）。
+     * 改用 PIT tick，基础 220ms 一步，吃到的食物越多越快，下限 90ms。 */
+    uint32_t step_ms = 220;
+    if (s->score > 0) {
+        uint32_t accel = (uint32_t)s->score * 8u;
+        step_ms = accel >= 130u ? 90u : 220u - accel;
+    }
+    uint64_t now = pit_get_ticks();
+    if (s->last_tick == 0) {
+        s->last_tick = now;
+        return 0;
+    }
+    if (now - s->last_tick < pit_ticks_from_ms(step_ms)) return 0;
+    s->last_tick = now;
     snake_move(st, 0, 0);
     return 1;
 }

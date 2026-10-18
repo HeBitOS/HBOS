@@ -394,6 +394,11 @@ static void gui_open_panel_window(gui_state_t *st, int panel) {
     (void)gui_open_window(st, WM_WIN_PANEL, panel, 1);
 }
 
+/* 内置应用（目前是文件统计）需要"去选一个文件"的入口时调用这里。 */
+void gui_open_files_panel(gui_state_t *st) {
+    gui_open_panel_window(st, PANEL_FILES);
+}
+
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
@@ -4017,6 +4022,22 @@ static int hit_desktop_icon(int mx, int my) {
     return -1;
 }
 
+/* 吸附预览框矩形。绘制和脏区计算共用一份，避免两边各算一套导致残影：
+ * 预览框从屏幕右侧换到左侧时，若只清"新"框的位置，右侧那条半透明框会
+ * 一直留在桌面上（issue #8）。 */
+static void snap_preview_rect(int side, int w, int h,
+                              int *px, int *py, int *pw, int *ph) {
+    *px = 0; *py = 0; *pw = w; *ph = h - TASKBAR_H;
+    if (side == WM_SNAP_LEFT) {
+        *pw = w / 2;
+    } else if (side == WM_SNAP_RIGHT) {
+        *px = w / 2; *pw = w - w / 2;
+    } else if (side == WM_SNAP_BOTTOM) {
+        /* 最小化预览：贴近任务栏的小框，提示窗口将收起 */
+        *pw = w / 5; *px = (w - *pw) / 2; *ph = 64; *py = h - TASKBAR_H - *ph - 8;
+    }
+}
+
 static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h, st->theme_light);
 
@@ -4029,13 +4050,8 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
     }
 
     if (st->snap_preview != WM_SNAP_NONE) {
-        int px = 0, py = 0, pw = w, ph = h - TASKBAR_H;
-        if (st->snap_preview == WM_SNAP_LEFT) { pw = w / 2; }
-        else if (st->snap_preview == WM_SNAP_RIGHT) { px = w / 2; pw = w - w / 2; }
-        else if (st->snap_preview == WM_SNAP_BOTTOM) {
-            // 最小化预览：贴近任务栏的小框，提示窗口将收起
-            pw = w / 5; px = (w - pw) / 2; ph = 64; py = h - TASKBAR_H - ph - 8;
-        }
+        int px, py, pw, ph;
+        snap_preview_rect(st->snap_preview, w, h, &px, &py, &pw, &ph);
         uint32_t accent = cyber_neon_cyan(st->theme_light);
         for (int yy = py + 4; yy < py + ph - 4; yy += 3)
             rect(px + 6, yy, pw - 12, 1, UI_ACCENT);
@@ -5518,6 +5534,7 @@ static void cmd_gui(int argc, char **argv) {
     uint8_t last_clock_sec = 0xFF;    // 任务栏时钟秒数，用于检测秒变化并触发重绘
     int last_title_idx = -1;          // 上次点击的窗口
     int snap_hint = WM_SNAP_NONE;     // 拖动吸附预览：WM_SNAP_*
+    int snap_shown = WM_SNAP_NONE;    // 上一帧真正画出来的预览方向（清残影用）
     int drag_bounds_valid = 0;
     int drag_last_x = 0, drag_last_y = 0, drag_last_w = 0, drag_last_h = 0;
     int resize_bounds_valid = 0;
@@ -5971,18 +5988,29 @@ static void cmd_gui(int argc, char **argv) {
                     if (resize_edge == WM_EDGE_N || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_NW)
                         new_h = resize_orig_h - dy;
                     if (new_h < 120) new_h = 120;
+                    /* 不允许把窗口拖得比桌面还大：超出屏幕的部分既画不出来，
+                     * 又会在缩小后留下没被重绘的残影（issue #8）。 */
+                    if (new_w > w) new_w = w;
+                    if (new_h > h - TASKBAR_H) new_h = h - TASKBAR_H;
 
                     if (resize_edge == WM_EDGE_N || resize_edge == WM_EDGE_NE || resize_edge == WM_EDGE_NW)
                         new_y = (resize_orig_win_y + resize_orig_h) - new_h;
 
-                    rw->w = new_w;
-                    rw->h = new_h;
+                    /* 走 WM 的入口，让吸附标记失效并统一做下限/上限钳制。 */
+                    wm_resize_window(&st.wm, resizing_window, new_w, new_h);
                     rw->x = new_x;
                     rw->y = new_y;
+                    if (rw->x < 0) rw->x = 0;
+                    if (rw->y < 0) rw->y = 0;
+                    if (rw->x + rw->w > w) rw->x = w - rw->w;
+                    if (rw->y + rw->h > h - TASKBAR_H)
+                        rw->y = h - TASKBAR_H - rw->h;
+                    rw->snap_side = WM_SNAP_NONE;
                     redraw = 1;
                     st.status = "调整窗口大小";
                 }
             } else if (!left_down) {
+                if (resizing_window >= 0) redraw = 1;   /* 收尾时整屏重绘，清掉缩放过程留下的边角 */
                 resizing_window = -1;
                 resize_bounds_valid = 0;
             }
@@ -6031,6 +6059,7 @@ static void cmd_gui(int argc, char **argv) {
                 }
                 snap_hint = WM_SNAP_NONE;
                 st.snap_preview = WM_SNAP_NONE;
+                snap_shown = WM_SNAP_NONE;
                 dragging_window = -1;
                 drag_pending = 0;
                 drag_bounds_valid = 0;
@@ -6332,9 +6361,19 @@ static void cmd_gui(int argc, char **argv) {
                             wm_window_t *tw = wm_get_window(&st.wm, slot);
                             if (tw && tw->state == WM_STATE_MINIMIZED) {
                                 wm_restore_window(&st.wm, slot);
+                                gui_focus_window(&st, slot);
+                                st.status = "已恢复窗口";
+                            } else if (tw && st.wm.active_window == slot) {
+                                /* 再点一次已经在最前面的窗口：最小化。
+                                 * 原来这里只做 focus，点任务栏图标永远收不起来
+                                 * （issue #8）。 */
+                                wm_minimize_window(&st.wm, slot);
+                                gui_sync_focus(&st);
+                                st.status = "窗口已最小化";
+                            } else if (tw) {
+                                gui_focus_window(&st, slot);
+                                st.status = "已切换窗口";
                             }
-                            gui_focus_window(&st, slot);
-                            st.status = "已切换窗口";
                         } else if (tb >= 0 && tb < TB_PIN_COUNT) {
                             gui_open_panel_window(&st, g_taskbar_pins[tb].panel);
                         } else {
@@ -6357,6 +6396,14 @@ static void cmd_gui(int argc, char **argv) {
                                     int win_x, win_y, win_w, win_h;
                                     if (dw && dw->state == WM_STATE_MAXIMIZED) {
                                         wm_restore_window(&st.wm, title_idx);
+                                        gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
+                                        drag_off_x = win_w / 2;
+                                        drag_off_y = WM_TITLE_H / 2;
+                                        gui_set_active_window_pos(&st, mx - drag_off_x, my - drag_off_y);
+                                    } else if (wm_unsnap_window(&st.wm, title_idx)) {
+                                        /* 吸附态（半屏）拖出来：先还原成吸附前的
+                                         * 尺寸，否则窗口会一直卡在半屏（issue #8）。
+                                         * 指针按新的标题栏重新对中，避免窗口瞬移。 */
                                         gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
                                         drag_off_x = win_w / 2;
                                         drag_off_y = WM_TITLE_H / 2;
@@ -6495,11 +6542,18 @@ static void cmd_gui(int argc, char **argv) {
                         gui_damage_region(drag_last_x, drag_last_y, drag_last_w, drag_last_h, w, h);
                     gui_damage_window(&st, w, h, dragging_window);
                     if (st.snap_preview != WM_SNAP_NONE) {
-                        int px = 0, py = 0, pw = w, ph = h - TASKBAR_H;
-                        if (st.snap_preview == WM_SNAP_LEFT) pw = w / 2;
-                        else if (st.snap_preview == WM_SNAP_RIGHT) { px = w / 2; pw = w - w / 2; }
+                        int px, py, pw, ph;
+                        snap_preview_rect(st.snap_preview, w, h, &px, &py, &pw, &ph);
                         gui_damage_region(px, py, pw, ph, w, h);
                     }
+                    /* 上一帧的预览框也要清：从右边缘拖到左边缘时，只清新框
+                     * 会留下右边那条半透明残影（issue #8）。 */
+                    if (snap_shown != WM_SNAP_NONE && snap_shown != st.snap_preview) {
+                        int px, py, pw, ph;
+                        snap_preview_rect(snap_shown, w, h, &px, &py, &pw, &ph);
+                        gui_damage_region(px, py, pw, ph, w, h);
+                    }
+                    snap_shown = st.snap_preview;
                     gui_window_metrics(&st, w, h, NULL, dragging_window,
                                        &drag_last_x, &drag_last_y, &drag_last_w, &drag_last_h);
                     gui_dirty_expand(&drag_last_x, &drag_last_y, &drag_last_w, &drag_last_h,

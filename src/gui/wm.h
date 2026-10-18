@@ -118,6 +118,8 @@ void wm_maximize_window(wm_state_t *wm, int idx);
 void wm_restore_window(wm_state_t *wm, int idx);
 void wm_toggle_maximize(wm_state_t *wm, int idx);
 void wm_snap_window(wm_state_t *wm, int idx, int side);
+/* 从吸附态退出：恢复到吸附前的几何。返回 1 表示确实做了还原。 */
+int  wm_unsnap_window(wm_state_t *wm, int idx);
 void wm_toggle_start_menu(wm_state_t *wm);
 void wm_close_start_menu(wm_state_t *wm);
 

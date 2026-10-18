@@ -89,6 +89,7 @@ int wm_open_window(wm_state_t *wm, int kind, int mode, int unique) {
     win->kind = kind;
     win->mode = mode;
     win->state = WM_STATE_NORMAL;
+    win->snap_side = WM_SNAP_NONE;
     win->x = 130 + (idx % 5) * 28;
     win->y = 62 + (idx % 5) * 22;
     win->w = 0;
@@ -223,12 +224,13 @@ void wm_maximize_window(wm_state_t *wm, int idx) {
     if (idx < 0 || idx >= wm->window_count) return;
     wm_window_t *win = &wm->windows[idx];
     if (!win->used) return;
-    if (win->state == WM_STATE_NORMAL) {
+    if (win->state == WM_STATE_NORMAL && win->snap_side == WM_SNAP_NONE) {
         win->restore.x = win->x;
         win->restore.y = win->y;
         win->restore.w = win->w;
         win->restore.h = win->h;
     }
+    win->snap_side = WM_SNAP_NONE;
     /* 瞬时最大化（几何动画反复出 bug，改为直接铺满）。 */
     win->anim_type = WM_ANIM_NONE;
     win->state = WM_STATE_MAXIMIZED;
@@ -246,6 +248,7 @@ void wm_restore_window(wm_state_t *wm, int idx) {
     /* 瞬时还原。 */
     win->anim_type = WM_ANIM_NONE;
     win->state = WM_STATE_NORMAL;
+    win->snap_side = WM_SNAP_NONE;
     if (win->restore.w > 0 && win->restore.h > 0) {
         win->x = win->restore.x;
         win->y = win->restore.y;
@@ -271,18 +274,34 @@ void wm_snap_window(wm_state_t *wm, int idx, int side) {
         return;
     }
     // 记录还原位置（仅在从普通态吸附时）
-    if (win->state == WM_STATE_NORMAL) {
+    if (win->state == WM_STATE_NORMAL && win->snap_side == WM_SNAP_NONE) {
         win->restore.x = win->x;
         win->restore.y = win->y;
         win->restore.w = win->w;
         win->restore.h = win->h;
     }
     win->state = WM_STATE_NORMAL;
+    win->snap_side = side;
     int half = wm->desk_w / 2;
     win->y = 0;
     win->h = wm->desk_h - WM_TASKBAR_H;
     win->w = half;
     win->x = (side == WM_SNAP_LEFT) ? 0 : (wm->desk_w - half);
+}
+
+/* 从吸附态退出。吸附时 state 仍是 NORMAL，所以只能靠 snap_side 判断；
+ * 不还原的话窗口会永远停在半屏尺寸（issue #8）。 */
+int wm_unsnap_window(wm_state_t *wm, int idx) {
+    wm_window_t *win = wm_get_window(wm, idx);
+    if (!win || win->snap_side == WM_SNAP_NONE) return 0;
+    win->snap_side = WM_SNAP_NONE;
+    if (win->restore.w > 0 && win->restore.h > 0) {
+        win->x = win->restore.x;
+        win->y = win->restore.y;
+        win->w = win->restore.w;
+        win->h = win->restore.h;
+    }
+    return 1;
 }
 
 void wm_toggle_start_menu(wm_state_t *wm) {
