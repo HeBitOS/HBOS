@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo/HBOS.png" alt="HBOS Logo" width="200">
+  <img src="docs/logo/new-logo.png" alt="HBOS Logo" width="200">
 </p>
 
 # HBOS
@@ -42,23 +42,40 @@ HBOS 也提供不包含桌面和图形应用的 no-GUI 构建，可单独验证�
 
 ### 1. 安装构建依赖
 
-Ubuntu / Debian：
+最省事的方式（自动识别 apt / pacman / dnf，装完再跑 `make deps` 检查一遍）：
+
+```bash
+sudo ./install.sh
+```
+
+手工安装，Ubuntu / Debian：
 
 ```bash
 sudo apt update
 sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin \
   xorriso mtools dosfstools qemu-system-x86 qemu-utils ovmf \
-  python3 python3-pil
+  python3 python3-pil python3-jsonschema python3-jinja2 python3-yaml \
+  cmake llvm autoconf automake pkg-config
 ```
 
-Arch linux:
+Arch Linux：
 
 ```bash
 sudo pacman -Sy
 sudo pacman -S --needed base-devel nasm grub xorriso mtools dosfstools \
-  qemu-system-x86 qemu-img edk2-ovmf python python-pillow
+  qemu-system-x86 qemu-img edk2-ovmf python python-pillow \
+  python-jsonschema python-jinja python-yaml \
+  cmake llvm autoconf automake pkgconf
 ```
 
+其中几个容易被漏掉、但 `make` 一定会用到的：
+
+| 依赖 | 谁需要它 |
+|---|---|
+| `cmake` + `python3-jsonschema/jinja2/yaml` | mbedTLS 走 CMake 构建，缺了会在生成头文件阶段报 `ModuleNotFoundError` |
+| `llvm`（`llvm-objcopy`） | limine 的 `./configure` 要它，缺了报 `llvm-objcopy invalid` |
+| `autoconf` / `automake` / `pkg-config` | limine 的 `./bootstrap` |
+| `mtools` / `dosfstools` | 制作 FAT32 安装镜像、跑 `make fat32-smoke` |
 
 Windows 推荐使用 WSL2 + Ubuntu。仓库也提供
 `scripts/build-windows.ps1` 和 `scripts/build-windows.cmd` 作为入口。
@@ -68,15 +85,19 @@ Windows 推荐使用 WSL2 + Ubuntu。仓库也提供
 ```bash
 git clone --recurse-submodules https://github.com/HeBitOS/HBOS.git
 cd HBOS
+make deps   # 递归拉齐子模块（含 mbedtls 嵌套子模块）+ 检查工具链
 make
 ```
 
-如果已经使用普通 `git clone` 下载、发现 `limine-bin` 为空，请在 HBOS
-仓库目录中执行：
+如果已经用普通 `git clone` 下载，或者子模块没拉全，`make deps` 同样能补齐；
+等价的手工命令是：
 
 ```bash
 git submodule update --init --recursive
 ```
+
+`make deps` 是幂等的：已经就位的子模块不会重复下载，缺包时只打印对应发行版
+的安装命令，不会自己 `sudo`。
 
 默认生成：
 
@@ -142,6 +163,24 @@ make bench-boot RUNS=5     # 实测冷启动时间（引导器阶段 + 内核阶
 参考数字（QEMU 512M，BIOS ISO）：默认配置约 **3.0 s**（其中内核阶段
 **0.04 s**），`BOOT_MENU_TIMEOUT=0` 约 **1.9 s**。测量方法与历代对比见
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
+### 5. 构建失败对照表
+
+| 报错 | 原因 | 处理 |
+|---|---|---|
+| `upload-pack: not our ref` / `没有包含 <sha>` | 子模块锁定了一个上游已不存在（或还没推上去）的 commit | `make deps`；仍有问题就 `git submodule sync --recursive && git submodule update --init --recursive` |
+| `HAX-Compile 模块缺失：找不到 .../mk/hax-apps.mk` | `HAX-Compile` 子模块没拉，或拉到了不含 `mk/`、`tools/genhax.py` 的旧提交 | `make deps`；临时绕过用 `make HBOS_BUNDLE_APPS=0` |
+| `mbedtls/ssl.h: No such file or directory` | mbedTLS 的嵌套子模块（`framework`、`tf-psa-crypto`、`mldsa-native`）没拉 | `make deps`，或 `git -C third_party/mbedtls submodule update --init --recursive` |
+| `No module named 'jsonschema'` | 缺 mbedTLS CMake 生成脚本的 python 依赖 | `sudo apt install python3-jsonschema python3-jinja2 python3-yaml` |
+| `Configure with --enable-uefi-x86-64 to build this port` | limine 的 configure 没开 UEFI | `cd limine-bin && ./configure --enable-uefi-x86-64 --enable-bios-x86-64` |
+| `llvm-objcopy invalid` | 没有 `llvm-objcopy` | `sudo apt install llvm` |
+| `设备上没有空间`（grub-mkrescue 阶段） | `/tmp` 太小（tmpfs 常见 10 MB） | `TMPDIR=$PWD/.tmp make` |
+
+网络受限时，子模块拉取可以走代理；`make deps` 只是调用 `git submodule`，
+沿用你 git 的代理配置。
+
+limine 的 `./bootstrap` 还会再拉 8 个 pin 死 commit 的小仓库（flanterm、
+libfdt、picoefi 等），第一次构建且网络不好时最容易卡在这一步；把代理配好
+重试即可，已经拉过的不会重复下载。
 
 ## HIVE 桌面环境
 
