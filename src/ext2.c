@@ -110,11 +110,11 @@ int ext2_mount(uint32_t partition_lba, ext2_fs_t *fs)
         g_ext2_error = "journal needs replay (ext3 dirty)";
         return -1;
     }
-    if (incompat & (EXT2_INCOMPAT_EXTENTS | EXT2_INCOMPAT_64BIT |
-                    EXT2_INCOMPAT_FLEX_BG)) {
-        g_ext2_error = "ext4 features (extent/64bit/flex_bg) unsupported";
-        return -1;
-    }
+    fs->feature_incompat = incompat;
+    fs->desc_size = (incompat & EXT2_INCOMPAT_64BIT) ? 64 : 32;
+    /* ext4（extent/64bit）只读：现有写路径只会写直接/间接块指针，往 extent
+     * inode 上写等于破坏文件系统。 */
+    fs->read_only = (incompat & (EXT2_INCOMPAT_EXTENTS | EXT2_INCOMPAT_64BIT)) != 0;
 
     fs->block_size = 1024U << fs->sb.s_log_block_size;
     fs->inode_size = fs->sb.s_inode_size ? fs->sb.s_inode_size : 128;
@@ -156,7 +156,7 @@ static int ext2_read_bgd(ext2_fs_t *fs, uint32_t group, ext2_bgd_t *bgd)
     if (!fs || !fs->mounted || !bgd) return -1;
 
     uint32_t bgd_block = fs->sb.s_first_data_block + 1;
-    uint32_t bgd_offset = group * sizeof(ext2_bgd_t);
+    uint32_t bgd_offset = group * (fs->desc_size ? fs->desc_size : sizeof(ext2_bgd_t));
     uint32_t block_offset = bgd_offset / fs->block_size;
     uint32_t byte_offset = bgd_offset % fs->block_size;
 
@@ -209,8 +209,76 @@ int ext2_read_inode(ext2_fs_t *fs, uint32_t inode_num, ext2_inode_t *inode)
  * @param block_idx 文件内逻辑块号（0 起）
  * @return 物理块号；0 表示越界/空洞/读失败
  */
+
+/* ── ext4 extent 树 ──────────────────────────────────────────────
+ * ext4 把 inode 的 i_block[15]（60 字节）当成 extent 树的根：header 12 字节，
+ * 后面是 extent 或 index 项，每项 12 字节。索引节点指向的块重复同样的结构。
+ * 这里只做"逻辑块 → 物理块"的映射，读路径不用改。 */
+#define EXT4_EXT_MAGIC 0xF30Au
+
+typedef struct __attribute__((packed)) {
+    uint16_t magic, entries, max, depth;
+    uint32_t generation;
+} ext4_ext_hdr_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t ee_block;
+    uint16_t ee_len;
+    uint16_t ee_start_hi;
+    uint32_t ee_start_lo;
+} ext4_ext_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t ei_block;
+    uint32_t ei_leaf_lo;
+    uint16_t ei_leaf_hi;
+    uint16_t unused;
+} ext4_ext_idx_t;
+
+static uint32_t ext4_extent_bmap(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t logical) {
+    uint8_t node[4096];
+    if (fs->block_size > sizeof(node)) return 0;
+    memcpy(node, inode->i_block, 60);
+
+    for (int level = 0; level < 6; level++) {
+        const ext4_ext_hdr_t *h = (const ext4_ext_hdr_t *)node;
+        if (h->magic != EXT4_EXT_MAGIC) return 0;
+
+        uint16_t entries = h->entries;
+        if (h->depth == 0) {
+            const ext4_ext_t *e = (const ext4_ext_t *)(node + sizeof(*h));
+            for (uint16_t i = 0; i < entries; i++) {
+                uint32_t len = e[i].ee_len;
+                if (len > 0x8000) len -= 0x8000;      /* unwritten extent */
+                if (!len) continue;
+                if (logical >= e[i].ee_block && logical < e[i].ee_block + len) {
+                    uint64_t phys = ((uint64_t)e[i].ee_start_hi << 32) | e[i].ee_start_lo;
+                    phys += (uint64_t)(logical - e[i].ee_block);
+                    return phys > 0xFFFFFFFFull ? 0 : (uint32_t)phys;
+                }
+            }
+            return 0;   /* 空洞 */
+        }
+
+        const ext4_ext_idx_t *ix = (const ext4_ext_idx_t *)(node + sizeof(*h));
+        int pick = -1;
+        for (uint16_t i = 0; i < entries; i++)
+            if (ix[i].ei_block <= logical) pick = (int)i;
+        if (pick < 0) return 0;
+
+        uint64_t leaf = ((uint64_t)ix[pick].ei_leaf_hi << 32) | ix[pick].ei_leaf_lo;
+        if (leaf > 0xFFFFFFFFull) return 0;
+        if (ext2_read_block(fs, (uint32_t)leaf, node) < 0) return 0;
+    }
+    return 0;
+}
+
 static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t block_idx)
 {
+    /* ext4：i_block 是 extent 树，不能按 15 个块指针解释 */
+    if (inode->i_flags & EXT2_EXTENTS_FL)
+        return ext4_extent_bmap(fs, inode, block_idx);
+
     /* 每个间接块能装下的块地址数：ext2 块地址固定 4 字节 */
     const uint32_t addr_per_block = fs->block_size / 4;
 
@@ -409,6 +477,7 @@ int ext2_path_to_inode(ext2_fs_t *fs, const char *path, uint32_t *out_inode)
  */
 int ext2_write_block(ext2_fs_t *fs, uint32_t block, const uint8_t *buf)
 {
+    if (fs && fs->read_only) return -1;   /* ext4 布局：拒绝一切写入 */
     if (!fs || !fs->mounted || !buf || !block) return -1;
     uint32_t spb = fs->block_size / BLOCK_SECTOR_SIZE;
     uint32_t start = block * spb;
@@ -418,7 +487,7 @@ int ext2_write_block(ext2_fs_t *fs, uint32_t block, const uint8_t *buf)
 static int ext2_write_bgd(ext2_fs_t *fs, uint32_t group, const ext2_bgd_t *bgd)
 {
     uint32_t bgd_block = fs->sb.s_first_data_block + 1;
-    uint32_t bgd_offset = group * sizeof(ext2_bgd_t);
+    uint32_t bgd_offset = group * (fs->desc_size ? fs->desc_size : sizeof(ext2_bgd_t));
     uint32_t block_offset = bgd_offset / fs->block_size;
     uint32_t byte_offset  = bgd_offset % fs->block_size;
     uint8_t block_buf[4096] __attribute__((aligned(2)));

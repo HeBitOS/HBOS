@@ -1212,7 +1212,10 @@ int fs_retry_mount(void) {
     if (block_init() < 0) return -1;
     if (fs_mount_disk() == 0) return 0;
     if (ext2_try_mount() == 0) {
-        console_write("fs: ext2 mounted\n", 17);
+        if (ext2_fs.feature_incompat & EXT2_INCOMPAT_EXTENTS)
+            console_write("fs: ext4 mounted (read-only)\n", 27);
+        else
+            console_write("fs: ext2 mounted\n", 17);
         fs_backend = FS_BACKEND_EXT2;
         ext2_rebuild_files();
         fs.total_sectors = block_sector_count();
@@ -1787,6 +1790,11 @@ static int ext2_try_mount(void) {
 int fs_sync(void) {
     if (fs_backend != FS_BACKEND_HBFS) return 0;
     return hbfs_sync_table();
+}
+
+int fs_is_readonly(void) {
+    if (fs_backend == FS_BACKEND_EXT2) return ext2_fs.read_only;
+    return 0;
 }
 
 /** 判断当前后端是否为磁盘文件系统 */

@@ -12,6 +12,7 @@
 #define EXT2_INCOMPAT_EXTENTS   0x0040u
 #define EXT2_INCOMPAT_64BIT     0x0080u
 #define EXT2_INCOMPAT_FLEX_BG   0x0200u
+#define EXT2_EXTENTS_FL         0x00080000u  /* inode i_flags: i_block 是 extent 树 */
 
 #define EXT2_SUPERBLOCK_OFFSET 1024
 #define EXT2_SUPERBLOCK_SIZE   1024
@@ -124,6 +125,9 @@ typedef struct {
     uint32_t bgd_count;
     uint32_t block_group_count;
     uint32_t partition_lba;
+    uint32_t feature_incompat;   /* 用于判断 extent / 64bit 布局 */
+    uint32_t desc_size;          /* 组描述符大小：32 或 64 */
+    int      read_only;          /* ext4 布局：只允许读，写入会破坏 extent */
     int mounted;
 } ext2_fs_t;
 

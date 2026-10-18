@@ -86,6 +86,8 @@ int fs_retry_mount(void);         /**< 惰性重挂载：盘晚就绪/热插拔�
 int fs_mount_partition(int index);
 int fs_sync(void);               /**< 将文件表同步到磁盘 */
 int fs_is_disk(void);            /**< 判断当前后端是否为磁盘文件系统 */
+/** 当前后端是否只读（ext4 布局目前只读；写入会破坏 extent）。 */
+int fs_is_readonly(void);
 const char *fs_backend_name(void); /**< 获取当前后端名称字符串 */
 uint32_t fs_disk_start_lba(void); /**< 获取 HBFS 分区起始 LBA */
 uint32_t fs_disk_total_sectors(void); /**< 获取 HBFS 分区总扇区数 */

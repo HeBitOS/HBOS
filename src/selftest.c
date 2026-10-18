@@ -6,6 +6,7 @@
 #include "string.h"
 #include "sys/stat.h"
 #include "unistd.h"
+#include "fs.h"
 #include "graphics/graphics.h"
 #include "core/heap.h"
 #include "core/task.h"
@@ -55,9 +56,11 @@ int selftest_run(void) {
     kfree(heap_b);
     kfree(heap_aligned);
 
+    int fd = -1;
+    if (!fs_is_readonly()) {
     (void)unlink("__selftest");
 
-    int fd = open("__selftest", O_RDONLY);
+    fd = open("__selftest", O_RDONLY);
     CHECK("open missing", fd < 0 && errno == ENOENT);
 
     fd = open("__selftest", O_CREAT | O_RDWR | O_TRUNC);
@@ -124,6 +127,7 @@ int selftest_run(void) {
     CHECK("syscall compare", memcmp(b, "abi", 3) == 0);
     CHECK("syscall close", hbos_close(fd) == 0);
     CHECK("syscall unlink", hbos_unlink("__syscall") == 0);
+    }   /* !fs_is_readonly() */
 
     /* Linux event compatibility: eventfd readiness feeds poll and epoll
      * without a helper process or a second descriptor namespace. */
