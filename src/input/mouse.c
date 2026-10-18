@@ -278,9 +278,39 @@ static int ps2_mouse_has_data(void) {
     return mouse_raw_tail != mouse_raw_head;
 }
 
+/* 每个鼠标包对应一个事件。之前是把一轮里所有包累加成"一个"事件，只保留
+ * 最后的按键状态——QEMU 的 sendkey/mouse_button 是瞬间按下+松开，两次边沿
+ * 会被合并成 buttons=0 的单个事件，GUI 于是完全看不到这次点击。真机上人手
+ * 点击跨越多帧所以掩盖了这个 bug。 */
+#define PS2_Q 16
+static mouse_event_t ps2_q[PS2_Q];
+static uint8_t ps2_q_head, ps2_q_tail;
+
+static void ps2_q_push(int dx, int dy, int dz, int buttons) {
+    uint8_t next = (uint8_t)((ps2_q_head + 1) & (PS2_Q - 1));
+    if (next == ps2_q_tail) return;   /* 满：丢最旧的移动，按键不丢 */
+    ps2_q[ps2_q_head].dx = dx;
+    ps2_q[ps2_q_head].dy = dy;
+    ps2_q[ps2_q_head].dz = dz;
+    ps2_q[ps2_q_head].buttons = buttons;
+    ps2_q_head = next;
+}
+
+static void ps2_button_edge(int buttons) {
+    static int last_buttons = 0;
+    if (buttons != last_buttons) {
+        kb_clear_modifiers();
+        last_buttons = buttons;
+    }
+}
+
 static int ps2_mouse_poll(mouse_event_t *ev) {
-    int sum_x = 0, sum_y = 0, sum_z = 0, buttons = 0;
-    int got_any = 0;
+    if (ps2_q_tail != ps2_q_head) {
+        *ev = ps2_q[ps2_q_tail];
+        ps2_q_tail = (uint8_t)((ps2_q_tail + 1) & (PS2_Q - 1));
+        ps2_button_edge(ev->buttons);
+        return 1;
+    }
 
     while (1) {
         int queued = ps2_mouse_dequeue_byte();
@@ -319,19 +349,13 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
             z = (int)(packet[3] & 0x0F);
             if (z & 0x08) z -= 16;
         }
-        sum_x += x; sum_y += y; sum_z += z;
-        buttons = (int)(packet[0] & 0x07);
-        got_any = 1;
+        ps2_q_push(x, -y, z, (int)(packet[0] & 0x07));
     }
 
-    if (got_any) {
-        static int last_buttons = 0;
-        if (buttons != last_buttons) {
-            kb_clear_modifiers();
-            last_buttons = buttons;
-        }
-        ev->dx = sum_x; ev->dy = -sum_y;
-        ev->dz = sum_z; ev->buttons = buttons;
+    if (ps2_q_tail != ps2_q_head) {
+        *ev = ps2_q[ps2_q_tail];
+        ps2_q_tail = (uint8_t)((ps2_q_tail + 1) & (PS2_Q - 1));
+        ps2_button_edge(ev->buttons);
         return 1;
     }
     return 0;
@@ -353,6 +377,10 @@ static int usb_mouse_poll(mouse_event_t *ev) {
 
     static uint32_t last_usb_buttons = 0;
     if (report.buttons != last_usb_buttons) {
+        char line[14]; int n = 0;
+        line[n++]='['; line[n++]='U'; line[n++]='S'; line[n++]='B'; line[n++]=']';
+        line[n++]=' '; line[n++]='b'; line[n++]='='; line[n++]=(char)('0'+(report.buttons & 7)); line[n++]='\n';
+        dbg_ser_len(line, (uint32_t)n);
         kb_clear_modifiers();
         last_usb_buttons = report.buttons;
     }
@@ -366,6 +394,14 @@ static int usb_mouse_poll(mouse_event_t *ev) {
 
 int mouse_poll(mouse_event_t *ev) {
     if (!mouse_ready || !ev) return 0;
+    {
+        static int announced;
+        if (!announced) {
+            announced = 1;
+            const char *b = (mouse_backend == MOUSE_BACKEND_USB) ? "[M] usb\n" : "[M] ps2\n";
+            dbg_ser_len(b, 8);
+        }
+    }
     if (mouse_backend == MOUSE_BACKEND_USB) return usb_mouse_poll(ev);
     if (mouse_backend == MOUSE_BACKEND_PS2) {
         int got = ps2_mouse_poll(ev);

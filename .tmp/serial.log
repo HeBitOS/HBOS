@@ -1,0 +1,81 @@
+XBLPOK
+
+===== HBOS - He Bit OS 0.1 beta5 pre18 Starting =====
+[XHCI] Scanning PCI bus for USB controllers...
+[PCI] 0:0 - Vendor=8086 Device=1237 Class=0006 SubClass=0000 ProgIF=0000
+[PCI] 0:1 - Vendor=8086 Device=7000 Class=0006 SubClass=0001 ProgIF=0000
+[PCI] 0:1 - Vendor=8086 Device=7010 Class=0001 SubClass=0001 ProgIF=0080
+[PCI] 0:1 - Vendor=8086 Device=7113 Class=0006 SubClass=0080 ProgIF=0000
+[PCI] 0:2 - Vendor=1234 Device=1111 Class=0003 SubClass=0000 ProgIF=0000
+[PCI] 0:3 - Vendor=8086 Device=100E Class=0002 SubClass=0000 ProgIF=0000
+[XHCI] Failed to find xHCI controller on PCI!
+fs: fat32 mounted
+[SELFTEST] PNG decode: PASS
+[SELFTEST] Linux event/AF_UNIX: PASS
+[SELFTEST] POSIX/ramfs: PASS
+[KERN] seed: tcc headers
+[KERN] seed: tcc headers done
+[KERN] seed: hpt repo
+[KERN] seed: hpt repo done
+[KERN] seed: web vendor
+[KERN] seed: web vendor done
+[KERN] seed: themes
+[KERN] seed: themes done
+[KERN] Shell ready
+[EHCI] scanning PCI for EHCI controllers
+[EHCI] no controller found
+[34m  _   _ ____   ___  ____
+ | | | | __ ) / _ \/ ___|
+ | |_| |  _ \| | | \___ \
+ |  _  | |_) | |_| |___) |
+ |_| |_|____/ \___/|____/
+[0m[1m[36m  v0.1-beta5-pre18[0m  [90m64-bit x86_64  输入 [0mhelp[90m 查看命令[0m
+
+
+  [1m[36m请选择启动模式 / Select boot mode[0m
+    [32m[H / G / Enter][0m HIVE 桌面       [33m[T][0m 命令行 Shell
+  > HIVE
+[M] ps2
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[DBG] st=00 l=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[DBG] st=00 l=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[DBG] st=00 l=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[DBG] st=00 l=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[DBG] st=00 l=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[DBG] st=00 l=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[POP] b=0
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=00 sp=00
+[PLL] n=1 b=01 sp=00
+[GUI] left-press
+[TB]=, y=1079 x=1919 H=050
+[TB] enter
+[PLL] n=1 b=00 sp=00

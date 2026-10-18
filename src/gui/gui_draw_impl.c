@@ -339,24 +339,40 @@ void gd_fill_round_rect(int x, int y, int w, int h, int r,
     else gd_rect(x + w - r, y + h - r, r, r, color);
 }
 
+/* 1px 圆角边框：外层圆角填边框色，内层圆角填内容色。
+ * 圆角不能靠 gd_border 画直线段实现——四角会露方角。 */
+static void gd_round_border(int x, int y, int w, int h, int r,
+                            uint32_t border_c, uint32_t body_c) {
+    if (r < 1) r = 1;
+    if (r * 2 > w || r * 2 > h) r = (w < h ? w : h) / 2;
+    gd_fill_round_rect(x, y, w, h, r, border_c, RR_ALL);
+    gd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, r - 1, body_c, RR_ALL);
+}
+
 void gd_draw_panel_shell(int x, int y, int w, int h, uint32_t top,
                              uint32_t bottom, uint32_t border_c, uint32_t accent) {
     if (w <= 0 || h <= 0) return;
     // Breeze-flat: near-solid fill with only a whisper of top sheen, a single
-    // 1px border, and a slim accent edge (no glossy highlight/shadow runs).
-    gd_vgradient(x, y, w, h, gd_rgb_lift(top, 4), bottom);
+    // 1px rounded border, and a slim accent edge.
+    int r = 6;
+    if (r * 2 > w || r * 2 > h) r = (w < h ? w : h) / 2;
+    gd_fill_round_rect(x, y, w, h, r, gd_rgb_lift(top, 4), RR_ALL);
+    gd_vgradient(x + r, y, w - 2 * r, h, gd_rgb_lift(top, 4), bottom);
     if (accent) {
         gd_rect(x, y + 1, 3, h - 2, accent);
     }
-    gd_border(x, y, w, h, border_c);
+    gd_round_border(x, y, w, h, r, border_c, gd_rgb_lift(top, 4));
 }
 
 void gd_draw_inset_shell(int x, int y, int w, int h, uint32_t border_c) {
     if (w <= 0 || h <= 0) return;
-    gd_vgradient(x, y, w, h, UI_BG, UI_BG);
-    gd_rect(x, y, w, 1, gd_rgb_lift(border_c, -28));
-    gd_rect(x, y + h - 1, w, 1, gd_rgb_lift(border_c, 12));
-    gd_border(x, y, w, h, border_c);
+    int r = 5;
+    if (r * 2 > w || r * 2 > h) r = (w < h ? w : h) / 2;
+    gd_fill_round_rect(x, y, w, h, r, UI_BG, RR_ALL);
+    gd_vgradient(x + r, y, w - 2 * r, h, UI_BG, UI_BG);
+    gd_rect(x + r, y, w - 2 * r, 1, gd_rgb_lift(border_c, -28));
+    gd_rect(x + r, y + h - 1, w - 2 * r, 1, gd_rgb_lift(border_c, 12));
+    gd_round_border(x, y, w, h, r, border_c, UI_BG);
 }
 
 
