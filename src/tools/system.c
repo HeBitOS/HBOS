@@ -10,6 +10,7 @@
 #include "../input/mouse.h"
 #include "../shell/shell.h"
 #include "../net.h"
+#include "../rtc_tz.h"
 #include "../smp.h"
 #include "../string.h"
 #include "../unistd.h"
@@ -655,6 +656,66 @@ static void cmd_mousediag(int argc, char **argv) {
     console_putchar('\n');
 }
 
+
+/* ── tz：查看/设置时区偏移 ───────────────────────────────────────
+ * RTC 存的是本地时间还是 UTC 取决于主板/虚拟机设置，内核无法自动判断；
+ * issue #8 里"时钟不准"多数就是这里差了几小时。给一个运行时可调的命令，
+ * 至少不用重编内核。 */
+static void tz_put_int(int v) {
+    char b[12];
+    int n = 0;
+    unsigned u = v < 0 ? (unsigned)(-v) : (unsigned)v;
+    if (v < 0) console_putchar('-');
+    if (!u) { console_putchar('0'); return; }
+    while (u) { b[n++] = (char)('0' + u % 10); u /= 10; }
+    while (n--) console_putchar(b[n]);
+}
+
+static void tz_two(uint8_t v) {
+    console_putchar((char)('0' + v / 10));
+    console_putchar((char)('0' + v % 10));
+}
+
+static void tz_show(void) {
+    uint8_t h, m, sec, day, mon, wday;
+    uint32_t year;
+    rtc_tz_read_local(&h, &m, &sec, &day, &mon, &year, &wday);
+    console_puts("local: ");
+    console_puts("\x1b[36m");
+    tz_two(h); console_putchar(':'); tz_two(m); console_putchar(':'); tz_two(sec);
+    console_puts("\x1b[0m  ");
+    tz_put_int((int)year); console_putchar('-');
+    tz_two(mon); console_putchar('-'); tz_two(day);
+    console_puts("  (UTC");
+    console_putchar(g_rtc_tz_offset_hours >= 0 ? '+' : '-');
+    tz_put_int(g_rtc_tz_offset_hours >= 0 ? g_rtc_tz_offset_hours
+                                          : -g_rtc_tz_offset_hours);
+    console_puts(")\n");
+}
+
+static void cmd_tz(int argc, char **argv) {
+    if (argc < 2) {
+        tz_show();
+        console_puts("usage: tz <hours>   例：tz 8 / tz -5 / tz 5.5 不支持小数\n");
+        return;
+    }
+    const char *p = argv[1];
+    int sign = 1;
+    if (*p == '+' || *p == '-') { if (*p == '-') sign = -1; p++; }
+    if (!*p) { console_puts("tz: 需要整数小时\n"); return; }
+    int v = 0;
+    while (*p) {
+        if (*p < '0' || *p > '9') { console_puts("tz: 需要整数小时\n"); return; }
+        v = v * 10 + (*p - '0');
+        if (v > 14) { console_puts("tz: 范围是 -12..+14\n"); return; }
+        p++;
+    }
+    v *= sign;
+    if (v < -12 || v > 14) { console_puts("tz: 范围是 -12..+14\n"); return; }
+    g_rtc_tz_offset_hours = v;
+    tz_show();
+}
+
 void tool_system_init(void) {
     static const command_t cmds[] = {
         {"mousediag",CMD_GROUP_SYSTEM, "Diagnose mouse input", "mousediag", cmd_mousediag},
@@ -672,6 +733,7 @@ void tool_system_init(void) {
         {"su",      CMD_GROUP_SYSTEM, "Switch user (root can switch to any uid)", "su [uid]", cmd_su},
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
+        {"tz",      CMD_GROUP_SYSTEM, "Show/set timezone offset (hours)", "tz [hours]", cmd_tz},
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},
         {"drivers", CMD_GROUP_SYSTEM, "Show hardware driver status", "drivers", cmd_drivers},
         {"top",     CMD_GROUP_SYSTEM, "Real-time task monitor","top",   cmd_top},

@@ -357,7 +357,9 @@ static void cmd_install(int argc, char **argv) {
  * 只在还没挂盘时可用 —— 换后端要重建 VFS，当前没有安全路径。 */
 static void cmd_mount(int argc, char **argv) {
     if (argc < 2) {
-        console_puts("\nusage: mount <n>   挂载第 n 个分区（先用 diskmgr 看分区号）\n\n");
+        /* 不带参数时直接把分区表打出来，省得再敲一次 diskmgr */
+        print_partitions(block_sector_count());
+        console_puts("\nusage: mount <n>   挂载第 n 个分区\n\n");
         return;
     }
     uint32_t idx = 0;

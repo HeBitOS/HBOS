@@ -25,6 +25,7 @@ static const char *cmd_cn(const char *name) {
     if (strcmp(name, "version") == 0) return "显示版本信息";
     if (strcmp(name, "about") == 0) return "显示系统概览和使用提示";
     if (strcmp(name, "clear") == 0) return "清屏";
+    if (strcmp(name, "tz") == 0) return "查看/设置时区偏移（tz <小时>）";
     if (strcmp(name, "status") == 0) return "显示系统状态";
     if (strcmp(name, "history") == 0) return "显示命令历史";
     if (strcmp(name, "clearhistory") == 0) return "清除命令历史";

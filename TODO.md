@@ -23,7 +23,7 @@
 | P1-2 | PS/2 鼠标丢帧、速度非线性 | `src/input/mouse.c`、`src/core/task.c` | 鼠标移动与屏幕刷新同频；连续 10s 画圈无跳点 |
 | P1-3 | 任务栏/日历弹窗时间显示 | `src/tools/gui.c`（draw_taskbar/cal） | 弹窗内显示完整 时:分:秒 + 时区 |
 | P1-4 | VMware `dhcp discover timeout` | `src/net.c`、`src/net_virtio.c` | VMware NAT 下 DHCP 100% 成功（脚本化复现） |
-| P1-5 | 时钟与宿主机偏差 | `src/rtc_tz.c` | RTC 为 UTC 时显示本地时间正确；可配置时区 |
+| P1-5 | 时钟与宿主机偏差 | 新增 `tz [hours]` 命令运行时可调偏移（`src/tools/system.c`）；**待办**：持久化到配置、自动判定 RTC 是否 UTC | `tz -5` 后任务栏/日历立即跟随 |
 | P1-6 | 资源管理器数值不刷新 | `src/gui/apps/app_taskmgr.c` | 每秒刷新，数值随开/关应用变化 |
 
 ## P2 · 多语言与 UTF-8
