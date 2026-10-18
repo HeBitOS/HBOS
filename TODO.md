@@ -43,7 +43,7 @@
 |---|---|---|---|
 | P3-1 | 分区表解析 | ✅ 解析（`src/partition.c`）+ GPT 自动挂载 + `mount <n>` 指定分区；**待办**：运行中切换后端（需 VFS 重建） | `diskmgr` 列出分区；`mount 2` 可挂指定分区（仅 ramfs 状态） |
 | P3-2 | USB 外接盘发现 | 现有 USB MSC 只认第一个 LUN；补枚举 + 插拔事件 | 插入 U 盘 3s 内出现在 `disks`；拔出后不崩 |
-| P3-3 | exFAT（读写） | 新增 `src/exfat.c`：目录项、簇链、FAT | 与 Linux `mkfs.exfat` 镜像双向互认（脚本差分） |
+| P3-3 | exFAT（读写） | 只读解析 ✅（`src/exfat.c`：引导扇区/FAT 簇链/0x85+0xC0+0xC1 目录项/UTF-16 名字）+ 单测；**待办**：接入 fs 后端（VFS 只读节点）与写入 | 合成卷与真实 `mkfs.exfat` 镜像均可挂载、列目录、读文件 |
 | P3-4 | ext3（ext2 + journal 回放） | 在 `src/ext2.c` 上加 journal 只读回放 | 挂载 dirty 的 ext3 镜像不损坏数据 |
 | P3-5 | ext4（extent + 64bit） | 扩展 ext2 驱动：extent 树、flex_bg | 读 Ubuntu 默认 ext4 镜像（`debugfs` 差分） |
 | P3-6 | XFS（只读优先） | 新增 `src/xfs.c`：B+ 树、inode | 只读挂载 + 列目录/读文件与 `xfs_db` 一致 |
@@ -103,3 +103,4 @@ P5 可与 P3/P4 并行（不同子系统）
 - 分区表解析（MBR/EBR/GPT + CRC 负例）与 diskmgr 分区显示
 - FAT32/ext2 挂载改用通用解析：GPT 盘与 superfloppy 可挂（QEMU 实测）
 - UTF-8 严格解码器 `src/lib/utf8.c` + 单测（P2-3 基础）
+- exFAT 只读解析 `src/exfat.c` + 单测（真实 mkfs.exfat 镜像验证）

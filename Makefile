@@ -240,6 +240,7 @@ C_SRCS = \
 	$(SRC_DIR)/graphics/blob_unpack.c \
 	$(SRC_DIR)/lib/json.c \
 	$(SRC_DIR)/lib/utf8.c \
+	$(SRC_DIR)/exfat.c \
 	$(SRC_DIR)/ui/theme.c \
 	$(SRC_DIR)/ui/ui_app.c \
 	$(SRC_DIR)/ui/ui_alloc_kernel.c \
@@ -807,6 +808,12 @@ hive-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/test_hive_winsrv
 	@echo "✓ HIVE UI 1.4 event/layout/widget tests"
 
+# exFAT 只读解析：合成卷 + （可选）真实 mkfs.exfat 镜像。
+exfat-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_exfat.c src/exfat.c \
+		src/lib/utf8.c -o $(BUILD_DIR)/test_exfat
+	$(BUILD_DIR)/test_exfat
+
 # UTF-8 严格解码：超长编码/代理区/越界/截断 必须拒绝。
 utf8-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_utf8.c src/lib/utf8.c \
@@ -822,7 +829,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test
 	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:
