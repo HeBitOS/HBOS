@@ -211,6 +211,19 @@ int main(int argc, char **argv) {
         CHECK(memcmp(buf, "abc\n", 4) == 0);
     }
 
+    printf("[EXFAT] 删除后复用目录项槽位\n");
+    CHECK(exfat_unlink_in_dir(&fs, 20, "IN2.TXT") == 0);
+    CHECK(exfat_create_in_dir(&fs, 20, "REUSE.TXT", "r", 1) == 0);
+    exfat_dirent_t sub4[8];
+    int sn4 = exfat_list_dir(&fs, 20, sub4, 8);
+    int seen_r = 0, seen_old = 0;
+    for (int i = 0; i < sn4; i++) {
+        if (strcmp(sub4[i].name, "REUSE.TXT") == 0) seen_r = 1;
+        if (strcmp(sub4[i].name, "IN2.TXT") == 0) seen_old = 1;
+    }
+    CHECK(seen_r && !seen_old);
+    CHECK(sn4 == 2);        /* IN.TXT + REUSE.TXT */
+
     printf("[EXFAT] 非 exFAT 镜像被拒绝\n");
     memset(g_img, 0, sizeof(g_img));
     CHECK(exfat_mount(&fs, mem_rd, NULL, 0) != 0);

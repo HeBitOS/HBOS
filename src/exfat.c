@@ -496,6 +496,23 @@ static int find_dir_slots(exfat_fs_t *fs, uint32_t dir_cluster, uint32_t entries
                     return 0;
                 }
             }
+            /* 复用已删除的目录项组：unlink 只清 InUse 位，槽位仍可回收。
+             * 要求组大小正好匹配（主项类型 0x05，后续次级项 0x40/0x41）。 */
+            for (uint32_t off = 0; off + need <= fs->bytes_per_sector; off += 32) {
+                if (sec[off] == 0x00) break;   /* 0x00 之后不可达，别往那写 */
+                if (sec[off] != 0x05) continue;
+                uint32_t cnt = sec[off + 1];
+                if (cnt + 1 != entries) continue;
+                int ok = 1;
+                for (uint32_t k = 1; k <= cnt; k++) {
+                    uint8_t t = sec[off + k * 32];
+                    if (t != 0x40 && t != 0x41) { ok = 0; break; }
+                }
+                if (!ok) continue;
+                *lba_out = base + s;
+                *off_out = off;
+                return 0;
+            }
         }
         uint32_t next = fat_next(fs, cluster);
         if (next < 2 || next == 0xFFFFFFFFu) break;
