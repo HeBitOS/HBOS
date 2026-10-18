@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, Experimental]
+  pull_request:
+    branches: [main, Experimental]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 宿主机测试：不需要 QEMU、不需要 root，几分钟内跑完，PR 的第一道门。
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3
+
+      - name: Run host test suite
+        run: make test
+
+  # 真实构建：BIOS ISO 走 GRUB，不需要 limine 的 bootstrap，CI 里最稳。
+  build-bios:
+    name: Build BIOS ISO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential nasm grub-pc-bin grub-efi-amd64-bin grub-common \
+            xorriso mtools dosfstools \
+            python3 python3-pil python3-jsonschema python3-jinja2 python3-yaml \
+            cmake llvm autoconf automake pkg-config
+
+      - name: Build
+        run: make -j"$(nproc)" bios-iso
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: hbos-bios-iso
+          path: build/hbos-bios*.iso
+          if-no-files-found: error

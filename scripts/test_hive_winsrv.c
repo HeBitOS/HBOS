@@ -57,8 +57,8 @@ int main(void) {
     uint32_t pixel = 0x80FF0000u;
     winsrv_clear(win, 0xFF0000FFu);
     winsrv_blit_argb(win, 0, 0, 1, 1, &pixel, 1);
-    CHECK(((win->surface[0] >> 16) & 0xFF) >= 127);
-    CHECK((win->surface[0] & 0xFF) >= 126);
+    CHECK(((win->win.surface[0] >> 16) & 0xFF) >= 127);
+    CHECK((win->win.surface[0] & 0xFF) >= 126);
 
     for (int i = 0; i < WINSRV_EVQ * 2; i++)
         winsrv_push_event(win, WINEV_MOUSE, i, i, i & 1);

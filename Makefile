@@ -371,7 +371,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps
+.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps test
 
 # 全新 clone 的第一站：递归拉子模块（含 mbedtls 嵌套）+ 检查宿主机工具。
 # 幂等，不发 sudo、不装包，缺包时只打印安装命令。
@@ -391,6 +391,7 @@ help:
 	@echo "  make chromium-baseline  Check module/API compatibility baseline"
 	@echo "  make browser-test  Run browser backend capability-gate tests"
 	@echo "  make deps       Check/complete submodules and host build dependencies"
+	@echo "  make test       Run all host-side unit/differential tests"
 	@echo "  make hive-test  Run HIVE widget event/layout unit tests"
 	@echo "  make hive-sync  Export the transitional runtime/SDK mirror to HIVE_REPO"
 	@echo "  make linux-compat-lib  Build opt-in Linux source compatibility library"
@@ -796,11 +797,19 @@ hive-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Iapp/include -Isrc/user \
 		scripts/test_hive_ui.c -o $(BUILD_DIR)/test_hive_ui
 	$(BUILD_DIR)/test_hive_ui
-	$(CC) -O2 -Wall -Wextra -Isrc \
+	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
 		scripts/test_hive_winsrv.c src/gui/winsrv.c \
+		src/ui/theme.c src/lib/json.c tests/host/theme_fs_stub.c \
+		tests/host/json_alloc_stub.c tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_hive_winsrv
 	$(BUILD_DIR)/test_hive_winsrv
 	@echo "✓ HIVE UI 1.4 event/layout/widget tests"
+
+# 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
+# 不需要 QEMU、不需要 root，秒级到分钟级。
+.PHONY: test
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench
+	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:
 	@test -x "$(HIVE_REPO)/tools/sync-from-hbos.sh" || \
