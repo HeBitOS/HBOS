@@ -32,6 +32,12 @@ static int file_rd(void *ctx, uint64_t lba, void *buf) {
     return fread(buf, 1, 512, f) == 512 ? 0 : -1;
 }
 
+static int file_wr(void *ctx, uint64_t lba, const void *buf) {
+    FILE *f = ((file_ctx_t *)ctx)->f;
+    if (fseek(f, (long)(lba * 512), SEEK_SET) != 0) return -1;
+    return fwrite(buf, 1, 512, f) == 512 ? 0 : -1;
+}
+
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
@@ -174,20 +180,39 @@ int main(int argc, char **argv) {
 
     if (argc > 1) {
         printf("[EXFAT] 真实镜像：%s\n", argv[1]);
-        FILE *f = fopen(argv[1], "rb");
+        FILE *f = fopen(argv[1], "r+b");
         if (!f) {
             printf("  [SKIP] 打不开\n");
         } else {
             file_ctx_t fc = { f };
             exfat_fs_t rfs;
-            if (exfat_mount(&rfs, file_rd, &fc, 0) == 0) {
-                exfat_dirent_t rl[16];
-                int rn = exfat_list_root(&rfs, rl, 16);
-                printf("  [ok] 挂载成功，根目录 %d 项\n", rn);
-                CHECK(rn >= 0);
-            } else {
-                printf("  [FAIL] 真实镜像挂载失败\n");
+            CHECK(exfat_mount(&rfs, file_rd, &fc, 0) == 0);
+            rfs.wr = file_wr;
+
+            printf("[EXFAT] 创建文件\n");
+            const char *payload = "written by hbos\n";
+            int pr = exfat_create_file(&rfs, "HBOS.TXT", payload, 16);
+            if (pr != 0) {
+                printf("  [FAIL] 创建失败（可能没有分配位图/空间不足）\n");
                 failures++;
+            } else {
+                /* 重新挂载再读，确保不是读到了内存里的残留 */
+                exfat_fs_t rf2;
+                CHECK(exfat_mount(&rf2, file_rd, &fc, 0) == 0);
+                exfat_dirent_t rl[32];
+                int rn = exfat_list_root(&rf2, rl, 32);
+                int found = -1;
+                for (int i = 0; i < rn; i++)
+                    if (strcmp(rl[i].name, "HBOS.TXT") == 0) found = i;
+                CHECK(found >= 0);
+                if (found >= 0) {
+                    char rb[32] = {0};
+                    CHECK(exfat_read_file(&rf2, rl[found].first_cluster,
+                                          rl[found].size, 0, rb, 16) == 16);
+                    CHECK(memcmp(rb, payload, 16) == 0);
+                    printf("  [ok] 写入后读回一致（%u 字节）\n",
+                           (unsigned)rl[found].size);
+                }
             }
             fclose(f);
         }

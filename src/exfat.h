@@ -18,9 +18,11 @@
 #define EXFAT_NAME_MAX 256
 
 typedef int (*exfat_read_fn)(void *ctx, uint64_t lba, void *buf);
+typedef int (*exfat_write_fn)(void *ctx, uint64_t lba, const void *buf);
 
 typedef struct {
     exfat_read_fn rd;
+    exfat_write_fn wr;          /* 写回调；为 NULL 时只读 */
     void *ctx;
     uint64_t volume_lba;        /* 分区起始 LBA */
     uint32_t bytes_per_sector;  /* 512 / 1024 / ... */
@@ -59,6 +61,15 @@ int exfat_iter_dir(exfat_fs_t *fs, uint32_t first_cluster,
 /** 读取文件的一段；返回实际读取字节数（<0 失败）。 */
 int exfat_read_file(exfat_fs_t *fs, uint32_t first_cluster, uint64_t size,
                     uint64_t offset, void *buf, uint32_t len);
+
+/**
+ * @brief 在根目录创建一个文件并写入数据（一次性，不支持追加）。
+ *
+ * 需要 wr 回调；目前只支持根目录、名字长度 <= 255、文件连续分配。
+ * 返回 0 成功。
+ */
+int exfat_create_file(exfat_fs_t *fs, const char *name,
+                      const void *data, uint32_t size);
 
 /** 卷标（最多 11 个 UTF-16 字符），无卷标返回空串。 */
 void exfat_volume_label(exfat_fs_t *fs, char *out, int cap);

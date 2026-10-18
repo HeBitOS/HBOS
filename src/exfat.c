@@ -249,3 +249,272 @@ void exfat_volume_label(exfat_fs_t *fs, char *out, int cap) {
         return;
     }
 }
+
+/* ══════════════════════════════════════════════════════════════════
+ * 写支持：在根目录创建文件（一次性写入，不支持追加）
+ *
+ * 需要：分配位图（0x81 项）、upcase 表（0x82 项，缺省时按 ASCII 大写）、
+ * FAT 链、目录项三件套（0x85 + 0xC0 + 0xC1）与 SetChecksum。
+ * ══════════════════════════════════════════════════════════════════ */
+
+static int write_sector(exfat_fs_t *fs, uint64_t lba, const void *buf) {
+    if (!fs->wr) return -1;
+    return fs->wr(fs->ctx, fs->volume_lba + lba, buf);
+}
+
+static int fat_set(exfat_fs_t *fs, uint32_t cluster, uint32_t value) {
+    uint64_t byte = (uint64_t)cluster * 4;
+    uint32_t lba = fs->fat_offset + (uint32_t)(byte / fs->bytes_per_sector);
+    uint32_t off = (uint32_t)(byte % fs->bytes_per_sector);
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    if (read_sector(fs, lba, sec) < 0) return -1;
+    sec[off] = (uint8_t)value;
+    sec[off + 1] = (uint8_t)(value >> 8);
+    sec[off + 2] = (uint8_t)(value >> 16);
+    sec[off + 3] = (uint8_t)(value >> 24);
+    return write_sector(fs, lba, sec);
+}
+
+/* 在簇链上按字节偏移读写；写是读-改-写（扇区可能只改一部分）。 */
+static int chain_rw(exfat_fs_t *fs, uint32_t first, uint64_t off,
+                    void *buf, uint32_t len, int is_write) {
+    if (!first) return -1;
+    uint64_t cluster_bytes = (uint64_t)fs->sectors_per_cluster * fs->bytes_per_sector;
+    uint32_t cluster = first;
+    uint32_t skip = (uint32_t)(off / cluster_bytes);
+    uint64_t inner = off % cluster_bytes;
+    for (uint32_t i = 0; i < skip; i++) {
+        cluster = fat_next(fs, cluster);
+        if (cluster < 2 || cluster == 0xFFFFFFFFu) return -1;
+    }
+
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    uint8_t *p = (uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < len) {
+        if (cluster < 2 || cluster == 0xFFFFFFFFu) return -1;
+        uint64_t base = cluster_lba(fs, cluster);
+        uint32_t sidx = (uint32_t)(inner / fs->bytes_per_sector);
+        uint32_t soff = (uint32_t)(inner % fs->bytes_per_sector);
+        if (read_sector(fs, base + sidx, sec) < 0) return -1;
+
+        uint32_t n = fs->bytes_per_sector - soff;
+        if (n > len - done) n = len - done;
+        if (is_write) {
+            for (uint32_t i = 0; i < n; i++) sec[soff + i] = p[done + i];
+            if (write_sector(fs, base + sidx, sec) < 0) return -1;
+        } else {
+            for (uint32_t i = 0; i < n; i++) p[done + i] = sec[soff + i];
+        }
+        done += n;
+        inner += n;
+        if (inner >= cluster_bytes) {
+            inner = 0;
+            cluster = fat_next(fs, cluster);
+        }
+    }
+    return 0;
+}
+
+/* 在根目录里找某个"关键目录项"（0x81 位图 / 0x82 upcase），取其数据簇。 */
+static int root_special(exfat_fs_t *fs, uint8_t type,
+                        uint32_t *first, uint64_t *size) {
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    uint32_t cluster = fs->root_cluster;
+    for (uint32_t guard = 0; guard < fs->cluster_count; guard++) {
+        uint64_t base = cluster_lba(fs, cluster);
+        for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
+            if (read_sector(fs, base + s, sec) < 0) return -1;
+            for (uint32_t off = 0; off + 32 <= fs->bytes_per_sector; off += 32) {
+                if (sec[off] == type) {
+                    if (first) *first = le32(sec + off + 20);
+                    if (size) *size = le64(sec + off + 24);
+                    return 0;
+                }
+                if (sec[off] == 0x00) return -1;
+            }
+        }
+        uint32_t next = fat_next(fs, cluster);
+        if (next < 2 || next == 0xFFFFFFFFu) break;
+        cluster = next;
+    }
+    return -1;
+}
+
+static int bitmap_get(exfat_fs_t *fs, uint32_t bm, uint32_t idx, int *bit) {
+    uint8_t b = 0;
+    if (chain_rw(fs, bm, idx / 8, &b, 1, 0) < 0) return -1;
+    *bit = (b >> (idx % 8)) & 1;
+    return 0;
+}
+
+static int bitmap_set(exfat_fs_t *fs, uint32_t bm, uint32_t idx, int val) {
+    uint8_t b = 0;
+    if (chain_rw(fs, bm, idx / 8, &b, 1, 0) < 0) return -1;
+    if (val) b |= (uint8_t)(1u << (idx % 8));
+    else b &= (uint8_t)~(1u << (idx % 8));
+    return chain_rw(fs, bm, idx / 8, &b, 1, 1);
+}
+
+/* 从位图里挑 need 个空闲簇并置位；返回实际找到的个数。 */
+static int alloc_clusters(exfat_fs_t *fs, uint32_t bm, uint32_t need,
+                          uint32_t *out, uint32_t max) {
+    uint32_t got = 0;
+    for (uint32_t i = 0; i < fs->cluster_count && got < need && got < max; i++) {
+        int bit = 0;
+        if (bitmap_get(fs, bm, i, &bit) < 0) break;
+        if (bit) continue;
+        if (bitmap_set(fs, bm, i, 1) < 0) break;
+        out[got++] = i + 2;
+    }
+    return (int)got;
+}
+
+static uint16_t exfat_ror1_add(uint16_t v, uint16_t add) {
+    return (uint16_t)(((v << 15) | (v >> 1)) + add);
+}
+
+/* UTF-8 → UTF-16，返回码元数；超长/非法返回 -1。 */
+static int utf8_to_utf16(const char *s, uint16_t *out, int cap) {
+    int n = 0;
+    uint32_t i = 0;
+    while (s[i]) {
+        uint32_t cp = 0;
+        int used = utf8_decode(s + i, 4, &cp);
+        if (!used) return -1;
+        i += (uint32_t)used;
+        if (cp >= 0x10000) {
+            if (n + 2 > cap) return -1;
+            cp -= 0x10000;
+            out[n++] = (uint16_t)(0xD800 + (cp >> 10));
+            out[n++] = (uint16_t)(0xDC00 + (cp & 0x3FF));
+        } else {
+            if (n + 1 > cap) return -1;
+            out[n++] = (uint16_t)cp;
+        }
+    }
+    return n;
+}
+
+/* 找一段能放下 entries 个 32B 目录项的空位（必须在同一扇区内）。 */
+static int find_dir_slots(exfat_fs_t *fs, uint32_t entries,
+                          uint64_t *lba_out, uint32_t *off_out) {
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    uint32_t need = entries * 32;
+    uint32_t cluster = fs->root_cluster;
+    for (uint32_t guard = 0; guard < fs->cluster_count; guard++) {
+        uint64_t base = cluster_lba(fs, cluster);
+        for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
+            if (read_sector(fs, base + s, sec) < 0) return -1;
+            for (uint32_t off = 0; off + need <= fs->bytes_per_sector; off += 32) {
+                if (sec[off] == 0x00) {
+                    *lba_out = base + s;
+                    *off_out = off;
+                    return 0;
+                }
+            }
+        }
+        uint32_t next = fat_next(fs, cluster);
+        if (next < 2 || next == 0xFFFFFFFFu) break;
+        cluster = next;
+    }
+    return -1;
+}
+
+int exfat_create_file(exfat_fs_t *fs, const char *name,
+                      const void *data, uint32_t size) {
+    if (!fs || !fs->wr || !name || !name[0]) return -1;
+
+    uint16_t uname[256];
+    int nlen = utf8_to_utf16(name, uname, 255);
+    if (nlen <= 0) return -1;
+
+    /* 名字哈希必须和 upcase 表一致。exFAT 的 upcase 表可以是压缩格式
+     * （0xFFFF 表示区间），完整解析还没做；ASCII 直接大写的结果与标准表
+     * 一致，所以先只允许 ASCII 名字，避免写出 fsck 会报 hash 错的项。 */
+    for (int i = 0; i < nlen; i++)
+        if (uname[i] >= 0x80) return -1;
+
+    uint32_t bm = 0;
+    uint64_t bm_size = 0;
+    if (root_special(fs, 0x81, &bm, &bm_size) < 0 || !bm) return -1;
+
+    uint32_t cluster_bytes = fs->sectors_per_cluster * fs->bytes_per_sector;
+    uint32_t need = size ? (size + cluster_bytes - 1) / cluster_bytes : 0;
+
+    uint32_t clusters[64];
+    if (need > 64) return -1;                       /* MVP：一次最多 64 簇 */
+    int got = alloc_clusters(fs, bm, need, clusters, 64);
+    if (got != (int)need) return -1;
+
+    for (uint32_t i = 0; i < need; i++)
+        if (fat_set(fs, clusters[i], i + 1 < need ? clusters[i + 1] : 0xFFFFFFFFu) < 0)
+            return -1;
+
+    if (need && size) {
+        if (chain_rw(fs, clusters[0], 0, (void *)data, size, 1) < 0) return -1;
+    }
+
+    /* 目录项三件套 */
+    uint8_t set[96];
+    for (int i = 0; i < 96; i++) set[i] = 0;
+
+    uint8_t *fe = set;
+    fe[0] = 0x85;
+    fe[1] = 2;                                      /* 两个次级项 */
+    fe[4] = 0x20;                                   /* FILE_ATTRIBUTE_ARCHIVE */
+    fe[20] = (uint8_t)(need ? clusters[0] : 0);
+    fe[21] = (uint8_t)((need ? clusters[0] : 0) >> 8);
+    fe[22] = (uint8_t)((need ? clusters[0] : 0) >> 16);
+    fe[23] = (uint8_t)((need ? clusters[0] : 0) >> 24);
+    for (int i = 0; i < 8; i++) fe[24 + i] = (uint8_t)((uint64_t)size >> (8 * i));
+
+    uint8_t *se = set + 32;
+    se[0] = 0xC0;
+    se[1] = 0;                                      /* 有效数据长度标志 */
+    se[3] = (uint8_t)nlen;
+    uint16_t hash = 0;
+    for (int i = 0; i < nlen; i++) {
+        uint16_t c = uname[i];
+        if (c >= 'a' && c <= 'z') c = (uint16_t)(c - 32);
+        hash = exfat_ror1_add(hash, c);
+    }
+    se[4] = (uint8_t)hash;
+    se[5] = (uint8_t)(hash >> 8);
+    for (int i = 0; i < 4; i++) se[20 + i] = fe[20 + i];
+    for (int i = 0; i < 8; i++) se[24 + i] = fe[24 + i];
+
+    uint8_t *ne = set + 64;
+    ne[0] = 0xC1;
+    for (int i = 0; i < nlen && i < 15; i++) {
+        ne[2 + i * 2] = (uint8_t)uname[i];
+        ne[2 + i * 2 + 1] = (uint8_t)(uname[i] >> 8);
+    }
+
+    /* SetChecksum：对三项逐字节 rotate-right-1 累加，校验和字段本身按 0 参与 */
+    fe[2] = 0; fe[3] = 0;
+    uint16_t sum = 0;
+    /* 规范要求跳过校验和字段本身（不是"按 0 参与"）：这两个字节虽然为 0，
+     * 但 rotate 一次就会改变后续结果，fsck 会报 checksum wrong。 */
+    for (int i = 0; i < 96; i++) {
+        if (i == 2 || i == 3) continue;
+        sum = exfat_ror1_add(sum, set[i]);
+    }
+    fe[2] = (uint8_t)sum;
+    fe[3] = (uint8_t)(sum >> 8);
+
+    uint64_t lba = 0;
+    uint32_t off = 0;
+    if (find_dir_slots(fs, 3, &lba, &off) < 0) return -1;
+
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    if (read_sector(fs, lba, sec) < 0) return -1;
+    for (int i = 0; i < 96; i++) sec[off + i] = set[i];
+    if (write_sector(fs, lba, sec) < 0) return -1;
+    return 0;
+}
