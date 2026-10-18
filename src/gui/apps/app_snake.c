@@ -37,26 +37,6 @@ static snake_state_t *snake(void) { return &g_snake; }
 #define SNAKE_W 16
 #define SNAKE_H 10
 
-/* CMOS 秒计数（与 app_clock.c 各持一份极小的端口读取，避免互依赖） */
-static inline void snake_outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-static inline uint8_t snake_inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-static uint8_t snake_bcd_to_bin(uint8_t v) {
-    return (uint8_t)((v & 0x0f) + ((v >> 4) * 10));
-}
-static uint8_t snake_cmos_second(void) {
-    snake_outb(0x70, 0x0b);
-    uint8_t sb = snake_inb(0x71);
-    snake_outb(0x70, 0x00);
-    uint8_t s = snake_inb(0x71);
-    return (sb & 0x04) ? s : snake_bcd_to_bin(s);
-}
-
 static void snake_place_food(gui_state_t *st) {
     (void)st;   /* 状态已私有化 */
     snake_state_t *s = snake();

@@ -60,12 +60,12 @@ typedef struct {
 // 全局文件系统实例
 static filesystem_t fs;           /**< 全局文件系统实例 */
 static fs_backend_t fs_backend = FS_BACKEND_RAM; /**< 当前文件系统后端类型 */
-static uint8_t ramfs_storage[MAX_FILES][RAMFS_MAX_FILE_SIZE]; /**< ramfs 模式下的文件数据存储区 */
-static hbfs_entry_t hbfs_table[MAX_FILES]; /**< HBFS 文件表 */
+static uint8_t ramfs_storage[RAMFS_MAX_FILES][RAMFS_MAX_FILE_SIZE]; /**< ramfs 模式下的文件数据存储区 */
+static hbfs_entry_t hbfs_table[HBFS_MAX_FILES]; /**< HBFS 文件表 */
 typedef char hbfs_table_size_must_match_disk_layout[
     sizeof(hbfs_table) == HBFS_TABLE_SECTORS * BLOCK_SECTOR_SIZE ? 1 : -1];
 static uint32_t hbfs_start_lba = HBFS_DEFAULT_START_LBA; /**< HBFS 分区起始 LBA */
-static uint32_t hbfs_total_sectors = 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS; /**< HBFS 分区总扇区数 */
+static uint32_t hbfs_total_sectors = 1 + HBFS_TABLE_SECTORS + HBFS_MAX_FILES * HBFS_FILE_SECTORS; /**< HBFS 分区总扇区数 */
 static const char *fs_error = "ok"; /**< 最近一次错误描述 */
 
 static int ramfs_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);   /**< ramfs VFS 读取操作 */
@@ -154,7 +154,7 @@ static uint32_t hbfs_data_lba(void) {
 
 /** 计算 HBFS 所需的总扇区数 */
 static uint32_t hbfs_needed_sectors(void) {
-    return 1 + HBFS_TABLE_SECTORS + MAX_FILES * HBFS_FILE_SECTORS;
+    return 1 + HBFS_TABLE_SECTORS + HBFS_MAX_FILES * HBFS_FILE_SECTORS;
 }
 
 /** 获取 HBFS 所需的最小扇区数（对外接口） */
@@ -236,7 +236,7 @@ static void fs_reset_ram(void) {
         f->name[0] = '\0';
         f->size = 0;
         f->capacity = RAMFS_MAX_FILE_SIZE;
-        f->data = ramfs_storage[i];
+        f->data = (i < RAMFS_MAX_FILES) ? ramfs_storage[i] : NULL;
         f->node.name[0] = '\0';
         f->node.type = VFS_NODE_FILE;
         f->node.size = 0;
@@ -258,7 +258,7 @@ static void hbfs_fill_super(hbfs_super_t *sb) {
     sb->magic = HBFS_MAGIC;
     sb->version = HBFS_VERSION;
     sb->start_lba = hbfs_start_lba;
-    sb->max_files = MAX_FILES;
+    sb->max_files = HBFS_MAX_FILES;
     sb->max_file_size = RAMFS_MAX_FILE_SIZE;
     sb->table_lba = hbfs_table_lba();
     sb->table_sectors = HBFS_TABLE_SECTORS;
@@ -285,7 +285,7 @@ static int hbfs_write_super(void) {
 static int hbfs_validate_super(const hbfs_super_t *sb) {
     return sb->magic == HBFS_MAGIC &&
            sb->version == HBFS_VERSION &&
-           sb->max_files == MAX_FILES &&
+           sb->max_files == HBFS_MAX_FILES &&
            sb->max_file_size == RAMFS_MAX_FILE_SIZE &&
            sb->start_lba == hbfs_start_lba &&
            sb->table_lba == hbfs_table_lba() &&
@@ -313,7 +313,7 @@ static int hbfs_load_table(void) {
 /** 根据 HBFS 文件表重建内存中的文件结构 */
 static void hbfs_rebuild_files_from_table(void) {
     fs.file_count = 0;
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < HBFS_MAX_FILES; i++) {
         file_t *f = &fs.files[i];
         hbfs_entry_t *e = &hbfs_table[i];
         f->used = e->used ? 1 : 0;
@@ -346,7 +346,7 @@ static void hbfs_rebuild_files_from_table(void) {
 
 /** 更新指定文件的 HBFS 文件表项并同步到磁盘 */
 static int hbfs_update_entry(file_t *f) {
-    if (!f || f->disk_slot >= MAX_FILES) return -1;
+    if (!f || f->disk_slot >= HBFS_MAX_FILES) return -1;
     hbfs_entry_t *e = &hbfs_table[f->disk_slot];
     memset(e, 0, sizeof(*e));
     if (f->used) {
@@ -1363,7 +1363,7 @@ int fs_check(fs_check_result_t *out) {
         if (hbfs_read_super(&sb) < 0 || !hbfs_validate_super(&sb)) {
             if (r.errors++ == 0) r.first_error = "invalid hbfs superblock";
         }
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < HBFS_MAX_FILES; i++) {
             if (fs.files[i].used != (hbfs_table[i].used ? 1 : 0)) {
                 if (r.errors++ == 0) r.first_error = "hbfs table mismatch";
             }
@@ -1865,7 +1865,7 @@ uint32_t fs_capacity_bytes(void) {
         uint64_t bytes = (uint64_t)hbfs_total_sectors * BLOCK_SECTOR_SIZE;
         return bytes > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)bytes;
     }
-    return MAX_FILES * RAMFS_MAX_FILE_SIZE;
+    return RAMFS_MAX_FILES * RAMFS_MAX_FILE_SIZE;
 }
 
 /** 获取已使用字节数 */
@@ -2043,6 +2043,8 @@ file_t *fs_create_file(const char *name) {
     }
 
     for (uint32_t i = 0; i < MAX_FILES; i++) {
+        if (fs_backend != FS_BACKEND_HBFS && i >= RAMFS_MAX_FILES)
+            break;   /* ramfs 数据区只有 RAMFS_MAX_FILES 个槽 */
         file_t *f = &fs.files[i];
         if (f->used) continue;
         strcpy(f->name, norm);

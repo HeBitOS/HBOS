@@ -10,7 +10,15 @@
 
 // 文件系统相关定义
 #define SECTOR_SIZE 512          /**< 扇区大小（字节） */
-#define MAX_FILES 128            /**< 最大文件数量 */
+/* 三个上限互相独立，别再合成一个常量：
+ *   FS_MAX_FILES    — 内存文件表，决定一次能列多少目录项
+ *   RAMFS_MAX_FILES — ramfs 数据区槽位（每槽 128KiB，128 个 = 16MiB 静态）
+ *   HBFS_MAX_FILES  — HBFS 磁盘表布局（16 扇区 × 512B / 64B 表项 = 128）
+ */
+#define FS_MAX_FILES     512
+#define RAMFS_MAX_FILES  128
+#define HBFS_MAX_FILES   128
+#define MAX_FILES FS_MAX_FILES   /**< 兼容旧调用点：默认按内存表容量 */
 #define MAX_FILENAME 32          /**< 文件名最大长度（含结尾 '\0'） */
 #define RAMFS_MAX_FILE_SIZE 131072 /**< ramfs/HBFS 单文件最大容量（字节） */
 
@@ -28,7 +36,7 @@ typedef struct file {
 
 // 文件系统结构
 typedef struct filesystem {
-    file_t files[MAX_FILES];     /**< 文件表 */
+    file_t files[FS_MAX_FILES];  /**< 文件表 */
     uint32_t file_count;         /**< 当前已使用的文件数 */
     uint32_t total_sectors;      /**< 磁盘总扇区数 */
 } filesystem_t;
