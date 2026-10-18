@@ -362,22 +362,28 @@ int ext2_readdir(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t index,
     if ((inode->i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return -1;
 
     uint8_t block_buf[4096] __attribute__((aligned(2)));
-    uint32_t offset = 0;
+    if (fs->block_size > sizeof(block_buf)) return -1;
+
+    uint32_t nblocks = (inode->i_size + fs->block_size - 1) / fs->block_size;
     uint32_t entry_idx = 0;
 
-    while (offset < inode->i_size) {
-        uint32_t block_idx = offset / fs->block_size;
-        uint32_t block_off = offset % fs->block_size;
+    /* 按"逻辑块"遍历，而不是按 rec_len 跨块串行推进。
+     * ext4 的 htree 目录里夹着 dx_root/dx_node 索引块，它们的假目录项
+     * rec_len 会覆盖整块，按链式推进会被带偏（实测 600 个文件只列出 126 个）。
+     * 这里对每块单独解析，索引块（inode==0 且 rec_len==block_size）直接跳过。 */
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t phys = ext2_inode_block(fs, inode, b);
+        if (!phys) continue;
+        if (ext2_read_block(fs, phys, block_buf) < 0) return -1;
 
-        uint32_t phys_block = ext2_inode_block(fs, inode, block_idx);
-        if (!phys_block) return -1;
+        ext2_dir_entry_t *first = (ext2_dir_entry_t *)block_buf;
+        if (first->inode == 0 && first->rec_len == fs->block_size)
+            continue;   /* dx_root / dx_node 索引块 */
 
-        if (ext2_read_block(fs, phys_block, block_buf) < 0) return -1;
-
-        while (block_off < fs->block_size && offset < inode->i_size) {
-            ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(block_buf + block_off);
-            if (entry->rec_len == 0) return -1;
-
+        uint32_t off = 0;
+        while (off + sizeof(ext2_dir_entry_t) <= fs->block_size) {
+            ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(block_buf + off);
+            if (entry->rec_len < 8 || off + entry->rec_len > fs->block_size) break;
             if (entry->inode != 0 && entry->name_len > 0) {
                 if (entry_idx == index) {
                     uint32_t nlen = entry->name_len;
@@ -389,8 +395,7 @@ int ext2_readdir(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t index,
                 }
                 entry_idx++;
             }
-            offset += entry->rec_len;
-            block_off += entry->rec_len;
+            off += entry->rec_len;
         }
     }
     return -1;
