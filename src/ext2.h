@@ -5,6 +5,14 @@
 
 #define EXT2_SIGNATURE 0xEF53
 
+/* INCOMPAT 特性：只要置位，本驱动就不能安全挂载。
+ * RECOVER=日志需要回放；EXTENTS=inode 的 i_block 是 extent 树而不是
+ * 15 个块指针；64BIT/FLEX_BG=超级块/组描述符布局变了。 */
+#define EXT2_INCOMPAT_RECOVER   0x0004u
+#define EXT2_INCOMPAT_EXTENTS   0x0040u
+#define EXT2_INCOMPAT_64BIT     0x0080u
+#define EXT2_INCOMPAT_FLEX_BG   0x0200u
+
 #define EXT2_SUPERBLOCK_OFFSET 1024
 #define EXT2_SUPERBLOCK_SIZE   1024
 
@@ -121,6 +129,8 @@ typedef struct {
 
 /* Read */
 int ext2_mount(uint32_t partition_lba, ext2_fs_t *fs);
+/** 最近一次挂载失败原因（静态字符串），成功时为 "ok"。 */
+const char *ext2_last_error(void);
 int ext2_read_inode(ext2_fs_t *fs, uint32_t inode_num, ext2_inode_t *inode);
 int ext2_read_block(ext2_fs_t *fs, uint32_t block, uint8_t *buf);
 int ext2_read_file(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t offset,

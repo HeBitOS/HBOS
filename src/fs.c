@@ -1285,7 +1285,10 @@ int fs_mount_partition(int index) {
         fs.total_sectors = hbfs_total_sectors;
         return 0;
     }
-    return fs_fail("该分区没有可识别的文件系统（FAT32/ext2/HBFS）");
+    /* ext2 那边可能给出了更具体的原因（ext4 特性 / 日志需回放） */
+    if (ext2_last_error() && strcmp(ext2_last_error(), "ok") != 0)
+        return fs_fail(ext2_last_error());
+    return fs_fail("该分区没有可识别的文件系统（FAT32/exFAT/ext2/HBFS）");
 }
 
 /**

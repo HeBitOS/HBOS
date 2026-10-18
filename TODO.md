@@ -44,8 +44,8 @@
 | P3-1 | 分区表解析 | ✅ 解析（`src/partition.c`）+ GPT 自动挂载 + `mount <n>` 指定分区；**待办**：运行中切换后端（需 VFS 重建） | `diskmgr` 列出分区；`mount 2` 可挂指定分区（仅 ramfs 状态） |
 | P3-2 | USB 外接盘发现 | 现有 USB MSC 只认第一个 LUN；补枚举 + 插拔事件 | 插入 U 盘 3s 内出现在 `disks`；拔出后不崩 |
 | P3-3 | exFAT（读写） | 只读 ✅：`src/exfat.c` + fs 后端（自动挂载 0x07 分区、根目录进文件表、只读 VFS）；读写：`create_file` + `write_file`（可扩展）已接 VFS，`writefile`/编辑器可直接写 exFAT 盘；fsck.exfat 严格校验通过。非 ASCII 名字（upcase 压缩表）✅；子目录创建/写入 ✅、truncate/unlink ✅；**待办**：目录扩簇（0x00 空槽会让后续簇不可达，需重排）、大文件（>64 簇） | QEMU 实测 exFAT 分区自动挂载；子目录递归展开（深度 4）；`make test` 覆盖合成卷（含嵌套目录）与真实镜像 |
-| P3-4 | ext3（ext2 + journal 回放） | 在 `src/ext2.c` 上加 journal 只读回放 | 挂载 dirty 的 ext3 镜像不损坏数据 |
-| P3-5 | ext4（extent + 64bit） | 扩展 ext2 驱动：extent 树、flex_bg | 读 Ubuntu 默认 ext4 镜像（`debugfs` 差分） |
+| P3-4 | ext3（ext2 + journal 回放） | 已做**安全防护**：检测到 INCOMPAT_RECOVER 直接拒绝，不再误按 ext2 读；回放本身未实现 | clean 的 ext3 可读；dirty 的明确拒绝而不是读垃圾 |
+| P3-5 | ext4（extent + 64bit） | 已做**安全防护**：EXTENTS/64BIT/FLEX_BG → 拒绝挂载（QEMU 实测不再误挂）；extent 树解析未实现 | 挂载 ext4 不产生垃圾数据；只读支持待做 |
 | P3-6 | XFS（只读优先） | 新增 `src/xfs.c`：B+ 树、inode | 只读挂载 + 列目录/读文件与 `xfs_db` 一致 |
 | P3-7 | FAT32 写入补齐 | 现有 FAT32 偏只读 | 创建/删除/改名/长文件名全通 |
 

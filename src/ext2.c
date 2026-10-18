@@ -82,8 +82,13 @@ static int ext2_write_sector(uint32_t partition_lba, uint32_t lba, const uint8_t
     return block_write_sector(partition_lba + lba, buf) == 0 ? 0 : -1;
 }
 
+static const char *g_ext2_error = "ok";
+
+const char *ext2_last_error(void) { return g_ext2_error; }
+
 int ext2_mount(uint32_t partition_lba, ext2_fs_t *fs)
 {
+    g_ext2_error = "ok";
     if (!fs) return -1;
     memset(fs, 0, sizeof(*fs));
 
@@ -93,7 +98,23 @@ int ext2_mount(uint32_t partition_lba, ext2_fs_t *fs)
     if (!ext2_read_sector(partition_lba, sb_lba, sector)) return -1;
     memcpy(&fs->sb, sector, sizeof(ext2_superblock_t));
 
-    if (fs->sb.s_magic != EXT2_SIGNATURE) return -1;
+    if (fs->sb.s_magic != EXT2_SIGNATURE) {
+        g_ext2_error = "bad magic";
+        return -1;
+    }
+
+    /* ext4（extent / 64bit / flex_bg）和需要日志回放的 ext3 不能按 ext2 读：
+     * 硬挂上去会把 extent 树当块指针解释，读出来是垃圾，写下去就是破坏。 */
+    uint32_t incompat = fs->sb.s_feature_incompat;
+    if (incompat & EXT2_INCOMPAT_RECOVER) {
+        g_ext2_error = "journal needs replay (ext3 dirty)";
+        return -1;
+    }
+    if (incompat & (EXT2_INCOMPAT_EXTENTS | EXT2_INCOMPAT_64BIT |
+                    EXT2_INCOMPAT_FLEX_BG)) {
+        g_ext2_error = "ext4 features (extent/64bit/flex_bg) unsupported";
+        return -1;
+    }
 
     fs->block_size = 1024U << fs->sb.s_log_block_size;
     fs->inode_size = fs->sb.s_inode_size ? fs->sb.s_inode_size : 128;
