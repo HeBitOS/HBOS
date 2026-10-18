@@ -41,7 +41,7 @@
 
 | # | 任务 | 说明 | 验收标准 |
 |---|---|---|---|
-| P3-1 | 分区表解析 | MBR + GPT（`src/partition.c`），块设备抽象出"磁盘/分区"两层 | `disks` 列出磁盘与分区；QEMU 三种布局（MBR/GPT/无分区）全过 |
+| P3-1 | 分区表解析 | ✅ 解析已完成（`src/partition.c`，MBR+EBR+GPT+CRC，宿主机单测）；**待办**：块层按分区读写 + 挂载指定分区 | `diskmgr` 已列出表类型/类型名/GPT 名字；挂载仍未分区化 |
 | P3-2 | USB 外接盘发现 | 现有 USB MSC 只认第一个 LUN；补枚举 + 插拔事件 | 插入 U 盘 3s 内出现在 `disks`；拔出后不崩 |
 | P3-3 | exFAT（读写） | 新增 `src/exfat.c`：目录项、簇链、FAT | 与 Linux `mkfs.exfat` 镜像双向互认（脚本差分） |
 | P3-4 | ext3（ext2 + journal 回放） | 在 `src/ext2.c` 上加 journal 只读回放 | 挂载 dirty 的 ext3 镜像不损坏数据 |
@@ -100,3 +100,4 @@ P5 可与 P3/P4 并行（不同子系统）
 - 开始菜单裁剪、吸附/缩放/任务栏/#8 部分修复
 - `make test` 宿主机测试总入口；修复失效的 winsrv 测试（P4 窗口统一后字段改名，测试仍在用旧字段）
 - CI：PR 跑宿主机测试 + 构建 BIOS ISO
+- 分区表解析（MBR/EBR/GPT + CRC 负例）与 diskmgr 分区显示
