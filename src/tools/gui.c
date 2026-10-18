@@ -5101,7 +5101,8 @@ static void cal_geometry(int w, int h, int *ox, int *oy, int *ow, int *oh,
     *head_h = ui_s(40);
     *wk_h = ui_s(24);
     *ow = *pad * 2 + *cell * 7;
-    *oh = *pad * 2 + *head_h + *wk_h + *cell * 6;
+    /* 底部留一行"当前时间 + 时区"：issue #8 反馈弹窗里看不到具体时间 */
+    *oh = *pad * 2 + *head_h + *wk_h + *cell * 6 + ui_s(28);
     *ox = w - *ow - ui_s(12);
     if (*ox < 8) *ox = 8;
     *oy = h - TASKBAR_H - *oh - ui_s(8);
@@ -5186,6 +5187,28 @@ static void draw_calendar_popup(int w, int h, gui_state_t *st) {
             text(cx + (cell - tw2) / 2, cy + (cell - lh) / 2, db, fg, 1);
         }
     }
+
+    /* 底部：当前时间（时:分:秒）+ 时区偏移，和任务栏时钟同源 */
+    int fy = oy + oh - pad - lh;
+    rect(ox + pad, fy - ui_s(7), ow - 2 * pad, 1, bd);
+    char tb[40];
+    uint32_t tp = 0;
+    tb[0] = 0;
+    if (th < 10) append_str(tb, sizeof(tb), &tp, "0");
+    append_uint(tb, sizeof(tb), &tp, th);
+    append_str(tb, sizeof(tb), &tp, ":");
+    if (tmin < 10) append_str(tb, sizeof(tb), &tp, "0");
+    append_uint(tb, sizeof(tb), &tp, tmin);
+    append_str(tb, sizeof(tb), &tp, ":");
+    if (tsec < 10) append_str(tb, sizeof(tb), &tp, "0");
+    append_uint(tb, sizeof(tb), &tp, tsec);
+    append_str(tb, sizeof(tb), &tp, "  UTC");
+    if (g_rtc_tz_offset_hours >= 0) append_str(tb, sizeof(tb), &tp, "+");
+    else { append_str(tb, sizeof(tb), &tp, "-"); }
+    int tzabs = g_rtc_tz_offset_hours < 0 ? -g_rtc_tz_offset_hours
+                                          : g_rtc_tz_offset_hours;
+    append_uint(tb, sizeof(tb), &tp, (uint32_t)tzabs);
+    text(ox + pad, fy, tb, fg, 1);
 }
 
 /* 日历命中：-1=面板外 0=面板内空白 1=上月 2=下月 */
