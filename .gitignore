@@ -21,3 +21,6 @@ scripts/__pycache__/
 .zcode/
 # inflate 差分测试的生成向量（约 20 MB，由 make inflate-bench 生成）
 tests/host/vectors/
+.agent-teams/
+.workbuddy/
+.Trash-0/
