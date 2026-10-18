@@ -211,6 +211,7 @@ static void cmd_install(int argc, char **argv) {
         console_puts("  3. diskmgr        confirm storage is ready\n\n");
         console_puts("Advanced:\n");
         console_puts("  install format                       erase the current FAT32 filesystem\n");
+        console_puts("  install partition <n>                 format partition n as FAT32 (custom install)\n");
         console_puts("  install part <start> <sectors>        create FAT32 at an exact LBA range\n");
         console_puts("  install hbfs-auto                     prepare storage using the legacy HBFS format\n");
         console_puts("  install hbfs-part <start> <sectors>   create legacy HBFS at an exact LBA range\n\n");
@@ -227,6 +228,25 @@ static void cmd_install(int argc, char **argv) {
         console_puts("\x1b[33minstall:\x1b[0m formatting current FAT32 partition\n");
         if (fs_format_disk_fat32() < 0) console_puts("\x1b[31minstall: format failed\x1b[0m\n");
         else console_puts("\x1b[32minstall: formatted\x1b[0m\n");
+        return;
+    }
+
+    if (argc > 1 && streq(argv[1], "partition")) {
+        uint32_t idx = 0;
+        if (argc < 3 || parse_u32(argv[2], &idx) < 0 || idx == 0) {
+            console_puts("usage: install partition <n>   （n 为 diskmgr 里的分区号）\n");
+            return;
+        }
+        console_puts("\x1b[33minstall:\x1b[0m formatting p");
+        print_uint(idx);
+        console_puts(" as FAT32\n");
+        if (fs_install_disk_fat32_partition((int)idx) < 0) {
+            console_puts("\x1b[31minstall: failed\x1b[0m: ");
+            console_puts(fs_last_error());
+            console_putchar('\n');
+            return;
+        }
+        console_puts("\x1b[32minstall: FAT32 partition ready\x1b[0m\n");
         return;
     }
 

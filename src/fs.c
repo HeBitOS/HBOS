@@ -1686,6 +1686,27 @@ int fs_mount_disk(void) {
     return 0;
 }
 
+/**
+ * 把第 index 个分区格式化成 FAT32。自定义安装的第一步：用户先在分区器里
+ * 划好区，再按分区号格式化，不用自己算 LBA。
+ */
+int fs_install_disk_fat32_partition(int index) {
+    static partition_entry_t parts[PART_MAX_ENTRIES];
+    if (fs_is_disk()) return fs_fail("已有文件系统在挂载，格式化前请重启");
+    if (block_init() < 0) return fs_fail("没有块设备");
+
+    int n = partition_parse(fs_part_read, NULL, parts, PART_MAX_ENTRIES);
+    if (n < 0) return fs_fail("分区表读取失败");
+    if (n == 0) return fs_fail("没有分区表");
+    if (index < 1 || index > n) return fs_fail("分区号超出范围");
+
+    uint64_t start = parts[index - 1].start_lba;
+    uint64_t secs = parts[index - 1].sectors;
+    if (start > 0xFFFFFFFFull || secs > 0xFFFFFFFFull || secs == 0)
+        return fs_fail("分区超出 32 位 LBA 范围");
+    return fs_install_disk_fat32_at((uint32_t)start, (uint32_t)secs);
+}
+
 /** 尝试挂载 EXT2 分区（扫描 MBR 中类型 0x83 的分区） */
 static int ext2_try_mount(void) {
     static partition_entry_t parts[PART_MAX_ENTRIES];

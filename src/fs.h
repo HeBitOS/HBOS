@@ -61,6 +61,8 @@ int fs_install_disk_at(uint32_t start_lba, uint32_t sectors); /**< 在指定 LBA
 int fs_format_disk_fat32(void);   /**< 格式化磁盘为 FAT32（使用默认/已有范围） */
 int fs_install_disk_fat32(void);  /**< 在磁盘上安装 FAT32 文件系统（自动选择分区范围），成为新装默认格式 */
 int fs_install_disk_fat32_at(uint32_t start_lba, uint32_t sectors); /**< 在指定 LBA 范围安装 FAT32 */
+/** 把分区表里的第 index 个分区（1 起）格式化成 FAT32（自定义安装用）。 */
+int fs_install_disk_fat32_partition(int index);
 /** 让当前 FAT32 盘可独立引导（BIOS/GRUB）：写 MBR 引导代码 + core.img +
  *  /boot/grub/grub.cfg。需先 install auto。 */
 int fs_install_boot_grub(void);
