@@ -75,6 +75,13 @@ const char *fs_last_error(void); /**< 获取最近一次错误描述 */
 int fs_read_partitions(fs_partition_info_t out[4]); /**< 读取分区表信息（最多 4 个分区） */
 int fs_mount_disk(void);         /**< 挂载磁盘上的 HBFS 文件系统 */
 int fs_retry_mount(void);         /**< 惰性重挂载：盘晚就绪/热插拔时重新探测，不重置 ramfs */
+/**
+ * @brief 挂载分区表里的第 index 个分区（1 起）。
+ *
+ * 只在当前是 ramfs 时可用：磁盘后端之间切换需要重建 VFS，当前没有安全路径，
+ * 所以换分区仍要重启。成功返回 0，失败通过 fs_last_error() 取原因。
+ */
+int fs_mount_partition(int index);
 int fs_sync(void);               /**< 将文件表同步到磁盘 */
 int fs_is_disk(void);            /**< 判断当前后端是否为磁盘文件系统 */
 const char *fs_backend_name(void); /**< 获取当前后端名称字符串 */

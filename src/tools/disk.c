@@ -333,10 +333,36 @@ static void cmd_install(int argc, char **argv) {
     cmd_diskmgr(0, 0);
 }
 
+/* mount <n>：挂载分区表里的第 n 个分区（1 起）。
+ * 只在还没挂盘时可用 —— 换后端要重建 VFS，当前没有安全路径。 */
+static void cmd_mount(int argc, char **argv) {
+    if (argc < 2) {
+        console_puts("\nusage: mount <n>   挂载第 n 个分区（先用 diskmgr 看分区号）\n\n");
+        return;
+    }
+    uint32_t idx = 0;
+    if (parse_u32(argv[1], &idx) < 0 || idx == 0) {
+        console_puts("\x1b[31mmount: 分区号必须是正整数\x1b[0m\n");
+        return;
+    }
+    if (fs_mount_partition((int)idx) == 0) {
+        console_puts("\x1b[32mmounted\x1b[0m: p");
+        print_uint(idx);
+        console_puts(" (");
+        console_puts(fs_backend_name());
+        console_puts(")\n");
+    } else {
+        console_puts("\x1b[31mmount failed\x1b[0m: ");
+        console_puts(fs_last_error());
+        console_putchar('\n');
+    }
+}
+
 void tool_disk_init(void) {
     static const command_t cmds[] = {
         {"diskmgr", CMD_GROUP_FILE, "Show disk usage map", "diskmgr", cmd_diskmgr},
         {"disk", CMD_GROUP_FILE, "Show disk usage map", "disk", cmd_diskmgr},
+        {"mount", CMD_GROUP_FILE, "Mount partition N", "mount <n>", cmd_mount},
         {"install", CMD_GROUP_SYSTEM, "Show installer or prepare FAT32 storage", "install [auto|status|format|part <start_lba> <sectors>|hbfs-auto|hbfs-part <start_lba> <sectors>]", cmd_install},
         {"setup", CMD_GROUP_SYSTEM, "Show installer or prepare FAT32 storage", "setup [auto|status|format|part <start_lba> <sectors>|hbfs-auto|hbfs-part <start_lba> <sectors>]", cmd_install},
     };

@@ -41,7 +41,7 @@
 
 | # | 任务 | 说明 | 验收标准 |
 |---|---|---|---|
-| P3-1 | 分区表解析 | ✅ 解析已完成（`src/partition.c`，MBR+EBR+GPT+CRC，宿主机单测）；**待办**：块层按分区读写 + 挂载指定分区 | `diskmgr` 已列出表类型/类型名/GPT 名字；挂载仍未分区化 |
+| P3-1 | 分区表解析 | ✅ 解析（`src/partition.c`）+ GPT 自动挂载 + `mount <n>` 指定分区；**待办**：运行中切换后端（需 VFS 重建） | `diskmgr` 列出分区；`mount 2` 可挂指定分区（仅 ramfs 状态） |
 | P3-2 | USB 外接盘发现 | 现有 USB MSC 只认第一个 LUN；补枚举 + 插拔事件 | 插入 U 盘 3s 内出现在 `disks`；拔出后不崩 |
 | P3-3 | exFAT（读写） | 新增 `src/exfat.c`：目录项、簇链、FAT | 与 Linux `mkfs.exfat` 镜像双向互认（脚本差分） |
 | P3-4 | ext3（ext2 + journal 回放） | 在 `src/ext2.c` 上加 journal 只读回放 | 挂载 dirty 的 ext3 镜像不损坏数据 |

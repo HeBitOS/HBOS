@@ -1058,6 +1058,52 @@ int fs_retry_mount(void) {
 }
 
 /**
+ * @brief 挂载指定分区（1 起）。
+ *
+ * 为什么限制在 ramfs：切后端要重建 VFS（vfs_init 会清掉 seed 静态文件），
+ * 现在没有安全的卸载/重挂路径。这里只允许"还没挂盘时选一个分区"，
+ * 避免半路把正在用的文件系统换掉。
+ */
+int fs_mount_partition(int index) {
+    static partition_entry_t parts[PART_MAX_ENTRIES];
+    if (fs_is_disk()) return fs_fail("已有磁盘文件系统，换分区请重启");
+    if (block_init() < 0) return fs_fail("没有块设备");
+
+    int n = partition_parse(fs_part_read, NULL, parts, PART_MAX_ENTRIES);
+    if (n < 0) return fs_fail("分区表读取失败");
+    if (n == 0) return fs_fail("没有分区表");
+    if (index < 1 || index > n) return fs_fail("分区号超出范围");
+    if (parts[index - 1].start_lba > 0xFFFFFFFFull) return fs_fail("分区起始 LBA 超出 32 位");
+
+    uint32_t start = (uint32_t)parts[index - 1].start_lba;
+    uint32_t secs = (uint32_t)parts[index - 1].sectors;
+    hbfs_start_lba = start;
+    hbfs_total_sectors = secs;
+
+    if (fat32_mount(start, &fat32_fs) == 0) {
+        fs_backend = FS_BACKEND_FAT32;
+        fat32_rebuild_files();
+        fs.total_sectors = fat32_fs.bpb.total_sectors_32;
+        return 0;
+    }
+    if (ext2_mount(start, &ext2_fs) == 0) {
+        fs_backend = FS_BACKEND_EXT2;
+        ext2_rebuild_files();
+        fs.total_sectors = secs;
+        return 0;
+    }
+
+    hbfs_super_t sb;
+    if (hbfs_read_super(&sb) == 0 && hbfs_validate_super(&sb) && hbfs_load_table() == 0) {
+        fs_backend = FS_BACKEND_HBFS;
+        hbfs_rebuild_files_from_table();
+        fs.total_sectors = hbfs_total_sectors;
+        return 0;
+    }
+    return fs_fail("该分区没有可识别的文件系统（FAT32/ext2/HBFS）");
+}
+
+/**
  * 检查文件系统一致性
  * @param out 输出检查结果
  * @return 无错误返回 0，有错误返回 -1
