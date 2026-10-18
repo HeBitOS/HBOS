@@ -95,6 +95,19 @@ static int fs_fail(const char *msg) {
     return -1;
 }
 
+/* 启动日志用：不数长度，交给 strlen */
+static void fs_puts(const char *s) {
+    console_write(s, strlen(s));
+}
+
+/* 极简无符号十进制输出（启动日志用） */
+static void fs_put_u32(uint32_t v) {
+    char b[12];
+    int n = 0;
+    do { b[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n--) console_write(&b[n], 1);
+}
+
 /* 分区表解析用的读扇区回调（partition.c 与块设备解耦，见 partition.h）。 */
 static int fs_part_read(void *ctx, uint64_t lba, void *buf) {
     (void)ctx;
@@ -1219,14 +1232,14 @@ int fs_retry_mount(void) {
     if (block_init() < 0) return -1;
     if (fs_mount_disk() == 0) return 0;
     if (ext2_try_mount() == 0) {
-        if (ext2_fs.feature_incompat & EXT2_INCOMPAT_EXTENTS)
-            console_write("fs: ext4 mounted (read-only)\n", 27);
-        else
-            console_write("fs: ext2 mounted\n", 17);
+        int is_ext4 = (ext2_fs.feature_incompat & EXT2_INCOMPAT_EXTENTS) != 0;
         fs_backend = FS_BACKEND_EXT2;
         ext2_rebuild_files();
-
         fs.total_sectors = block_sector_count();
+        fs_puts(is_ext4 ? "fs: ext4 mounted (read-only), files="
+                        : "fs: ext2 mounted, files=");
+        fs_put_u32(fs.file_count);
+        console_write("\n", 1);
         return 0;
     }
     if (exfat_try_mount() == 0) {

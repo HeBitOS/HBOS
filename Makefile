@@ -240,6 +240,7 @@ C_SRCS = \
 	$(SRC_DIR)/graphics/blob_unpack.c \
 	$(SRC_DIR)/lib/json.c \
 	$(SRC_DIR)/lib/utf8.c \
+	$(SRC_DIR)/lib/ext4_extent.c \
 	$(SRC_DIR)/exfat.c \
 	$(SRC_DIR)/ui/theme.c \
 	$(SRC_DIR)/ui/ui_app.c \
@@ -828,6 +829,12 @@ exfat-test: | $(BUILD_DIR)
 		echo "  [skip] mkfs.exfat 不存在，跳过真实镜像用例"; \
 	fi
 
+# ext4 extent 映射：depth 0/1、空洞、unwritten、坏 magic。
+ext4-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_ext4_extent.c \
+		src/lib/ext4_extent.c -o $(BUILD_DIR)/test_ext4_extent
+	$(BUILD_DIR)/test_ext4_extent
+
 # UTF-8 严格解码：超长编码/代理区/越界/截断 必须拒绝。
 utf8-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_utf8.c src/lib/utf8.c \
@@ -843,7 +850,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test
 	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:

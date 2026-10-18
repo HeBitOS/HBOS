@@ -210,74 +210,19 @@ int ext2_read_inode(ext2_fs_t *fs, uint32_t inode_num, ext2_inode_t *inode)
  * @return 物理块号；0 表示越界/空洞/读失败
  */
 
-/* ── ext4 extent 树 ──────────────────────────────────────────────
- * ext4 把 inode 的 i_block[15]（60 字节）当成 extent 树的根：header 12 字节，
- * 后面是 extent 或 index 项，每项 12 字节。索引节点指向的块重复同样的结构。
- * 这里只做"逻辑块 → 物理块"的映射，读路径不用改。 */
-#define EXT4_EXT_MAGIC 0xF30Au
+#include "lib/ext4_extent.h"
 
-typedef struct __attribute__((packed)) {
-    uint16_t magic, entries, max, depth;
-    uint32_t generation;
-} ext4_ext_hdr_t;
-
-typedef struct __attribute__((packed)) {
-    uint32_t ee_block;
-    uint16_t ee_len;
-    uint16_t ee_start_hi;
-    uint32_t ee_start_lo;
-} ext4_ext_t;
-
-typedef struct __attribute__((packed)) {
-    uint32_t ei_block;
-    uint32_t ei_leaf_lo;
-    uint16_t ei_leaf_hi;
-    uint16_t unused;
-} ext4_ext_idx_t;
-
-static uint32_t ext4_extent_bmap(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t logical) {
-    uint8_t node[4096];
-    if (fs->block_size > sizeof(node)) return 0;
-    memcpy(node, inode->i_block, 60);
-
-    for (int level = 0; level < 6; level++) {
-        const ext4_ext_hdr_t *h = (const ext4_ext_hdr_t *)node;
-        if (h->magic != EXT4_EXT_MAGIC) return 0;
-
-        uint16_t entries = h->entries;
-        if (h->depth == 0) {
-            const ext4_ext_t *e = (const ext4_ext_t *)(node + sizeof(*h));
-            for (uint16_t i = 0; i < entries; i++) {
-                uint32_t len = e[i].ee_len;
-                if (len > 0x8000) len -= 0x8000;      /* unwritten extent */
-                if (!len) continue;
-                if (logical >= e[i].ee_block && logical < e[i].ee_block + len) {
-                    uint64_t phys = ((uint64_t)e[i].ee_start_hi << 32) | e[i].ee_start_lo;
-                    phys += (uint64_t)(logical - e[i].ee_block);
-                    return phys > 0xFFFFFFFFull ? 0 : (uint32_t)phys;
-                }
-            }
-            return 0;   /* 空洞 */
-        }
-
-        const ext4_ext_idx_t *ix = (const ext4_ext_idx_t *)(node + sizeof(*h));
-        int pick = -1;
-        for (uint16_t i = 0; i < entries; i++)
-            if (ix[i].ei_block <= logical) pick = (int)i;
-        if (pick < 0) return 0;
-
-        uint64_t leaf = ((uint64_t)ix[pick].ei_leaf_hi << 32) | ix[pick].ei_leaf_lo;
-        if (leaf > 0xFFFFFFFFull) return 0;
-        if (ext2_read_block(fs, (uint32_t)leaf, node) < 0) return 0;
-    }
-    return 0;
+static int ext2_extent_rd(void *ctx, uint32_t block, void *buf) {
+    return ext2_read_block((ext2_fs_t *)ctx, block, buf);
 }
 
 static uint32_t ext2_inode_block(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t block_idx)
 {
     /* ext4：i_block 是 extent 树，不能按 15 个块指针解释 */
     if (inode->i_flags & EXT2_EXTENTS_FL)
-        return ext4_extent_bmap(fs, inode, block_idx);
+        return ext4_extent_map_raw(ext2_extent_rd, fs,
+                                   (const uint8_t *)inode->i_block,
+                                   fs->block_size, block_idx);
 
     /* 每个间接块能装下的块地址数：ext2 块地址固定 4 字节 */
     const uint32_t addr_per_block = fs->block_size / 4;
