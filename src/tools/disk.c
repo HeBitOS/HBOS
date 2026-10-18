@@ -1,4 +1,5 @@
 #include "../block.h"
+#include "../partition.h"
 #include "../fs.h"
 #include "../graphics/graphics.h"
 #include "tool.h"
@@ -64,40 +65,53 @@ static void usage_bar(uint32_t used, uint32_t cap, uint32_t width) {
     console_puts("%");
 }
 
-static void print_partition_line(uint32_t idx, const fs_partition_info_t *p, uint32_t disk_sectors) {
-    console_puts("  p");
-    print_uint(idx + 1);
-    console_puts(": ");
-    if (!p->present) {
-        console_puts("\x1b[90mempty\x1b[0m\n");
-        return;
-    }
-    if (p->bootable) console_puts("\x1b[32m*\x1b[0m ");
-    else console_puts("  ");
-    print_hex8(p->type);
-    if (p->type == 0x0C) console_puts(" FAT32 ");
-    else if (p->type == 0xEF) console_puts(" ESP   ");
-    else if (p->type == 0xEB) console_puts(" HBFS  ");
-    else if (p->type == 0x83) console_puts(" EXT2  ");
-    else console_puts("       ");
-    console_puts(" start=");
-    print_uint(p->start_lba);
-    console_puts(" size=");
-    print_sectors_mib(p->sectors);
-    console_puts(" ");
-    usage_bar(p->sectors, disk_sectors, 18);
-    if ((p->type == 0xEB || p->type == 0x83 || p->type == 0x0B || p->type == 0x0C) && p->start_lba == fs_disk_start_lba()) console_puts(" \x1b[36mmounted\x1b[0m");
-    console_putchar('\n');
+static int disk_read_cb(void *ctx, uint64_t lba, void *buf) {
+    (void)ctx;
+    if (lba > 0xFFFFFFFFull) return -1;
+    return block_read_sector((uint32_t)lba, (uint8_t *)buf);
 }
 
 static void print_partitions(uint32_t disk_sectors) {
-    fs_partition_info_t parts[4];
+    static partition_entry_t parts[PART_MAX_ENTRIES];
+    int n = partition_parse(disk_read_cb, NULL, parts, PART_MAX_ENTRIES);
+
     console_puts("partitions:\n");
-    if (fs_read_partitions(parts) < 0) {
+    if (n < 0) {
         console_puts("  \x1b[31munavailable\x1b[0m\n");
         return;
     }
-    for (uint32_t i = 0; i < 4; i++) print_partition_line(i, &parts[i], disk_sectors);
+    if (n == 0) {
+        console_puts("  \x1b[90mnone (whole-disk filesystem)\x1b[0m\n");
+        return;
+    }
+    console_puts("  table: ");
+    console_puts(partition_scheme_name(parts[0].scheme));
+    console_putchar('\n');
+
+    for (int i = 0; i < n; i++) {
+        const partition_entry_t *p = &parts[i];
+        console_puts("  p");
+        print_uint((uint32_t)(i + 1));
+        console_puts(": ");
+        if (p->bootable) console_puts("\x1b[32m*\x1b[0m ");
+        else console_puts("  ");
+        print_hex8(p->type);
+        console_puts(" ");
+        console_puts(partition_type_name(p->type));
+        if (p->name[0]) {
+            console_puts(" \x1b[36m");
+            console_puts(p->name);
+            console_puts("\x1b[0m");
+        }
+        console_puts(" start=");
+        print_uint((uint32_t)p->start_lba);
+        console_puts(" size=");
+        print_sectors_mib((uint32_t)p->sectors);
+        console_puts(" ");
+        usage_bar((uint32_t)p->sectors, disk_sectors, 18);
+        if (p->start_lba == fs_disk_start_lba()) console_puts(" \x1b[36mmounted\x1b[0m");
+        console_putchar('\n');
+    }
 }
 
 static void print_file_usage(void) {

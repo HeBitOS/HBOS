@@ -220,6 +220,7 @@ C_SRCS = \
 	$(SRC_DIR)/block.c \
 	$(SRC_DIR)/ahci.c \
 	$(SRC_DIR)/nvme.c \
+	$(SRC_DIR)/partition.c \
 	$(SRC_DIR)/fs.c \
 	$(SRC_DIR)/vfs.c \
 	$(SRC_DIR)/ata.c \
@@ -805,10 +806,16 @@ hive-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/test_hive_winsrv
 	@echo "✓ HIVE UI 1.4 event/layout/widget tests"
 
+# 分区表解析（MBR / EBR / GPT，含 CRC 负例）。
+partition-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_partition.c src/partition.c \
+		-o $(BUILD_DIR)/test_partition
+	$(BUILD_DIR)/test_partition
+
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test
 	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:
