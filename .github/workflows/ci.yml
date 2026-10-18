@@ -25,7 +25,7 @@ jobs:
       - name: Install host toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3
+          sudo apt-get install -y build-essential python3 exfatprogs
 
       - name: Run host test suite
         run: make test
