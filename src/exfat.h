@@ -45,6 +45,17 @@ int exfat_mount(exfat_fs_t *fs, exfat_read_fn rd, void *ctx, uint64_t volume_lba
 /** 列出根目录中的文件/目录，返回条目数（<0 失败）。 */
 int exfat_list_root(exfat_fs_t *fs, exfat_dirent_t *out, int max);
 
+/** 列出任意目录（以起始簇标识）中的条目；根目录传 fs->root_cluster。 */
+int exfat_list_dir(exfat_fs_t *fs, uint32_t first_cluster,
+                   exfat_dirent_t *out, int max);
+
+/** 目录遍历回调：返回非 0 停止遍历。 */
+typedef int (*exfat_dir_cb)(void *ctx, const exfat_dirent_t *e);
+
+/** 逐条遍历目录，不缓存整目录（适合递归展开）。 */
+int exfat_iter_dir(exfat_fs_t *fs, uint32_t first_cluster,
+                   exfat_dir_cb cb, void *ctx);
+
 /** 读取文件的一段；返回实际读取字节数（<0 失败）。 */
 int exfat_read_file(exfat_fs_t *fs, uint32_t first_cluster, uint64_t size,
                     uint64_t offset, void *buf, uint32_t len);

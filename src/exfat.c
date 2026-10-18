@@ -78,42 +78,41 @@ int exfat_mount(exfat_fs_t *fs, exfat_read_fn rd, void *ctx, uint64_t volume_lba
     return 0;
 }
 
-/* 目录遍历状态：文件项 + 后面的流扩展/名字项 */
 typedef struct {
     int      active;
-    int      remain;        /* 还差几个次级项 */
+    int      remain;
     uint8_t  attr;
     uint32_t first;
     uint64_t size;
-    int      name_len;      /* 已写入 out 的字节数 */
+    int      name_len;
     char     name[EXFAT_NAME_MAX];
 } dir_set_t;
 
-static void set_finish(dir_set_t *s, exfat_dirent_t *out, int max, int *count) {
-    if (!s->active) return;
+/* 把收集到的一组目录项交给回调；返回非 0 表示调用方要求停止。 */
+static int set_emit(dir_set_t *s, exfat_dir_cb cb, void *ctx) {
+    if (!s->active) return 0;
     s->active = 0;
-    if (*count >= max) return;
-    if (!s->name_len) return;                 /* 无名字的项（如卷标残留）跳过 */
-    exfat_dirent_t *e = &out[*count];
-    for (int i = 0; i < s->name_len; i++) e->name[i] = s->name[i];
-    e->name[s->name_len] = 0;
-    e->first_cluster = s->first;
-    e->size = s->size;
-    e->attr = s->attr;
-    (*count)++;
+    if (!s->name_len) return 0;
+    exfat_dirent_t e;
+    for (int i = 0; i < s->name_len; i++) e.name[i] = s->name[i];
+    e.name[s->name_len] = 0;
+    e.first_cluster = s->first;
+    e.size = s->size;
+    e.attr = s->attr;
+    return cb(ctx, &e);
 }
 
-int exfat_list_root(exfat_fs_t *fs, exfat_dirent_t *out, int max) {
-    if (!fs || !out || max <= 0) return -1;
+int exfat_iter_dir(exfat_fs_t *fs, uint32_t first_cluster,
+                   exfat_dir_cb cb, void *ctx) {
+    if (!fs || !cb) return -1;
 
     uint8_t sec[1024];
     if (fs->bytes_per_sector > sizeof(sec)) return -1;
 
-    int count = 0;
     dir_set_t set;
     set.active = 0;
 
-    uint32_t cluster = fs->root_cluster;
+    uint32_t cluster = first_cluster;
     for (uint32_t guard = 0; guard < fs->cluster_count; guard++) {
         uint64_t base = cluster_lba(fs, cluster);
         for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
@@ -122,41 +121,72 @@ int exfat_list_root(exfat_fs_t *fs, exfat_dirent_t *out, int max) {
                 const uint8_t *e = sec + off;
                 uint8_t type = e[0];
                 if (type == 0x00) {
-                    set_finish(&set, out, max, &count);
-                    return count;
+                    (void)set_emit(&set, cb, ctx);
+                    return 0;
                 }
-                if (type == 0x85) {                     /* 文件目录项 */
-                    set_finish(&set, out, max, &count);
+                if (type == 0x85) {
+                    if (set_emit(&set, cb, ctx)) return 0;
                     set.active = 1;
                     set.remain = e[1];
                     set.attr = e[4];
                     set.first = le32(e + 20);
                     set.size = le64(e + 24);
                     set.name_len = 0;
+                    if (set.remain <= 0) {          /* 没有次级项：立即结束 */
+                        if (set_emit(&set, cb, ctx)) return 0;
+                    }
                     continue;
                 }
                 if (!set.active) continue;
 
-                if (type == 0xC0) {                     /* 流扩展：簇/长度以它为准 */
+                if (type == 0xC0) {
                     set.first = le32(e + 20);
                     set.size = le64(e + 24);
-                } else if (type == 0xC1) {              /* 文件名：15 个 UTF-16 */
+                } else if (type == 0xC1) {
                     for (int i = 0; i < 15; i++) {
                         uint16_t u = le16(e + 2 + i * 2);
-                        if (!u) break;              /* 名字项用 0 补齐 */
+                        if (!u) break;
                         set.name_len = name_append_utf16(set.name, EXFAT_NAME_MAX,
                                                          set.name_len, u);
                     }
                 }
-                if (--set.remain <= 0) set_finish(&set, out, max, &count);
+                if (--set.remain <= 0) {
+                    if (set_emit(&set, cb, ctx)) return 0;
+                }
             }
         }
         uint32_t next = fat_next(fs, cluster);
         if (next == 0xFFFFFFFFu || next < 2) break;
         cluster = next;
     }
-    set_finish(&set, out, max, &count);
-    return count;
+    (void)set_emit(&set, cb, ctx);
+    return 0;
+}
+
+typedef struct {
+    exfat_dirent_t *out;
+    int max;
+    int count;
+} dir_collect_t;
+
+static int collect_cb(void *ctx, const exfat_dirent_t *e) {
+    dir_collect_t *c = (dir_collect_t *)ctx;
+    if (c->count >= c->max) return 1;
+    c->out[c->count++] = *e;
+    return 0;
+}
+
+int exfat_list_dir(exfat_fs_t *fs, uint32_t first_cluster,
+                   exfat_dirent_t *out, int max) {
+    if (!out || max <= 0) return -1;
+    dir_collect_t c = { out, max, 0 };
+    if (exfat_iter_dir(fs, first_cluster, collect_cb, &c) < 0) return -1;
+    return c.count;
+}
+
+int exfat_list_root(exfat_fs_t *fs, exfat_dirent_t *out, int max) {
+    if (!fs) return -1;
+    return exfat_list_dir(fs, fs->root_cluster, out, max);
 }
 
 int exfat_read_file(exfat_fs_t *fs, uint32_t first_cluster, uint64_t size,

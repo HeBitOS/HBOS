@@ -636,33 +636,64 @@ static const vfs_ops_t exfat_ops = {
     .unlink = exfat_vfs_unlink,
 };
 
-static void exfat_rebuild_files(void) {
-    static exfat_dirent_t ents[64];
-    fs.file_count = 0;
-    int n = exfat_list_root(&exfat_fs, ents, 64);
-    if (n < 0) return;
+/* 递归展开 exFAT 目录：exfat_iter_dir 逐条回调，不在内存里缓存整目录。 */
+typedef struct {
+    const char *prefix;
+    int depth;
+} exfat_walk_t;
 
-    for (int i = 0; i < n && fs.file_count < MAX_FILES; i++) {
-        if (ents[i].attr & 0x10) continue;          /* 目录：暂不展开 */
-        file_t *f = &fs.files[fs.file_count];
-        f->size = ents[i].size > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)ents[i].size;
-        f->capacity = f->size;
-        f->data = NULL;
-        f->disk_slot = ents[i].first_cluster;
-        f->used = 1;
-        f->type = 0;
-        f->node.type = VFS_NODE_FILE;
-        f->node.size = f->size;
-        f->node.capacity = f->capacity;
-        f->node.private_data = f;
-        f->node.ops = &exfat_ops;
-        f->node.uid = 0;
-        f->node.gid = 0;
-        f->node.mode = S_IFREG | 0444;
-        strncpy(f->name, ents[i].name, MAX_FILENAME - 1);
-        f->name[MAX_FILENAME - 1] = 0;
-        fs.file_count++;
+static void exfat_add_entry(const exfat_dirent_t *e, const char *full, int is_dir) {
+    file_t *f = &fs.files[fs.file_count++];
+    f->size = e->size > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)e->size;
+    f->capacity = f->size;
+    f->data = NULL;
+    f->disk_slot = e->first_cluster;
+    f->used = 1;
+    f->type = is_dir ? 1 : 0;
+    f->node.type = is_dir ? VFS_NODE_DIR : VFS_NODE_FILE;
+    f->node.size = f->size;
+    f->node.capacity = f->capacity;
+    f->node.private_data = f;
+    f->node.ops = &exfat_ops;
+    f->node.uid = 0;
+    f->node.gid = 0;
+    f->node.mode = (is_dir ? S_IFDIR | 0555 : S_IFREG | 0444);
+    strncpy(f->name, full, MAX_FILENAME - 1);
+    f->name[MAX_FILENAME - 1] = 0;
+}
+
+static int exfat_emit(void *ctx, const exfat_dirent_t *e) {
+    exfat_walk_t *w = (exfat_walk_t *)ctx;
+    if (fs.file_count >= MAX_FILES) return 1;
+    if (!e->name[0]) return 0;
+
+    uint32_t plen = (uint32_t)strlen(w->prefix);
+    uint32_t nlen = (uint32_t)strlen(e->name);
+    if (plen + (plen ? 1u : 0u) + nlen >= MAX_FILENAME) return 0;
+
+    char full[MAX_FILENAME];
+    uint32_t pos = 0;
+    for (uint32_t i = 0; i < plen; i++) full[pos++] = w->prefix[i];
+    if (plen) full[pos++] = '/';
+    for (uint32_t i = 0; i < nlen; i++) full[pos++] = e->name[i];
+    full[pos] = 0;
+
+    int is_dir = (e->attr & 0x10) != 0;
+    exfat_add_entry(e, full, is_dir);
+
+    if (is_dir && w->depth < 4) {
+        exfat_walk_t child;
+        child.prefix = full;
+        child.depth = w->depth + 1;
+        (void)exfat_iter_dir(&exfat_fs, e->first_cluster, exfat_emit, &child);
     }
+    return 0;
+}
+
+static void exfat_rebuild_files(void) {
+    fs.file_count = 0;
+    exfat_walk_t root = { "", 0 };
+    (void)exfat_iter_dir(&exfat_fs, exfat_fs.root_cluster, exfat_emit, &root);
 }
 
 /* exFAT 与 NTFS 共用 0x07（MS basic data），靠签名区分。 */

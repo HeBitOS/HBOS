@@ -62,6 +62,8 @@ static void build_volume(void) {
     put32(fat + 2 * 4, 3);            /* 根目录跨两个簇 */
     put32(fat + 3 * 4, 0xFFFFFFFFu);
     put32(fat + 10 * 4, 0xFFFFFFFFu);
+    put32(fat + 20 * 4, 0xFFFFFFFFu);   /* 子目录 */
+    put32(fat + 21 * 4, 0xFFFFFFFFu);   /* 子目录里的文件 */
 
     uint8_t *root = g_img + HEAP_LBA * SEC;
     /* 卷标 */
@@ -86,11 +88,40 @@ static void build_volume(void) {
     const char *name = "HI.TXT";
     for (int i = 0; i < 6; i++) put16(n + 2 + i * 2, (uint16_t)name[i]);
 
+    /* 子目录项集合：0x85 + 0xC0 + 0xC1，属性 0x10 */
+    uint8_t *de = n + 32;
+    de[0] = 0x85; de[1] = 2; de[4] = 0x10;
+    put32(de + 20, 20);
+    put64(de + 24, 0);
+    uint8_t *ds = de + 32;
+    ds[0] = 0xC0; ds[1] = 0; ds[3] = 3;
+    put32(ds + 20, 20);
+    put64(ds + 24, 0);
+    uint8_t *dn = ds + 32;
+    dn[0] = 0xC1;
+    for (int i = 0; i < 3; i++) put16(dn + 2 + i * 2, (uint16_t)"SUB"[i]);
+
     /* 第二个簇标记结束，防止越界扫描 */
     g_img[(HEAP_LBA + 1) * SEC] = 0x00;
 
     uint8_t *data = g_img + (HEAP_LBA + 8) * SEC;   /* 簇 10 = 堆 + 8 */
     memcpy(data, "hello exfat\n", FILESIZE);
+
+    /* 子目录（簇 20）里放一个 IN.TXT */
+    uint8_t *sub = g_img + (HEAP_LBA + 18) * SEC;   /* 簇 20 = 堆 + 18 */
+    uint8_t *fe = sub;
+    fe[0] = 0x85; fe[1] = 2; fe[4] = 0x20;
+    put32(fe + 20, 21);
+    put64(fe + 24, 5);
+    uint8_t *fs2 = fe + 32;
+    fs2[0] = 0xC0; fs2[1] = 0; fs2[3] = 6;
+    put32(fs2 + 20, 21);
+    put64(fs2 + 24, 5);
+    uint8_t *fn = fs2 + 32;
+    fn[0] = 0xC1;
+    for (int i = 0; i < 6; i++) put16(fn + 2 + i * 2, (uint16_t)"IN.TXT"[i]);
+    uint8_t *subdata = g_img + (HEAP_LBA + 19) * SEC;  /* 簇 21 */
+    memcpy(subdata, "sub!\n", 5);
 }
 
 int main(int argc, char **argv) {
@@ -109,11 +140,14 @@ int main(int argc, char **argv) {
 
     printf("[EXFAT] 列根目录\n");
     int n = exfat_list_root(&fs, list, 8);
-    CHECK(n == 1);
+    CHECK(n == 2);
     CHECK(strcmp(list[0].name, "HI.TXT") == 0);
     CHECK(list[0].size == FILESIZE);
     CHECK(list[0].first_cluster == 10);
     CHECK((list[0].attr & 0x10) == 0);
+    CHECK(strcmp(list[1].name, "SUB") == 0);
+    CHECK((list[1].attr & 0x10) != 0);
+    CHECK(list[1].first_cluster == 20);
 
     printf("[EXFAT] 读文件\n");
     char buf[32] = {0};
@@ -123,6 +157,16 @@ int main(int argc, char **argv) {
     CHECK(exfat_read_file(&fs, 10, FILESIZE, 6, buf, 5) == 5);
     CHECK(memcmp(buf, "exfat", 5) == 0);
     CHECK(exfat_read_file(&fs, 10, FILESIZE, FILESIZE, buf, 4) == 0);
+
+    printf("[EXFAT] 子目录\n");
+    exfat_dirent_t sublist[4];
+    int sn = exfat_list_dir(&fs, 20, sublist, 4);
+    CHECK(sn == 1);
+    CHECK(strcmp(sublist[0].name, "IN.TXT") == 0);
+    CHECK(sublist[0].size == 5);
+    memset(buf, 0, sizeof(buf));
+    CHECK(exfat_read_file(&fs, 21, 5, 0, buf, 5) == 5);
+    CHECK(memcmp(buf, "sub!\n", 5) == 0);
 
     printf("[EXFAT] 非 exFAT 镜像被拒绝\n");
     memset(g_img, 0, sizeof(g_img));
