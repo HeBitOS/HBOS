@@ -5286,11 +5286,20 @@ static void draw_start_menu(gui_state_t *st) {
         } else {
             blit_icon(ix, iy, isz, e.icon);
         }
+        /* 标签居中并**裁剪到本格子**。
+         *
+         * 原先只把右边界钳到面板边缘（ox + SM_W - SM_PAD），于是：
+         *   - 长名字（如"十六进制查看器"）会越过格子右边界压到邻格上
+         *   - 最后一列的长名字会被面板边缘硬切（截图里 "leapyear" 缺尾）
+         * 现在按格子矩形算裁剪边界，名字再长也只在自己格内被截断，
+         * 不会串到邻居那里。 */
         int tw = text_width(e.name, 1);
         int lx = cx - tw / 2;
-        if (lx < ox + SM_PAD) lx = ox + SM_PAD;
-        text_clipped(lx, iy + isz + 4, ox + SM_W - SM_PAD,
-                     e.name, UI_FG, 1);
+        int cell_l = cx - SM_CELL_W / 2 + 4;
+        int cell_r = cx + SM_CELL_W / 2 - 4;
+        if (lx < cell_l) lx = cell_l;
+        if (lx >= cell_r) lx = cell_r - 1;
+        text_clipped(lx, iy + isz + 4, cell_r, e.name, UI_FG, 1);
     }
     if (vis == 0) {
         text(ox + SM_PAD, oy + SM_GRID_TOP + 24, "无匹配应用",
