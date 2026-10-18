@@ -664,8 +664,27 @@ static int exfat_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, u
     }
     return (int)count;
 }
-static int exfat_vfs_truncate(vfs_node_t *node) { (void)node; return -1; }
-static int exfat_vfs_unlink(vfs_node_t *node) { (void)node; return -1; }
+static int exfat_vfs_truncate(vfs_node_t *node) {
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used) return -1;
+    char base[MAX_FILENAME];
+    uint32_t dir = 0;
+    if (exfat_split(f->name, base, &dir) < 0) return -1;
+    if (exfat_truncate_in_dir(&exfat_fs, dir, base) < 0) return -1;
+    f->size = 0;
+    f->node.size = 0;
+    return 0;
+}
+
+static int exfat_vfs_unlink(vfs_node_t *node) {
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used) return -1;
+    char base[MAX_FILENAME];
+    uint32_t dir = 0;
+    if (exfat_split(f->name, base, &dir) < 0) return -1;
+    if (exfat_unlink_in_dir(&exfat_fs, dir, base) < 0) return -1;
+    return 0;
+}
 
 static const vfs_ops_t exfat_ops = {
     .read = exfat_vfs_read,

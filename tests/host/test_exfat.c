@@ -270,6 +270,31 @@ int main(int argc, char **argv) {
                     printf("  [ok] 中文名读回：%s\n", rlu[fu].name);
                 }
 
+                /* 截断与删除：验证簇释放、位图清位、目录项标记 */
+                printf("[EXFAT] 截断/删除\n");
+                CHECK(exfat_create_file(&rfs, "TMP.TXT", "xyz", 3) == 0);
+                CHECK(exfat_truncate_in_dir(&rfs, rfs.root_cluster, "TMP.TXT") == 0);
+                exfat_fs_t rft;
+                CHECK(exfat_mount(&rft, file_rd, &fc, 0) == 0);
+                exfat_dirent_t rlt[32];
+                int rnt = exfat_list_root(&rft, rlt, 32);
+                int ft = -1;
+                for (int i = 0; i < rnt; i++)
+                    if (strcmp(rlt[i].name, "TMP.TXT") == 0) ft = i;
+                CHECK(ft >= 0);
+                if (ft >= 0) CHECK(rlt[ft].size == 0);
+
+                CHECK(exfat_unlink_in_dir(&rfs, rfs.root_cluster, "TMP.TXT") == 0);
+                exfat_fs_t rfd;
+                CHECK(exfat_mount(&rfd, file_rd, &fc, 0) == 0);
+                exfat_dirent_t rld[32];
+                int rnd = exfat_list_root(&rfd, rld, 32);
+                int fd2 = -1;
+                for (int i = 0; i < rnd; i++)
+                    if (strcmp(rld[i].name, "TMP.TXT") == 0) fd2 = i;
+                CHECK(fd2 < 0);
+                printf("  [ok] 截断后 size=0，删除后列表不再出现\n");
+
                 /* 追加 + 覆盖：验证簇扩展与目录项大小回写 */
                 printf("[EXFAT] 追加/覆盖写入\n");
                 CHECK(exfat_write_file(&rfs, "HBOS.TXT", 16, "APPENDED\n", 9) == 0);

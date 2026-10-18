@@ -87,6 +87,12 @@ int exfat_create_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
 int exfat_write_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
                        uint64_t offset, const void *data, uint32_t len);
 
+/** 把文件截断为 0 字节（释放簇、清目录项大小）。 */
+int exfat_truncate_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name);
+
+/** 删除文件（标记目录项为已删除并释放簇）。 */
+int exfat_unlink_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name);
+
 /** 卷标（最多 11 个 UTF-16 字符），无卷标返回空串。 */
 void exfat_volume_label(exfat_fs_t *fs, char *out, int cap);
 

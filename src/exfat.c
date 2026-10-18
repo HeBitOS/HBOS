@@ -484,6 +484,7 @@ static int find_dir_slots(exfat_fs_t *fs, uint32_t dir_cluster, uint32_t entries
     if (fs->bytes_per_sector > sizeof(sec)) return -1;
     uint32_t need = entries * 32;
     uint32_t cluster = dir_cluster;
+
     for (uint32_t guard = 0; guard < fs->cluster_count; guard++) {
         uint64_t base = cluster_lba(fs, cluster);
         for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
@@ -744,6 +745,80 @@ static int write_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name,
     return write_sector(fs, loc.lba, sec);
 }
 
+
+/* ── 截断 / 删除 ─────────────────────────────────────────────── */
+
+static int free_chain(exfat_fs_t *fs, uint32_t bm, uint32_t first) {
+    uint32_t c = first;
+    uint32_t guard = 0;
+    while (c >= 2 && c != 0xFFFFFFFFu && guard++ < fs->cluster_count) {
+        uint32_t next = fat_next(fs, c);
+        if (bitmap_set(fs, bm, c - 2, 0) < 0) return -1;
+        if (fat_set(fs, c, 0) < 0) return -1;
+        c = next;
+    }
+    return 0;
+}
+
+static int find_entry_loc(exfat_fs_t *fs, uint32_t dir_cluster,
+                          const char *name, entry_loc_t *loc) {
+    uint16_t uname[256];
+    int nlen = utf8_to_utf16(name, uname, 255);
+    if (nlen <= 0) return -1;
+    return find_file_entry(fs, dir_cluster, uname, nlen, loc);
+}
+
+int exfat_truncate_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name) {
+    if (!fs || !fs->wr) return -1;
+    entry_loc_t loc;
+    if (find_entry_loc(fs, dir_cluster, name, &loc) < 0) return -1;
+
+    if (loc.first) {
+        uint32_t bm = 0;
+        uint64_t bm_size = 0;
+        if (root_special(fs, 0x81, &bm, &bm_size) < 0 || !bm) return -1;
+        if (free_chain(fs, bm, loc.first) < 0) return -1;
+    }
+
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    if (read_sector(fs, loc.lba, sec) < 0) return -1;
+    uint8_t *fe = sec + loc.off;
+    uint8_t *se = fe + 32;
+    fe[20] = fe[21] = fe[22] = fe[23] = 0;
+    for (int i = 0; i < 8; i++) fe[24 + i] = 0;
+    se[20] = se[21] = se[22] = se[23] = 0;
+    for (int i = 0; i < 8; i++) { se[24 + i] = 0; se[8 + i] = 0; }
+
+    fe[2] = fe[3] = 0;
+    uint16_t sum = set_checksum(fe, fe[1]);
+    fe[2] = (uint8_t)sum;
+    fe[3] = (uint8_t)(sum >> 8);
+    return write_sector(fs, loc.lba, sec);
+}
+
+int exfat_unlink_in_dir(exfat_fs_t *fs, uint32_t dir_cluster, const char *name) {
+    if (!fs || !fs->wr) return -1;
+    entry_loc_t loc;
+    if (find_entry_loc(fs, dir_cluster, name, &loc) < 0) return -1;
+
+    if (loc.first) {
+        uint32_t bm = 0;
+        uint64_t bm_size = 0;
+        if (root_special(fs, 0x81, &bm, &bm_size) < 0 || !bm) return -1;
+        if (free_chain(fs, bm, loc.first) < 0) return -1;
+    }
+
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    if (read_sector(fs, loc.lba, sec) < 0) return -1;
+    /* exFAT 用 InUse 位标记删除：整组（主项 + 所有次级项）type &= 0x7F。
+     * 只清主项会留下孤儿 0xC0/0xC1，fsck 报 unknown entry type。 */
+    uint32_t cnt = sec[loc.off + 1];
+    for (uint32_t i = 0; i <= cnt && loc.off + i * 32 < fs->bytes_per_sector; i++)
+        sec[loc.off + i * 32] = (uint8_t)(sec[loc.off + i * 32] & 0x7F);
+    return write_sector(fs, loc.lba, sec);
+}
 int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
                      const void *data, uint32_t len) {
     if (!fs) return -1;
