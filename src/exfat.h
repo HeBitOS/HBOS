@@ -71,6 +71,14 @@ int exfat_read_file(exfat_fs_t *fs, uint32_t first_cluster, uint64_t size,
 int exfat_create_file(exfat_fs_t *fs, const char *name,
                       const void *data, uint32_t size);
 
+/**
+ * @brief 在已有文件上按偏移写入（可扩展；只支持根目录、ASCII 名字）。
+ *
+ * offset 必须 <= 当前文件大小（不支持挖洞）。返回 0 成功。
+ */
+int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
+                     const void *data, uint32_t len);
+
 /** 卷标（最多 11 个 UTF-16 字符），无卷标返回空串。 */
 void exfat_volume_label(exfat_fs_t *fs, char *out, int cap);
 

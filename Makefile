@@ -819,10 +819,10 @@ exfat-test: | $(BUILD_DIR)
 		mkfs.exfat -n HBOSTEST $$img >/dev/null 2>&1; \
 		$(BUILD_DIR)/test_exfat $$img; \
 		if command -v fsck.exfat >/dev/null 2>&1; then \
-			out=$$(fsck.exfat -n $$img 2>&1 || true); \
-			bad=$$(printf '%s\n' "$$out" | grep "ERROR" | grep -v "name hash" || true); \
-			if [ -n "$$bad" ]; then echo "$$out"; exit 1; fi; \
-			echo "  [ok] fsck.exfat: no structural errors"; \
+			if ! fsck.exfat -n $$img >/dev/null 2>&1; then \
+				fsck.exfat -n $$img || true; exit 1; \
+			fi; \
+			echo "  [ok] fsck.exfat: clean"; \
 		fi; \
 	else \
 		echo "  [skip] mkfs.exfat 不存在，跳过真实镜像用例"; \

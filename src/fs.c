@@ -615,6 +615,12 @@ static int exfat_part_read(void *ctx, uint64_t lba, void *buf) {
     return block_read_sector((uint32_t)lba, (uint8_t *)buf);
 }
 
+static int exfat_part_write(void *ctx, uint64_t lba, const void *buf) {
+    (void)ctx;
+    if (lba > 0xFFFFFFFFull) return -1;
+    return block_write_sector((uint32_t)lba, (const uint8_t *)buf);
+}
+
 static int exfat_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used || !buf) return 0;
@@ -623,8 +629,16 @@ static int exfat_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t
 }
 
 static int exfat_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count) {
-    (void)node; (void)offset; (void)buf; (void)count;
-    return -1;   /* 只读 */
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used || (!buf && count)) return -1;
+    if (exfat_write_file(&exfat_fs, f->name, offset, buf, count) < 0) return -1;
+    uint32_t end = offset + count;
+    if (end > f->size) {
+        f->size = end;
+        f->node.size = end;
+        f->capacity = end;
+    }
+    return (int)count;
 }
 static int exfat_vfs_truncate(vfs_node_t *node) { (void)node; return -1; }
 static int exfat_vfs_unlink(vfs_node_t *node) { (void)node; return -1; }
@@ -706,6 +720,7 @@ static int exfat_try_mount(void) {
         if (parts[i].type != 0x07) continue;
         if (parts[i].start_lba > 0xFFFFFFFFull) continue;
         if (exfat_mount(&exfat_fs, exfat_part_read, NULL, parts[i].start_lba) == 0) {
+            exfat_fs.wr = exfat_part_write;
             hbfs_start_lba = (uint32_t)parts[i].start_lba;
             hbfs_total_sectors = (uint32_t)parts[i].sectors;
             return 0;
@@ -1201,6 +1216,7 @@ int fs_mount_partition(int index) {
     hbfs_total_sectors = secs;
 
     if (exfat_mount(&exfat_fs, exfat_part_read, NULL, start) == 0) {
+        exfat_fs.wr = exfat_part_write;
         fs_backend = FS_BACKEND_EXFAT;
         exfat_rebuild_files();
         fs.total_sectors = secs;
@@ -1854,8 +1870,34 @@ file_t *fs_create_file(const char *name) {
     if (!normalize_path(name, norm)) return NULL;
     file_t *existing = fs_find_file(norm);
     if (existing) return existing;
-    if (fs_backend == FS_BACKEND_EXFAT) {   /* 只读后端 */
-        (void)fs_fail("exFAT 当前为只读");
+    if (fs_backend == FS_BACKEND_EXFAT) {
+        /* 只支持根目录、ASCII 名字（exfat_create_file 的限制） */
+        if (strchr(norm, '/')) { (void)fs_fail("exFAT 暂不支持子目录"); return NULL; }
+        if (exfat_create_file(&exfat_fs, norm, NULL, 0) < 0) {
+            (void)fs_fail("exFAT 创建文件失败");
+            return NULL;
+        }
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            file_t *f = &fs.files[i];
+            if (f->used) continue;
+            strcpy(f->name, norm);
+            f->size = 0;
+            f->capacity = 0;
+            f->data = NULL;
+            f->disk_slot = 0;
+            f->used = 1;
+            f->type = 0;
+            f->node.type = VFS_NODE_FILE;
+            f->node.size = 0;
+            f->node.capacity = 0;
+            f->node.private_data = f;
+            f->node.ops = &exfat_ops;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFREG | 0644;
+            fs.file_count++;
+            return f;
+        }
         return NULL;
     }
 

@@ -377,6 +377,22 @@ static uint16_t exfat_ror1_add(uint16_t v, uint16_t add) {
     return (uint16_t)(((v << 15) | (v >> 1)) + add);
 }
 
+/* 目录项集合校验和：主项（0x85）跳过自身的 checksum 字段（字节 2..3），
+ * 次级项从第 0 字节开始全部参与。按"所有项都跳过 2..3"算会算错。 */
+static uint16_t set_checksum(const uint8_t *set, uint32_t cnt) {
+    uint16_t sum = 0;
+    for (uint32_t e = 0; e <= cnt; e++) {
+        const uint8_t *d = set + e * 32;
+        sum = exfat_ror1_add(sum, d[0]);
+        sum = exfat_ror1_add(sum, d[1]);
+        uint32_t start = (e == 0) ? 4 : 2;
+        for (uint32_t i = start; i < 32; i++)
+            sum = exfat_ror1_add(sum, d[i]);
+    }
+    return sum;
+}
+
+
 /* UTF-8 → UTF-16，返回码元数；超长/非法返回 -1。 */
 static int utf8_to_utf16(const char *s, uint16_t *out, int cap) {
     int n = 0;
@@ -477,11 +493,15 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
     se[0] = 0xC0;
     se[1] = 0;                                      /* 有效数据长度标志 */
     se[3] = (uint8_t)nlen;
+    /* 名字哈希按 UTF-16LE 的**字节流**计算（每个码元的低字节、高字节各
+     * rotate-add 一次）。内核 exfat_calc_chksum16(upname, unilen << 1) 与
+     * exfatprogs 都是这个算法；按"整码元"算会被 fsck 判 hash wrong。 */
     uint16_t hash = 0;
     for (int i = 0; i < nlen; i++) {
         uint16_t c = uname[i];
         if (c >= 'a' && c <= 'z') c = (uint16_t)(c - 32);
-        hash = exfat_ror1_add(hash, c);
+        hash = exfat_ror1_add(hash, (uint16_t)(c & 0xFF));
+        hash = exfat_ror1_add(hash, (uint16_t)(c >> 8));
     }
     se[4] = (uint8_t)hash;
     se[5] = (uint8_t)(hash >> 8);
@@ -497,13 +517,7 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
 
     /* SetChecksum：对三项逐字节 rotate-right-1 累加，校验和字段本身按 0 参与 */
     fe[2] = 0; fe[3] = 0;
-    uint16_t sum = 0;
-    /* 规范要求跳过校验和字段本身（不是"按 0 参与"）：这两个字节虽然为 0，
-     * 但 rotate 一次就会改变后续结果，fsck 会报 checksum wrong。 */
-    for (int i = 0; i < 96; i++) {
-        if (i == 2 || i == 3) continue;
-        sum = exfat_ror1_add(sum, set[i]);
-    }
+    uint16_t sum = set_checksum(set, 2);
     fe[2] = (uint8_t)sum;
     fe[3] = (uint8_t)(sum >> 8);
 
@@ -517,4 +531,150 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
     for (int i = 0; i < 96; i++) sec[off + i] = set[i];
     if (write_sector(fs, lba, sec) < 0) return -1;
     return 0;
+}
+
+/* ── 在已有文件上写（可扩展）────────────────────────────────── */
+
+typedef struct {
+    uint64_t lba;        /* 0x85 所在扇区 */
+    uint32_t off;        /* 0x85 在扇区内的偏移 */
+    uint32_t first;
+    uint64_t size;
+} entry_loc_t;
+
+/* 在根目录里按名字找文件项集合。名字项必须和 0x85/0xC0 在同一扇区
+ * （创建路径就是这么写的；更长的名字后续再支持）。 */
+static int find_file_entry(exfat_fs_t *fs, const uint16_t *want, int wlen,
+                           entry_loc_t *out) {
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    uint32_t cluster = fs->root_cluster;
+
+    for (uint32_t guard = 0; guard < fs->cluster_count; guard++) {
+        uint64_t base = cluster_lba(fs, cluster);
+        for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
+            if (read_sector(fs, base + s, sec) < 0) return -1;
+            for (uint32_t off = 0; off + 32 <= fs->bytes_per_sector; off += 32) {
+                if (sec[off] == 0x00) return -1;
+                if (sec[off] != 0x85) continue;
+                uint32_t cnt = sec[off + 1];
+                if (off + 32 * (cnt + 1) > fs->bytes_per_sector) continue;
+                const uint8_t *st = sec + off + 32;
+                if (st[0] != 0xC0) continue;
+                int nlen = st[3];
+                if (nlen != wlen) continue;
+
+                uint16_t name[256];
+                int got = 0;
+                for (uint32_t k = 2; k <= cnt && got < nlen; k++) {
+                    const uint8_t *ne = sec + off + k * 32;
+                    if (ne[0] != 0xC1) break;
+                    for (int i = 0; i < 15 && got < nlen; i++)
+                        name[got++] = le16(ne + 2 + i * 2);
+                }
+                if (got != nlen) continue;
+
+                int same = 1;
+                for (int i = 0; i < nlen; i++)
+                    if (name[i] != want[i]) { same = 0; break; }
+                if (!same) continue;
+
+                out->lba = base + s;
+                out->off = off;
+                out->first = le32(st + 20);
+                out->size = le64(st + 24);
+                return 0;
+            }
+        }
+        uint32_t next = fat_next(fs, cluster);
+        if (next < 2 || next == 0xFFFFFFFFu) break;
+        cluster = next;
+    }
+    return -1;
+}
+
+static int chain_count(exfat_fs_t *fs, uint32_t first) {
+    uint32_t n = 0;
+    uint32_t c = first;
+    while (c >= 2 && c != 0xFFFFFFFFu && n < fs->cluster_count) {
+        n++;
+        c = fat_next(fs, c);
+    }
+    return (int)n;
+}
+
+int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
+                     const void *data, uint32_t len) {
+    if (!fs || !fs->wr || !name) return -1;
+    if (offset && !data) return -1;
+
+    uint16_t uname[256];
+    int nlen = utf8_to_utf16(name, uname, 255);
+    if (nlen <= 0) return -1;
+    for (int i = 0; i < nlen; i++)
+        if (uname[i] >= 0x80) return -1;
+
+    entry_loc_t loc;
+    if (find_file_entry(fs, uname, nlen, &loc) < 0) return -1;
+    if (offset > loc.size) return -1;
+
+    uint64_t new_size = loc.size;
+    if ((uint64_t)offset + len > new_size) new_size = (uint64_t)offset + len;
+
+    uint32_t cb = fs->sectors_per_cluster * fs->bytes_per_sector;
+    uint32_t need = new_size ? (uint32_t)((new_size + cb - 1) / cb) : 0;
+    int have = loc.first ? chain_count(fs, loc.first) : 0;
+    uint32_t first = loc.first;
+
+    if ((int)need > have) {
+        uint32_t bm = 0;
+        uint64_t bm_size = 0;
+        if (root_special(fs, 0x81, &bm, &bm_size) < 0 || !bm) return -1;
+
+        uint32_t more = need - (uint32_t)have;
+        uint32_t add[64];
+        if (more > 64) return -1;
+        if (alloc_clusters(fs, bm, more, add, 64) != (int)more) return -1;
+
+        for (uint32_t i = 0; i < more; i++)
+            if (fat_set(fs, add[i], i + 1 < more ? add[i + 1] : 0xFFFFFFFFu) < 0)
+                return -1;
+
+        if (!first) {
+            first = add[0];
+        } else {
+            uint32_t tail = first;
+            for (uint32_t i = 0; i + 1 < (uint32_t)have; i++) {
+                uint32_t nx = fat_next(fs, tail);
+                if (nx < 2 || nx == 0xFFFFFFFFu) break;
+                tail = nx;
+            }
+            if (fat_set(fs, tail, add[0]) < 0) return -1;
+        }
+    }
+
+    if (len && chain_rw(fs, first, offset, (void *)data, len, 1) < 0) return -1;
+
+    /* 回写两个目录项的大小/首簇，再重算 SetChecksum */
+    uint8_t sec[1024];
+    if (fs->bytes_per_sector > sizeof(sec)) return -1;
+    if (read_sector(fs, loc.lba, sec) < 0) return -1;
+
+    uint8_t *fe = sec + loc.off;
+    uint8_t *se = fe + 32;
+    fe[20] = (uint8_t)first; fe[21] = (uint8_t)(first >> 8);
+    fe[22] = (uint8_t)(first >> 16); fe[23] = (uint8_t)(first >> 24);
+    for (int i = 0; i < 8; i++) fe[24 + i] = (uint8_t)(new_size >> (8 * i));
+
+    se[20] = fe[20]; se[21] = fe[21]; se[22] = fe[22]; se[23] = fe[23];
+    for (int i = 0; i < 8; i++) se[24 + i] = fe[24 + i];
+    for (int i = 0; i < 8; i++) se[8 + i] = fe[24 + i];   /* ValidDataLength */
+
+    uint32_t cnt = fe[1];
+    fe[2] = 0; fe[3] = 0;
+    uint16_t sum = set_checksum(fe, cnt);
+    fe[2] = (uint8_t)sum;
+    fe[3] = (uint8_t)(sum >> 8);
+
+    return write_sector(fs, loc.lba, sec);
 }

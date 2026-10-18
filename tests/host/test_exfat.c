@@ -206,12 +206,36 @@ int main(int argc, char **argv) {
                     if (strcmp(rl[i].name, "HBOS.TXT") == 0) found = i;
                 CHECK(found >= 0);
                 if (found >= 0) {
-                    char rb[32] = {0};
+                    char rb[64] = {0};
                     CHECK(exfat_read_file(&rf2, rl[found].first_cluster,
                                           rl[found].size, 0, rb, 16) == 16);
                     CHECK(memcmp(rb, payload, 16) == 0);
                     printf("  [ok] 写入后读回一致（%u 字节）\n",
                            (unsigned)rl[found].size);
+                }
+
+                /* 追加 + 覆盖：验证簇扩展与目录项大小回写 */
+                printf("[EXFAT] 追加/覆盖写入\n");
+                CHECK(exfat_write_file(&rfs, "HBOS.TXT", 16, "APPENDED\n", 9) == 0);
+                CHECK(exfat_write_file(&rfs, "HBOS.TXT", 0, "HBOS", 4) == 0);
+
+                exfat_fs_t rf3;
+                CHECK(exfat_mount(&rf3, file_rd, &fc, 0) == 0);
+                exfat_dirent_t rl3[32];
+                int rn3 = exfat_list_root(&rf3, rl3, 32);
+                int f3 = -1;
+                for (int i = 0; i < rn3; i++)
+                    if (strcmp(rl3[i].name, "HBOS.TXT") == 0) f3 = i;
+                CHECK(f3 >= 0);
+                if (f3 >= 0) {
+                    char rb[64] = {0};
+                    CHECK(rl3[f3].size == 25);
+                    CHECK(exfat_read_file(&rf3, rl3[f3].first_cluster,
+                                          rl3[f3].size, 0, rb, 25) == 25);
+                    CHECK(memcmp(rb, "HBOS", 4) == 0);
+                    CHECK(memcmp(rb + 16, "APPENDED\n", 9) == 0);
+                    printf("  [ok] 追加后大小 %u，内容一致\n",
+                           (unsigned)rl3[f3].size);
                 }
             }
             fclose(f);
