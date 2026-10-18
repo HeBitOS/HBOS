@@ -141,6 +141,13 @@ int ext2_read_file(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t offset,
                    uint8_t *buf, uint32_t count);
 int ext2_readdir(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t index,
                  char *name, uint32_t *type);
+
+/** 目录遍历回调：返回非 0 停止。 */
+typedef int (*ext2_dir_cb)(void *ctx, const char *name, uint32_t file_type,
+                           uint32_t ino);
+
+/** 一次性遍历目录（按块扫描，不重复从头扫描）。 */
+int ext2_iter_dir(ext2_fs_t *fs, ext2_inode_t *dir, ext2_dir_cb cb, void *ctx);
 int ext2_lookup(ext2_fs_t *fs, ext2_inode_t *dir_inode,
                 const char *name, uint32_t *out_inode);
 int ext2_path_to_inode(ext2_fs_t *fs, const char *path, uint32_t *out_inode);

@@ -401,6 +401,40 @@ int ext2_readdir(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t index,
     return -1;
 }
 
+int ext2_iter_dir(ext2_fs_t *fs, ext2_inode_t *dir, ext2_dir_cb cb, void *ctx) {
+    if (!fs || !fs->mounted || !dir || !cb) return -1;
+    if ((dir->i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return -1;
+
+    uint8_t block_buf[4096] __attribute__((aligned(2)));
+    if (fs->block_size > sizeof(block_buf)) return -1;
+
+    uint32_t nblocks = (dir->i_size + fs->block_size - 1) / fs->block_size;
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t phys = ext2_inode_block(fs, dir, b);
+        if (!phys) continue;
+        if (ext2_read_block(fs, phys, block_buf) < 0) return -1;
+
+        ext2_dir_entry_t *first = (ext2_dir_entry_t *)block_buf;
+        if (first->inode == 0 && first->rec_len == fs->block_size)
+            continue;   /* htree 索引块 */
+
+        uint32_t off = 0;
+        while (off + sizeof(ext2_dir_entry_t) <= fs->block_size) {
+            ext2_dir_entry_t *e = (ext2_dir_entry_t *)(block_buf + off);
+            if (e->rec_len < 8 || off + e->rec_len > fs->block_size) break;
+            if (e->inode && e->name_len) {
+                char nm[64];
+                uint32_t n = e->name_len > sizeof(nm) - 1 ? sizeof(nm) - 1 : e->name_len;
+                memcpy(nm, e->name, n);
+                nm[n] = '\0';
+                if (cb(ctx, nm, e->file_type, e->inode)) return 0;
+            }
+            off += e->rec_len;
+        }
+    }
+    return 0;
+}
+
 int ext2_lookup(ext2_fs_t *fs, ext2_inode_t *dir_inode,
                 const char *name, uint32_t *out_inode)
 {

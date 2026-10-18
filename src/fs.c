@@ -346,42 +346,49 @@ static int hbfs_update_entry(file_t *f) {
 }
 
 /** 从 EXT2 根目录读取文件条目并填充 fs.files[] */
+/* ext2/ext4 目录扫描：一次遍历完成，不再对每个名字调用 lookup（那是 O(n²)）。 */
+static int ext2_scan_cb(void *ctx, const char *name, uint32_t ftype, uint32_t ino) {
+    (void)ctx;
+    if (name[0] == '.') return 0;
+    if (fs.file_count >= MAX_FILES) return 1;   /* 满了就停 */
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(&ext2_fs, ino, &inode) < 0) return 0;
+    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG &&
+        (inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
+
+    char nm[MAX_FILENAME];
+    uint32_t nlen = 0;
+    while (name[nlen] && nlen < MAX_FILENAME - 1) nlen++;
+    memcpy(nm, name, nlen);
+    nm[nlen] = 0;
+
+    file_t *f = &fs.files[fs.file_count];
+    memcpy(f->name, nm, nlen + 1);
+    f->size = inode.i_size;
+    f->capacity = inode.i_size > RAMFS_MAX_FILE_SIZE ? inode.i_size : RAMFS_MAX_FILE_SIZE;
+    f->data = NULL;
+    f->disk_slot = ino;
+    f->used = 1;
+    f->type = (ftype == 2) ? 1 : 0;
+    f->node.type = f->type ? VFS_NODE_DIR : VFS_NODE_FILE;
+    f->node.size = f->size;
+    f->node.capacity = f->capacity;
+    f->node.private_data = f;
+    f->node.ops = &ext2_ops;
+    f->node.uid = inode.i_uid;
+    f->node.gid = inode.i_gid;
+    f->node.mode = inode.i_mode;
+    memcpy(f->node.name, f->name, nlen + 1);
+    fs.file_count++;
+    return 0;
+}
+
 static void ext2_rebuild_files(void) {
     fs.file_count = 0;
     ext2_inode_t root;
     if (ext2_read_inode(&ext2_fs, EXT2_ROOT_INO, &root) < 0) return;
-    uint32_t idx = 0;
-    char name[64];
-    uint32_t type;
-    while (idx < MAX_FILES && ext2_readdir(&ext2_fs, &root, idx, name, &type) == 0) {
-        if (name[0] == '.' || idx >= MAX_FILES) { idx++; continue; }
-        file_t *f = &fs.files[fs.file_count];
-        uint32_t ino;
-        if (ext2_lookup(&ext2_fs, &root, name, &ino) < 0) { idx++; continue; }
-        ext2_inode_t inode;
-        if (ext2_read_inode(&ext2_fs, ino, &inode) < 0) { idx++; continue; }
-        if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG &&
-            (inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) { idx++; continue; }
-        uint32_t nlen = 0; while (name[nlen] && nlen < MAX_FILENAME - 1) nlen++;
-        memcpy(f->name, name, nlen); f->name[nlen] = '\0';
-        f->size = inode.i_size;
-        f->capacity = inode.i_size > RAMFS_MAX_FILE_SIZE ? inode.i_size : RAMFS_MAX_FILE_SIZE;
-        f->data = NULL;
-        f->disk_slot = ino;
-        f->used = 1;
-        f->type = (type == 1) ? 1 : 0;
-        f->node.type = f->type ? VFS_NODE_DIR : VFS_NODE_FILE;
-        f->node.size = f->size;
-        f->node.capacity = f->capacity;
-        f->node.private_data = f;
-        f->node.ops = &ext2_ops;
-        f->node.uid = inode.i_uid;
-        f->node.gid = inode.i_gid;
-        f->node.mode = inode.i_mode;
-        memcpy(f->node.name, f->name, nlen + 1);
-        fs.file_count++;
-        idx++;
-    }
+    (void)ext2_iter_dir(&ext2_fs, &root, ext2_scan_cb, NULL);
 }
 
 /** EXT2 VFS 读取操作 */
@@ -1218,6 +1225,7 @@ int fs_retry_mount(void) {
             console_write("fs: ext2 mounted\n", 17);
         fs_backend = FS_BACKEND_EXT2;
         ext2_rebuild_files();
+
         fs.total_sectors = block_sector_count();
         return 0;
     }

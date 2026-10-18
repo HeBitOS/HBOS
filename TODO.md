@@ -46,7 +46,7 @@
 | P3-3 | exFAT（读写） | 只读 ✅：`src/exfat.c` + fs 后端（自动挂载 0x07 分区、根目录进文件表、只读 VFS）；读写：`create_file` + `write_file`（可扩展）已接 VFS，`writefile`/编辑器可直接写 exFAT 盘；fsck.exfat 严格校验通过。非 ASCII 名字（upcase 压缩表）✅；子目录创建/写入 ✅、truncate/unlink ✅；**待办**：目录扩簇（0x00 空槽会让后续簇不可达，需重排）、大文件（>64 簇） | QEMU 实测 exFAT 分区自动挂载；子目录递归展开（深度 4）；`make test` 覆盖合成卷（含嵌套目录）与真实镜像 |
 | P3-4 | ext3（ext2 + journal 回放） | 已做**安全防护**：检测到 INCOMPAT_RECOVER 直接拒绝，不再误按 ext2 读；回放本身未实现 | clean 的 ext3 可读；dirty 的明确拒绝而不是读垃圾 |
 | P3-5 | ext4（extent + 64bit） | ✅ 只读：extent 树 + 64 字节描述符 + htree 目录按块遍历；写入强制拒绝。QEMU 实测可列目录/读文件 | Ubuntu 默认 ext4 盘可读；写入待做 |
-| P3-6 | 目录容量 | `MAX_FILES=128`：大目录只能列前 128 项（实测 600 文件止步 126） | 需按需扩容文件表或改为流式目录接口 |
+| P3-6 | 目录容量 | 扫描已改为一次遍历（O(n)），但上限仍是 `MAX_FILES=128`——它同时决定 `ramfs_storage[128][128KiB]`(16MB) 与 HBFS 表布局，不能单独放大 | 需把 FS_MAX_FILES / RAMFS_MAX_FILES / HBFS_MAX_FILES 拆开后才好扩容 |
 | P3-6 | XFS（只读优先） | 新增 `src/xfs.c`：B+ 树、inode | 只读挂载 + 列目录/读文件与 `xfs_db` 一致 |
 | P3-7 | FAT32 写入补齐 | 现有 FAT32 偏只读 | 创建/删除/改名/长文件名全通 |
 
