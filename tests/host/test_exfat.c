@@ -214,6 +214,25 @@ int main(int argc, char **argv) {
                            (unsigned)rl[found].size);
                 }
 
+                /* 非 ASCII 名字：验证 upcase 表解析与 UTF-16 名字项 */
+                printf("[EXFAT] 中文文件名\n");
+                CHECK(exfat_create_file(&rfs, "中文.TXT", "nihao\n", 6) == 0);
+                exfat_fs_t rfu;
+                CHECK(exfat_mount(&rfu, file_rd, &fc, 0) == 0);
+                exfat_dirent_t rlu[32];
+                int rnu = exfat_list_root(&rfu, rlu, 32);
+                int fu = -1;
+                for (int i = 0; i < rnu; i++)
+                    if (strcmp(rlu[i].name, "中文.TXT") == 0) fu = i;
+                CHECK(fu >= 0);
+                if (fu >= 0) {
+                    char ru[16] = {0};
+                    CHECK(exfat_read_file(&rfu, rlu[fu].first_cluster,
+                                          rlu[fu].size, 0, ru, 6) == 6);
+                    CHECK(memcmp(ru, "nihao\n", 6) == 0);
+                    printf("  [ok] 中文名读回：%s\n", rlu[fu].name);
+                }
+
                 /* 追加 + 覆盖：验证簇扩展与目录项大小回写 */
                 printf("[EXFAT] 追加/覆盖写入\n");
                 CHECK(exfat_write_file(&rfs, "HBOS.TXT", 16, "APPENDED\n", 9) == 0);

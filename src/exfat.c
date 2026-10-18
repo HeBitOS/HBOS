@@ -377,6 +377,68 @@ static uint16_t exfat_ror1_add(uint16_t v, uint16_t add) {
     return (uint16_t)(((v << 15) | (v >> 1)) + add);
 }
 
+
+/* upcase 表：真实卷上通常是压缩格式（0xFFFF, N 表示前一个值再重复 N 次）。
+ * 表本身 ~5KB，解压后 128KB —— 内核堆没这么大，所以在压缩流上按需扫到
+ * 目标码点为止（名字都很短，代价可接受）。 */
+static uint32_t g_up_cluster;
+static uint64_t g_up_size;
+static int      g_up_ready;     /* 0=未查过 1=有表 -1=无表 */
+
+static void upcase_load(exfat_fs_t *fs) {
+    if (g_up_ready) return;
+    uint32_t first = 0;
+    uint64_t size = 0;
+    if (root_special(fs, 0x82, &first, &size) == 0 && first && size) {
+        g_up_cluster = first;
+        g_up_size = size;
+        g_up_ready = 1;
+    } else {
+        g_up_ready = -1;
+    }
+}
+
+static uint16_t upcase_lookup(exfat_fs_t *fs, uint16_t c) {
+    uint16_t ascii = (c >= 'a' && c <= 'z') ? (uint16_t)(c - 32) : c;
+    upcase_load(fs);
+    if (g_up_ready != 1) return ascii;
+
+    /* 表可能被压缩到几 KB，但解压后 64K 项 —— 不展开，边扫边计数。
+     * 每 512 字节读一次扇区（早期版本每 2 字节读一次，中文名要几万次
+     * 扇区读，真盘上会卡住）。 */
+    uint8_t sec[512];
+    uint64_t sec_base = (uint64_t)-1;
+
+    uint32_t idx = 0;
+    uint64_t off = 0;
+    while (off + 2 <= g_up_size && idx <= c) {
+        uint64_t base = off & ~511ull;
+        if (base != sec_base) {
+            if (chain_rw(fs, g_up_cluster, base, sec, 512, 0) < 0) break;
+            sec_base = base;
+        }
+        uint16_t v = le16(sec + (off & 511));
+        off += 2;
+        if (v == 0xFFFF) {
+            /* 0xFFFF,N：接下来 N 个码点映射到自身（CJK 大区间靠它压缩）。 */
+            if (off + 2 > g_up_size) break;
+            base = off & ~511ull;
+            if (base != sec_base) {
+                if (chain_rw(fs, g_up_cluster, base, sec, 512, 0) < 0) break;
+                sec_base = base;
+            }
+            uint16_t n = le16(sec + (off & 511));
+            off += 2;
+            if (idx + n > c) return c;
+            idx += n;
+        } else {
+            if (idx == c) return v;
+            idx++;
+        }
+    }
+    return ascii;
+}
+
 /* 目录项集合校验和：主项（0x85）跳过自身的 checksum 字段（字节 2..3），
  * 次级项从第 0 字节开始全部参与。按"所有项都跳过 2..3"算会算错。 */
 static uint16_t set_checksum(const uint8_t *set, uint32_t cnt) {
@@ -449,12 +511,6 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
     int nlen = utf8_to_utf16(name, uname, 255);
     if (nlen <= 0) return -1;
 
-    /* 名字哈希必须和 upcase 表一致。exFAT 的 upcase 表可以是压缩格式
-     * （0xFFFF 表示区间），完整解析还没做；ASCII 直接大写的结果与标准表
-     * 一致，所以先只允许 ASCII 名字，避免写出 fsck 会报 hash 错的项。 */
-    for (int i = 0; i < nlen; i++)
-        if (uname[i] >= 0x80) return -1;
-
     uint32_t bm = 0;
     uint64_t bm_size = 0;
     if (root_special(fs, 0x81, &bm, &bm_size) < 0 || !bm) return -1;
@@ -494,12 +550,11 @@ int exfat_create_file(exfat_fs_t *fs, const char *name,
     se[1] = 0;                                      /* 有效数据长度标志 */
     se[3] = (uint8_t)nlen;
     /* 名字哈希按 UTF-16LE 的**字节流**计算（每个码元的低字节、高字节各
-     * rotate-add 一次）。内核 exfat_calc_chksum16(upname, unilen << 1) 与
-     * exfatprogs 都是这个算法；按"整码元"算会被 fsck 判 hash wrong。 */
+     * rotate-add 一次），且每个码元先过 upcase 表。内核
+     * exfat_calc_chksum16(upname, unilen << 1) 与 exfatprogs 都是这个算法。 */
     uint16_t hash = 0;
     for (int i = 0; i < nlen; i++) {
-        uint16_t c = uname[i];
-        if (c >= 'a' && c <= 'z') c = (uint16_t)(c - 32);
+        uint16_t c = upcase_lookup(fs, uname[i]);
         hash = exfat_ror1_add(hash, (uint16_t)(c & 0xFF));
         hash = exfat_ror1_add(hash, (uint16_t)(c >> 8));
     }
@@ -611,9 +666,6 @@ int exfat_write_file(exfat_fs_t *fs, const char *name, uint64_t offset,
     uint16_t uname[256];
     int nlen = utf8_to_utf16(name, uname, 255);
     if (nlen <= 0) return -1;
-    for (int i = 0; i < nlen; i++)
-        if (uname[i] >= 0x80) return -1;
-
     entry_loc_t loc;
     if (find_file_entry(fs, uname, nlen, &loc) < 0) return -1;
     if (offset > loc.size) return -1;
