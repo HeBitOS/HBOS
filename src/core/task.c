@@ -68,33 +68,106 @@ typedef struct {
 
 static task_t task_pool[MAX_TASKS];          /**< 任务池（静态分配） */
 static int task_count = 0;                   /**< 当前任务数 */
-static task_t *current_task = NULL;          /**< 当前运行的任务 */
-static sched_queue_t ready_q;                /**< 就绪队列（task_init 里初始化） */
+static uint32_t next_id = 0;                 /**< 下一个任务 ID */
+
+/* ── 每核一份调度状态（SMP）────────────────────────────────────
+ * 单核时代这里是一个全局 current_task + 一个全局 ready_q。AP 一旦开始
+ * 真正调度，两个核会同时写同一份 current_task，A 核的 yield 会把 B 核
+ * 正在跑的任务当成"前一个任务"存 rsp——栈直接串线。所以拆成每核一份：
+ * current_task / ready_q 这两个名字保留，用左值宏转到调用者所在核，
+ * 127 处引用全都不用改。 */
+static task_t *cpu_current[MAX_CPUS];
+static sched_queue_t cpu_ready[MAX_CPUS];
+static task_t *cpu_idle[MAX_CPUS];
+static int cpu_ready_inited;
+static volatile int aps_released;
+
+
+static int my_cpu(void);
+int sched_trace_on;   /* 调试开关：1 时把调度决策打到串口 */
+static void smp_trace_mark(const char *what, task_t *t);
+
+/* 临时调试：只打印名字以 smp 开头的任务，避免开机日志被淹没 */
+static void smp_trace_mark(const char *what, task_t *t) {
+    char a[2] = { (char)('0' + (my_cpu() % 10)), 0 };
+    char b[2] = { (char)('0' + (int)(t->state % 10)), 0 };
+    char c[2] = { (char)('0' + (t->snode.queued ? 1 : 0)), 0 };
+    smp_panic_puts("[MK] ");
+    smp_panic_puts(what);
+    smp_panic_puts(" name=");
+    smp_panic_puts(t->name);
+    smp_panic_puts(" cpu=");
+    smp_panic_puts(a);
+    smp_panic_puts(" st=");
+    smp_panic_puts(b);
+    smp_panic_puts(" q=");
+    smp_panic_puts(c);
+    smp_panic_puts(" rsp=");
+    smp_panic_hex(t->rsp);
+    smp_panic_puts("\n");
+}
+
+static void smp_trace_switch(const char *where, task_t *next) {
+    if (!sched_trace_on || !next) return;
+    if (next->name[0] == 'i' && next->name[1] == 'd') return;  /* 跳过 idle */
+    char c[2] = { (char)('0' + (my_cpu() % 10)), 0 };
+    smp_panic_puts("[TR] ");
+    smp_panic_puts(where);
+    smp_panic_puts(" cpu=");
+    smp_panic_puts(c);
+    smp_panic_puts(" name=");
+    smp_panic_puts(next->name);
+    smp_panic_puts(" rsp=");
+    smp_panic_hex(next->rsp);
+    smp_panic_puts("\n");
+}
+
+static int my_cpu(void) {
+    int i = smp_cpu_index();
+    if (i < 0 || i >= MAX_CPUS) i = 0;
+    return i;
+}
+
+static task_t **cur_slot(void) { return &cpu_current[my_cpu()]; }
+static sched_queue_t *ready_slot(void) { return &cpu_ready[my_cpu()]; }
+
+#define current_task (*cur_slot())
+#define ready_q (*ready_slot())
 
 #define TASK_OF_NODE(n) ((task_t *)((char *)(n) - offsetof(task_t, snode)))
 
-/* 就绪：入队（已在队里就不重复入队）。 */
+/* 就绪：入队到该任务所属核心（不是"当前核心"——被窃取/迁移过之后两者
+ * 可能不同）。已在队里就不重复入队。 */
 static void sched_mark_ready(task_t *t) {
     if (!t) return;
+    if (sched_trace_on) smp_trace_mark("ready", t);
     t->state = TASK_READY;
-    if (!t->snode.queued)
-        (void)schedq_push(&ready_q, &t->snode, t->prio);
+    if (!t->snode.queued) {
+        if (t->cpu >= MAX_CPUS) t->cpu = 0;
+        (void)schedq_push(&cpu_ready[t->cpu], &t->snode, t->prio);
+    }
 }
 
-/* 运行态：从就绪队列摘掉（选出它时已经摘过一次，这里兜底）。 */
+/* 运行态：从它所在核心的就绪队列摘掉。 */
 static void sched_mark_running(task_t *t) {
     if (!t) return;
-    if (t->snode.queued) (void)schedq_remove(&ready_q, &t->snode);
+    if (sched_trace_on) smp_trace_mark("running", t);
+    if (t->snode.queued) {
+        if (t->cpu >= MAX_CPUS) t->cpu = 0;
+        (void)schedq_remove(&cpu_ready[t->cpu], &t->snode);
+    }
     t->state = TASK_RUNNING;
 }
 
 /* 结束：必须摘队，否则槽位复用后会留下幽灵节点。 */
 static void sched_mark_dead(task_t *t) {
     if (!t) return;
-    if (t->snode.queued) (void)schedq_remove(&ready_q, &t->snode);
+    if (t->snode.queued) {
+        if (t->cpu >= MAX_CPUS) t->cpu = 0;
+        (void)schedq_remove(&cpu_ready[t->cpu], &t->snode);
+    }
     t->state = TASK_TERMINATED;
 }
-static uint32_t next_id = 0;                 /**< 下一个任务 ID */
 
 /** 预分配的栈空间: 64 个任务 × 8KB = 512KB */
 static char task_stacks[MAX_TASKS][TASK_STACK_SIZE]
@@ -290,38 +363,37 @@ static void task_release_fd_table(task_t *task) {
 // ============================================================
 
 /**
- * 从当前任务起，沿循环链表找到下一个 READY 状态的任务。
+ * 从一个核心的就绪队列里取出下一个可运行任务。
  *
- * 这是调度的唯一选择原语，task_yield() 与 task_schedule() 共用，
- * 避免两处各自实现一套扫描而语义漂移。健壮性保证：
- *   - 用 task_count 作为步数上界，即使循环链表因槽位复用出现意外
- *     断链/成环，也不会无限循环或跟随野 next 指针越界；
- *   - 遇到空 next（理论上不该出现）显式回绕到池头，而不是解引用 NULL。
+ * 取出的节点可能是陈旧条目（任务已退出/已在跑），跳过即可——状态迁移
+ * 时都做了摘队，正常情况下不会出现。依赖未完成的任务重新挂回队尾。
  *
- * 复杂度: 与任务数成正比 O(MAX_TASKS)。MAX_TASKS=64 是有界小常数，
- * 轮转扫描本身就是公平性的实现方式；这里消除的是"两套重复且其中一套
- * 可能越界"的正确性/可维护性问题，而非渐进复杂度。
- *
- * @return 下一个可运行任务，没有则返回 NULL
+ * @return 可运行任务，队列空 / 全是陈旧条目时返回 NULL
  */
-static task_t *sched_next(void) {
-    if (!current_task || task_count <= 1) return NULL;
-
-    /* 就绪队列取队首：O(1)，不再线性扫描任务池。
-     * 取出的节点可能是陈旧条目（任务已退出/已在跑），跳过即可——
-     * 状态迁移时都做了摘队，正常情况下不会出现。 */
+static task_t *pick_from_cpu(int cpu, int stealing) {
+    if (cpu < 0 || cpu >= MAX_CPUS) return NULL;
+    sched_queue_t *q = &cpu_ready[cpu];
     for (uint32_t guard = 0; guard < (uint32_t)task_count + 2u; guard++) {
-        sched_node_t *n = schedq_pick(&ready_q);
+        sched_node_t *n = schedq_pick(q);
         if (!n) return NULL;
         task_t *t = TASK_OF_NODE(n);
-        if (t == current_task) continue;
+        /* 队列里可能残留"该核正在跑的那个任务"的节点（每 tick 会重新
+         * mark_ready 一次）。它状态是 READY 但人在跑，绝不能被本核选中，
+         * 更不能被别的核偷走——否则两个核同时跑同一个任务，共用同一份
+         * rsp，栈立刻串线（实测就是这样炸的）。 */
+        if (t == cpu_current[cpu]) continue;
+        /* 偷取只对"允许铺开"的任务生效。钉在某个核上的任务（主任务/
+         * shell/GUI、各核空闲任务）被别的核偷走会直接要命：实测把 main
+         * 偷到 AP 上之后，BSP 这边的任务跑完就再也找不到可运行任务，
+         * 直接报"All tasks terminated"。 */
+        if (stealing && (t->no_steal || !t->affinity_any)) continue;
         if (t->state != TASK_READY) continue;
         /* 依赖未完成：重新挂回队尾，等前置结束（每轮最多重挂一次，
          * 由 guard 上界保证不会死循环）。 */
         if (t->dep_id != 0) {
             const task_t *dep = task_get_by_id(t->dep_id);
             if (dep && dep->state != TASK_TERMINATED) {
-                (void)schedq_push(&ready_q, &t->snode, t->prio);
+                (void)schedq_push(q, &t->snode, t->prio);
                 continue;
             }
             t->dep_id = 0;   /* 前置已结束，解除依赖 */
@@ -331,13 +403,48 @@ static task_t *sched_next(void) {
     return NULL;
 }
 
+/**
+ * 调度决策：先看本核队列，空了再去别的核"偷"。
+ *
+ * 单核时行为和以前完全一致（只是多一层判断）。多核时这是负载均衡的
+ * 兜底：本核空闲而别的核积压，就把最高优先级的那个搬过来——不然
+ * 一个核忙死、另一个核 hlt 空转，正是笔记里说的"卡顿/中断"。
+ */
+static task_t *sched_next(void) {
+    if (!current_task || task_count <= 1) return NULL;
+
+    int me = my_cpu();
+    task_t *t = pick_from_cpu(me, 0);
+    if (t) { t->cpu = (uint8_t)me; return t; }
+
+    int ncpu = smp_cpu_count();
+    if (ncpu <= 1) return NULL;
+
+    /* 偷：按负载从高到低找，只要目标核队列里还有别人（不偷它唯一
+     * 的那个任务，否则两边来回抖）。 */
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (c == me || c >= ncpu) continue;
+        if (schedq_count(&cpu_ready[c]) < 2) continue;
+        t = pick_from_cpu(c, 1);
+        if (t) {
+            t->cpu = (uint8_t)me;
+            return t;
+        }
+    }
+    return NULL;
+}
+
+static int pick_cpu_for(const task_t *t);
+static void sched_rebalance(task_t *t);
+
 void task_set_priority(task_t *t, uint8_t prio) {
     if (!t) return;
     if (prio >= SCHED_LEVELS) prio = SCHED_LEVELS - 1;
     t->prio = prio;
     /* 已在就绪队列里：换到新等级（摘了再挂，保持 FIFO 语义）。 */
     if (t->snode.queued) {
-        (void)schedq_remove(&ready_q, &t->snode);
+        if (t->cpu >= MAX_CPUS) t->cpu = 0;
+        (void)schedq_remove(&cpu_ready[t->cpu], &t->snode);
         (void)schedq_push(&ready_q, &t->snode, prio);
     }
 }
@@ -351,7 +458,65 @@ void task_set_dependency(task_t *t, uint32_t dep_id) {
 }
 
 void task_set_parallel_width(task_t *t, uint8_t width) {
-    if (t) t->parallel_width = width ? width : 1;
+    if (!t) return;
+    t->parallel_width = width ? width : 1;
+    /* 声明"有活可以并行"就等于允许调度器把它铺到别的核——单线程任务
+     * 保持钉在原核，避免无谓迁移把 cache 全打飞。 */
+    if (t->parallel_width > 1) {
+        t->affinity_any = 1;
+        sched_rebalance(t);
+    }
+}
+
+/* 亲和性/并行宽度变了之后，把还在排队里的任务搬到合适核心上。
+ * 只搬就绪态的任务：正在跑的要等它下次入队时自然落到新核。 */
+static void sched_rebalance(task_t *t) {
+    if (!t || !cpu_ready_inited) return;
+    smp_sched_lock();
+    int was_queued = t->snode.queued;
+    if (was_queued) (void)schedq_remove(&cpu_ready[t->cpu], &t->snode);
+    t->cpu = (uint8_t)pick_cpu_for(t);
+    t->last_cpu = t->cpu;
+    if (was_queued && t->state == TASK_READY) sched_mark_ready(t);
+    smp_sched_unlock();
+}
+
+void task_set_affinity_any(task_t *t, int any) {
+    if (!t) return;
+    t->affinity_any = any ? 1 : 0;
+    sched_rebalance(t);
+}
+
+int task_get_cpu(const task_t *t) {
+    if (!t) return 0;
+    return t->last_cpu < MAX_CPUS ? t->last_cpu : 0;
+}
+
+int task_ready_count_on_cpu(int cpu) {
+    if (cpu < 0 || cpu >= MAX_CPUS || !cpu_ready_inited) return 0;
+    return (int)schedq_count(&cpu_ready[cpu]);
+}
+
+const task_t *task_current_on_cpu(int cpu) {
+    if (cpu < 0 || cpu >= MAX_CPUS) return NULL;
+    return cpu_current[cpu];
+}
+
+/** 给一个可铺开的新任务挑核：选就绪任务最少的那颗。
+ *  只有一个在线核（或还没进 SMP）时永远返回 0。 */
+static int pick_cpu_for(const task_t *t) {
+    int ncpu = smp_cpu_count();
+    if (!t->affinity_any || ncpu <= 1) return my_cpu();
+    /* 从"调用者下一颗核"开始轮，平票就不会全落回 0 号核——否则两个
+     * 并行任务都堆在 BSP 队列里，看起来"铺开了"其实没铺。 */
+    int best = my_cpu(), best_load = 0x7FFFFFFF;
+    for (int k = 1; k <= ncpu; k++) {
+        int c = (my_cpu() + k) % ncpu;
+        if (c >= MAX_CPUS) continue;
+        int load = (int)schedq_count(&cpu_ready[c]);
+        if (load < best_load) { best_load = load; best = c; }
+    }
+    return best;
 }
 
 // ============================================================
@@ -363,7 +528,11 @@ void task_set_parallel_width(task_t *t, uint8_t width) {
  * 创建主任务 (task 0) 作为初始执行上下文
  */
 void task_init(void) {
-    schedq_init(&ready_q, 8);   /* 每 8 次调度升一级最低优先级，防饿死 */
+    /* 每核一条就绪队列。老化窗口 8：每 8 次取任务把最低优先级升一级，
+     * 对应笔记里"同级先来后到 + 不许饿死"。 */
+    for (int i = 0; i < MAX_CPUS; i++) schedq_init(&cpu_ready[i], 8);
+    cpu_ready_inited = 1;
+
     task_t *main_task = &task_pool[0];
     main_task->id = next_id++;
     strncpy(main_task->name, "main", TASK_NAME_MAX);
@@ -414,6 +583,89 @@ void task_init(void) {
 
     current_task = main_task;
     task_count = 1;
+    main_task->state = TASK_RUNNING;
+    main_task->prio = 0;
+    main_task->dep_id = 0;
+    main_task->parallel_width = 1;
+    /* 主任务（shell/GUI 那条线）钉在 BSP：桌面绘制、PS/2、帧缓冲都只
+     * 有一个实例，让它乱跑到 AP 上是自找麻烦。 */
+    main_task->affinity_any = 0;
+    main_task->cpu = 0;
+    main_task->last_cpu = 0;
+    main_task->snode.queued = 0;
+
+    /* 每个 AP 一个空闲任务：AP 需要一个真实的任务上下文才能参与调度
+     * （task_switch 要有地方存/取 rsp），否则 current_task 为空时
+     * task_schedule() 会直接返回，AP 永远接不了活。 */
+    int ncpu = smp_cpu_count();
+    for (int c = 1; c < ncpu && c < MAX_CPUS; c++) {
+        int id = task_create_idle(c);
+        if (id < 0) continue;
+        task_t *idle = task_lookup((uint32_t)id);
+        if (!idle) continue;
+        cpu_idle[c] = idle;
+    }
+
+    task_smp_release_aps();
+}
+
+void task_smp_release_aps(void) {
+    aps_released = 1;
+    __sync_synchronize();
+    smp_ap_release();
+}
+
+/** AP 上跑的空闲任务：没活就 hlt，靠本核 LAPIC 定时器叫醒后重新选任务。 */
+static void task_idle_entry(void *arg) {
+    (void)arg;
+    for (;;) {
+        task_schedule();
+        __asm__ volatile("sti; hlt");
+    }
+}
+
+/** 建一个绑定到指定核心的空闲任务（最低优先级，绝不被偷走）。 */
+int task_create_idle(int cpu) {
+    if (cpu <= 0 || cpu >= MAX_CPUS) return -1;
+    static const char *names[MAX_CPUS] = {
+        "idle0", "idle1", "idle2", "idle3", "idle4", "idle5", "idle6", "idle7"
+    };
+    int id = task_create(names[cpu], task_idle_entry, NULL);
+    if (id < 0) return -1;
+    task_t *t = task_lookup((uint32_t)id);
+    if (!t) return -1;
+    /* task_create 把它按"创建者所在核"塞进了 cpu_ready[0]，这里要搬到
+     * 目标核的队列：只改 t->cpu 而不搬节点，会让同一个任务同时出现在
+     * BSP 的队列里，两个核跑同一份 rsp —— 栈直接串线。 */
+    if (t->snode.queued) (void)schedq_remove(&cpu_ready[t->cpu], &t->snode);
+    t->prio = SCHED_LEVELS - 1;      /* 最低优先级 */
+    t->cpu = (uint8_t)cpu;
+    t->last_cpu = (uint8_t)cpu;
+    t->affinity_any = 0;
+    t->no_steal = 1;     /* 空闲任务只在自家核上跑 */
+    sched_mark_ready(t);
+    return id;
+}
+
+void task_ap_enter(int cpu) {
+    if (cpu <= 0 || cpu >= MAX_CPUS || !cpu_idle[cpu]) {
+        for (;;) __asm__ volatile("cli; hlt");
+    }
+    task_t *idle = cpu_idle[cpu];
+
+    cpu_current[cpu] = idle;
+    idle->state = TASK_RUNNING;
+    if (idle->snode.queued) (void)schedq_remove(&cpu_ready[cpu], &idle->snode);
+
+    /* 从空闲任务的初始帧切进去：之后本核每次调度都从它出发。
+     * 这里必须先自己拿一次调度锁——task_entry_trampoline 的第一条指令
+     * 是 smp_sched_unlock，它假定"新任务是在持锁状态下被切进来的"。 */
+    static uint64_t ap_dummy_rsp[MAX_CPUS];
+    static uint8_t ap_dummy_fpu[MAX_CPUS][512] __attribute__((aligned(16)));
+    smp_sched_lock();
+    task_switch(&ap_dummy_rsp[cpu], &idle->rsp,
+                ap_dummy_fpu[cpu], idle->fpu_state);
+    for (;;) __asm__ volatile("cli; hlt");
 }
 
 /**
@@ -457,7 +709,17 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->id = next_id++;
     strncpy(tcb->name, name ? name : "task", TASK_NAME_MAX);
     tcb->name[TASK_NAME_MAX - 1] = '\0';
-    sched_mark_ready(tcb);
+    /* 调度字段必须在入队之前定好：旧代码先 sched_mark_ready() 再填字段，
+     * 复用槽位时会把上一次的 prio/cpu 带进队列。 */
+    tcb->state = TASK_READY;
+    tcb->prio = 0;
+    tcb->dep_id = 0;
+    tcb->parallel_width = 1;
+    tcb->affinity_any = 0;
+    tcb->no_steal = 0;
+    tcb->cpu = (uint8_t)my_cpu();
+    tcb->last_cpu = tcb->cpu;
+    tcb->snode.queued = 0;
     tcb->entry = entry;
     tcb->arg = arg;
     tcb->exit_status = 0;
@@ -530,6 +792,9 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     *--sp = 0;  // R15 (最低地址 = 最终 RSP)
 
     tcb->rsp = (uint64_t)sp;
+
+    /* 帧搭好了才入队：否则并发调度可能拿到一个 rsp 还没填的任务。 */
+    sched_mark_ready(tcb);
 
     if (!reuse) {
         // 插入循环链表（在 head 之后）
@@ -710,13 +975,19 @@ void task_yield(void) {
 
     if (prev->state == TASK_RUNNING)
         sched_mark_ready(prev);
+    /* 不变量：被换下去的任务必须躺在就绪队列里。schedq_pick 会把"本核
+     * 正在跑的那个"从队头弹掉，如果这一轮恰好弹到它、又选了别的任务，
+     * 它就会既不在队列里也不在跑——再也回不来。这里补一次入队。 */
+    if (prev != next && prev->state != TASK_TERMINATED && !prev->snode.queued)
+        (void)schedq_push(&cpu_ready[prev->cpu], &prev->snode, prev->prio);
     sched_mark_running(next);
+    smp_trace_switch(__func__, next);
     current_task = next;
 
     if (next->mm && next->mm->pml4_phys)
         vmm_set_pml4(next->mm->pml4_phys);
     task_reap_address_spaces();
-    tss_set_stack(next->stack_base + next->stack_size);
+    tss_set_stack_cpu(my_cpu(), next->stack_base + next->stack_size);
     task_switch_tls(prev, next);
 
     task_sig_deliver(next);
@@ -845,16 +1116,29 @@ void task_exit(void) {
     while (1) {
         task_t *next = sched_next();
         if (!next) {
+            /* 本核没活可干了：退回自己的空闲任务，而不是把整个核停机。
+             * 停机等于永久少一个 CPU，而且日志里的"All tasks terminated"
+             * 会误导成系统整体挂了（实际只是这个核没排到）。 */
+            int me = my_cpu();
+            if (cpu_idle[me] && cpu_idle[me] != current_task &&
+                cpu_idle[me]->state != TASK_TERMINATED) {
+                next = cpu_idle[me];
+                next->state = TASK_READY;
+            }
+        }
+        if (!next) {
             console_puts("\n\x1b[31m[KERN] All tasks terminated, halting.\x1b[0m\n");
             while (1) __asm__ volatile("cli; hlt");
         }
         sched_mark_running(next);
+        smp_trace_switch(__func__, next);
+    smp_trace_switch(__func__, next);
         task_t *prev = current_task;
         current_task = next;
         if (next->mm && next->mm->pml4_phys)
             vmm_set_pml4(next->mm->pml4_phys);
         task_reap_address_spaces();
-        tss_set_stack(next->stack_base + next->stack_size);
+        tss_set_stack_cpu(my_cpu(), next->stack_base + next->stack_size);
         task_switch_tls(prev, next);
         task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);
     }
@@ -866,6 +1150,13 @@ void task_set_exit_status(int status) {
 }
 
 const task_t *task_get_by_id(uint32_t id) {
+    for (int i = 0; i < task_count; i++) {
+        if (task_pool[i].id == id) return &task_pool[i];
+    }
+    return NULL;
+}
+
+task_t *task_lookup(uint32_t id) {
     for (int i = 0; i < task_count; i++) {
         if (task_pool[i].id == id) return &task_pool[i];
     }
@@ -1359,7 +1650,7 @@ const task_t *task_get_active(uint32_t index) {
 /** 列出所有活跃任务到控制台 */
 void task_list_all(void) {
     console_puts("\n\x1b[33mTask List\x1b[0m\n");
-    console_puts("  \x1b[36mID  Name                 State\x1b[0m\n");
+    console_puts("  \x1b[36mID  Name                 State      Prio Cpu\x1b[0m\n");
     for (int i = 0; i < task_count; i++) {
         task_t *t = &task_pool[i];
         if (t->state == TASK_TERMINATED) continue;
@@ -1387,6 +1678,11 @@ void task_list_all(void) {
             default:              state_str = "UNKNOWN"; break;
         }
         console_puts(state_str);
+        int spad = 11 - (int)strlen(state_str);
+        for (int p = 0; p < spad; p++) console_putchar(' ');
+        console_putchar((char)('0' + (t->prio % 10)));
+        console_puts("    ");
+        console_putchar((char)('0' + (task_get_cpu(t) % 10)));
         console_putchar('\n');
     }
     console_puts("\n");
@@ -1407,23 +1703,36 @@ void task_schedule(void) {
     if (!current_task || current_task->state == TASK_TERMINATED) return;
     uint64_t irq_flags = task_irq_save();
     smp_sched_lock();
-    if (current_task->state == TASK_RUNNING)
-        sched_mark_ready(current_task);
+    task_t *cur = current_task;
+    if (cur->state == TASK_RUNNING)
+        sched_mark_ready(cur);
     /* 与 task_yield 共用一个健壮的轮转选择原语，消除此处原先
      * "盲跟 next 指针 + checked 兜底"的重复扫描及其越界风险。 */
     task_t *next = sched_next();
     if (!next) {
+        /* 这一轮没换成别的任务：把状态改回 RUNNING。
+         * sched_mark_ready 会把 state 置成 READY，但任务其实一步都没离开
+         * CPU。若就这么返回，它下次 yield 时"只有 RUNNING 才入队"的判断
+         * 会把它漏掉——一旦被切走就再也回不到就绪队列，最终表现为
+         * "All tasks terminated" 或者一个核凭空消失。 */
+        if (cur->state == TASK_READY) cur->state = TASK_RUNNING;
         smp_sched_unlock();
         task_irq_restore(irq_flags);
         return;
     }
+    /* 不变量：被换下去的任务必须躺在就绪队列里。schedq_pick 会把"本核
+     * 正在跑的那个"从队头弹掉，如果这一轮恰好弹到它、又选了别的任务，
+     * 它就会既不在队列里也不在跑——再也回不来。这里补一次入队。 */
+    if (cur != next && cur->state != TASK_TERMINATED && !cur->snode.queued)
+        (void)schedq_push(&cpu_ready[cur->cpu], &cur->snode, cur->prio);
     sched_mark_running(next);
+    smp_trace_switch(__func__, next);
     task_t *prev = current_task;
     current_task = next;
     if (next->mm && next->mm->pml4_phys)
         vmm_set_pml4(next->mm->pml4_phys);
     task_reap_address_spaces();
-    tss_set_stack(next->stack_base + next->stack_size);
+    tss_set_stack_cpu(my_cpu(), next->stack_base + next->stack_size);
     task_switch_tls(prev, next);
     task_sig_deliver(next);
     task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);

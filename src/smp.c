@@ -2,6 +2,7 @@
 #include "acpi.h"
 #include "string.h"
 #include "core/cpu.h"
+#include "core/io.h"
 #include "core/task.h"
 
 static per_cpu_t cpu_data[MAX_CPUS];
@@ -70,6 +71,28 @@ int smp_cpu_count(void) {
     return cpu_count;
 }
 
+int smp_cpu_index(void) {
+    if (!lapic_base || cpu_count <= 0) return 0;
+    uint32_t id = lapic_get_id();
+    for (int i = 0; i < cpu_count && i < MAX_CPUS; i++) {
+        if (cpu_data[i].apic_id == id) return i;
+    }
+    return 0;
+}
+
+void smp_lapic_eoi(void) {
+    if (lapic_base) lapic_write(LAPIC_EOI, 0);
+}
+
+void smp_ap_timer_start(void) {
+    if (!lapic_base) return;
+    /* 分频 16 + 一个固定初值：不需要精确毫秒，只要一个稳定的抢占节拍。
+     * 目标是十几毫秒量级，跟 BSP 的 100Hz PIT 大致同频。 */
+    lapic_write(LAPIC_TIMER_DIV, 0x3);
+    lapic_write(LAPIC_LVT_TIMER, IRQ_SMP_TIMER | LAPIC_TIMER_PERIODIC);
+    lapic_write(LAPIC_TIMER_INIT, 200000);
+}
+
 void smp_sched_lock(void) {
     spinlock_acquire(&sched_lock);
 }
@@ -78,9 +101,33 @@ void smp_sched_unlock(void) {
     spinlock_release(&sched_lock);
 }
 
+static volatile int aps_ready;
+
 static void ap_idle(void) {
     while (1) {
-        __asm__ volatile("sti; hlt");
+        __asm__ volatile("cli; hlt");
+    }
+}
+
+/* AP 早期调试通道：这时候 AP 上还没有锁、没有调度器、没有 console，
+ * 只能直写 COM1。超时保护避免串口没初始化时死等。 */
+static void ap_serial(const char *s) {
+    while (*s) {
+        int guard = 100000;
+        while (!(io_in8(0x3F8 + 5) & 0x20) && --guard) { }
+        if (guard > 0) io_out8(0x3F8, (uint8_t)*s);
+        s++;
+    }
+}
+
+static void ap_serial_uint(uint32_t v) {
+    char buf[12];
+    int i = 0;
+    if (v == 0) { ap_serial("0"); return; }
+    while (v && i < 11) { buf[i++] = (char)('0' + (v % 10)); v /= 10; }
+    while (i-- > 0) {
+        char c[2] = { buf[i], 0 };
+        ap_serial(c);
     }
 }
 
@@ -107,15 +154,53 @@ static void ap_entry(void) {
         /* 跳板（smp_trampoline.asm）搭的是一份没有 TSS、也没配 IDT 的临时
          * GDT，只够把这个核心带进长模式——真出中断/异常在这上面直接三重
          * 故障。补上共享的正式 GDT/IDT，并把这个核心自己的 TSS 指向独立
-         * 的栈，不再和 BSP 共用同一个 rsp0。（这段目前还到不了——见
-         * smp_init() 里的说明，跳板本身在切换过程中就会三重故障。） */
+         * 的栈，不再和 BSP 共用同一个 rsp0。 */
         uint64_t stack_top = (uint64_t)(uintptr_t)&ap_kernel_stack[my_idx][AP_STACK_SIZE];
         cpu_data[my_idx].stack = stack_top;
         gdt_idt_load_ap(my_idx, stack_top);
         cpu_data[my_idx].online = 1;
+        ap_serial("[AP] online cpu=");
+        ap_serial_uint((uint32_t)my_idx);
+        ap_serial("\n");
     }
 
+    /* BSP 的 task_init() 在这之后才跑，调度器（每核就绪队列 + 各核空闲
+     * 任务）还没建好，先在这里等。不能用 sti;hlt 等——8259 的 IRQ0 只
+     * 送到 BSP，AP 一旦 hlt 就没有任何东西能叫醒它。pause 自旋的等待
+     * 窗口只有开机阶段的几十毫秒。 */
+    while (!aps_ready) __asm__ volatile("pause");
+
+    smp_ap_timer_start();          /* 本核自己的时间片节拍 */
+    task_ap_enter(my_idx);         /* 进入本核空闲任务，永不返回 */
     ap_idle();
+}
+
+void smp_ap_release(void) {
+    __sync_synchronize();
+    aps_ready = 1;
+}
+
+/* 崩溃路径专用：只写 COM1，不碰 console/帧缓冲（那些有多核共享状态，
+ * 在故障现场调用会把真实错误信息吃掉）。任意核都能调，不取锁——
+ * 宁可两行字交错，也不能在崩溃时死等一把锁。 */
+void smp_panic_puts(const char *s) {
+    while (*s) {
+        int guard = 200000;
+        while (!(io_in8(0x3F8 + 5) & 0x20) && --guard) { }
+        if (guard > 0) io_out8(0x3F8, (uint8_t)*s);
+        s++;
+    }
+}
+
+void smp_panic_hex(uint64_t v) {
+    char buf[19];
+    buf[0] = '0'; buf[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        int d = (int)((v >> ((15 - i) * 4)) & 0xF);
+        buf[2 + i] = (char)(d < 10 ? '0' + d : 'A' + d - 10);
+    }
+    buf[18] = 0;
+    smp_panic_puts(buf);
 }
 
 extern void ap_trampoline_start(void);
@@ -126,14 +211,24 @@ static int start_ap(uint32_t apic_id, uint32_t cpu_idx) {
     uint8_t *src = (uint8_t *)(uintptr_t)&ap_trampoline_start;
     uint8_t *end = (uint8_t *)(uintptr_t)&ap_trampoline_end;
     size_t size = (size_t)(end - src);
-    if (size > 4096) return -1;
+    /* 参数块从 TRAMPOLINE_ADDR+0xFE0 开始，代码绝对不能盖到那里去。
+     * （之前只挡 4096，代码一长就会把参数块写掉。） */
+    if (size > 0xFE0) return -1;
 
     for (size_t i = 0; i < size; i++) tramp[i] = src[i];
 
+    /* 参数块布局（与 smp_trampoline.asm 严格对应，彼此不得重叠）：
+     *   +0xFE0 u32 cpu_idx
+     *   +0xFE8 u64 cr3
+     *   +0xFF0 u64 栈顶
+     *   +0xFF8 u64 入口
+     * 旧布局里栈顶(+0xFEC)和入口(+0xFF0)重叠 4 字节，写入口会把栈顶
+     * 高 32 位冲成入口地址的低 32 位，AP 一 call 就跳到野栈上三重故障
+     * ——这正是之前"STARTUP IPI 之后整机复位"的根因。 */
     *(volatile uint32_t *)(uintptr_t)(TRAMPOLINE_ADDR + 0xFE0) = cpu_idx;
-    *(volatile uint64_t *)(uintptr_t)(TRAMPOLINE_ADDR + 0xFE4) = read_cr3();
-    *(volatile uint64_t *)(uintptr_t)(TRAMPOLINE_ADDR + 0xFE4 + 8) = TRAMPOLINE_ADDR + 0x1000;
-    *(volatile uint64_t *)(uintptr_t)(TRAMPOLINE_ADDR + 0xFF0) = (uint64_t)(uintptr_t)ap_entry;
+    *(volatile uint64_t *)(uintptr_t)(TRAMPOLINE_ADDR + 0xFE8) = read_cr3();
+    *(volatile uint64_t *)(uintptr_t)(TRAMPOLINE_ADDR + 0xFF0) = TRAMPOLINE_ADDR + 0x1000;
+    *(volatile uint64_t *)(uintptr_t)(TRAMPOLINE_ADDR + 0xFF8) = (uint64_t)(uintptr_t)ap_entry;
 
     lapic_write(LAPIC_ICR_HI, apic_id << 24);
     lapic_write(LAPIC_ICR_LO, LAPIC_DELIVERY_INIT | LAPIC_LEVEL_ASSERT | LAPIC_EDGE);
@@ -179,15 +274,22 @@ void smp_init(void) {
         return;
     }
 
-    /* 已知问题，暂不在这里拉起 AP（后续单独跟进）：修好 MADT 解析
-     * （见 acpi.c acpi_init() 的注释）和 smp.h 里 LAPIC_DELIVERY_ 系列宏
-     * 缺移位的 bug 之后，INIT-SIPI-SIPI 已经能正确送达 AP 了，但
-     * smp_trampoline.asm 在实模式→保护模式→长模式切换过程中会触发三重
-     * 故障，导致整机复位——QEMU -smp 4 实测：BSP 发出第一个 AP 的
-     * STARTUP IPI 后，串口直接从 "XBLPOK" 重新打印，ap_entry() 里任何
-     * 调试输出都没出现过，说明问题出在跳板汇编本身、连 C 代码都没跑到，
-     * 和这次的 TSS/GDT/IDT 改动无关。这里先只用 MADT 确认核心数量、
-     * 不去实际执行 start_ap()：真实多核硬件必然有 >1 个核心，真跳进
-     * 这个 bug 会导致开机死循环重启，比"不启用多核、单核正常跑"糟得多。 */
-    (void)start_ap;
+    /* 逐个拉起 AP。失败就停在已经起来的数量上，不再重试——复位循环比
+     * "少用几个核"糟得多。 */
+    for (int i = 1; i < MAX_CPUS && i < madt->cpu_count; i++) {
+        if (!(madt->cpus[i].flags & 1)) continue;   /* MADT flags bit0 = enabled */
+        cpu_data[i].apic_id = madt->cpus[i].apic_id;
+        cpu_data[i].enabled = 1;
+        if (start_ap(cpu_data[i].apic_id, (uint32_t)i) != 0) {
+            cpu_data[i].enabled = 0;
+            ap_serial("[AP] bring-up failed cpu=");
+            ap_serial_uint((uint32_t)i);
+            ap_serial("\n");
+            break;
+        }
+        cpu_count = i + 1;
+    }
+    ap_serial("[SMP] online cpus=");
+    ap_serial_uint((uint32_t)cpu_count);
+    ap_serial("\n");
 }

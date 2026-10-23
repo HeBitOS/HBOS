@@ -46,6 +46,11 @@
 
 #define LAPIC_ICR_PENDING    (1 << 12)
 
+/* 每个 AP 自己的调度节拍（LAPIC 定时器）。用 0x40 单独一个向量，
+ * 不占 PIC 的 0x20-0x2F：AP 收不到 8259 的 IRQ0（虚拟线模式只送 BSP），
+ * 没有这个节拍的话 AP 一次都不会重新调度。 */
+#define IRQ_SMP_TIMER        0x40
+
 typedef struct {
     uint32_t apic_id;
     uint32_t enabled;
@@ -61,6 +66,18 @@ void smp_init(void);
 int smp_cpu_count(void);
 void smp_send_ipi(uint32_t apic_id, uint32_t vector);
 uint32_t smp_get_apic_id(void);
+
+/** 调用者所在核心的编号（0..smp_cpu_count()-1）。smp_init 之前恒为 0。 */
+int smp_cpu_index(void);
+/** 给本核 LAPIC 发 EOI（LAPIC 定时器/LINT 的向量必须走这里，不能发 PIC）。 */
+void smp_lapic_eoi(void);
+/** 启动本核的周期性 LAPIC 定时器，用于 AP 上的时间片抢占。 */
+void smp_ap_timer_start(void);
+/** BSP 的调度器建好后放行 AP：之前 AP 在 ap_entry 里自旋等待。 */
+void smp_ap_release(void);
+/** 崩溃现场专用输出：直写 COM1，不碰 console/帧缓冲。 */
+void smp_panic_puts(const char *s);
+void smp_panic_hex(uint64_t v);
 
 void smp_sched_lock(void);
 void smp_sched_unlock(void);

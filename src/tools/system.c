@@ -210,8 +210,115 @@ static void cmd_ps(int argc, char **argv) {
     task_list_all();
 }
 
-static void cmd_kill(int argc, char **argv) {
-    if (argc < 2) { console_puts("Usage: kill <pid> [signal]\n"); return; }
+/** 打印一个十进制数（shell 命令里到处都在手搓，这里收一处） */
+static void put_u32(uint32_t v) {
+    char buf[12];
+    int n = 0;
+    if (!v) { console_putchar('0'); return; }
+    while (v && n < 11) { buf[n++] = (char)('0' + (v % 10)); v /= 10; }
+    while (n--) console_putchar(buf[n]);
+}
+
+/* ── smpstat：看每个核在跑谁、排了几个 ─────────────────────────── */
+static void cmd_smpstat(int argc, char **argv) {
+    (void)argc; (void)argv;
+    int n = smp_cpu_count();
+    console_puts("SMP: ");
+    put_u32((uint32_t)n);
+    console_puts(" core(s) online\n");
+    console_puts("  cpu  ready  current task\n");
+    for (int c = 0; c < n; c++) {
+        console_puts("   ");
+        put_u32((uint32_t)c);
+        console_puts("     ");
+        put_u32((uint32_t)task_ready_count_on_cpu(c));
+        console_puts("     ");
+        const task_t *t = task_current_on_cpu(c);
+        console_puts(t && t->name[0] ? t->name : "-");
+        console_puts("\n");
+    }
+    console_puts("  提示：smptest 会拉起两个 CPU 密集型任务，看它们是否真的落到不同核上。\n");
+}
+
+/* ── smptest：并行铺开的可验证样例 ───────────────────────────── */
+#define SMPTEST_TASKS 2
+#define SMPTEST_ITERS 6000000ULL
+
+static volatile int smptest_done;
+static volatile uint32_t smptest_hits[MAX_CPUS];      /* 每个核被跑了多少次采样 */
+static volatile uint32_t smptest_cpu_of[SMPTEST_TASKS]; /* 该任务最终落在哪核 */
+
+static void smptest_worker(void *arg) {
+    int idx = (int)(intptr_t)arg;
+    uint8_t seen[MAX_CPUS];
+    for (int i = 0; i < MAX_CPUS; i++) seen[i] = 0;
+    volatile uint64_t acc = 0;
+    for (uint64_t i = 0; i < SMPTEST_ITERS; i++) {
+        acc += i ^ (uint64_t)idx;
+        if ((i & 0x1FFFFFULL) == 0) {
+            int c = smp_cpu_index();
+            if (c >= 0 && c < MAX_CPUS && !seen[c]) {
+                seen[c] = 1;
+                smptest_hits[c]++;
+                if (smptest_cpu_of[idx] == 0xFFFFFFFFu)
+                    smptest_cpu_of[idx] = (uint32_t)c;
+            }
+        }
+    }
+    (void)acc;
+    __sync_fetch_and_add(&smptest_done, 1);
+}
+
+static void cmd_smptest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    /* 需要看调度轨迹时把 sched_trace_on 打开（会往串口刷很多行） */
+    if (smp_cpu_count() < 2) {
+        console_puts("smptest: 只有 1 个核在线，先确认机器是否真的多核（smpstat）。\n");
+        return;
+    }
+    smptest_done = 0;
+    for (int i = 0; i < MAX_CPUS; i++) smptest_hits[i] = 0;
+    for (int i = 0; i < SMPTEST_TASKS; i++) smptest_cpu_of[i] = 0xFFFFFFFFu;
+
+    int ids[SMPTEST_TASKS];
+    for (int i = 0; i < SMPTEST_TASKS; i++) {
+        ids[i] = task_create("smpwork", smptest_worker, (void *)(intptr_t)i);
+        if (ids[i] < 0) { console_puts("smptest: 任务创建失败\n"); return; }
+        task_t *t = task_lookup((uint32_t)ids[i]);
+        if (t) {
+            /* 关键：允许铺到任意核 + 声明有并行活，调度器才会挑最闲的核 */
+            task_set_affinity_any(t, 1);
+            task_set_parallel_width(t, (uint8_t)SMPTEST_TASKS);
+            task_set_priority(t, 0);
+        }
+    }
+
+    uint32_t spin = 0;
+    while (smptest_done < SMPTEST_TASKS && spin < 20000000u) {
+        spin++;
+        task_yield();
+    }
+
+    console_puts("smptest: ");
+    put_u32((uint32_t)smptest_done);
+    console_puts("/");
+    put_u32(SMPTEST_TASKS);
+    console_puts(" 个并行任务完成，各核命中次数：\n");
+    uint32_t used = 0;
+    for (int c = 0; c < smp_cpu_count(); c++) {
+        if (!smptest_hits[c]) continue;
+        used++;
+        console_puts("  cpu");
+        put_u32((uint32_t)c);
+        console_puts(" x");
+        put_u32(smptest_hits[c]);
+        console_puts("\n");
+    }
+    console_puts(used >= 2 ? "  => 已铺开到多个核。\n"
+                           : "  => 没铺开（检查 AP 是否在线 / 任务是否被钉在单核）。\n");
+}
+
+static void cmd_kill(int argc, char **argv) {    if (argc < 2) { console_puts("Usage: kill <pid> [signal]\n"); return; }
     /* Parse PID */
     uint32_t pid = 0;
     const char *s = argv[1];
@@ -732,6 +839,8 @@ void tool_system_init(void) {
         {"id",      CMD_GROUP_SYSTEM, "Show user/group identity", "id", cmd_id},
         {"su",      CMD_GROUP_SYSTEM, "Switch user (root can switch to any uid)", "su [uid]", cmd_su},
         {"ps",      CMD_GROUP_SYSTEM, "List running tasks",   "ps",      cmd_ps},
+        {"smpstat", CMD_GROUP_SYSTEM, "Show per-core scheduler state", "smpstat", cmd_smpstat},
+        {"smptest", CMD_GROUP_SYSTEM, "Run 2 CPU-bound tasks across cores", "smptest", cmd_smptest},
         {"kill",    CMD_GROUP_SYSTEM, "Send signal to task",  "kill <pid> [sig]", cmd_kill},
         {"tz",      CMD_GROUP_SYSTEM, "Show/set timezone offset (hours)", "tz [hours]", cmd_tz},
         {"status",  CMD_GROUP_SYSTEM, "Show system status",   "status", cmd_status},

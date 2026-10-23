@@ -136,8 +136,24 @@ IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
 
+; ============================================================
+; SMP：AP 自己的 LAPIC 定时器（向量 0x40）。
+; 不能复用 IRQ 0 的存根——那条路径末尾会去发 8259 的 EOI，而 AP 上的
+; 中断根本不是 8259 送来的。这里只借 irq_common 的寄存器保存/恢复，
+; C 侧按 int_no 单独处理并发 LAPIC EOI。
+; 注意：本段必须放在 irq_stub_table 的表项之前，绝不能插进表里，
+; 否则表项会指向存根的机器码（实测就是这么崩的：0x6A006A40E9BC）。
+; ============================================================
+global smp_timer_stub
+smp_timer_stub:
+    push 0
+    push 0x40
+    jmp irq_common
+
 global irq_stub_table
 irq_stub_table:
+
+
 %assign i 0
 %rep 16
     dq irq_stub_%+i

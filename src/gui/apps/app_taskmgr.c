@@ -34,7 +34,9 @@ static uint8_t tm_cmos_second(void) {
 #define TM_COL_PID   0
 #define TM_COL_NAME  56
 #define TM_COL_STATE 260
-#define TM_COL_PPID  360
+#define TM_COL_PRIO  356   /* 调度优先级：0 最高 */
+#define TM_COL_CPU   424   /* 最近一次实际执行的核心 */
+#define TM_COL_PPID  480
 /* hint line (20) + memory bar (14) + info line (16) + spacing */
 #define TM_FOOTER_H  62
 
@@ -125,6 +127,8 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     }
 
     int show_state = aw >= TM_COL_STATE + 60;
+    int show_prio  = aw >= TM_COL_PRIO + 60;
+    int show_cpu   = aw >= TM_COL_CPU + 56;
     int show_ppid  = aw >= TM_COL_PPID + 60;
     int name_clip_x = tx + (show_state ? TM_COL_STATE - 8 : aw - 4);
 
@@ -133,6 +137,10 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     gui_text(tx + TM_COL_NAME, ty + TM_HEADER_Y, "名称", UI_ACCENT, 1);
     if (show_state)
         gui_text(tx + TM_COL_STATE, ty + TM_HEADER_Y, "状态", UI_ACCENT, 1);
+    if (show_prio)
+        gui_text(tx + TM_COL_PRIO, ty + TM_HEADER_Y, "优先级", UI_ACCENT, 1);
+    if (show_cpu)
+        gui_text(tx + TM_COL_CPU, ty + TM_HEADER_Y, "CPU", UI_ACCENT, 1);
     if (show_ppid)
         gui_text(tx + TM_COL_PPID, ty + TM_HEADER_Y, "父PID", UI_ACCENT, 1);
     gui_rect(tx, ty + TM_LIST_TOP - 6, aw, 1, UI_SURFACE3);
@@ -154,6 +162,19 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
 
         if (show_state)
             gui_text(tx + TM_COL_STATE, ry, tm_state_name(t->state), tm_state_color(t->state), 1);
+
+        /* 优先级/核心：调度器的真实决策依据，和 smpstat 显示的一致。 */
+        if (show_prio) {
+            pos = 0; line[0] = 0;
+            gui_append_str(line, sizeof(line), &pos, "P");
+            gui_append_uint(line, sizeof(line), &pos, t->prio);
+            gui_text(tx + TM_COL_PRIO, ry, line, UI_FG2, 1);
+        }
+        if (show_cpu) {
+            pos = 0; line[0] = 0;
+            gui_append_uint(line, sizeof(line), &pos, (uint32_t)task_get_cpu(t));
+            gui_text(tx + TM_COL_CPU, ry, line, UI_FG2, 1);
+        }
 
         if (show_ppid) {
             pos = 0; line[0] = 0;

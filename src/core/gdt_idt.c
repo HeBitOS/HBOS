@@ -8,6 +8,7 @@
 #include "task.h"
 #include "../syscall.h"
 #include "../signal.h"
+#include "../smp.h"
 #include "../graphics/graphics.h"
 
 // ============================================================
@@ -134,6 +135,16 @@ void tss_set_stack(uint64_t rsp0) {
     linux_syscall_kernel_rsp = rsp0;
 }
 
+void tss_set_stack_cpu(int cpu, uint64_t rsp0) {
+    if (cpu < 0 || cpu >= GDT_MAX_CPUS) cpu = 0;
+    g_tss[cpu].rsp0 = rsp0;
+    /* SYSCALL 的内核栈仍只在 BSP 上维护一份；AP 上的用户态任务走 int 路径。 */
+    if (cpu == 0) {
+        extern uint64_t linux_syscall_kernel_rsp;
+        linux_syscall_kernel_rsp = rsp0;
+    }
+}
+
 // ============================================================
 // Interrupt Descriptor Table (IDT) + PIC
 // ============================================================
@@ -257,8 +268,52 @@ void isr_handler(isr_regs_t *regs) {
     }
 
     console_puts("\n\x1b[31m===== KERNEL PANIC =====\x1b[0m\n");
+    /* 先走串口的应急通道：这一份不会被其他核的 console 输出搅乱，
+     * 也不会因为 console 内部状态坏了而丢掉关键信息。 */
+    smp_panic_puts("\n[PANIC] cpu=");
+    { char c[2] = { (char)('0' + (smp_cpu_index() % 10)), 0 }; smp_panic_puts(c); }
+    smp_panic_puts(" vec=");
+    smp_panic_hex(vec);
+    smp_panic_puts(" err=");
+    smp_panic_hex(regs->err_code);
+    smp_panic_puts(" rip=");
+    smp_panic_hex(regs->rip);
+    smp_panic_puts(" rsp=");
+    smp_panic_hex(regs->rsp);
+    smp_panic_puts(" cr2=");
+    smp_panic_hex(cr2_val);
+    smp_panic_puts("\n");
     console_puts("Exception: ");
     console_puts(name);
+    console_puts(" (cpu=");
+    console_putchar((char)('0' + (smp_cpu_index() % 10)));
+    console_puts(", err=");
+    {
+        uint64_t e = regs->err_code;
+        int started = 0;
+        for (int s = 15; s >= 0; s--) {
+            int digit = (int)((e >> (s * 4)) & 0xF);
+            if (digit || started || s == 0) {
+                started = 1;
+                console_putchar(digit < 10 ? (char)('0' + digit)
+                                            : (char)('A' + digit - 10));
+            }
+        }
+    }
+    console_puts(", rip=");
+    {
+        uint64_t r = regs->rip;
+        int started = 0;
+        for (int s = 15; s >= 0; s--) {
+            int digit = (int)((r >> (s * 4)) & 0xF);
+            if (digit || started || s == 0) {
+                started = 1;
+                console_putchar(digit < 10 ? (char)('0' + digit)
+                                            : (char)('A' + digit - 10));
+            }
+        }
+    }
+    console_puts(")");
     console_puts(" (vector 0x");
     {
         int started = 0;
@@ -329,6 +384,16 @@ uint64_t pit_get_ticks(void) {
 }
 
 void irq_handler(isr_regs_t *regs) {
+    /* SMP：AP 的 LAPIC 定时器。它不走 8259，所以必须在这里分出去，
+     * 否则会落到下面按 PIC 的 irq 号发 EOI，等于往串口/键盘的端口上
+     * 乱写。 */
+    if (regs->int_no == IRQ_SMP_TIMER) {
+        smp_lapic_eoi();
+        extern void task_schedule(void);
+        task_schedule();
+        return;
+    }
+
     uint8_t irq = (uint8_t)(regs->int_no - IRQ_BASE);
 
     if (irq == 7 || irq == 15) {
@@ -414,6 +479,11 @@ void gdt_idt_init(void) {
         uint64_t addr = irq_stub_table[i];
         idt_set_entry(IRQ_BASE + i, addr, IDT_PRESENT | IDT_DPL0 | IDT_INT_GATE);
     }
+
+    /* SMP：AP 的 LAPIC 定时器向量（见 smp.h 的 IRQ_SMP_TIMER） */
+    extern void smp_timer_stub(void);
+    idt_set_entry(IRQ_SMP_TIMER, (uint64_t)smp_timer_stub,
+                  IDT_PRESENT | IDT_DPL0 | IDT_INT_GATE);
 
     idt_set_entry(HBOS_SYSCALL_VECTOR, (uint64_t)syscall_int80_stub,
                   IDT_PRESENT | IDT_DPL3 | IDT_TRAP_GATE);

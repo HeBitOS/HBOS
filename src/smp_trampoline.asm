@@ -42,11 +42,12 @@ ap_protected:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, 0x9000
+    ; 只能用低地址做临时栈：0x9000 会压到参数块（0x8FE0 起）上。
+    mov esp, 0x8000
 
     ; Set up 4-level paging (use existing kernel page tables)
     ; CR3 already valid from BSP
-    mov eax, [0x8FE4]
+    mov eax, [0x8FE8]
     mov cr3, eax
 
     ; Enable PAE
@@ -82,14 +83,14 @@ ap_longmode:
     mov ss, ax
 
     ; Set up stack
-    mov rsp, [0x8FE4 + 8]
+    mov rsp, [0x8FF0]
 
     ; Set CR3 to kernel page tables
-    mov rax, [0x8FE4]
+    mov rax, [0x8FE8]
     mov cr3, rax
 
-    ; Call C entry function via pointer stored at 0x8FF0
-    mov rax, [0x8FF0]
+    ; Call C entry function via pointer stored at 0x8FF8
+    mov rax, [0x8FF8]
     call rax
 
     ; Halt if entry returns

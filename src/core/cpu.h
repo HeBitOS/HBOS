@@ -323,6 +323,9 @@ static inline void hlt(void)  { __asm__ volatile("hlt"); }
 void gdt_init(void);
 void gdt_idt_init(void);
 void tss_set_stack(uint64_t rsp0);
+/** 同 tss_set_stack，但指定核心：SMP 下每个核切任务时只能改自己的 rsp0，
+ *  否则 A 核的切换会把 B 核的 ring0 栈顶改掉。 */
+void tss_set_stack_cpu(int cpu, uint64_t rsp0);
 /** AP 核心专用：加载 BSP 已经建好的共享 GDT/IDT，并把 cpu_idx 对应的
  * TSS 描述符指向它自己独享的 rsp0 栈——见 GDT_TSS_LOW(cpu) 上面的说明。
  * 不重建 GDT/IDT 表本身（那些是 gdt_idt_init() 一次性建好、全核心共用
