@@ -64,7 +64,8 @@
 
 ## P2 输入改道
 
-**状态：鼠标已改道（motion/button/axis 全部经 seat），键盘仍是原路径。**
+**状态：已完成（2026-10-24）。鼠标 motion/button/axis、键盘全部经 seat；
+指针焦点从"固定 root"改成按命中窗口切换（桌面空白处退回 root）。**
 
 **todo**
 - `mouse_poll()`/`key_poll()` → `wl_seat_pointer_*` / `wl_seat_key()`。
@@ -73,12 +74,24 @@
 - 迁移现有 `st.buttons/mx/my` 语义到 seat 事件，保持行为一致。
 
 - [x] 鼠标：轮询 → seat → dispatch 回填镜像，处理代码零改动。
-- [ ] 键盘：`key_poll()` → `wl_seat_key()`（需要先把 kb 的键码映射成 keysym）。
-- [ ] 指针焦点：从固定 root 改成命中窗口（依赖每窗口 surface）。
+- [x] 键盘：`key_poll()` → `wl_seat_key()`（press+release 两拍喂进队列）。
+- [x] 指针焦点：每帧 `gui_window_at()` 命中测试，焦点变化产生 LEAVE/ENTER。
 
 **验收（当前）**：桌面与开始菜单正常；鼠标点击/滚轮路径已全部经过 seat。
 
 ## P3 窗口管理接入
+
+**状态（2026-10-24）：每窗口 surface + 提交式脏区已落地；winn 的几何操作
+仍直接改窗口字段，surface 承担的是"提交 + 脏区"这一层。**
+
+- [x] 每个窗口一个 `wl_surface`（`gui.c` 的 `g_win_surf[]`，懒创建）。
+      窗口内容变化 → `wl_surface_damage` → `commit` → 提交监听器把窗口
+      局部矩形换算成屏幕坐标，经 `gui_dirty_add_regions()` 一次性并入脏区。
+      内存拿不到时退回直接标脏区（不因此不重绘）。
+- [ ] 每窗口离屏 buffer：16 个 1024×768×4 的 buffer 要 48MB，而堆只有
+      2MB，必须先做下面「内存策略」里的缓冲池，否则只能退化为直接画 root。
+- [x] 动效帧数由策略层给（≤180ms），动效期间只重绘相关窗口矩形。
+- [ ] 最小化 = unmapped / 恢复 = 重新 attach + commit 的语义化改造。
 
 **todo**
 - `wm.c` 的 move/resize/maximize 改为操作 surface 的几何，而不是直接改窗口。
@@ -98,7 +111,8 @@
 
 ## P5 兼容层
 
-**todo**
+**状态：内置应用零改动可运行这条已经成立（`gui_app_*` 接口没动），
+但"应用私有 surface"还没做——它依赖每窗口 buffer，见 P3 的遗留项。**
 - `gui_app_*`（13 个图元）映射到"应用私有 surface"，不再写全局画布。
 - `winsrv` 的窗口消息映射成 surface 生命周期 + seat 事件。
 - 内置应用**零改动**跑在新合成器上。

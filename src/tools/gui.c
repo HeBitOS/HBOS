@@ -19,6 +19,7 @@
 #include "../graphics/graphics.h"
 #include "../input/mouse.h"
 #include "../gui/wl/wl_seat.h"
+#include "../gui/wl/wl_surface.h"
 #include "../net.h"
 #include "../usb_hid.h"
 #include "../xhci.h"
@@ -4236,10 +4237,71 @@ static void gui_damage_region(int x, int y, int rw, int rh, int scr_w, int scr_h
     if (rw > 0 && rh > 0) gui_dirty_add(x, y, rw, rh);
 }
 
+/* ── ① P3：每窗口一个 wl_surface ────────────────────────────────
+ * 窗口内容变化不再直接往屏幕脏区里塞矩形，而是走 surface 的
+ * damage → commit，由提交监听器把窗口局部坐标换算成屏幕坐标后一次性
+ * 并入脏区列表。这样"一个窗口改了什么"是窗口自己的状态，合成器只负责
+ * 把已提交的脏区贴到屏幕上——也就是笔记里要的 surface 语义。
+ *
+ * 这里不做每窗口离屏 buffer（16 个 1024x768 的 buffer 要 48MB，堆只有
+ * 2MB）；窗口内容仍然直接画到共享画布，surface 承担的是"提交 + 脏区"
+ * 这一层。缓冲区池化见 WAYLAND_PLAN.md 的内存策略一节。 */
+static wl_surface_t *g_win_surf[WM_MAX_WINDOWS];
+static gui_state_t  *g_gui_st;
+static int g_gui_w, g_gui_h;
+
+static void win_surface_commit_cb(wl_surface_t *s, wl_buffer_t *buf,
+                                  const wl_rect_t *damage, int count,
+                                  int full_damage, void *ctx) {
+    (void)s; (void)buf;
+    int idx = (int)(intptr_t)ctx;
+    if (!g_gui_st || idx < 0 || idx >= WM_MAX_WINDOWS) return;
+    int wx, wy, ww, wh;
+    gui_window_metrics(g_gui_st, g_gui_w, g_gui_h, NULL, idx,
+                       &wx, &wy, &ww, &wh);
+    gui_region_t regs[WL_SURFACE_MAX_DAMAGE + 1];
+    int n = 0;
+    if (full_damage) {
+        regs[n].x = wx; regs[n].y = wy; regs[n].w = ww; regs[n].h = wh;
+        n++;
+    } else {
+        for (int i = 0; i < count && n < WL_SURFACE_MAX_DAMAGE; i++) {
+            if (damage[i].w <= 0 || damage[i].h <= 0) continue;
+            regs[n].x = wx + damage[i].x;
+            regs[n].y = wy + damage[i].y;
+            regs[n].w = damage[i].w;
+            regs[n].h = damage[i].h;
+            n++;
+        }
+    }
+    if (n > 0) gui_dirty_add_regions(regs, n, g_gui_w, g_gui_h);
+}
+
+static wl_surface_t *win_surface(int idx, int ww, int wh) {
+    if (idx < 0 || idx >= WM_MAX_WINDOWS) return NULL;
+    wl_surface_t *s = g_win_surf[idx];
+    if (!s) {
+        s = wl_surface_create(ww, wh);
+        if (!s) return NULL;
+        wl_surface_set_commit_listener(s, win_surface_commit_cb,
+                                       (void *)(intptr_t)idx);
+        g_win_surf[idx] = s;
+    }
+    s->w = ww;
+    s->h = wh;
+    return s;
+}
+
 static void gui_damage_window(gui_state_t *st, int scr_w, int scr_h, int idx) {
     int wx, wy, ww, wh;
     gui_window_metrics(st, scr_w, scr_h, NULL, idx, &wx, &wy, &ww, &wh);
-    gui_damage_region(wx, wy, ww, wh, scr_w, scr_h);
+    wl_surface_t *s = win_surface(idx, ww, wh);
+    if (!s) {   /* 内存拿不到就退回直接标脏区，不能因此不重绘 */
+        gui_damage_region(wx, wy, ww, wh, scr_w, scr_h);
+        return;
+    }
+    wl_surface_damage(s, 0, 0, ww, wh);
+    (void)wl_surface_commit(s);
 }
 
 static void gui_damage_cursor(int omx, int omy, int nmx, int nmy) {
@@ -5864,6 +5926,10 @@ static void cmd_gui(int argc, char **argv) {
     st.taskbar_show_seconds = 1;
     st.effects_enabled = 1;
     gui_effects_set_enabled(1);
+    /* ① P3：surface 提交回调需要桌面状态与屏幕尺寸来换算屏幕坐标 */
+    g_gui_st = &st;
+    g_gui_w = w;
+    g_gui_h = h;
     st.brightness = 100;
     gui_set_brightness(st.brightness);
     /* 把 shell 的初始主题发布到 gui_service：HAX 应用窗口跟随的是
@@ -6242,6 +6308,18 @@ static void cmd_gui(int argc, char **argv) {
             if (my < 0) my = 0;
             if (mx > w - 1) mx = w - 1;
             if (my > h - 1) my = h - 1;
+
+            /* ① P2：指针焦点跟着命中窗口走，不再固定挂在 root surface 上。
+             * 焦点一变 wl_seat 就产生 LEAVE/ENTER，控件据此清掉 hover 态；
+             * 桌面空白处退回 root（id=1）。 */
+            {
+                static int ptr_focus = -1;
+                int hot = gui_window_at(&st, w, h, mx, my);
+                if (hot != ptr_focus) {
+                    ptr_focus = hot;
+                    wl_seat_set_pointer_focus(g_seat, hot >= 0 ? hot + 2 : 1);
+                }
+            }
 
             int redraw = 0;
             if (acc_dz != 0) {
