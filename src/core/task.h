@@ -105,6 +105,8 @@ typedef struct task {
     task_state_t state;
     uint8_t prio;              /**< 就绪优先级：数值越小越高；同值先来后到 */
     sched_node_t snode;        /**< 就绪队列节点（每任务一个，空间 O(N)） */
+    uint32_t dep_id;           /**< 前置任务 id（0=无）；未完成时本任务不参与调度 */
+    uint8_t  parallel_width;   /**< 期望并行宽度（1=单线程；>1 表示有并行工作可铺开） */
 
     // Saved stack pointer (RSP) — when task yields
     uint64_t rsp;
@@ -266,6 +268,11 @@ int task_get_count(void);
 /** 设置任务优先级（0 最高）。同优先级仍按轮转公平调度。 */
 void task_set_priority(task_t *t, uint8_t prio);
 uint8_t task_get_priority(const task_t *t);
+
+/** 依赖：dep_id 任务未结束时本任务不参与调度（0 表示清除依赖）。 */
+void task_set_dependency(task_t *t, uint32_t dep_id);
+/** 并行宽度提示：>1 表示该任务有可并行的子工作（调度器可优先铺开）。 */
+void task_set_parallel_width(task_t *t, uint8_t width);
 
 // Get active task by visible index, or NULL when out of range
 const task_t *task_get_active(uint32_t index);

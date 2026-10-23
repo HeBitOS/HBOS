@@ -316,6 +316,16 @@ static task_t *sched_next(void) {
         task_t *t = TASK_OF_NODE(n);
         if (t == current_task) continue;
         if (t->state != TASK_READY) continue;
+        /* 依赖未完成：重新挂回队尾，等前置结束（每轮最多重挂一次，
+         * 由 guard 上界保证不会死循环）。 */
+        if (t->dep_id != 0) {
+            const task_t *dep = task_get_by_id(t->dep_id);
+            if (dep && dep->state != TASK_TERMINATED) {
+                (void)schedq_push(&ready_q, &t->snode, t->prio);
+                continue;
+            }
+            t->dep_id = 0;   /* 前置已结束，解除依赖 */
+        }
         return t;
     }
     return NULL;
@@ -334,6 +344,14 @@ void task_set_priority(task_t *t, uint8_t prio) {
 
 uint8_t task_get_priority(const task_t *t) {
     return t ? t->prio : 0;
+}
+
+void task_set_dependency(task_t *t, uint32_t dep_id) {
+    if (t) t->dep_id = dep_id;
+}
+
+void task_set_parallel_width(task_t *t, uint8_t width) {
+    if (t) t->parallel_width = width ? width : 1;
 }
 
 // ============================================================
