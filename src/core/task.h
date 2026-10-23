@@ -102,6 +102,7 @@ typedef struct task {
     uint32_t id;
     char name[TASK_NAME_MAX];
     task_state_t state;
+    uint8_t prio;              /**< 就绪优先级：数值越小越高；同值保持轮转顺序 */
 
     // Saved stack pointer (RSP) — when task yields
     uint64_t rsp;
@@ -259,6 +260,10 @@ void task_set_host_symtab(uint32_t id, void *symtab, char *strtab, uint64_t coun
 
 // Get number of active (non-terminated) tasks
 int task_get_count(void);
+
+/** 设置任务优先级（0 最高）。同优先级仍按轮转公平调度。 */
+void task_set_priority(task_t *t, uint8_t prio);
+uint8_t task_get_priority(const task_t *t);
 
 // Get active task by visible index, or NULL when out of range
 const task_t *task_get_active(uint32_t index);

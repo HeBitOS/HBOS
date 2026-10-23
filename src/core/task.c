@@ -282,14 +282,39 @@ static void task_release_fd_table(task_t *task) {
 static task_t *sched_next(void) {
     if (!current_task || task_count <= 1) return NULL;
 
+    /* 优先级优先、同级保持轮转：沿环走一圈，取 prio 最小者；
+     * prio 相同时取"离当前最近"的那个，等价于原来的轮转顺序。
+     * 任务上限 64，这里是常数级扫描；配套的 O(1) 多级队列在
+     * core/sched_core.c，下一步替换这段扫描。 */
+    task_t *best = NULL;
+    uint8_t best_prio = 0xFF;
+    int best_dist = 0x7FFFFFFF;
+    int dist = 0;
+
     task_t *t = current_task;
     for (int steps = 0; steps < task_count; steps++) {
         t = t->next;
         if (!t) t = &task_pool[0];      /* 显式回绕，绝不解引用 NULL */
+        dist++;
         if (t == current_task) break;   /* 转了一圈回到自己 */
-        if (t->state == TASK_READY) return t;
+        if (t->state != TASK_READY) continue;
+        if (t->prio < best_prio ||
+            (t->prio == best_prio && dist < best_dist)) {
+            best = t;
+            best_prio = t->prio;
+            best_dist = dist;
+        }
     }
-    return NULL;
+    return best;
+}
+
+void task_set_priority(task_t *t, uint8_t prio) {
+    if (!t) return;
+    t->prio = prio;
+}
+
+uint8_t task_get_priority(const task_t *t) {
+    return t ? t->prio : 0;
 }
 
 // ============================================================

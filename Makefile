@@ -829,6 +829,12 @@ exfat-test: | $(BUILD_DIR)
 		echo "  [skip] mkfs.exfat 不存在，跳过真实镜像用例"; \
 	fi
 
+# 多级优先级就绪队列：优先级/FIFO/摘除/老化/计数一致性。
+sched-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_sched_core.c \
+		$(SRC_DIR)/core/sched_core.c -o $(BUILD_DIR)/test_sched_core
+	$(BUILD_DIR)/test_sched_core
+
 # ext4 extent 映射：depth 0/1、空洞、unwritten、坏 magic。
 ext4-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_ext4_extent.c \
@@ -850,7 +856,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test
 	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:
