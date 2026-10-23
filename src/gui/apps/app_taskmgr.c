@@ -30,7 +30,7 @@ static uint8_t tm_cmos_second(void) {
 
 #define TM_ROW_H     24
 #define TM_HEADER_Y  8
-#define TM_LIST_TOP  36
+#define TM_LIST_TOP  104   /* 顶部标题+摘要卡片（Win11 风格） */
 #define TM_COL_PID   0
 #define TM_COL_NAME  56
 #define TM_COL_STATE 260
@@ -96,8 +96,34 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     char line[96];
     tm_clamp_selection(st);
     int count = task_get_count();
+
     int aw = tm_avail_w(win_w);
     int ah = tm_avail_h(win_h);
+    /* Win11 风格顶部：标题 + 两张摘要卡片（进程数 / 物理内存总量）。 */
+    gui_text(tx, ty + 6, "任务管理器", UI_FG, 1);
+    {
+        int card_w = (aw - 16) / 2;
+        if (card_w < 80) card_w = 80;
+        int card_h = 48;
+        int cy = ty + 30;
+
+        gui_fill_round_rect(tx, cy, card_w, card_h, 10, UI_SURFACE2);
+        gui_text(tx + 12, cy + 8, "进程", UI_FG2, 1);
+        uint32_t p2 = 0;
+        line[0] = 0;
+        gui_append_uint(line, sizeof(line), &p2, (uint32_t)count);
+        gui_text(tx + 12, cy + 24, line, UI_FG, 1);
+
+        int cx2 = tx + card_w + 16;
+        gui_fill_round_rect(cx2, cy, card_w, card_h, 10, UI_SURFACE2);
+        gui_text(cx2 + 12, cy + 8, "内存", UI_FG2, 1);
+        p2 = 0; line[0] = 0;
+        gui_append_uint(line, sizeof(line), &p2,
+                        (uint32_t)(pmm_get_total_mem() / (1024u * 1024u)));
+        gui_append_str(line, sizeof(line), &p2, " MB");
+        gui_text(cx2 + 12, cy + 24, line, UI_FG, 1);
+    }
+
     int show_state = aw >= TM_COL_STATE + 60;
     int show_ppid  = aw >= TM_COL_PPID + 60;
     int name_clip_x = tx + (show_state ? TM_COL_STATE - 8 : aw - 4);
