@@ -831,6 +831,13 @@ exfat-test: | $(BUILD_DIR)
 		echo "  [skip] mkfs.exfat 不存在，跳过真实镜像用例"; \
 	fi
 
+# Wayland 地基：surface 双缓冲/脏区/释放、seat 焦点与事件队列。
+wl-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_wl.c \
+		$(SRC_DIR)/gui/wl/wl_surface.c $(SRC_DIR)/gui/wl/wl_seat.c \
+		-o $(BUILD_DIR)/test_wl
+	$(BUILD_DIR)/test_wl
+
 # 动效策略：总开关 / 两级权限 / 帧数上限。
 fx-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_gui_effects.c \
@@ -864,7 +871,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wl-test
 	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:
