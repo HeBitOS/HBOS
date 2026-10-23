@@ -5136,6 +5136,25 @@ static void sm_launch(gui_state_t *st, const sm_entry_t *e) {
     }
 }
 
+/* 菜单可用高度：屏幕高度减去任务栏与上下留白。菜单再高就装不下了。 */
+static int sm_avail_h(int screen_h) {
+    int avail = screen_h - TASKBAR_H - 16;
+    if (avail < SM_H) avail = SM_H;
+    return avail;
+}
+
+/* 菜单高度变了必须同步重算 y，否则上半截留在原位、下半截伸出屏幕。 */
+static void sm_reposition(int *menu_y, int mh, int screen_h) {
+    int y = screen_h - TASKBAR_H - mh - 8;
+    if (y < 8) y = 8;
+    *menu_y = y;
+}
+
+static int sm_clamp_h(int h, int screen_h) {
+    int avail = sm_avail_h(screen_h);
+    return h > avail ? avail : h;
+}
+
 static int gui_start_menu_h(void) {
     int total = sm_total_entries();
     int rows = (total + SM_GRID_COLS - 1) / SM_GRID_COLS;
@@ -5378,6 +5397,9 @@ static void draw_start_menu(gui_state_t *st) {
     int ox = wm->menu_x, oy = wm->menu_y;
     int light = st->theme_light;
     int mh = wm->menu_h > 0 ? wm->menu_h : SM_H;   /* 动态面板高度 */
+    /* 面板内容必须裁剪在面板内：高度被可用空间钳制后，多出来的行会溢出到
+     * 任务栏/屏幕外，之前"用户/关机"那排按钮就是这样被裁掉的。 */
+    int clip_ok = gui_clip_push(ox, oy, SM_W, mh);
     int extra = mh - SM_H;
     if (extra < 0) extra = 0;
 
@@ -5526,12 +5548,14 @@ static void draw_start_menu(gui_state_t *st) {
         text(power_x + 20, btn_y + (btn_h - gui_font_line_height()) / 2,
              "关机", UI_FG, 1);
     }
+    if (clip_ok > 0) gui_clip_pop();
 }
 
 /* 进入 GUI 的欢迎窗口 —— 与桌面其余部分统一的圆角现代风格（蓝/深主题）。 */
 // 与 draw_window_frame 完全一致的 Breeze 窗框配色/圆角/标题栏样式（中性标题
 // 栏 + 强调色边框 + 左上角圆角图标），让欢迎窗口看起来就是桌面里的一个普通
 // 窗口，而不是一张单独的强调色卡片。
+
 static void draw_splash_window(int w, int h, int ticks, int light) {
     (void)light;
     int sw = ui_s(440), sh = ui_s(208);
@@ -5841,7 +5865,8 @@ static void cmd_gui(int argc, char **argv) {
             wm_toggle_start_menu(&st.wm);
             if (st.wm.start_menu_open) {
                 gui_scan_disk_apps();
-                st.wm.menu_h = gui_start_menu_h();
+                st.wm.menu_h = sm_clamp_h(gui_start_menu_h(), h);
+                sm_reposition(&st.wm.menu_y, st.wm.menu_h, h);
                 st.sm_search[0] = 0; st.sm_search_len = 0;
                 st.status = "开始菜单";
             }
@@ -6387,8 +6412,9 @@ static void cmd_gui(int argc, char **argv) {
                             else if (ci == 2) {
                                 wm_toggle_start_menu(&st.wm);
                                 if (st.wm.start_menu_open) {
-                                    int mh = gui_start_menu_h();
+                                    int mh = sm_clamp_h(gui_start_menu_h(), h);
                                     st.wm.menu_h = mh;
+                                    sm_reposition(&st.wm.menu_y, mh, h);
                                     st.wm.menu_x = (w - SM_W) / 2;
                                     if (st.wm.menu_x < 8) st.wm.menu_x = 8;
                                     st.wm.menu_y = h - TASKBAR_H - mh - 8;
@@ -6489,8 +6515,9 @@ static void cmd_gui(int argc, char **argv) {
                             if (st.wm.start_menu_open) {
                                 /* Win11 style: center horizontally above taskbar.
                                  * 面板高度按 .hax GUI 应用数动态增长。 */
-                                int mh = gui_start_menu_h();
+                                int mh = sm_clamp_h(gui_start_menu_h(), h);
                                 st.wm.menu_h = mh;
+                                sm_reposition(&st.wm.menu_y, mh, h);
                                 st.wm.menu_x = (w - SM_W) / 2;
                                 if (st.wm.menu_x < 8) st.wm.menu_x = 8;
                                 st.wm.menu_y = h - TASKBAR_H - mh - 8;
