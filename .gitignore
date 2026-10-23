@@ -18,3 +18,6 @@ build-compat/
 HPT-server/
 scripts/__pycache__/
 .zcode/
+.agent-teams/
+.workbuddy/
+.Trash-0/
