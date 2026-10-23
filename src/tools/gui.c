@@ -915,6 +915,8 @@ static uint8_t g_guiapp_btn = 0;
 static wl_seat_t *g_seat;
 static int g_seat_mx, g_seat_my, g_seat_buttons, g_seat_dz;
 static int g_seat_focus;
+static int g_seat_key_val;      /* 经 seat 派发回来的键值（键盘改道用） */
+static uint32_t g_full_redraws; /* 整屏重绘次数（P4 性能指标） */
 
 static void seat_event_cb(void *ctx, const wl_event_t *ev) {
     (void)ctx;
@@ -931,6 +933,9 @@ static void seat_event_cb(void *ctx, const wl_event_t *ev) {
     }
     case WL_EV_POINTER_AXIS:
         g_seat_dz += ev->axis;
+        break;
+    case WL_EV_KEY:
+        if (ev->pressed) g_seat_key_val = (int)ev->key;
         break;
     case WL_EV_POINTER_ENTER:
         g_seat_focus = ev->surface_id;
@@ -4246,6 +4251,7 @@ static int cursor_overlaps_rect(int mx, int my, int rx, int ry, int rw, int rh) 
 
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
     if (gui_dirty_is_full() || gui_dirty_count() == 0) {
+        g_full_redraws++;
         if (gui_dirty_count() == 0) gui_dirty_mark_full();
         draw_gui_screen(w, h, st);
         draw_cursor(mx, my, edge);
@@ -5045,53 +5051,6 @@ static char disk_apps[GUI_DISK_APP_MAX][32];
 static int disk_app_count;
 static uint8_t disk_hax_buf[65536];
 
-static int disk_hax_kind(const uint8_t *data, size_t len,
-                         char *name_out, size_t name_cap) {
-    if (!data || len < 64 || memcmp(data, "\x7f" "ELF\x02\x01", 6) != 0)
-        return 0;
-    uint64_t shoff;
-    uint16_t shentsize, shentnum, shstrndx;
-    __builtin_memcpy(&shoff, data + 0x28, 8);
-    __builtin_memcpy(&shentsize, data + 0x3A, 2);
-    __builtin_memcpy(&shentnum, data + 0x3C, 2);
-    __builtin_memcpy(&shstrndx, data + 0x3E, 2);
-    if (shentsize < 64 || shstrndx >= shentnum ||
-        shoff + (uint64_t)shentsize * shentnum > len)
-        return 0;
-    const uint8_t *sh0 = data + shoff;
-    uint64_t shstr_off, shstr_size;
-    __builtin_memcpy(&shstr_off,
-                     sh0 + (uint64_t)shstrndx * shentsize + 0x18, 8);
-    __builtin_memcpy(&shstr_size,
-                     sh0 + (uint64_t)shstrndx * shentsize + 0x20, 8);
-    if (shstr_off + shstr_size > len) return 0;
-    for (uint16_t i = 0; i < shentnum; i++) {
-        const uint8_t *sh = sh0 + (uint64_t)i * shentsize;
-        uint32_t name_off;
-        __builtin_memcpy(&name_off, sh, 4);
-        if (name_off >= shstr_size) continue;
-        const char *secname = (const char *)(data + shstr_off + name_off);
-        if (strcmp(secname, ".haxmeta") != 0) continue;
-        uint64_t sec_off, sec_size;
-        __builtin_memcpy(&sec_off, sh + 0x18, 8);
-        __builtin_memcpy(&sec_size, sh + 0x20, 8);
-        if (sec_size < 104 || sec_off + sec_size > len) return 0;
-        const uint8_t *meta = data + sec_off;
-        uint32_t magic, kind;
-        __builtin_memcpy(&magic, meta, 4);
-        __builtin_memcpy(&kind, meta + 4, 4);
-        if (magic != 0x4D584148u || kind == 0) return 0;
-        if (name_out && name_cap) {
-            const char *nm = (const char *)(meta + 8);
-            size_t n = 0;
-            while (n + 1 < name_cap && nm[n] && n < 32) { name_out[n] = nm[n]; n++; }
-            name_out[n] = 0;
-        }
-        return (int)kind;
-    }
-    return 0;
-}
-
 static void gui_scan_disk_apps(void) {
     disk_app_count = 0;
     char full[256];
@@ -5100,34 +5059,11 @@ static void gui_scan_disk_apps(void) {
         char name[VFS_MAX_NAME];
         uint32_t type;
         if (vfs_readdir_at(full, i, name, &type) != 0) break;
-        if (type != VFS_NODE_FILE) continue;
-        size_t nl = strlen(name);
-        if (nl < 5 || name[nl - 4] != '.' || name[nl - 3] != 'h' ||
-            name[nl - 2] != 'a' || name[nl - 1] != 'x')
-            continue;
-        char path[96];
-        size_t pn = nl < 90 ? nl : 90;
-        memcpy(path, "/bin/", 5);
-        memcpy(path + 5, name, pn);
-        path[5 + pn] = 0;
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) continue;
-        size_t total = 0;
-        long rn;
-        while (total < sizeof(disk_hax_buf) &&
-               (rn = read(fd, disk_hax_buf + total,
-                          sizeof(disk_hax_buf) - total)) > 0)
-            total += (size_t)rn;
-        close(fd);
-        if (total == 0) continue;
-        char app_name[32] = {0};
-        int kind = disk_hax_kind(disk_hax_buf, total, app_name,
-                                 sizeof(app_name));
-        if (!(kind & HAX_KIND_GUI)) continue;
-        const char *use = app_name[0] ? app_name : name;
-        size_t un = strlen(use);
+        if (name[0] == '.' || name[0] == 0) continue;
+        if (type != VFS_NODE_FILE && type != VFS_NODE_SYMLINK) continue;
+        size_t un = strlen(name);
         if (un >= 32) un = 31;
-        memcpy(disk_apps[disk_app_count], use, un);
+        memcpy(disk_apps[disk_app_count], name, un);
         disk_apps[disk_app_count][un] = 0;
         disk_app_count++;
     }
@@ -6027,6 +5963,15 @@ static void cmd_gui(int argc, char **argv) {
         }
 
         int key = key_poll();
+        /* 键盘也走 seat：按下+松开各发一个事件，派发回来的键值继续给后面
+         * 的处理逻辑用，行为与直读 key_poll 一致。 */
+        if (key && g_seat) {
+            (void)wl_seat_key(g_seat, (uint32_t)key, 1);
+            (void)wl_seat_key(g_seat, (uint32_t)key, 0);
+            (void)wl_seat_dispatch(g_seat, 8);
+            key = g_seat_key_val;
+            g_seat_key_val = 0;
+        }
         /* Tab：打开/关闭概览（多任务）。Esc 也能退出。 */
         if (key == '\t') {
             st.overview = !st.overview;
@@ -6086,7 +6031,15 @@ static void cmd_gui(int argc, char **argv) {
         }
         /* F5: force a full desktop repaint (manual refresh). */
         if (key == KB_KEY_F5) {
-            st.status = "桌面已刷新";
+            {
+                static char sbuf[48];
+                uint32_t pos = 0;
+                append_str(sbuf, sizeof(sbuf), &pos, "整屏重绘 ");
+                append_uint(sbuf, sizeof(sbuf), &pos, g_full_redraws);
+                append_str(sbuf, sizeof(sbuf), &pos, " 次 · 桌面已刷新");
+                sbuf[pos] = 0;
+                st.status = sbuf;
+            }
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
@@ -6709,6 +6662,7 @@ static void cmd_gui(int argc, char **argv) {
                             wm_toggle_start_menu(&st.wm);
                             st.sm_search[0] = 0; st.sm_search_len = 0;  /* 每次打开清空搜索 */
                             if (st.wm.start_menu_open) {
+                                gui_scan_disk_apps();
                                 /* Win11 style: center horizontally above taskbar.
                                  * 面板高度按 .hax GUI 应用数动态增长。 */
                                 int mh = sm_clamp_h(gui_start_menu_h(), h);
