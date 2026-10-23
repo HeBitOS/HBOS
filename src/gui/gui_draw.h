@@ -12,6 +12,11 @@ void gui_set_layer_opacity(uint8_t opacity);
 uint8_t gui_get_layer_opacity(void);
 
 void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px);
+
+/* ① P1：把桌面画布包成一个 root surface，呈现改走 attach/damage/commit。
+ * 必须在 gui_set_surface() 之后调用；失败时自动退回直贴路径。 */
+void gui_wl_init(uint32_t *pixels, int w, int h, uint32_t pitch_px);
+int  gui_wl_active(void);
 void gui_present_surface(const fb_info_t *fb);
 void gui_present_rect(const fb_info_t *fb, int x, int y, int w, int h);
 

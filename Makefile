@@ -305,6 +305,9 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gui/gui_dirty.c \
 	$(SRC_DIR)/gui/gui_effects.c \
+	$(SRC_DIR)/gui/wl/wl_surface.c \
+	$(SRC_DIR)/gui/wl/wl_compositor.c \
+	$(SRC_DIR)/gui/wl/wl_seat.c \
 	$(SRC_DIR)/gui/browser_backend.c \
 	$(SRC_DIR)/gui/browser_layout.c \
 	$(SRC_DIR)/gui/gui_apps.c \

@@ -5727,6 +5727,7 @@ static void cmd_gui(int argc, char **argv) {
     uint64_t surface_phys = pmm_alloc_blocks(surface_pages);
     if (surface_phys) {
         gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
+        gui_wl_init((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
     } else {
         st.status = "图形缓冲分配失败";
     }

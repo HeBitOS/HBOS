@@ -13,6 +13,8 @@
  * 依赖：fb_*（帧缓冲）、gui_font_*（字形）、gui_clip_*（裁剪）、主题令牌。
  */
 #include "gui_draw.h"
+#include "wl/wl_surface.h"
+#include "wl/wl_compositor.h"
 #include "gui_dirty.h"
 #include "../ui/theme.h"
 #include "../ui/ui_tokens.h"
@@ -149,7 +151,7 @@ void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px) {
     g_gui_surface_pitch = surface ? pitch_px : 0;
 }
 
-void gui_present_surface(const fb_info_t *fb) {
+static void present_full_raw(const fb_info_t *fb) {
     if (!fb || !g_gui_surface) return;
     uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
     for (int y = 0; y < g_gui_surface_h; y++) {
@@ -159,7 +161,75 @@ void gui_present_surface(const fb_info_t *fb) {
     }
 }
 
+/* ── Wayland 风格提交路径（① P1）────────────────────────────────
+ * 桌面画进 g_gui_surface（就是 root surface 的 buffer），提交走
+ * attach → damage → commit；commit 回调再由合成器贴到真实帧缓冲。
+ * 没有初始化（或分配失败）时退回原来的直贴路径。 */
+static wl_surface_t *g_root;
+static wl_buffer_t g_root_buf;
+static wl_compositor_t *g_comp;
+static const fb_info_t *g_present_fb;
+
+static void present_rect_raw(const fb_info_t *fb, int x, int y, int w, int h);
+
+static void wl_on_blit(void *ctx, int dx, int dy, wl_buffer_t *b,
+                       const wl_rect_t *damage, int count, int full) {
+    (void)ctx; (void)b;
+    if (!g_present_fb) return;
+    if (full || count <= 0) {
+        present_full_raw(g_present_fb);
+        return;
+    }
+    for (int i = 0; i < count; i++)
+        present_rect_raw(g_present_fb, dx + damage[i].x, dy + damage[i].y,
+                         damage[i].w, damage[i].h);
+}
+
+void gui_wl_init(uint32_t *pixels, int w, int h, uint32_t pitch_px) {
+    if (!pixels || w <= 0 || h <= 0) return;
+    g_root_buf.w = w;
+    g_root_buf.h = h;
+    g_root_buf.stride = (int)(pitch_px * 4);
+    g_root_buf.pixels = pixels;
+    g_root_buf.release = 0;
+    g_root_buf.release_ctx = 0;
+    g_root_buf.busy = 0;
+
+    g_root = wl_surface_create(w, h);
+    if (!g_root) return;
+    (void)wl_surface_attach(g_root, &g_root_buf);
+    (void)wl_surface_commit(g_root);
+
+    g_comp = wl_comp_create(wl_on_blit, 0);
+    if (g_comp) (void)wl_comp_add(g_comp, g_root, 0, 0, 0);
+}
+
+int gui_wl_active(void) { return g_root != 0; }
+
+void gui_present_surface(const fb_info_t *fb) {
+    if (!fb || !g_gui_surface) return;
+    g_present_fb = fb;
+    if (g_root) {
+        wl_surface_damage(g_root, 0, 0, g_gui_surface_w, g_gui_surface_h);
+        (void)wl_surface_attach(g_root, &g_root_buf);
+        (void)wl_surface_commit(g_root);
+        return;
+    }
+    present_full_raw(fb);
+}
+
 void gui_present_rect(const fb_info_t *fb, int x, int y, int w, int h) {
+    g_present_fb = fb;
+    if (g_root) {
+        wl_surface_damage(g_root, x, y, w, h);
+        (void)wl_surface_attach(g_root, &g_root_buf);
+        (void)wl_surface_commit(g_root);
+        return;
+    }
+    present_rect_raw(fb, x, y, w, h);
+}
+
+static void present_rect_raw(const fb_info_t *fb, int x, int y, int w, int h) {
     if (!fb || !g_gui_surface || w <= 0 || h <= 0) return;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
