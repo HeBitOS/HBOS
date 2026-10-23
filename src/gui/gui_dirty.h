@@ -33,4 +33,12 @@ int  gui_clip_intersect(int *x, int *y, int *w, int *h);
 
 void gui_dirty_expand(int *x, int *y, int *w, int *h, int pad, int max_w, int max_h);
 
+/* ── 区域列表重绘（③ 笔记："重绘任意区域，成 a list 所指的样子"）──
+ * 调用方给一组矩形，这里负责裁剪到屏幕范围并逐个并入脏区（合并规则同
+ * gui_dirty_add）。返回实际并入的矩形个数；参数非法返回 -1。 */
+typedef struct { int x, y, w, h; } gui_region_t;
+
+int gui_dirty_add_regions(const gui_region_t *regions, int n,
+                          int screen_w, int screen_h);
+
 #endif

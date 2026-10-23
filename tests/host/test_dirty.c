@@ -41,6 +41,19 @@ int main(void) {
     gui_dirty_add(0, 0, 10, 10);
     CHECK(gui_dirty_count() == 0);
 
+    printf("[DIRTY] 区域列表：裁剪 + 合并\n");
+    gui_dirty_reset();
+    gui_region_t regs[3] = {
+        {-5, -5, 20, 20},      /* 裁成 (0,0,15,15) */
+        {5, 5, 10, 10},        /* 与上一块相交，合并 */
+        {500, 500, 10, 10},    /* 越界，忽略 */
+    };
+    CHECK(gui_dirty_add_regions(regs, 3, 100, 100) == 2);
+    CHECK(gui_dirty_count() == 1);
+    CHECK(gui_dirty_get(0, &x, &y, &w, &h) == 0);
+    CHECK(x == 0 && y == 0 && w == 15 && h == 15);
+    CHECK(gui_dirty_add_regions(NULL, 1, 100, 100) == -1);
+
     if (failures) { printf("[DIRTY] FAILED: %d\n", failures); return 1; }
     printf("[DIRTY] all tests passed\n");
     return 0;

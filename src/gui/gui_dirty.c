@@ -186,3 +186,23 @@ void gui_clip_pop(void) {
     else
         gui_clip_clear();
 }
+
+int gui_dirty_add_regions(const gui_region_t *regions, int n,
+                          int screen_w, int screen_h) {
+    if (!regions || n <= 0 || screen_w <= 0 || screen_h <= 0) return -1;
+    int added = 0;
+    for (int i = 0; i < n; i++) {
+        int x = regions[i].x, y = regions[i].y;
+        int w = regions[i].w, h = regions[i].h;
+        if (w <= 0 || h <= 0) continue;
+        /* 裁剪到屏幕 */
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x + w > screen_w) w = screen_w - x;
+        if (y + h > screen_h) h = screen_h - y;
+        if (w <= 0 || h <= 0) continue;
+        gui_dirty_add(x, y, w, h);
+        added++;
+    }
+    return added;
+}
