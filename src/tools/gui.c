@@ -687,17 +687,13 @@ static void line_u32(char *buf, uint32_t cap, const char *a, uint32_t v, const c
 // division), which avoids the +/-1px jitter a single post-hoc "* 7/5" scale
 // would add as `a` grows.
 static int clamp_delta(int v) {
-    int s = v < 0 ? -1 : 1;
-    int a = v < 0 ? -v : v;
-    if (a == 0) return 0;
-    int out;
-    if (a <= 3)       out = a * 4;               // 精细控制：每计数 4px
-    else if (a <= 8)  out = 16 + (a - 4) * 5;     // 过渡：每计数 5px
-    else              out = 36 + (a - 8) * 7;     // 快速甩动：每计数 7px，便于跨屏
-    out *= s;
-    if (out > 260)  return 260;
-    if (out < -260) return -260;
-    return out;
+    /* 1 个鼠标计数 = 1 像素。
+     * 之前是分段加速（>8 计数时 ×7），指针一甩就冲到屏幕角上：手感飘，
+     * 而且脚本化点击（QEMU sendkey/screendump 回归）根本没法定位。
+     * 现在改回 1:1；每帧上限 127px 只是防脏数据，正常移动不会碰到。 */
+    if (v > 127) return 127;
+    if (v < -127) return -127;
+    return v;
 }
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
