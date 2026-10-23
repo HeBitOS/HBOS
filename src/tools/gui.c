@@ -1,3 +1,4 @@
+#include "gui_effects.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -5829,6 +5830,8 @@ static void cmd_gui(int argc, char **argv) {
     st.last_clicked_file = -1;
     st.delete_confirm_index = -1;
     st.taskbar_show_seconds = 1;
+    st.effects_enabled = 1;
+    gui_effects_set_enabled(1);
     st.brightness = 100;
     gui_set_brightness(st.brightness);
     /* 把 shell 的初始主题发布到 gui_service：HAX 应用窗口跟随的是

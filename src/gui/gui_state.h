@@ -107,6 +107,7 @@ typedef struct gui_state {
     int  showdesk_active;
     int theme_light;
     int taskbar_show_seconds;  /* 任务栏时钟是否显示秒数，默认开启 */
+    int effects_enabled;       /* 窗口动效总开关，默认开启（③） */
     int brightness;            /* 屏幕亮度 20..100，默认 100 */
     int brightness_popup_open; /* 任务栏亮度滑杆弹窗是否打开 */
     char console_input[120];

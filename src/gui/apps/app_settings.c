@@ -1,3 +1,4 @@
+#include "gui_effects.h"
 #include "gui_app.h"
 #include "../../ui/theme.h"
 #include "../../ui/ui_tokens.h"
@@ -102,6 +103,15 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
             st->taskbar_show_seconds ? UI_ACCENT : UI_SURFACE2);
     y += SB_H + 6;
     gui_text(x, y, "关闭后任务栏时钟只显示时:分，不显示秒", UI_DIM, 1);
+    y += 16 + 8;
+
+    /* ── 动效（③） ── */
+    section(x, y, "窗口动效");
+    y += 20;
+    draw_sb(x, y, SB_W + 30, st->effects_enabled ? "● 开启动效" : "  开启动效",
+            st->effects_enabled ? UI_ACCENT : UI_SURFACE2);
+    y += SB_H + 6;
+    gui_text(x, y, "关闭后窗口打开/最小化/最大化立即完成，不再占帧", UI_DIM, 1);
     y += 16 + 8;
 
     /* ── 开机默认启动方式 ── 第一次开机选一次后记住，之后不再询问；
@@ -227,6 +237,16 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
     if (mx >= x && mx < x + SB_W + 30 && my >= y && my < y + SB_H) {
         st->taskbar_show_seconds = !st->taskbar_show_seconds;
         st->status = st->taskbar_show_seconds ? "任务栏时钟已显示秒数" : "任务栏时钟已隐藏秒数";
+        return 1;
+    }
+    y += SB_H + 30;
+
+    /* 动效开关 */
+    y += 20;
+    if (mx >= x && mx < x + SB_W + 30 && my >= y && my < y + SB_H) {
+        st->effects_enabled = !st->effects_enabled;
+        gui_effects_set_enabled(st->effects_enabled);
+        st->status = st->effects_enabled ? "窗口动效已开启" : "窗口动效已关闭";
         return 1;
     }
     y += SB_H + 30;
