@@ -835,6 +835,7 @@ exfat-test: | $(BUILD_DIR)
 wl-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_wl.c \
 		$(SRC_DIR)/gui/wl/wl_surface.c $(SRC_DIR)/gui/wl/wl_seat.c \
+		$(SRC_DIR)/gui/wl/wl_compositor.c \
 		-o $(BUILD_DIR)/test_wl
 	$(BUILD_DIR)/test_wl
 

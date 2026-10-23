@@ -50,12 +50,14 @@
 **目标**：`wl_compositor` 管理 surface 链表 + z-order，并把 commit 结果画到帧缓冲。
 
 **todo**
-- `src/gui/wl/wl_compositor.{h,c}`：surface 注册/注销、z-order、输入命中（顶层优先）。
-- `commit_listener`：把 buffer（RGBA）blit 到 `gd_surface_ptr()` 的对应矩形。
-- 现有窗口在创建时挂一个 surface；`draw_gui_frame` 改为"遍历 surface 列表提交"。
-- 用一个 demo surface（纯色 + 动画色块）验证独立提交。
+- [x] `src/gui/wl/wl_compositor.{h,c}`：注册/注销、move、visible、raise、
+      顶层命中（`wl_comp_hit`）、从下到上的绘制顺序（`wl_comp_paint`）。
+- [ ] `commit_listener` 接 `gd_*`：把 buffer（RGBA）blit 到帧缓冲对应矩形。
+- [ ] 现有窗口创建时挂 surface；`draw_gui_frame` 改为遍历 surface 列表。
+- [ ] demo surface（纯色 + 动画）验证独立提交。
 
-**验收**：桌面 + 一个自绘 surface 同屏；拖动 demo surface 只重绘它的脏区。
+**验收（当前进度）**：视图管理单测通过（z-order/命中/隐藏/提升/移除）；
+**尚未接入 gui.c**，桌面仍走老路径。
 
 ## P2 输入改道
 

@@ -3,6 +3,7 @@
 #include <string.h>
 #include "gui/wl/wl_surface.h"
 #include "gui/wl/wl_seat.h"
+#include "gui/wl/wl_compositor.h"
 
 static int failures;
 #define CHECK(e) do { if (!(e)) { printf("  [FAIL] %s:%d %s\n", __FILE__, __LINE__, #e); failures++; } } while (0)
@@ -123,7 +124,51 @@ int main(void) {
     CHECK(wl_seat_pending(seat) == 0);
 
     wl_seat_destroy(seat);
-    wl_surface_destroy(s);
+
+    printf("[WL] compositor：z-order / 命中 / 绘制顺序\n");
+    static uint32_t p0[40*30], p1[40*30], p2[40*30];
+    wl_buffer_t b0 = {40, 30, 160, p0, NULL, NULL, 0};
+    wl_buffer_t b1 = {40, 30, 160, p1, NULL, NULL, 0};
+    wl_buffer_t b2 = {40, 30, 160, p2, NULL, NULL, 0};
+
+    wl_surface_t *s0 = wl_surface_create(40, 30);
+    wl_surface_t *s1 = wl_surface_create(40, 30);
+    wl_surface_t *s2 = wl_surface_create(40, 30);
+    wl_surface_attach(s0, &b0); wl_surface_commit(s0);
+    wl_surface_attach(s1, &b1); wl_surface_commit(s1);
+    wl_surface_attach(s2, &b2); wl_surface_commit(s2);
+
+    wl_compositor_t *comp = wl_comp_create(NULL, NULL);
+    CHECK(comp != NULL);
+    CHECK(wl_comp_add(comp, s0, 0, 0, 1) == 0);
+    CHECK(wl_comp_add(comp, s1, 10, 10, 2) == 0);
+    CHECK(wl_comp_add(comp, s2, 20, 20, 3) == 0);
+    CHECK(wl_comp_add(comp, s0, 0, 0, 1) == -1);       /* 重复 */
+    CHECK(wl_comp_count(comp) == 3);
+
+    CHECK(wl_comp_hit(comp, 5, 5) == s0);
+    CHECK(wl_comp_hit(comp, 25, 25) == s2);            /* 最上层 */
+    CHECK(wl_comp_hit(comp, 45, 45) == s2);            /* 仍在上层矩形内 */
+    CHECK(wl_comp_hit(comp, 200, 200) == NULL);
+
+    CHECK(wl_comp_move(comp, s2, 100, 100) == 0);
+    CHECK(wl_comp_hit(comp, 25, 25) == s1);
+    CHECK(wl_comp_hit(comp, 110, 110) == s2);
+
+    CHECK(wl_comp_set_visible(comp, s1, 0) == 0);
+    CHECK(wl_comp_hit(comp, 25, 25) == s0);
+    CHECK(wl_comp_set_visible(comp, s1, 1) == 0);
+
+    CHECK(wl_comp_raise(comp, s0) == 0);
+    CHECK(wl_comp_hit(comp, 25, 25) == s0);
+
+    CHECK(wl_comp_remove(comp, s1) == 0);
+    CHECK(wl_comp_count(comp) == 2);
+    CHECK(wl_comp_hit(comp, 25, 25) == s0);
+
+    wl_surface_destroy(s0);
+    wl_surface_destroy(s1);
+    wl_surface_destroy(s2);
 
     if (failures) { printf("[WL] FAILED: %d\n", failures); return 1; }
     printf("[WL] all tests passed\n");
