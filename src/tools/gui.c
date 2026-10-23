@@ -3570,16 +3570,15 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
 
 static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int icon_id, int active, int state, int light) {
     (void)light;
-    int R = (state == WM_STATE_MAXIMIZED) ? 0 : 8;
+    int R = (state == WM_STATE_MAXIMIZED) ? 0 : 12;
     if (state != WM_STATE_MAXIMIZED) {
         soft_shadow(x, y, win_w, win_h);
         soft_shadow(x + 2, y + 3, win_w - 4, win_h - 4);  // deeper drop shadow
     }
 
-    uint32_t body_bg  = active ? (UI_SURFACE2)
-                               : (UI_SURFACE);
-    uint32_t title_bg = active ? (UI_SURFACE2)
-                               : (UI_SURFACE2);
+    /* GNOME 观感：内容区纯白，标题栏比内容略深一档（Adwaita headerbar）。 */
+    uint32_t body_bg  = UI_SURFACE;
+    uint32_t title_bg = UI_SURFACE2;
     uint32_t border_c = active ? UI_ACCENT
                                : (UI_SURFACE3);
 
@@ -3598,21 +3597,18 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
                            : (UI_SURFACE3);
     int btn_x = x + win_w - WM_BTN_W - 8;
     int btn_y = y + 7;
-    draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20,
-                     UI_ERR, UI_ERR, UI_ERR, 0);
+    fill_round_rect(btn_x, btn_y, WM_BTN_W, 20, 10, UI_ERR, RR_ALL);
     draw_window_control_icon(btn_x + 7, btn_y + 6, GUI_CTRL_CLOSE, 0,
                              UI_FG);
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nbtn, nbtn,
-                     UI_SURFACE3, 0);
+    fill_round_rect(btn_x, btn_y, WM_BTN_W, 20, 10, nbtn, RR_ALL);
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MAX,
                              state == WM_STATE_MAXIMIZED,
                              UI_FG);
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    draw_panel_shell(btn_x, btn_y, WM_BTN_W, 20, nbtn, nbtn,
-                     UI_SURFACE3, 0);
+    fill_round_rect(btn_x, btn_y, WM_BTN_W, 20, 10, nbtn, RR_ALL);
     draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MIN, 0,
                              UI_FG);
 
