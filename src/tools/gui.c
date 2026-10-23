@@ -5967,6 +5967,28 @@ static void cmd_gui(int argc, char **argv) {
 
         wm_update_animations(&st.wm);
 
+        /* ③ 笔记「重绘任意区域成 a list 所指的样子」：把正在做动效的窗口
+         * 矩形收集成一个列表，一次性并入脏区。动效期间只重绘这些矩形，
+         * 不整屏刷 —— 拖动/最大化时全屏重绘次数不再增长。 */
+        {
+            gui_region_t regs[WM_MAX_WINDOWS];
+            int rn = 0;
+            for (int wi = 0; wi < st.wm.window_count &&
+                             wi < WM_MAX_WINDOWS; wi++) {
+                wm_window_t *w = &st.wm.windows[wi];
+                if (!w->used || w->anim_type == WM_ANIM_NONE) continue;
+                int rx, ry, rw, rh;
+                wm_get_window_rect(&st.wm, wi, &rx, &ry, &rw, &rh);
+                if (rw <= 0 || rh <= 0) continue;
+                regs[rn].x = rx;
+                regs[rn].y = ry;
+                regs[rn].w = rw;
+                regs[rn].h = rh;
+                rn++;
+            }
+            if (rn > 0) gui_dirty_add_regions(regs, rn, w, h);
+        }
+
         /* 跟随 gui_service 的设置变化（设置应用或其它写方经 service 改
          * 主题时，桌面这里同步应用）。revision 未变时只是一次结构体
          * 拷贝；service 对原值重放不递增 revision，不会引发无谓整帧

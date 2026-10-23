@@ -97,7 +97,10 @@ int wm_open_window(wm_state_t *wm, int kind, int mode, int unique) {
     win->h = 0;
     win->anim_type = WM_ANIM_OPEN;  /* 打开时淡入 */
     win->anim_frame = 0;
-    win->anim_total = 10;
+    /* 帧数由策略层给：100Hz 下 10 帧 = 100ms，符合笔记「时长 ≤180ms」；
+     * 动效关掉时返回 0，这里夹到 1 让动画当帧收敛。 */
+    win->anim_total = gui_effects_max_frames();
+    if (win->anim_total <= 0) win->anim_total = 1;
     win->opacity = 40;   /* 起始淡显，update 会逐帧拉满 */
     wm->z_order[idx] = idx;
     wm_focus_window(wm, idx);
@@ -232,8 +235,23 @@ void wm_maximize_window(wm_state_t *wm, int idx) {
         win->restore.h = win->h;
     }
     win->snap_side = WM_SNAP_NONE;
-    /* 瞬时最大化（几何动画反复出 bug，改为直接铺满）。 */
-    win->anim_type = WM_ANIM_NONE;
+    /* 几何过渡是高开销动效（整窗重排 + 大面积重绘），按笔记的两级权限
+     * 只给管理级；普通级保持瞬时铺满，默认克制。
+     * 过渡期间 win->x/y/w/h 存的是最终目标，起点单独存在 anim_from，
+     * 避免自引用——之前几何动画"永远收敛不到全屏并产生拖影"就是这个。 */
+    if (gui_effects_allowed(1) && win->anim_type == WM_ANIM_NONE &&
+        win->w > 0 && win->h > 0) {
+        win->anim_from.x = win->x;
+        win->anim_from.y = win->y;
+        win->anim_from.w = win->w;
+        win->anim_from.h = win->h;
+        win->anim_frame = 0;
+        win->anim_total = gui_effects_max_frames();
+        if (win->anim_total <= 0) win->anim_total = 1;
+        win->anim_type = WM_ANIM_MAXIMIZE;
+    } else {
+        win->anim_type = WM_ANIM_NONE;
+    }
     win->state = WM_STATE_MAXIMIZED;
     win->x = 0;
     win->y = 0;
@@ -246,8 +264,20 @@ void wm_restore_window(wm_state_t *wm, int idx) {
     wm_window_t *win = &wm->windows[idx];
     if (!win->used) return;
     if (win->state == WM_STATE_NORMAL) return;
-    /* 瞬时还原。 */
-    win->anim_type = WM_ANIM_NONE;
+    if (gui_effects_allowed(1) && win->anim_type == WM_ANIM_NONE) {
+        int cx, cy, cw, ch;
+        wm_get_window_rect(wm, idx, &cx, &cy, &cw, &ch);
+        win->anim_from.x = cx;
+        win->anim_from.y = cy;
+        win->anim_from.w = cw;
+        win->anim_from.h = ch;
+        win->anim_frame = 0;
+        win->anim_total = gui_effects_max_frames();
+        if (win->anim_total <= 0) win->anim_total = 1;
+        win->anim_type = WM_ANIM_RESTORE;
+    } else {
+        win->anim_type = WM_ANIM_NONE;
+    }
     win->state = WM_STATE_NORMAL;
     win->snap_side = WM_SNAP_NONE;
     if (win->restore.w > 0 && win->restore.h > 0) {

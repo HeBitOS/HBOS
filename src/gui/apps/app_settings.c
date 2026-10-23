@@ -114,6 +114,19 @@ static void app_settings_draw(gui_state_t *st, int tx, int ty, int win_w, int wi
     gui_text(x, y, "关闭后窗口打开/最小化/最大化立即完成，不再占帧", UI_DIM, 1);
     y += 16 + 8;
 
+    /* 两级权限的第 2 级（笔记「按 2 权限等级划分：最高、最低」）：
+     * 普通级只允许位移/淡入这类廉价动效；管理级才允许几何过渡 + 大面积
+     * 重绘。默认普通级，符合「默认不过分花哨」。 */
+    {
+        int admin = gui_effects_perm() == GUI_PERM_ADMIN;
+        draw_sb(x, y, SB_W + 30, admin ? "● 强化动效" : "  强化动效",
+                admin ? UI_ACCENT : UI_SURFACE2);
+        y += SB_H + 6;
+        gui_text(x, y, "管理级：允许最大化/还原的几何过渡；关闭则瞬时完成",
+                 UI_DIM, 1);
+        y += 16 + 8;
+    }
+
     /* ── 开机默认启动方式 ── 第一次开机选一次后记住，之后不再询问；
      * 这里跟命令行的 startup 命令改的是同一份磁盘偏好（shell_get/set_startup_pref）。 */
     section(x, y, "开机默认启动");
@@ -247,6 +260,16 @@ static int app_settings_click(gui_state_t *st, int mx, int my,
         st->effects_enabled = !st->effects_enabled;
         gui_effects_set_enabled(st->effects_enabled);
         st->status = st->effects_enabled ? "窗口动效已开启" : "窗口动效已关闭";
+        return 1;
+    }
+    y += SB_H + 30;
+
+    /* 强化动效（两级权限里的管理级） */
+    if (mx >= x && mx < x + SB_W + 30 && my >= y && my < y + SB_H) {
+        int admin = gui_effects_perm() == GUI_PERM_ADMIN;
+        gui_effects_set_perm(admin ? GUI_PERM_USER : GUI_PERM_ADMIN);
+        st->status = admin ? "已切回普通动效（廉价特效）"
+                           : "已开启强化动效（管理级）";
         return 1;
     }
     y += SB_H + 30;
