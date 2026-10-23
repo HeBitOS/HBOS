@@ -4348,20 +4348,36 @@ static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, i
     gui_dirty_reset();
 }
 
-// Desktop shortcut icons over the wallpaper. Single click opens the target.
+/* ── 桌面「软件夹」：图标网格 + 双击打开（⑤） ────────────────────
+ * 笔记要求桌面复刻 Windows 的图标网格，并且双击才打开。原来是一列写死
+ * 的 4 个快捷方式、单击即开；现在改成两列网格（多了记事本/任务管理器/
+ * 设置/代码），单击只选中，双击才启动 —— 和 Windows 的触感一致，也避免
+ * 误触把窗口堆满。 */
 typedef struct { const char *label; int kind; int mode; } desktop_icon_t;
 static const desktop_icon_t g_desktop_icons[] = {
     {"文件管理器", WM_WIN_PANEL, PANEL_FILES},
     {"应用",       WM_WIN_PANEL, PANEL_APPS},
     {"控制台",     WM_WIN_APP,   GUI_APP_DIAG},
     {"计算器",     WM_WIN_APP,   GUI_APP_CALC},
+    {"记事本",     WM_WIN_APP,   GUI_APP_NOTES},
+    {"任务管理器", WM_WIN_APP,   GUI_APP_TASKMGR},
+    {"设置",       WM_WIN_APP,   GUI_APP_SETTINGS},
+    {"代码",       WM_WIN_APP,   GUI_APP_CODE},
 };
 #define DESKTOP_ICON_COUNT ((int)(sizeof(g_desktop_icons) / sizeof(g_desktop_icons[0])))
+#define DESKTOP_ICON_COLS  2
+#define DESKTOP_DBL_TICKS  40    /* 100Hz 下 40 tick = 400ms 内算双击 */
+
+static int g_di_sel = -1;             /* 选中的图标（单击） */
+static uint32_t g_di_sel_tick;        /* 上次点击时刻，用于判双击 */
 
 static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
+    int rows = (DESKTOP_ICON_COUNT + DESKTOP_ICON_COLS - 1) / DESKTOP_ICON_COLS;
+    int col = i / rows;
+    int row = i % rows;
     *w = ui_s(96); *h = ui_s(100);
-    *x = ui_s(42);
-    *y = ui_s(46) + i * ui_s(112);
+    *x = ui_s(42) + col * ui_s(104);
+    *y = ui_s(46) + row * ui_s(112);
 }
 
 
@@ -4370,6 +4386,9 @@ static void draw_desktop_icons(void) {
         const desktop_icon_t *d = &g_desktop_icons[i];
         int x, y, w, h;
         desktop_icon_rect(i, &x, &y, &w, &h);
+        if (i == g_di_sel)
+            fill_round_rect(x - 6, y - 4, w + 12, h + 12, UI_RADIUS_SM,
+                            UI_SURFACE2, RR_ALL);
         int isz = ui_s(58), ix = x + (w - isz) / 2, iy = y;
         if (d->kind == WM_WIN_PANEL)
             blit_icon(ix, iy, isz, panel_icon_id(d->mode));
@@ -4389,6 +4408,20 @@ static int hit_desktop_icon(int mx, int my) {
         if (mx >= x && mx < x + w && my >= y && my < y + h + 16) return i;
     }
     return -1;
+}
+
+/* 单击选中、双击启动。返回 1 表示这次点击真的启动了窗口。 */
+static int desktop_icon_click(gui_state_t *st, int idx) {
+    if (idx < 0 || idx >= DESKTOP_ICON_COUNT) return 0;
+    uint32_t now = (uint32_t)pit_get_ticks();
+    int dbl = (idx == g_di_sel) && (now - g_di_sel_tick) <= DESKTOP_DBL_TICKS;
+    g_di_sel = idx;
+    g_di_sel_tick = now;
+    if (!dbl) return 0;
+    const desktop_icon_t *d = &g_desktop_icons[idx];
+    if (d->kind == WM_WIN_PANEL) gui_open_panel_window(st, d->mode);
+    else gui_open_window(st, WM_WIN_APP, d->mode, 0);
+    return 1;
 }
 
 /* 吸附预览框矩形。绘制和脏区计算共用一份，避免两边各算一套导致残影：
@@ -5139,7 +5172,7 @@ static void gui_scan_disk_apps(void) {
 /* 启动器动态总高度：内置 13 项 + 追加的 .hax 行 */
 /* ── 开始菜单：统一应用条目（内置 + .hax + 磁盘 hpt 应用）+ 搜索过滤 ─
  * 键盘是 ASCII，应用名是中文，故每个内置应用附带 ASCII/拼音关键词供搜索。 */
-enum { SM_K_PANEL = 0, SM_K_APP = 1, SM_K_HAX = 2, SM_K_DISK = 3 };
+enum { SM_K_PANEL = 0, SM_K_APP = 1, SM_K_HAX = 2, SM_K_DISK = 3, SM_K_FOLDER = 4 };
 typedef struct {
     const char *name; const char *kw; int kind; int mode; int icon;
 } sm_entry_t;
@@ -5154,10 +5187,32 @@ static const sm_entry_t sm_builtin[] = {
     {"磁盘",       "disk cipan",               SM_K_PANEL, PANEL_DISK,      ICON_DISK},
     {"资源",       "resource sys ziyuan",      SM_K_PANEL, PANEL_SYS,       ICON_SYS},
     {"应用",       "app apps yingyong",        SM_K_PANEL, PANEL_APPS,      ICON_APPS},
+    /* 文件夹条目：点了不启动，而是进下一层（⑤ 三级菜单）。 */
+    {"系统工具",   "sys tool gongju",          SM_K_FOLDER, 1,              ICON_SYS},
 };
 #define SM_BUILTIN_N ((int)(sizeof(sm_builtin) / sizeof(sm_builtin[0])))
 
+/* ── ⑤ 三级菜单：开始菜单内部的"文件夹页" ─────────────────────
+ * g_sm_page = 0 是一/二级视图（分类 chips + 条目网格）；
+ * g_sm_page = 1 是「系统工具」文件夹页，末尾一格是「‹ 返回」。
+ * 条目仍然走同一套 sm_entry_at/sm_visible_at，搜索与键盘 Enter 自动
+ * 在子页里也生效。 */
+static int g_sm_page;
+
+static const sm_entry_t sm_systools[] = {
+    {"控制台",     "console diag",     SM_K_APP, GUI_APP_DIAG,     ICON_APPS},
+    {"任务管理器", "task mgr",         SM_K_APP, GUI_APP_TASKMGR,  ICON_APPS},
+    {"设置",       "settings theme",   SM_K_APP, GUI_APP_SETTINGS, ICON_APPS},
+    {"代码编辑器", "code editor",      SM_K_APP, GUI_APP_CODE,     ICON_APPS},
+};
+#define SM_SYSTOOLS_N ((int)(sizeof(sm_systools) / sizeof(sm_systools[0])))
+
+static const sm_entry_t sm_back_entry = {
+    "‹ 返回", "back fanhui", SM_K_FOLDER, 0, ICON_FILES
+};
+
 static int sm_total_entries(void) {
+    if (g_sm_page != 0) return SM_SYSTOOLS_N + 1;
     return SM_BUILTIN_N + gui_app_module_count() + gui_hax_count() + disk_app_count;
 }
 
@@ -5165,6 +5220,11 @@ static int sm_entry_tail_at(int k, sm_entry_t *out);
 
 static int sm_entry_at(int idx, sm_entry_t *out) {
     if (idx < 0) return 0;
+    if (g_sm_page != 0) {
+        if (idx < SM_SYSTOOLS_N) { *out = sm_systools[idx]; return 1; }
+        if (idx == SM_SYSTOOLS_N) { *out = sm_back_entry; return 1; }
+        return 0;
+    }
     if (idx < SM_BUILTIN_N) { *out = sm_builtin[idx]; return 1; }
 
     /* 应用条目从模块注册表派生：name/kw/icon 都在那里，只有一份来源 */
@@ -5220,6 +5280,7 @@ static int sm_match(const char *hay, const char *q) {
 }
 
 static int sm_cat_match(const gui_state_t *st, const sm_entry_t *e) {
+    if (g_sm_page != 0) return 1;   /* 子页里不再按 chips 过滤 */
     switch (st->sm_cat) {
     case 1: return e->kind == SM_K_PANEL;
     case 2: return e->kind == SM_K_APP;
@@ -5262,6 +5323,11 @@ static int sm_visible_count(const gui_state_t *st) {
 }
 
 static void sm_launch(gui_state_t *st, const sm_entry_t *e) {
+    if (e->kind == SM_K_FOLDER) {          /* 进下一层 / 返回上一层 */
+        g_sm_page = e->mode;
+        st->sm_cat = 0;
+        return;
+    }
     if (e->kind == SM_K_PANEL) gui_open_panel_window(st, e->mode);
     else if (e->kind == SM_K_APP) gui_open_window(st, WM_WIN_APP, e->mode, 0);
     else if (e->kind == SM_K_DISK) {
@@ -5621,9 +5687,11 @@ static void draw_start_menu(gui_state_t *st) {
     /* ── "已固定" section label ── */
     int lty = oy + SM_PIN_TOP;
     text(ox + SM_PAD, lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
-         "已固定", UI_FG2, 1);
-    /* 分类 chips（⑤ 二级菜单的最小实现）：全部 / 面板 / 应用 / 磁盘 */
-    {
+         g_sm_page ? "系统工具" : "已固定", UI_FG2, 1);
+    /* 分类 chips（⑤ 二级菜单）：全部 / 面板 / 应用 / 磁盘。
+     * 进了「系统工具」文件夹页（三级）就藏起来——子页里不再按分类过滤，
+     * 留着可点的 chips 会误导。 */
+    if (g_sm_page == 0) {
         static const char *cats[4] = {"全部", "面板", "应用", "磁盘"};
         int cw = ui_s(52), gap = ui_s(6);
         int total_w = cw * 4 + gap * 3;
@@ -6118,6 +6186,7 @@ static void cmd_gui(int argc, char **argv) {
                 st.wm.menu_h = sm_clamp_h(gui_start_menu_h(), h);
                 sm_reposition(&st.wm.menu_y, st.wm.menu_h, h);
                 st.sm_search[0] = 0; st.sm_search_len = 0;
+                g_sm_page = 0;
                 st.status = "开始菜单";
             }
             gui_dirty_mark_full();
@@ -6184,9 +6253,15 @@ static void cmd_gui(int argc, char **argv) {
             } else if (key == '\n' || key == '\r') { /* Enter 启动首个匹配 */
                 sm_entry_t e;
                 if (sm_visible_at(&st, 0, &e)) {
-                    wm_close_start_menu(&st.wm);
-                    st.sm_search[0] = 0; st.sm_search_len = 0;
-                    sm_launch(&st, &e);
+                    if (e.kind == SM_K_FOLDER) {
+                        /* 文件夹条目：换页，菜单留着（⑤ 三级菜单） */
+                        st.sm_search[0] = 0; st.sm_search_len = 0;
+                        sm_launch(&st, &e);
+                    } else {
+                        wm_close_start_menu(&st.wm);
+                        st.sm_search[0] = 0; st.sm_search_len = 0;
+                        sm_launch(&st, &e);
+                    }
                 }
             } else if (key == '\b' || key == GUI_KEY_BACKSPACE) {
                 if (st.sm_search_len > 0) st.sm_search[--st.sm_search_len] = 0;
@@ -6763,6 +6838,13 @@ static void cmd_gui(int argc, char **argv) {
                         /* 网格单元 → 过滤后的实际应用（内置或 .hax，统一启动） */
                         sm_entry_t e;
                         int ok = sm_visible_at(&st, item - SM_CELL_BASE, &e);
+                        if (ok && e.kind == SM_K_FOLDER) {
+                            /* 进/退文件夹页：菜单不关，只换内容 */
+                            st.sm_search[0] = 0; st.sm_search_len = 0;
+                            sm_launch(&st, &e);
+                            redraw = 1;
+                            break;
+                        }
                         wm_close_start_menu(&st.wm);
                         st.sm_search[0] = 0; st.sm_search_len = 0;
                         if (ok) sm_launch(&st, &e);
@@ -7026,13 +7108,10 @@ static void cmd_gui(int argc, char **argv) {
                                      * and prevents clicks through an overlapping
                                      * window. */
                                     int dico = hit_desktop_icon(mx, my);
-                                    if (dico >= 0) {
-                                        const desktop_icon_t *d = &g_desktop_icons[dico];
-                                        if (d->kind == WM_WIN_PANEL)
-                                            gui_open_panel_window(&st, d->mode);
-                                        else
-                                            gui_open_window(&st, WM_WIN_APP, d->mode, 0);
-                                    }
+                                    if (dico >= 0)
+                                        (void)desktop_icon_click(&st, dico);
+                                    else
+                                        g_di_sel = -1;   /* 点空白取消选中 */
                                 }
                             }
                         }
