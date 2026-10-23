@@ -948,6 +948,108 @@ void gui_app_text(int x, int y, const char *s, uint32_t color, int scale) {
     text(x, y, s, color, scale);
 }
 
+/* ── 画布图元（v0.1-beta4）────────────────────────────────────
+ * 全是 gd_* 原语的薄包装：应用侧只认画布坐标，裁剪交给底层。 */
+void gui_app_line(int x0, int y0, int x1, int y1, uint32_t color) {
+    if (!gd_surface_ptr()) return;
+    int dx = x1 - x0, dy = y1 - y0;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    int sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
+    int err = adx - ady;
+    while (1) {
+        gd_rect(x0, y0, 1, 1, color);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = err * 2;
+        if (e2 > -ady) { err -= ady; x0 += sx; }
+        if (e2 <  adx) { err += adx; y0 += sy; }
+    }
+}
+
+void gui_app_thick_line(int x0, int y0, int x1, int y1, int thickness, uint32_t color) {
+    if (thickness <= 1) { gui_app_line(x0, y0, x1, y1, color); return; }
+    int half = thickness / 2;
+    int dx = x1 - x0, dy = y1 - y0;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    if (ady > adx) {
+        for (int i = -half; i <= half; i++) gui_app_line(x0 + i, y0, x1 + i, y1, color);
+    } else {
+        for (int i = -half; i <= half; i++) gui_app_line(x0, y0 + i, x1, y1 + i, color);
+    }
+}
+
+void gui_app_circle(int cx, int cy, int r, uint32_t color) {
+    if (!gd_surface_ptr() || r <= 0) return;
+    int x = r, y = 0, err = 1 - r;
+    while (x >= y) {
+        gd_rect(cx + x, cy + y, 1, 1, color);
+        gd_rect(cx + y, cy + x, 1, 1, color);
+        gd_rect(cx - y, cy + x, 1, 1, color);
+        gd_rect(cx - x, cy + y, 1, 1, color);
+        gd_rect(cx - x, cy - y, 1, 1, color);
+        gd_rect(cx - y, cy - x, 1, 1, color);
+        gd_rect(cx + y, cy - x, 1, 1, color);
+        gd_rect(cx + x, cy - y, 1, 1, color);
+        y++;
+        if (err < 0) err += 2 * y + 1;
+        else { x--; err += 2 * (y - x) + 1; }
+    }
+}
+
+void gui_app_fill_circle(int cx, int cy, int r, uint32_t color) {
+    if (!gd_surface_ptr() || r <= 0) return;
+    for (int dy = -r; dy <= r; dy++) {
+        int w = 0;
+        while ((w + 1) * (w + 1) + dy * dy <= r * r) w++;
+        if (w > 0) gd_rect(cx - w, cy + dy, w * 2 + 1, 1, color);
+    }
+}
+
+void gui_app_round_rect(int x, int y, int w, int h, int r, uint32_t color, int corners) {
+    if (!gd_surface_ptr() || w <= 0 || h <= 0) return;
+    if (r <= 0) { gd_rect(x, y, w, h, color); return; }
+    gd_fill_round_rect(x, y, w, h, r, color, corners);
+}
+
+void gui_app_gradient(int x, int y, int w, int h, uint32_t top, uint32_t bottom) {
+    if (!gd_surface_ptr() || w <= 0 || h <= 0) return;
+    gd_vgradient(x, y, w, h, top, bottom);
+}
+
+void gui_app_alpha_rect(int x, int y, int w, int h, uint32_t color) {
+    if (!gd_surface_ptr() || w <= 0 || h <= 0) return;
+    gd_rect_alpha(x, y, w, h, color);
+}
+
+void gui_app_blit(int x, int y, int w, int h, const uint32_t *src) {
+    if (!gd_surface_ptr() || !src || w <= 0 || h <= 0) return;
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++) {
+            uint32_t px = src[j * w + i];
+            uint32_t a = px >> 24;
+            if (a == 0) continue;
+            if (a == 0xFF) gd_rect(x + i, y + j, 1, 1, px);
+            else gd_rect_alpha(x + i, y + j, 1, 1, px);
+        }
+    }
+}
+
+void gui_app_icon(int x, int y, int icon_id, uint32_t tint) {
+    if (!gd_surface_ptr()) return;
+    (void)tint;
+    gd_blit_icon(x, y, 24, icon_id);
+}
+
+int gui_app_text_width(const char *s, int scale) {
+    if (!s) return 0;
+    if (scale < 1) scale = 1;
+    return text_width(s, scale);
+}
+
+int gui_app_text_height(int scale) {
+    if (scale < 1) scale = 1;
+    return gui_font_line_height() * scale;
+}
+
 // 全屏画布应用独占 gd_surface_ptr() 并自行 present（见上方注释），合成器的正常
 // 光标叠加不会运行；若直接把光标画进 gd_surface_ptr()，会被应用当成画布内容
 // 永久保留并形成光标笔迹。因此改为在 blit 到真实

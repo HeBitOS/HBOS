@@ -32,4 +32,40 @@ int  gui_app_pollkey(void);
 /** 轮询鼠标；写入绝对坐标 x、y，返回按键位掩码（bit0=左键） */
 int  gui_app_pollmouse(int *x, int *y);
 
+/* ── 绘制图元（v0.1-beta4 扩充）────────────────────────────────
+ * 之前画布只有 clear/rect/text 三件套，画不了线、圆、渐变和图标，
+ * .hax 应用只能拿矩形拼图案。下面这些直接映射到内核绘图原语，
+ * 全部以画布左上角为原点，越界由内核裁剪。 */
+
+/** 直线（Bresenham，1px） */
+void gui_app_line(int x0, int y0, int x1, int y1, uint32_t color);
+
+/** 粗直线（thickness >= 1） */
+void gui_app_thick_line(int x0, int y0, int x1, int y1, int thickness, uint32_t color);
+
+/** 圆轮廓（1px） */
+void gui_app_circle(int cx, int cy, int r, uint32_t color);
+
+/** 实心圆 */
+void gui_app_fill_circle(int cx, int cy, int r, uint32_t color);
+
+/** 圆角矩形；corners 位掩码 bit0..3 = 左上/右上/左下/右下 */
+void gui_app_round_rect(int x, int y, int w, int h, int r, uint32_t color, int corners);
+
+/** 垂直渐变（top → bottom） */
+void gui_app_gradient(int x, int y, int w, int h, uint32_t top, uint32_t bottom);
+
+/** 半透明矩形（color 最高字节为 alpha，0..255） */
+void gui_app_alpha_rect(int x, int y, int w, int h, uint32_t color);
+
+/** 贴一张 RGBA 图标（src 为 w*h 个 0xAARRGGBB 像素，行优先） */
+void gui_app_blit(int x, int y, int w, int h, const uint32_t *src);
+
+/** 画内置图标集中的一张（icon_id 见 gui_icons.h） */
+void gui_app_icon(int x, int y, int icon_id, uint32_t tint);
+
+/** 文本像素宽度/行高（用于居中排版） */
+int  gui_app_text_width(const char *s, int scale);
+int  gui_app_text_height(int scale);
+
 #endif /* HBOS_GUI_CANVAS_H */
