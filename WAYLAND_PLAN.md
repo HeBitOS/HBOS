@@ -54,7 +54,9 @@
       顶层命中（`wl_comp_hit`）、从下到上的绘制顺序（`wl_comp_paint`）。
 - [x] `commit_listener` 接 `gd_*`：present 走 damage + attach + commit +
       `wl_comp_paint()`，合成器把 root surface 贴到帧缓冲（QEMU 截图验证）。
-- [ ] 现有窗口创建时挂 surface；`draw_gui_frame` 改为遍历 surface 列表。
+- [x] 桌面 root surface 接入 present 路径（damage→attach→commit→按脏区贴屏）。
+- [ ] 每窗口独立 buffer：需要把 `draw_gui_screen` 拆成" wallpaper + 每窗口离屏渲染"，
+      属于 P3 的主体，尚未开始。
 - [ ] demo surface（纯色 + 动画）验证独立提交。
 
 **验收（当前进度）**：视图管理单测通过（z-order/命中/隐藏/提升/移除）；
@@ -62,7 +64,7 @@
 
 ## P2 输入改道
 
-**目标**：删除 `gui.c` 里的鼠标轮询，输入统一走 `wl_seat`。
+**状态：鼠标已改道（motion/button/axis 全部经 seat），键盘仍是原路径。**
 
 **todo**
 - `mouse_poll()`/`key_poll()` → `wl_seat_pointer_*` / `wl_seat_key()`。
@@ -70,7 +72,11 @@
 - 键盘焦点 = 活动窗口的 surface。
 - 迁移现有 `st.buttons/mx/my` 语义到 seat 事件，保持行为一致。
 
-**验收**：所有现有窗口可点、可拖、可输入；`gui.c` 里不再有直接 `mouse_poll` 调用。
+- [x] 鼠标：轮询 → seat → dispatch 回填镜像，处理代码零改动。
+- [ ] 键盘：`key_poll()` → `wl_seat_key()`（需要先把 kb 的键码映射成 keysym）。
+- [ ] 指针焦点：从固定 root 改成命中窗口（依赖每窗口 surface）。
+
+**验收（当前）**：桌面与开始菜单正常；鼠标点击/滚轮路径已全部经过 seat。
 
 ## P3 窗口管理接入
 
