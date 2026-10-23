@@ -35,6 +35,7 @@
 #include "../gui/gui_state.h"
 #include "../gui/gui_dirty.h"
 #include "../gui/gui_draw.h"
+#include "../gui/overview_layout.h"
 #include "../gui/gui_html.h"
 #include "../gui/gui_app.h"
 #include "../gui/gui_panel.h"
@@ -4037,10 +4038,177 @@ static void draw_app_windows(void) {
     }
 }
 
+/* ── 窗口快照池（① P3b 的落地形式：共享 buffer + 可见区域裁剪）──────
+ * 渲染仍走共享画布（快路径），但每个可见窗口把自己的矩形**拷进**
+ * 池里的 buffer。用途：
+ *   - 概览（多任务）用真实缩略图，而不是空卡片；
+ *   - 后续 3D 层叠直接拿快照做透视，不需要重画窗口。
+ * 池只有 4 块，按需申请；申请不到就跳过该窗口（降级为无快照）。 */
+#define WBUF_SLOTS 4
+#define WBUF_MAX   512          /* 单张缩略图最大 512x512 */
+typedef struct {
+    uint32_t *px;
+    int w, h;                   /* 缩略图实际尺寸 */
+    int win_index;              /* 当前存放哪个窗口，-1 空闲 */
+} wbuf_t;
+static wbuf_t g_wbuf[WBUF_SLOTS];
+static int g_wbuf_rr;
+
+/* 在 GUI 初始化时一次性分配：运行期再申请 500KB 连续页很容易失败
+ * （之前就是因此拿到空快照，概览里只显示一块灰卡片）。 */
+static void wbuf_init(void) {
+    size_t bytes = (size_t)WBUF_MAX * WBUF_MAX * 4u;
+    size_t pages = (bytes + GUI_PAGE_SIZE - 1) / GUI_PAGE_SIZE;
+    for (int i = 0; i < WBUF_SLOTS; i++) {
+        if (g_wbuf[i].px) continue;
+        uint64_t phys = pmm_alloc_blocks(pages);
+        if (!phys) break;
+        g_wbuf[i].px = (uint32_t *)(uintptr_t)phys;
+        g_wbuf[i].w = 0;
+        g_wbuf[i].h = 0;
+        g_wbuf[i].win_index = -1;
+    }
+}
+
+/* 选一个槽并算出"能塞进 WBUF_MAX 的采样因子 f"。 */
+static wbuf_t *wbuf_acquire(int win_index, int sw, int sh, int *f_out) {
+    if (sw <= 0 || sh <= 0 || !f_out) return NULL;
+    int f = 1;
+    while ((sw / f) > WBUF_MAX || (sh / f) > WBUF_MAX) f++;
+    int tw = sw / f, th = sh / f;
+    if (tw < 1) tw = 1;
+    if (th < 1) th = 1;
+
+    for (int i = 0; i < WBUF_SLOTS; i++) {
+        wbuf_t *b = &g_wbuf[i];
+        if (b->px && b->win_index == win_index && b->w == tw && b->h == th) {
+            *f_out = f;
+            b->win_index = win_index;
+            return b;
+        }
+    }
+    for (int i = 0; i < WBUF_SLOTS; i++) {
+        wbuf_t *b = &g_wbuf[i];
+        if (!b->px) continue;
+        if (b->win_index < 0 || b->win_index == win_index) {
+            b->win_index = win_index;
+            b->w = tw;
+            b->h = th;
+            *f_out = f;
+            return b;
+        }
+    }
+    /* 全忙：抢最旧的一个（按轮转） */
+    wbuf_t *b = &g_wbuf[g_wbuf_rr % WBUF_SLOTS];
+    g_wbuf_rr++;
+    if (!b->px) return NULL;
+    b->win_index = win_index;
+    b->w = tw;
+    b->h = th;
+    *f_out = f;
+    return b;
+}
+
+/* 把窗口矩形**降采样**拷进快照。
+ * 概览只需要缩略图，按 1/f 采样即可：1920×1080 的窗口只要 ~480×270，
+ * 内存从 8MB 降到 0.5MB，避免 pmm 连续大块分配失败（之前就是因此拿到空快照）。 */
+static void wbuf_capture_scaled(wbuf_t *b, int sx, int sy, int f,
+                                int scr_w, int scr_h) {
+    if (!b || !b->px || f < 1) return;
+    uint32_t *surface = (uint32_t *)gd_surface_ptr();
+    if (!surface) return;
+    uint32_t pitch = gd_surface_pitch();
+    for (int y = 0; y < b->h; y++) {
+        int dy = sy + y * f;
+        if (dy < 0 || dy >= scr_h) continue;
+        for (int x = 0; x < b->w; x++) {
+            int dx = sx + x * f;
+            if (dx < 0 || dx >= scr_w) continue;
+            b->px[y * b->w + x] = surface[dy * pitch + dx];
+        }
+    }
+}
+
+/* 概览：把窗口快照按 2D 排布画成卡片（GNOME Activities 风格）。
+ * 布局用 overview_layout.c 的算法（高度降序、同高按 x）。 */
+static ov_layout_t g_ov_layout;
+static int g_ov_win[OV_MAX_WINDOWS];
+
+static void blit_scaled(const uint32_t *src, int sw, int sh,
+                        int dx, int dy, int dw, int dh) {
+    if (!src || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    for (int y = 0; y < dh; y++) {
+        int sy = y * sh / dh;
+        const uint32_t *row = &src[sy * sw];
+        for (int x = 0; x < dw; x++) {
+            int sx = x * sw / dw;
+            rect(dx + x, dy + y, 1, 1, row[sx]);
+        }
+    }
+}
+
+static void draw_overview(int w, int h, gui_state_t *st) {
+    rect_alpha(0, 0, w, h, 0xB4000000u);   /* 暗色蒙版 */
+
+    int n = 0;
+    for (int i = 0; i < st->wm.window_count && n < OV_MAX_WINDOWS; i++) {
+        wm_window_t *win = wm_get_window(&st->wm, i);
+        if (!win || !win->used || win->state == WM_STATE_MINIMIZED) continue;
+        int x, y, ww, wh;
+        gui_window_metrics(st, w, h, NULL, i, &x, &y, &ww, &wh);
+        int f = 1;
+        wbuf_t *b = wbuf_acquire(i, ww, wh, &f);
+        if (b) wbuf_capture_scaled(b, x, y, f, w, h);
+        g_ov_win[n++] = i;
+    }
+
+    if (n == 0) {
+        text(w / 2 - 40, h / 2, "没有打开的窗口", UI_FG, 1);
+        return;
+    }
+
+    ov_win_t wins[OV_MAX_WINDOWS];
+    for (int i = 0; i < n; i++) {
+        /* 用真实几何（包含动效/最大化后的结果），不能用 wm 里的原始字段：
+         * 最大化窗口的 win->w/h 可能还是 0 或旧值，会让缩放算错。 */
+        int x, y, ww, wh;
+        gui_window_metrics(st, w, h, NULL, g_ov_win[i], &x, &y, &ww, &wh);
+        wins[i].x = x;
+        wins[i].y = y;
+        wins[i].w = ww;
+        wins[i].h = wh;
+    }
+
+    int mx = 120, my = 120;
+    if (ov_layout_compute(wins, n, mx, my, w - 2 * mx, h - my - 160, 24,
+                          &g_ov_layout) <= 0) return;
+
+    for (int i = 0; i < n; i++) {
+        ov_cell_t *c = &g_ov_layout.cells[i];
+        wm_window_t *win = wm_get_window(&st->wm, g_ov_win[c->src_index]);
+        wbuf_t *b = NULL;
+        for (int k = 0; k < WBUF_SLOTS; k++)
+            if (g_wbuf[k].win_index == g_ov_win[c->src_index]) b = &g_wbuf[k];
+
+        fill_round_rect(c->x - 3, c->y - 3, c->w + 6, c->h + 6, 10,
+                        UI_SURFACE3, RR_ALL);
+        if (b && b->px) blit_scaled(b->px, b->w, b->h, c->x, c->y, c->w, c->h);
+        else rect(c->x, c->y, c->w, c->h, UI_BG);
+        border(c->x, c->y, c->w, c->h, UI_LINE2);
+        if (win) {
+            int tw = text_width(win->title, 1);
+            text(c->x + (c->w - tw) / 2, c->y + c->h + 8, win->title,
+                 UI_FG, 1);
+        }
+    }
+    text(mx, 48, "概览 · Tab/Esc 退出", UI_FG2, 1);
+}
+
 static void draw_gui_screen(int w, int h, gui_state_t *st) {
     gui_sync_focus(st);
     draw_desktop(w, h, st);
     draw_app_windows();
+    if (st->overview) draw_overview(w, h, st);
     draw_start_menu(st);
     if (st->brightness_popup_open) draw_brightness_popup(w, h, st);
     draw_calendar_popup(w, h, st);
@@ -5789,6 +5957,7 @@ static void cmd_gui(int argc, char **argv) {
     if (surface_phys) {
         gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
         gui_wl_init((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
+        wbuf_init();   /* 缩略图池：一次性分配，避免运行期连续页失败 */
     } else {
         st.status = "图形缓冲分配失败";
     }
@@ -5858,6 +6027,19 @@ static void cmd_gui(int argc, char **argv) {
         }
 
         int key = key_poll();
+        /* Tab：打开/关闭概览（多任务）。Esc 也能退出。 */
+        if (key == '\t') {
+            st.overview = !st.overview;
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
+        if (key == 27 && st.overview) {
+            st.overview = 0;
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         /* F1: toggle the start menu (keyboard-only path to every app --
          * previously mouse-only via the taskbar logo / right-click menu;
          * once open, typing filters and Enter launches, see below). */
@@ -6332,7 +6514,21 @@ static void cmd_gui(int argc, char **argv) {
                 redraw = 1;
             }
 
-            if ((st.buttons & 1) && !(last_buttons & 1)) {
+            if ((st.buttons & 1) && !(last_buttons & 1) && st.overview) {
+                for (int i = 0; i < g_ov_layout.count; i++) {
+                    ov_cell_t *c = &g_ov_layout.cells[i];
+                    if (mx >= c->x && mx < c->x + c->w &&
+                        my >= c->y && my < c->y + c->h) {
+                        int widx = g_ov_win[c->src_index];
+                        wm_focus_window(&st.wm, widx);
+                        gui_sync_focus(&st);
+                        break;
+                    }
+                }
+                st.overview = 0;
+                gui_dirty_mark_full();
+                redraw = 1;
+            } else if ((st.buttons & 1) && !(last_buttons & 1)) {
                 st.clicks++;
                 /* 弹层（右键菜单/亮度/日历/开始菜单）画在所有窗口之上
                  * （draw_gui_screen 的绘制顺序），打开期间应用窗口必须

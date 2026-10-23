@@ -100,6 +100,7 @@ typedef struct gui_state {
     int  ctx_target;        /* 窗口菜单时的目标窗口索引 */
     /* 日历弹窗（点击任务栏时钟） */
     int  cal_open;
+    int  overview;             /**< 概览（多任务）是否打开 */
     int  cal_year, cal_month;   /* 正在浏览的年月（可用 ‹ › 翻月） */
     /* 显示桌面（任务栏最右角）：记录被本功能最小化的窗口位掩码 */
     uint32_t showdesk_mask;

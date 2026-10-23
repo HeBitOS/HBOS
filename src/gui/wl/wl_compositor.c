@@ -74,7 +74,7 @@ int wl_comp_raise(wl_compositor_t *c, wl_surface_t *s) {
 wl_surface_t *wl_comp_hit(const wl_compositor_t *c, int x, int y) {
     if (!c) return 0;
     wl_surface_t *best = 0;
-    int best_z = -0x7FFFFFFF;
+    int best_z = -2147483647;
     for (int i = 0; i < c->count; i++) {
         const wl_view_t *v = &c->views[i];
         if (!v->visible || !v->surface) continue;
@@ -95,7 +95,7 @@ int wl_comp_paint(wl_compositor_t *c) {
     /* 简单选择排序：从最低 z 开始画。视图上限 16，常数级。 */
     int done[WL_COMP_MAX_VIEWS] = {0};
     for (int round = 0; round < c->count; round++) {
-        int pick = -1, pick_z = 0x7FFFFFFF;
+        int pick = -1, pick_z = 2147483647;
         for (int i = 0; i < c->count; i++) {
             if (done[i]) continue;
             if (pick < 0 || c->views[i].z < pick_z) {
