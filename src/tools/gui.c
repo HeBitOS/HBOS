@@ -17,6 +17,7 @@
 #include "../graphics/gui_icons.h"
 #include "../graphics/graphics.h"
 #include "../input/mouse.h"
+#include "../gui/wl/wl_seat.h"
 #include "../net.h"
 #include "../usb_hid.h"
 #include "../xhci.h"
@@ -908,6 +909,39 @@ static uint8_t g_guiapp_btn = 0;
 
 /* 全屏画布应用的"屏幕所有者"任务 id：非 0 时合成器让位（不绘制、不读输入），
  * 由该全屏应用独占 gd_surface_ptr() 并自行 present；应用退出后由主循环清零。 */
+/* ① P2：输入统一走 wl_seat。事件先入队、再 dispatch 回填这里的镜像字段，
+ * 现有处理代码只读镜像，行为不变；焦点语义（enter/leave）由 seat 负责。 */
+static wl_seat_t *g_seat;
+static int g_seat_mx, g_seat_my, g_seat_buttons, g_seat_dz;
+static int g_seat_focus;
+
+static void seat_event_cb(void *ctx, const wl_event_t *ev) {
+    (void)ctx;
+    switch (ev->type) {
+    case WL_EV_POINTER_MOTION:
+        g_seat_mx = ev->x;
+        g_seat_my = ev->y;
+        break;
+    case WL_EV_POINTER_BUTTON: {
+        int bit = 1 << (ev->button - 1);
+        if (ev->pressed) g_seat_buttons |= bit;
+        else g_seat_buttons &= ~bit;
+        break;
+    }
+    case WL_EV_POINTER_AXIS:
+        g_seat_dz += ev->axis;
+        break;
+    case WL_EV_POINTER_ENTER:
+        g_seat_focus = ev->surface_id;
+        break;
+    case WL_EV_POINTER_LEAVE:
+        g_seat_focus = 0;
+        break;
+    default:
+        break;
+    }
+}
+
 uint32_t g_screen_owner_task = 0;
 
 int gui_app_info(int *w, int *h) {
@@ -5718,6 +5752,13 @@ static void cmd_gui(int argc, char **argv) {
     }
 
     (void)block_init();
+    g_seat = wl_seat_create();
+    if (g_seat) {
+        wl_seat_add_listener(g_seat, seat_event_cb, NULL);
+        wl_seat_set_pointer_focus(g_seat, 1);   /* root surface */
+        wl_seat_set_keyboard_focus(g_seat, 1);
+        (void)wl_seat_dispatch(g_seat, 8);
+    }
     if (mouse_init() < 0) st.status = "未检测到鼠标";
     else st.status = mouse_backend_name();
     // Boot to a clean desktop (wallpaper + icons); user opens apps from there.
@@ -5960,6 +6001,26 @@ static void cmd_gui(int argc, char **argv) {
              * delta immediately, capped. No carry, no gain. */
             acc_dx = clamp_delta(acc_dx);
             acc_dy = clamp_delta(acc_dy);
+            if (g_seat) {
+                g_seat_dz = 0;
+                int tx = g_seat_mx + acc_dx;
+                int ty = g_seat_my + acc_dy;
+                (void)wl_seat_pointer_motion(g_seat, tx, ty);
+                if (st.buttons != g_seat_buttons) {
+                    for (int b = 1; b <= 3; b++) {
+                        int old = (g_seat_buttons >> (b - 1)) & 1;
+                        int now = (st.buttons >> (b - 1)) & 1;
+                        if (old != now) (void)wl_seat_pointer_button(g_seat, b, now);
+                    }
+                }
+                if (acc_dz) (void)wl_seat_pointer_axis(g_seat, acc_dz);
+                (void)wl_seat_dispatch(g_seat, 16);
+                mx = g_seat_mx;
+                my = g_seat_my;
+                st.buttons = g_seat_buttons;
+                acc_dx = 0;
+                acc_dy = 0;
+            }
             int old_mx = mx;
             int old_my = my;
             mx += acc_dx;
