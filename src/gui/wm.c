@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "wm.h"
+#include "gui_effects.h"
 #include "../string.h"
 
 static int g_titles_ready = 0;
@@ -517,10 +518,19 @@ int wm_hit_start_menu(wm_state_t *wm, int mx, int my) {
  * ================================================================ */
 
 void wm_update_animations(wm_state_t *wm) {
+    /* 动效总开关（③）：关闭时所有动画立即收敛，不占帧。
+     * 策略层在 gui_effects.c，可被设置应用 / 命令修改。 */
+    int fx = gui_effects_enabled();
     for (int i = 0; i < wm->window_count; i++) {
         wm_window_t *win = &wm->windows[i];
         if (!win->used || win->anim_type == WM_ANIM_NONE) continue;
 
+        if (!fx) {
+            win->anim_type = WM_ANIM_NONE;
+            win->anim_frame = 0;
+            win->opacity = 255;
+            continue;
+        }
         win->anim_frame++;
 
         if (win->anim_frame >= win->anim_total) {
