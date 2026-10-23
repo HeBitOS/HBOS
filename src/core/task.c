@@ -69,6 +69,31 @@ typedef struct {
 static task_t task_pool[MAX_TASKS];          /**< 任务池（静态分配） */
 static int task_count = 0;                   /**< 当前任务数 */
 static task_t *current_task = NULL;          /**< 当前运行的任务 */
+static sched_queue_t ready_q;                /**< 就绪队列（task_init 里初始化） */
+
+#define TASK_OF_NODE(n) ((task_t *)((char *)(n) - offsetof(task_t, snode)))
+
+/* 就绪：入队（已在队里就不重复入队）。 */
+static void sched_mark_ready(task_t *t) {
+    if (!t) return;
+    t->state = TASK_READY;
+    if (!t->snode.queued)
+        (void)schedq_push(&ready_q, &t->snode, t->prio);
+}
+
+/* 运行态：从就绪队列摘掉（选出它时已经摘过一次，这里兜底）。 */
+static void sched_mark_running(task_t *t) {
+    if (!t) return;
+    if (t->snode.queued) (void)schedq_remove(&ready_q, &t->snode);
+    t->state = TASK_RUNNING;
+}
+
+/* 结束：必须摘队，否则槽位复用后会留下幽灵节点。 */
+static void sched_mark_dead(task_t *t) {
+    if (!t) return;
+    if (t->snode.queued) (void)schedq_remove(&ready_q, &t->snode);
+    t->state = TASK_TERMINATED;
+}
 static uint32_t next_id = 0;                 /**< 下一个任务 ID */
 
 /** 预分配的栈空间: 64 个任务 × 8KB = 512KB */
@@ -282,35 +307,29 @@ static void task_release_fd_table(task_t *task) {
 static task_t *sched_next(void) {
     if (!current_task || task_count <= 1) return NULL;
 
-    /* 优先级优先、同级保持轮转：沿环走一圈，取 prio 最小者；
-     * prio 相同时取"离当前最近"的那个，等价于原来的轮转顺序。
-     * 任务上限 64，这里是常数级扫描；配套的 O(1) 多级队列在
-     * core/sched_core.c，下一步替换这段扫描。 */
-    task_t *best = NULL;
-    uint8_t best_prio = 0xFF;
-    int best_dist = 0x7FFFFFFF;
-    int dist = 0;
-
-    task_t *t = current_task;
-    for (int steps = 0; steps < task_count; steps++) {
-        t = t->next;
-        if (!t) t = &task_pool[0];      /* 显式回绕，绝不解引用 NULL */
-        dist++;
-        if (t == current_task) break;   /* 转了一圈回到自己 */
+    /* 就绪队列取队首：O(1)，不再线性扫描任务池。
+     * 取出的节点可能是陈旧条目（任务已退出/已在跑），跳过即可——
+     * 状态迁移时都做了摘队，正常情况下不会出现。 */
+    for (uint32_t guard = 0; guard < (uint32_t)task_count + 2u; guard++) {
+        sched_node_t *n = schedq_pick(&ready_q);
+        if (!n) return NULL;
+        task_t *t = TASK_OF_NODE(n);
+        if (t == current_task) continue;
         if (t->state != TASK_READY) continue;
-        if (t->prio < best_prio ||
-            (t->prio == best_prio && dist < best_dist)) {
-            best = t;
-            best_prio = t->prio;
-            best_dist = dist;
-        }
+        return t;
     }
-    return best;
+    return NULL;
 }
 
 void task_set_priority(task_t *t, uint8_t prio) {
     if (!t) return;
+    if (prio >= SCHED_LEVELS) prio = SCHED_LEVELS - 1;
     t->prio = prio;
+    /* 已在就绪队列里：换到新等级（摘了再挂，保持 FIFO 语义）。 */
+    if (t->snode.queued) {
+        (void)schedq_remove(&ready_q, &t->snode);
+        (void)schedq_push(&ready_q, &t->snode, prio);
+    }
 }
 
 uint8_t task_get_priority(const task_t *t) {
@@ -326,6 +345,7 @@ uint8_t task_get_priority(const task_t *t) {
  * 创建主任务 (task 0) 作为初始执行上下文
  */
 void task_init(void) {
+    schedq_init(&ready_q, 8);   /* 每 8 次调度升一级最低优先级，防饿死 */
     task_t *main_task = &task_pool[0];
     main_task->id = next_id++;
     strncpy(main_task->name, "main", TASK_NAME_MAX);
@@ -419,7 +439,7 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->id = next_id++;
     strncpy(tcb->name, name ? name : "task", TASK_NAME_MAX);
     tcb->name[TASK_NAME_MAX - 1] = '\0';
-    tcb->state = TASK_READY;
+    sched_mark_ready(tcb);
     tcb->entry = entry;
     tcb->arg = arg;
     tcb->exit_status = 0;
@@ -545,7 +565,7 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     tcb->id = next_id++;
     strncpy(tcb->name, name ? name : "user", TASK_NAME_MAX);
     tcb->name[TASK_NAME_MAX - 1] = '\0';
-    tcb->state = TASK_READY;
+    sched_mark_ready(tcb);
     tcb->entry = NULL;
     tcb->arg = NULL;
     tcb->exit_status = 0;
@@ -671,8 +691,8 @@ void task_yield(void) {
     }
 
     if (prev->state == TASK_RUNNING)
-        prev->state = TASK_READY;
-    next->state = TASK_RUNNING;
+        sched_mark_ready(prev);
+    sched_mark_running(next);
     current_task = next;
 
     if (next->mm && next->mm->pml4_phys)
@@ -802,7 +822,7 @@ void task_exit(void) {
     task_release_mm(current_task);
     task_irq_save();
     smp_sched_lock();
-    current_task->state = TASK_TERMINATED;
+    sched_mark_dead(current_task);
 
     while (1) {
         task_t *next = sched_next();
@@ -810,7 +830,7 @@ void task_exit(void) {
             console_puts("\n\x1b[31m[KERN] All tasks terminated, halting.\x1b[0m\n");
             while (1) __asm__ volatile("cli; hlt");
         }
-        next->state = TASK_RUNNING;
+        sched_mark_running(next);
         task_t *prev = current_task;
         current_task = next;
         if (next->mm && next->mm->pml4_phys)
@@ -940,7 +960,7 @@ int task_kill(uint32_t id, int sig) {
             ldso_release_thread_tls(target);
         task_release_fd_table(target);
         task_release_mm(target);
-        target->state = TASK_TERMINATED;
+        sched_mark_dead(target);
         return 0;
     }
 
@@ -984,7 +1004,7 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     child->id = next_id++;
     strncpy(child->name, current_task->name, TASK_NAME_MAX);
     child->name[TASK_NAME_MAX - 1] = '\0';
-    child->state = TASK_READY;
+    sched_mark_ready(child);
     child->entry = linux_context ? NULL : current_task->entry;
     child->arg = linux_context ? NULL : current_task->arg;
     child->exit_status = 0;
@@ -1007,7 +1027,7 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
             task_release_mm(child);
         else if (child_pml4)
             vmm_destroy_address_space(child_pml4);
-        child->state = TASK_TERMINATED;
+        sched_mark_dead(child);
         return -1;
     }
     if (current_task->mm)
@@ -1015,7 +1035,7 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     if (current_task->mm &&
         task_copy_vm_areas(child->mm, current_task->mm) < 0) {
         task_release_mm(child);
-        child->state = TASK_TERMINATED;
+        sched_mark_dead(child);
         return -1;
     }
     child->fs_base = task_get_fs_base();
@@ -1040,7 +1060,7 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     child->fd_table = task_fd_table_alloc();
     if (!child->fd_table) {
         task_release_mm(child);
-        child->state = TASK_TERMINATED;
+        sched_mark_dead(child);
         return -1;
     }
     memcpy(child->fd_table->entries, current_task->fd_table->entries, sizeof(child->fd_table->entries));
@@ -1190,7 +1210,7 @@ static int task_clone_thread_common(
     thread->id = next_id++;
     strncpy(thread->name, current_task->name, TASK_NAME_MAX);
     thread->name[TASK_NAME_MAX - 1] = '\0';
-    thread->state = TASK_READY;
+    sched_mark_ready(thread);
     thread->parent_id = current_task->id;
     thread->stack_base = (uint64_t)task_stacks[idx];
     thread->stack_size = TASK_STACK_SIZE;
@@ -1370,7 +1390,7 @@ void task_schedule(void) {
     uint64_t irq_flags = task_irq_save();
     smp_sched_lock();
     if (current_task->state == TASK_RUNNING)
-        current_task->state = TASK_READY;
+        sched_mark_ready(current_task);
     /* 与 task_yield 共用一个健壮的轮转选择原语，消除此处原先
      * "盲跟 next 指针 + checked 兜底"的重复扫描及其越界风险。 */
     task_t *next = sched_next();
@@ -1379,7 +1399,7 @@ void task_schedule(void) {
         task_irq_restore(irq_flags);
         return;
     }
-    next->state = TASK_RUNNING;
+    sched_mark_running(next);
     task_t *prev = current_task;
     current_task = next;
     if (next->mm && next->mm->pml4_phys)
@@ -1449,7 +1469,7 @@ void task_sig_deliver(task_t *task) {
             task->sig_pending.sig[word] &= ~(1ULL << bit);
             if (sig == SIGKILL) {
                 task->sig_exit_code = 9;
-                task->state = TASK_TERMINATED;
+                sched_mark_dead(task);
             }
             return;
         }
@@ -1461,7 +1481,7 @@ void task_sig_deliver(task_t *task) {
                 sig == SIGILL || sig == SIGSEGV || sig == SIGFPE ||
                 sig == SIGBUS || sig == SIGABRT || sig == SIGPIPE) {
                 task->sig_exit_code = sig;
-                task->state = TASK_TERMINATED;
+                sched_mark_dead(task);
             }
             return;
         } else if (handler == SIG_IGN) {

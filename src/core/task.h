@@ -2,6 +2,7 @@
 #define HBOS_TASK_H
 
 #include <stdint.h>
+#include "sched_core.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include "../fd.h"
@@ -102,7 +103,8 @@ typedef struct task {
     uint32_t id;
     char name[TASK_NAME_MAX];
     task_state_t state;
-    uint8_t prio;              /**< 就绪优先级：数值越小越高；同值保持轮转顺序 */
+    uint8_t prio;              /**< 就绪优先级：数值越小越高；同值先来后到 */
+    sched_node_t snode;        /**< 就绪队列节点（每任务一个，空间 O(N)） */
 
     // Saved stack pointer (RSP) — when task yields
     uint64_t rsp;

@@ -255,6 +255,7 @@ C_SRCS = \
 	$(SRC_DIR)/input/mouse.c \
 	$(SRC_DIR)/shell/shell.c \
 	$(SRC_DIR)/core/task.c \
+	$(SRC_DIR)/core/sched_core.c \
 	$(SRC_DIR)/lib/posix.c \
 	$(SRC_DIR)/lib/string.c \
 	$(SRC_DIR)/crypto/sha256.c \
@@ -303,6 +304,7 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/compositor.c \
 	$(SRC_DIR)/gui/effects.c \
 	$(SRC_DIR)/gui/gui_dirty.c \
+	$(SRC_DIR)/gui/gui_effects.c \
 	$(SRC_DIR)/gui/browser_backend.c \
 	$(SRC_DIR)/gui/browser_layout.c \
 	$(SRC_DIR)/gui/gui_apps.c \
@@ -829,6 +831,12 @@ exfat-test: | $(BUILD_DIR)
 		echo "  [skip] mkfs.exfat 不存在，跳过真实镜像用例"; \
 	fi
 
+# 动效策略：总开关 / 两级权限 / 帧数上限。
+fx-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_gui_effects.c \
+		$(SRC_DIR)/gui/gui_effects.c -o $(BUILD_DIR)/test_gui_effects
+	$(BUILD_DIR)/test_gui_effects
+
 # 多级优先级就绪队列：优先级/FIFO/摘除/老化/计数一致性。
 sched-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_sched_core.c \
@@ -856,7 +864,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test
 	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:
