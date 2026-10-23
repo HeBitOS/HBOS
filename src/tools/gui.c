@@ -250,6 +250,10 @@ void gui_select_file(gui_state_t *st, int index);
 static int gui_select_path(gui_state_t *st, const char *path);
 static void draw_desktop(int w, int h, gui_state_t *st);
 static void draw_start_menu(gui_state_t *st);
+
+/* 分类 chips 的命中区（绘制时记录，点击时使用） */
+static int g_sm_chip_x[4];
+static int g_sm_chip_y, g_sm_chip_cw, g_sm_chip_gap;
 static void draw_context_menu(gui_state_t *st);
 static void draw_calendar_popup(int w, int h, gui_state_t *st);
 static void draw_window_switcher(int w, int h, gui_state_t *st);
@@ -5153,6 +5157,15 @@ static int sm_match(const char *hay, const char *q) {
     return 0;
 }
 
+static int sm_cat_match(const gui_state_t *st, const sm_entry_t *e) {
+    switch (st->sm_cat) {
+    case 1: return e->kind == SM_K_PANEL;
+    case 2: return e->kind == SM_K_APP;
+    case 3: return e->kind == SM_K_HAX || e->kind == SM_K_DISK;
+    default: return 1;
+    }
+}
+
 static int sm_entry_matches(const sm_entry_t *e, const char *q) {
     return sm_match(e->name, q) || sm_match(e->kw, q);
 }
@@ -5181,7 +5194,7 @@ static int sm_visible_count(const gui_state_t *st) {
     int seen = 0, total = sm_total_entries();
     for (int i = 0; i < total; i++) {
         sm_entry_t e;
-        if (sm_entry_at(i, &e) && sm_entry_matches(&e, q)) seen++;
+        if (sm_entry_at(i, &e) && sm_cat_match(st, &e) && sm_entry_matches(&e, q)) seen++;
     }
     return seen;
 }
@@ -5547,9 +5560,28 @@ static void draw_start_menu(gui_state_t *st) {
     int lty = oy + SM_PIN_TOP;
     text(ox + SM_PAD, lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
          "已固定", UI_FG2, 1);
-    text(ox + SM_W - SM_PAD - text_width("全部 >", 1),
-         lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
-         "全部 >", UI_ACCENT, 1);
+    /* 分类 chips（⑤ 二级菜单的最小实现）：全部 / 面板 / 应用 / 磁盘 */
+    {
+        static const char *cats[4] = {"全部", "面板", "应用", "磁盘"};
+        int cw = ui_s(52), gap = ui_s(6);
+        int total_w = cw * 4 + gap * 3;
+        int cx = ox + SM_W - SM_PAD - total_w;
+        for (int i = 0; i < 4; i++) {
+            int cwid = cw;
+            int x0 = cx + i * (cw + gap);
+            int active = (st->sm_cat == i);
+            gui_fill_round_rect(x0, lty, cwid, SM_PIN_LABEL_H, 8,
+                                active ? UI_ACCENT : UI_SURFACE2);
+            int twx = text_width(cats[i], 1);
+            text(x0 + (cwid - twx) / 2,
+                 lty + (SM_PIN_LABEL_H - gui_font_line_height()) / 2,
+                 cats[i], active ? UI_ACCENT_FG : UI_FG2, 1);
+            g_sm_chip_x[i] = x0;
+        }
+        g_sm_chip_y = lty;
+        g_sm_chip_cw = cw;
+        g_sm_chip_gap = gap;
+    }
 
     /* ── 应用网格（按搜索过滤后顺序排布） ── */
     int cell_w = (SM_W - 2 * SM_PAD) / SM_GRID_COLS;
@@ -6600,6 +6632,22 @@ static void cmd_gui(int argc, char **argv) {
                     gui_dirty_mark_full();
                     redraw = 1;
                 } else if (st.wm.start_menu_open) {
+                    int chip = -1;
+                    if (g_sm_chip_cw > 0 && my >= g_sm_chip_y &&
+                        my < g_sm_chip_y + SM_PIN_LABEL_H) {
+                        for (int i = 0; i < 4; i++) {
+                            if (mx >= g_sm_chip_x[i] &&
+                                mx < g_sm_chip_x[i] + g_sm_chip_cw) {
+                                chip = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (chip >= 0) {
+                        st.sm_cat = chip;
+                        gui_dirty_mark_full();
+                        redraw = 1;
+                    } else {
                     int item = wm_hit_start_menu(&st.wm, mx, my);
                     if (item == SM_SEARCH_ITEM) {
                         /* 点搜索框：保持菜单打开，用键盘输入即可搜索 */
@@ -6624,6 +6672,7 @@ static void cmd_gui(int argc, char **argv) {
                         wm_close_start_menu(&st.wm);
                         st.sm_search[0] = 0; st.sm_search_len = 0;
                         redraw = 1;
+                    }
                     }
                 } else {
                     int close_idx = hit_window_close(w, h, &st, mx, my);
