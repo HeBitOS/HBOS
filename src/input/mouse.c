@@ -377,10 +377,6 @@ static int usb_mouse_poll(mouse_event_t *ev) {
 
     static uint32_t last_usb_buttons = 0;
     if (report.buttons != last_usb_buttons) {
-        char line[14]; int n = 0;
-        line[n++]='['; line[n++]='U'; line[n++]='S'; line[n++]='B'; line[n++]=']';
-        line[n++]=' '; line[n++]='b'; line[n++]='='; line[n++]=(char)('0'+(report.buttons & 7)); line[n++]='\n';
-        dbg_ser_len(line, (uint32_t)n);
         kb_clear_modifiers();
         last_usb_buttons = report.buttons;
     }
@@ -394,14 +390,6 @@ static int usb_mouse_poll(mouse_event_t *ev) {
 
 int mouse_poll(mouse_event_t *ev) {
     if (!mouse_ready || !ev) return 0;
-    {
-        static int announced;
-        if (!announced) {
-            announced = 1;
-            const char *b = (mouse_backend == MOUSE_BACKEND_USB) ? "[M] usb\n" : "[M] ps2\n";
-            dbg_ser_len(b, 8);
-        }
-    }
     if (mouse_backend == MOUSE_BACKEND_USB) return usb_mouse_poll(ev);
     if (mouse_backend == MOUSE_BACKEND_PS2) {
         int got = ps2_mouse_poll(ev);

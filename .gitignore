@@ -24,3 +24,6 @@ tests/host/vectors/
 .agent-teams/
 .workbuddy/
 .Trash-0/
+.tmp/
+.build-check.log
+.tmp-test.log
