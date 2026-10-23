@@ -213,6 +213,7 @@ void gui_present_surface(const fb_info_t *fb) {
         wl_surface_damage(g_root, 0, 0, g_gui_surface_w, g_gui_surface_h);
         (void)wl_surface_attach(g_root, &g_root_buf);
         (void)wl_surface_commit(g_root);
+        if (g_comp) (void)wl_comp_paint(g_comp);
         return;
     }
     present_full_raw(fb);
@@ -224,6 +225,7 @@ void gui_present_rect(const fb_info_t *fb, int x, int y, int w, int h) {
         wl_surface_damage(g_root, x, y, w, h);
         (void)wl_surface_attach(g_root, &g_root_buf);
         (void)wl_surface_commit(g_root);
+        if (g_comp) (void)wl_comp_paint(g_comp);
         return;
     }
     present_rect_raw(fb, x, y, w, h);

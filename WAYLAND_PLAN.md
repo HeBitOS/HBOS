@@ -52,7 +52,8 @@
 **todo**
 - [x] `src/gui/wl/wl_compositor.{h,c}`：注册/注销、move、visible、raise、
       顶层命中（`wl_comp_hit`）、从下到上的绘制顺序（`wl_comp_paint`）。
-- [ ] `commit_listener` 接 `gd_*`：把 buffer（RGBA）blit 到帧缓冲对应矩形。
+- [x] `commit_listener` 接 `gd_*`：present 走 damage + attach + commit +
+      `wl_comp_paint()`，合成器把 root surface 贴到帧缓冲（QEMU 截图验证）。
 - [ ] 现有窗口创建时挂 surface；`draw_gui_frame` 改为遍历 surface 列表。
 - [ ] demo surface（纯色 + 动画）验证独立提交。
 
