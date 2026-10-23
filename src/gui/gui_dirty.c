@@ -26,6 +26,14 @@ static int rect_intersect(int ax, int ay, int aw, int ah,
     return *ow > 0 && *oh > 0;
 }
 
+/* 相交或**相邻**都合并：相邻矩形拼起来能少一次重绘，且不会露缝。 */
+static int rect_touch(int ax, int ay, int aw, int ah,
+                      int bx, int by, int bw, int bh) {
+    int ox = (ax + aw < bx + bw ? ax + aw : bx + bw) - (ax > bx ? ax : bx);
+    int oy = (ay + ah < by + bh ? ay + ah : by + bh) - (ay > by ? ay : by);
+    return ox >= 0 && oy >= 0;
+}
+
 void gui_dirty_reset(void) {
     g_full = 0;
     g_dirty_n = 0;
@@ -40,9 +48,35 @@ int gui_dirty_is_full(void) {
     return g_full;
 }
 
+/* 把新矩形并入已有脏区：相交就取并集，并集可能又碰到别的，循环到稳定。
+ * 好处：光标移动这类大量小矩形会被并成一块，不会很快撞上 GUI_DIRTY_MAX
+ * 而退化成整屏重绘（那是最贵的一条路径）。 */
 void gui_dirty_add(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (g_full) return;
+
+    int merged = 1;
+    while (merged) {
+        merged = 0;
+        for (int i = 0; i < g_dirty_n; i++) {
+            if (!rect_touch(x, y, w, h, g_dx[i], g_dy[i], g_dw[i], g_dh[i]))
+                continue;
+            int x1 = x < g_dx[i] ? x : g_dx[i];
+            int y1 = y < g_dy[i] ? y : g_dy[i];
+            int x2 = x + w > g_dx[i] + g_dw[i] ? x + w : g_dx[i] + g_dw[i];
+            int y2 = y + h > g_dy[i] + g_dh[i] ? y + h : g_dy[i] + g_dh[i];
+            x = x1; y = y1; w = x2 - x1; h = y2 - y1;
+            /* 移除 i：用最后一个补齐 */
+            g_dirty_n--;
+            g_dx[i] = g_dx[g_dirty_n];
+            g_dy[i] = g_dy[g_dirty_n];
+            g_dw[i] = g_dw[g_dirty_n];
+            g_dh[i] = g_dh[g_dirty_n];
+            merged = 1;
+            break;
+        }
+    }
+
     if (g_dirty_n >= GUI_DIRTY_MAX) {
         gui_dirty_mark_full();
         return;

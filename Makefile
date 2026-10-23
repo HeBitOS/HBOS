@@ -835,6 +835,12 @@ exfat-test: | $(BUILD_DIR)
 		echo "  [skip] mkfs.exfat 不存在，跳过真实镜像用例"; \
 	fi
 
+# 脏区合并：相交取并集、超限退化整屏。
+dirty-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_dirty.c \
+		$(SRC_DIR)/gui/gui_dirty.c -o $(BUILD_DIR)/test_dirty
+	$(BUILD_DIR)/test_dirty
+
 # 概览排布：高度降序 / 同高按 x / 等比缩放。
 ov-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_overview.c \
@@ -882,7 +888,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wl-test ov-test
+test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wl-test ov-test dirty-test
 	@echo "✓ 宿主机测试全部通过"
 
 hive-sync:
