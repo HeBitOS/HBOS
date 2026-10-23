@@ -172,16 +172,20 @@ static const fb_info_t *g_present_fb;
 
 static void present_rect_raw(const fb_info_t *fb, int x, int y, int w, int h);
 
-static void wl_on_blit(void *ctx, int dx, int dy, wl_buffer_t *b,
-                       const wl_rect_t *damage, int count, int full) {
-    (void)ctx; (void)b;
+/* commit 监听器：**按脏区**贴到帧缓冲。
+ * 之前这里走 wl_comp_paint() 传 full=1，等于每帧整屏拷贝——4K 下直接卡死。
+ * 现在 damage 由 surface 带过来，局部刷新只拷那几个矩形。 */
+static void wl_on_commit(wl_surface_t *surf, wl_buffer_t *b,
+                         const wl_rect_t *damage, int count, int full,
+                         void *ctx) {
+    (void)surf; (void)b; (void)ctx;
     if (!g_present_fb) return;
     if (full || count <= 0) {
         present_full_raw(g_present_fb);
         return;
     }
     for (int i = 0; i < count; i++)
-        present_rect_raw(g_present_fb, dx + damage[i].x, dy + damage[i].y,
+        present_rect_raw(g_present_fb, damage[i].x, damage[i].y,
                          damage[i].w, damage[i].h);
 }
 
@@ -197,10 +201,11 @@ void gui_wl_init(uint32_t *pixels, int w, int h, uint32_t pitch_px) {
 
     g_root = wl_surface_create(w, h);
     if (!g_root) return;
+    wl_surface_set_commit_listener(g_root, wl_on_commit, 0);
     (void)wl_surface_attach(g_root, &g_root_buf);
     (void)wl_surface_commit(g_root);
 
-    g_comp = wl_comp_create(wl_on_blit, 0);
+    g_comp = wl_comp_create(0, 0);
     if (g_comp) (void)wl_comp_add(g_comp, g_root, 0, 0, 0);
 }
 
@@ -213,7 +218,6 @@ void gui_present_surface(const fb_info_t *fb) {
         wl_surface_damage(g_root, 0, 0, g_gui_surface_w, g_gui_surface_h);
         (void)wl_surface_attach(g_root, &g_root_buf);
         (void)wl_surface_commit(g_root);
-        if (g_comp) (void)wl_comp_paint(g_comp);
         return;
     }
     present_full_raw(fb);
@@ -225,7 +229,6 @@ void gui_present_rect(const fb_info_t *fb, int x, int y, int w, int h) {
         wl_surface_damage(g_root, x, y, w, h);
         (void)wl_surface_attach(g_root, &g_root_buf);
         (void)wl_surface_commit(g_root);
-        if (g_comp) (void)wl_comp_paint(g_comp);
         return;
     }
     present_rect_raw(fb, x, y, w, h);
