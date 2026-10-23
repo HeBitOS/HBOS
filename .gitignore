@@ -3,6 +3,7 @@
 build/
 build-nogui/
 build-core/
+docs/
 .claude/
 .roo/
 .claudecode.md
