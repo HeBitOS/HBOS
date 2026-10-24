@@ -1292,7 +1292,15 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
     text_clipped(tx + 22, ty + 164, tx + side_w - 10, gui_file_path(mst), UI_FG, 1);
     text(tx + 22, ty + 202, "/home", UI_DIM, 1);
     text(tx + 22, ty + 232, "/dev  /proc", UI_DIM, 1);
-    text(tx + 14, ty + 286, "Enter进入  Back上级", UI_DIM, 1);
+    /* 快捷键提示：一行放不下 118px 的侧栏（"Enter进入  Back上级"约
+     * 125px，溢出的部分会被右边主列表盖掉，看起来像被截断），拆成两行
+     * 并锚定到侧栏框的底部，同时按侧栏宽度裁剪。 */
+    {
+        int hint_y = ty + 114 + L.box_h - 40;
+        if (hint_y < ty + 270) hint_y = ty + 270;
+        text_clipped(tx + 14, hint_y, tx + side_w - 10, "Enter 进入", UI_DIM, 1);
+        text_clipped(tx + 14, hint_y + 18, tx + side_w - 10, "Back 上级", UI_DIM, 1);
+    }
 
     vgradient(main_x, ty + 114, main_w, L.box_h, UI_SURFACE, UI_SURFACE);
     border(main_x, ty + 114, main_w, L.box_h, UI_ACCENT);
