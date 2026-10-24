@@ -13,6 +13,15 @@ uint8_t gui_get_layer_opacity(void);
 
 void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px);
 
+/* ① P3：把后续绘制重定向到一块独立 buffer（每窗口 buffer）。
+ * 逻辑坐标仍是屏幕绝对坐标，绘制层内部减去 (origin_x, origin_y) 落到
+ * buffer 上；裁剪区语义不变。只能单层嵌套（内层请求会被忽略）。 */
+void gui_target_begin(uint32_t *px, int w, int h, uint32_t pitch_px,
+                      int origin_x, int origin_y);
+void gui_target_end(void);
+int  gui_target_active(void);
+void gd_target_origin(int *ox, int *oy);
+
 /* ① P1：把桌面画布包成一个 root surface，呈现改走 attach/damage/commit。
  * 必须在 gui_set_surface() 之后调用；失败时自动退回直贴路径。 */
 void gui_wl_init(uint32_t *pixels, int w, int h, uint32_t pitch_px);

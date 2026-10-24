@@ -3671,6 +3671,123 @@ static void draw_app_window_body(int tx, int ty, int win_w, int win_h, gui_state
     (void)gui_app_draw(st, mode, tx, ty, win_w, win_h);
 }
 
+/* ── 每窗口 buffer（① P3）──────────────────────────────────────
+ * 窗口内容先画进自己的一块 buffer，再整块贴到屏幕上。buffer 从 PMM 拿
+ * 连续物理页（恒等映射，可直接当指针用），因为堆只有 2MB——一个
+ * 790x430 的窗口就要 1.3MB。
+ *
+ * 预算 24MB。超了就按 LRU 抢别人的 buffer，抢不到就让这个窗口退回
+ * "直画屏幕"的老路径：功能不受影响，只是少了缓存收益。
+ *
+ * 缓存什么时候能用：窗口整块重画过的下一帧（valid=1），且期间没有
+ * 输入事件/尺寸变化/主题切换。拖动窗口时正好符合——内容没变，位置在变，
+ * 于是每帧只做一次 memcpy，不再重新执行应用的绘制代码。 */
+#define WINBUF_BUDGET_BYTES (24 * 1024 * 1024)
+
+typedef struct {
+    uint32_t *px;
+    uint64_t  phys;
+    int w, h;
+    int valid;          /* 1 = 内容可直接贴 */
+    uint32_t last_use;
+} winbuf_t;
+
+static winbuf_t g_winbuf[WM_MAX_WINDOWS];
+static int g_winbuf_bytes;
+static uint32_t g_winbuf_clock;
+
+static void winbuf_release(int idx) {
+    if (idx < 0 || idx >= WM_MAX_WINDOWS) return;
+    winbuf_t *b = &g_winbuf[idx];
+    if (!b->px) return;
+    size_t pages = ((size_t)b->w * (size_t)b->h * 4u + 4095u) / 4096u;
+    pmm_free_blocks(b->phys, pages);
+    g_winbuf_bytes -= b->w * b->h * 4;
+    b->px = 0; b->phys = 0; b->w = b->h = 0; b->valid = 0;
+}
+
+/* 按需分配；预算不够就抢最久没用过的（跳过 keep_idx）。 */
+static int winbuf_ensure(int idx, int w, int h, int keep_idx) {
+    if (idx < 0 || idx >= WM_MAX_WINDOWS || w <= 0 || h <= 0) return -1;
+    winbuf_t *b = &g_winbuf[idx];
+    if (b->px && b->w == w && b->h == h) { b->last_use = ++g_winbuf_clock; return 0; }
+    winbuf_release(idx);
+
+    size_t bytes = (size_t)w * (size_t)h * 4u;
+    if ((size_t)g_winbuf_bytes + bytes > WINBUF_BUDGET_BYTES) {
+        /* 腾地方：先扔已关闭窗口的，再扔最久没用的 */
+        int victim = -1;
+        uint32_t oldest = 0xFFFFFFFFu;
+        for (int i = 0; i < WM_MAX_WINDOWS; i++) {
+            if (i == idx || i == keep_idx || !g_winbuf[i].px) continue;
+            if (g_winbuf[i].last_use < oldest) { oldest = g_winbuf[i].last_use; victim = i; }
+        }
+        if (victim < 0) return -1;
+        winbuf_release(victim);
+        if ((size_t)g_winbuf_bytes + bytes > WINBUF_BUDGET_BYTES) return -1;
+    }
+
+    size_t pages = (bytes + 4095u) / 4096u;
+    uint64_t phys = pmm_alloc_blocks(pages);
+    if (!phys) return -1;
+    b->px = (uint32_t *)(uintptr_t)phys;
+    b->phys = phys;
+    b->w = w;
+    b->h = h;
+    b->valid = 0;
+    b->last_use = ++g_winbuf_clock;
+    g_winbuf_bytes += (int)bytes;
+    return 0;
+}
+
+/* 把屏幕 (ox,oy,w,h) 的现有像素拷进 buffer 当底图：窗口的状态栏用的是
+ * 半透明渐变，混色底必须是"已经画好的窗口背景"，否则会混到垃圾上。 */
+static void winbuf_seed_from_screen(winbuf_t *b, int ox, int oy) {
+    uint32_t *src = gd_surface_ptr();
+    if (!src || !b->px) return;
+    int sw = gd_surface_w(), sh = gd_surface_h(), pitch = gd_surface_pitch();
+    for (int r = 0; r < b->h; r++) {
+        int sy = oy + r;
+        uint32_t *drow = b->px + (uint32_t)r * (uint32_t)b->w;
+        if (sy < 0 || sy >= sh) continue;
+        for (int c = 0; c < b->w; c++) {
+            int sx = ox + c;
+            drow[c] = (sx >= 0 && sx < sw) ? src[(uint32_t)sy * (uint32_t)pitch + (uint32_t)sx]
+                                           : 0;
+        }
+    }
+}
+
+/* 把 buffer 贴回屏幕，只贴脏区与窗口矩形的交集。 */
+static void winbuf_blit_screen(winbuf_t *b, int ox, int oy) {
+    uint32_t *dst = gd_surface_ptr();
+    if (!dst || !b->px) return;
+    int x = ox, y = oy, w = b->w, h = b->h;
+    if (!gui_clip_intersect(&x, &y, &w, &h)) return;
+    int dw = gd_surface_w(), dh = gd_surface_h(), pitch = gd_surface_pitch();
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > dw) w = dw - x;
+    if (y + h > dh) h = dh - y;
+    if (w <= 0 || h <= 0) return;
+    int sx = x - ox, sy = y - oy;
+    for (int r = 0; r < h; r++) {
+        uint32_t *drow = dst + (uint32_t)(y + r) * (uint32_t)pitch + (uint32_t)x;
+        uint32_t *srow = b->px + (uint32_t)(sy + r) * (uint32_t)b->w + (uint32_t)sx;
+        for (int c = 0; c < w; c++) drow[c] = srow[c];
+    }
+}
+
+static void winbuf_invalidate(int idx) {
+    if (idx >= 0 && idx < WM_MAX_WINDOWS) g_winbuf[idx].valid = 0;
+}
+static void winbuf_invalidate_all(void) {
+    for (int i = 0; i < WM_MAX_WINDOWS; i++) g_winbuf[i].valid = 0;
+}
+
+/* 拖动中的窗口索引（-1 = 没在拖）。拖动时内容不变，可以只贴 buffer。 */
+static int g_drag_win = -1;
+
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     wm_window_t *win = wm_get_window(&st->wm, idx);
     if (!win) return;
@@ -3694,6 +3811,30 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 
     int tx = win_x + 30;
     int ty = win_y + 42;
+
+    /* ① P3：窗口内容先画进自己的 buffer，再整块贴到屏幕上。
+     * 缓存命中（内容没变，比如正在拖动/只是鼠标划过）时连应用绘制
+     * 都不跑，直接 memcpy。动画/半透明期间不走缓存——那时每帧的像素
+     * 都不一样，缓存没有意义还会糊。 */
+    winbuf_t *wb = NULL;
+    int bx = win_x + 1, by = win_y + 1;
+    int bw = win_w - 2, bh = win_h - 2;
+    if (bw > 0 && bh > 0 && !gui_target_active() &&
+        win->anim_type == WM_ANIM_NONE && win->opacity >= 255 &&
+        winbuf_ensure(idx, bw, bh, st->wm.active_window) == 0) {
+        wb = &g_winbuf[idx];
+    }
+
+    /* 缓存只在"拖动这个窗口"时复用：其余情况应用可能在无输入的情况下
+     * 自己变（时钟、加载中的网页），贴旧图会看到不动的画面。
+     * 拖动时内容必然不变，正是缓存该生效的场景。 */
+    if (wb && wb->valid && g_drag_win == idx) {
+        winbuf_blit_screen(wb, bx, by);
+    } else {
+        if (wb) {
+            winbuf_seed_from_screen(wb, bx, by);
+            gui_target_begin(wb->px, bw, bh, (uint32_t)bw, bx, by);
+        }
 
     /* 客户区裁剪：内容必须被限制在窗口内部。
      *
@@ -3734,6 +3875,13 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     text(win_x + 24, win_y + win_h - 22,
          idx == st->wm.active_window ? st->status : "单击任务栏切换",
          cyber_text_muted(st->theme_light), 1);
+
+        if (wb) {
+            gui_target_end();
+            wb->valid = 1;
+            winbuf_blit_screen(wb, bx, by);
+        }
+    }
 
     st->active = old_active;
     st->app_mode = old_app;
@@ -4319,6 +4467,11 @@ static int cursor_overlaps_rect(int mx, int my, int rx, int ry, int rw, int rh) 
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
     if (gui_dirty_is_full() || gui_dirty_count() == 0) {
         g_full_redraws++;
+        /* 整屏重绘 = 全部重画，窗口缓存也随之作废（下一次画窗口时会
+         * 重新填充并重新标 valid）。 */
+        winbuf_invalidate_all();
+        for (int wi = 0; wi < WM_MAX_WINDOWS; wi++)
+            if (!st->wm.windows[wi].used) winbuf_release(wi);
         if (gui_dirty_count() == 0) gui_dirty_mark_full();
         draw_gui_screen(w, h, st);
         draw_cursor(mx, my, edge);
@@ -6610,6 +6763,7 @@ static void cmd_gui(int argc, char **argv) {
                 st.snap_preview = WM_SNAP_NONE;
                 snap_shown = WM_SNAP_NONE;
                 dragging_window = -1;
+                g_drag_win = -1;
                 drag_pending = 0;
                 drag_bounds_valid = 0;
             }
@@ -6979,6 +7133,10 @@ static void cmd_gui(int argc, char **argv) {
                                     st.status = "窗口已最大化/还原";
                                 } else {
                                     dragging_window = title_idx;
+                                    /* 拖动期间内容不变：让缓存从这一帧重新
+                                     * 填充，之后每帧只贴 buffer。 */
+                                    g_drag_win = title_idx;
+                                    winbuf_invalidate(title_idx);
                                     // Dragging a maximized window restores it
                                     // first so it follows the cursor (standard
                                     // behavior) instead of staying stuck fullscreen.
@@ -7293,6 +7451,13 @@ void gui_rect_alpha(int x, int y, int w, int h, uint32_t color) { rect_alpha(x, 
 void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
                       int clip_x, int clip_y, int clip_w, int clip_h) {
     if (!gd_surface_ptr() || !rgbdata || img_w <= 0 || img_h <= 0 || clip_w <= 0 || clip_h <= 0) return;
+    /* 目标表面可能被平移到窗口 buffer 上，先把逻辑坐标换算过去 */
+    int tox = 0, toy = 0;
+    gd_target_origin(&tox, &toy);
+    if (tox || toy) {
+        x -= tox; y -= toy;
+        clip_x -= tox; clip_y -= toy;
+    }
     int x0 = x, y0 = y, x1 = x + img_w, y1 = y + img_h;
     if (x0 < clip_x) x0 = clip_x;
     if (y0 < clip_y) y0 = clip_y;

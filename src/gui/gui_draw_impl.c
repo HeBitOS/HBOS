@@ -151,6 +151,54 @@ void gui_set_surface(uint32_t *surface, int w, int h, uint32_t pitch_px) {
     g_gui_surface_pitch = surface ? pitch_px : 0;
 }
 
+/* ── 目标表面（① P3：每窗口 buffer 的落点）────────────────────────
+ * 窗口/应用仍然按**屏幕绝对坐标**画（几千处调用点一行都不用改），只是
+ * 写像素时把坐标减去目标原点，落到该窗口自己的 buffer 里。裁剪区
+ * （gui_clip_*）保存的是逻辑坐标、在平移之前生效，语义完全不变。
+ *
+ * 只支持一层嵌套：合成器不会在画窗口 buffer 的过程中再切另一个 buffer。 */
+static int g_tgt_ox = 0, g_tgt_oy = 0;
+static uint32_t *g_tgt_save_px = 0;
+static int g_tgt_save_w = 0, g_tgt_save_h = 0;
+static uint32_t g_tgt_save_pitch = 0;
+static int g_tgt_saved = 0;
+
+void gui_target_begin(uint32_t *px, int w, int h, uint32_t pitch_px,
+                      int origin_x, int origin_y) {
+    if (g_tgt_saved) return;              /* 不支持嵌套，忽略内层请求 */
+    g_tgt_save_px = g_gui_surface;
+    g_tgt_save_w = g_gui_surface_w;
+    g_tgt_save_h = g_gui_surface_h;
+    g_tgt_save_pitch = g_gui_surface_pitch;
+    g_tgt_saved = 1;
+    g_gui_surface = px;
+    g_gui_surface_w = px ? w : 0;
+    g_gui_surface_h = px ? h : 0;
+    g_gui_surface_pitch = px ? pitch_px : 0;
+    g_tgt_ox = origin_x;
+    g_tgt_oy = origin_y;
+}
+
+void gui_target_end(void) {
+    if (!g_tgt_saved) return;
+    g_gui_surface = g_tgt_save_px;
+    g_gui_surface_w = g_tgt_save_w;
+    g_gui_surface_h = g_tgt_save_h;
+    g_gui_surface_pitch = g_tgt_save_pitch;
+    g_tgt_ox = 0;
+    g_tgt_oy = 0;
+    g_tgt_saved = 0;
+}
+
+int gui_target_active(void) { return g_tgt_saved; }
+
+/* 当前目标原点（逻辑坐标 = 目标坐标 + 原点）。给那些自己算行指针的
+ * 调用方（如 gui_blit_rgb888）换算用。 */
+void gd_target_origin(int *ox, int *oy) {
+    if (ox) *ox = g_tgt_ox;
+    if (oy) *oy = g_tgt_oy;
+}
+
 static void present_full_raw(const fb_info_t *fb) {
     if (!fb || !g_gui_surface) return;
     uint32_t fb_pitch = (uint32_t)(fb->pitch / 4);
@@ -262,6 +310,8 @@ void gd_rect_alpha(int x, int y, int w, int h, uint32_t color) {
         return;
     }
     if (g_gui_surface) {
+        x -= g_tgt_ox;
+        y -= g_tgt_oy;
         if (x >= g_gui_surface_w || y >= g_gui_surface_h) return;
         if (x < 0) { w += x; x = 0; }
         if (y < 0) { h += y; y = 0; }
@@ -323,6 +373,8 @@ void gd_rect(int x, int y, int w, int h, uint32_t color) {
         return;
     }
     if (g_gui_surface) {
+        x -= g_tgt_ox;
+        y -= g_tgt_oy;
         if (x >= g_gui_surface_w || y >= g_gui_surface_h) return;
         if (x < 0) {
             w += x;
@@ -357,7 +409,7 @@ void gd_border(int x, int y, int w, int h, uint32_t color) {
 // cleanly against the wallpaper/desktop drawn beneath them.
 void gd_round_corner(int bx, int by, int r, int cxc, int cyc, uint32_t color) {
     if (!g_gui_surface) { return; }
-    int x = bx, y = by, w = r, h = r;
+    int x = bx - g_tgt_ox, y = by - g_tgt_oy, w = r, h = r;
     if (!gui_clip_intersect(&x, &y, &w, &h)) return;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
@@ -520,6 +572,8 @@ void gd_blit_glyph(int x, int y, const gui_glyph_t *g, uint32_t color, int scale
     int smooth = scale > 1;
 
     if (g_gui_surface) {
+        cx -= g_tgt_ox;
+        cy -= g_tgt_oy;
         if (cx < 0) { cw += cx; off_x -= cx; cx = 0; }
         if (cy < 0) { ch += cy; off_y -= cy; cy = 0; }
         if (cx >= g_gui_surface_w || cy >= g_gui_surface_h) return;
@@ -596,6 +650,8 @@ void gd_blit_mono_glyph(int x, int y, const uint8_t *glyph, uint32_t color, int 
         }
         return;
     }
+    cx -= g_tgt_ox;
+    cy -= g_tgt_oy;
     if (cx < 0) { cw += cx; off_x -= cx; cx = 0; }
     if (cy < 0) { ch += cy; off_y -= cy; cy = 0; }
     if (cx >= g_gui_surface_w || cy >= g_gui_surface_h) return;
@@ -627,6 +683,8 @@ void gd_blit_icon_rgba(int x, int y, int sz, const uint32_t *src, int tile) {
     int cx = x, cy = y, cw = sz, ch = sz;
     if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
     int off_x = cx - x, off_y = cy - y;
+    cx -= g_tgt_ox;
+    cy -= g_tgt_oy;
     if (cx + cw > g_gui_surface_w) cw = g_gui_surface_w - cx;
     if (cy + ch > g_gui_surface_h) ch = g_gui_surface_h - cy;
 
