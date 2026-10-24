@@ -15,6 +15,8 @@
 #define MOUSE_RIGHT  0x02
 #define MOUSE_MIDDLE 0x04
 
+/* 1 = 严格 IntelliMouse 探测（含失败回退 + 运行时错位自检） */
+#define MOUSE_ENABLE_WHEEL_PROBE 1
 #define PS2_IO_TIMEOUT_MS 100U
 #define PS2_RESET_TIMEOUT_MS 500U
 #define PS2_MAX_STALL_SPINS 500000U
@@ -174,21 +176,47 @@ static int ps2_mouse_init(void) {
      * （滚轮增量，见下面解析循环里 packet[3] 那段——已经写好了，只是
      * mouse_packet_size 一直停在 3，从没触发过）。任何一步失败就放弃，
      * 退回原来的 3 字节协议，不影响现有的移动/按键。 */
+    /* 滚轮探测暂时关闭：那串 200/100/80 魔法序列一旦发出去，设备就进入
+     * 4 字节包模式；只要 ID 读取失败/时序抖动（TCG 下常见），就会出现
+     * "设备 4 字节 / 解析 3 字节"（X 锁死）或反向错位（Y 读到 flags 字节
+     * 0x08，取反后恒为负 → 指针被顶在屏幕上边缘）。
+     * 关掉它 → 设备固定在 3 字节默认模式，与解析一致，X/Y 都正常。
+     * 需要滚轮时把这里改成 1，并确保 ID 读取成功率为 100%。 */
+#if MOUSE_ENABLE_WHEEL_PROBE
+    /* 严格的 IntelliMouse 探测（顺序照 Linux psmouse）：
+     *   0xF5 关上报 → 0xF3 200/100/80 → 0xF2 取 ID → 只认 0x03/0x04
+     * 任何一步失败/ID 不认，就用 0xF6(set defaults) 把设备拉回 3 字节。
+     * 切模式后必须清空队列与解析状态，否则残留字节会和新包长混在一起
+     * —— 这正是"X 锁死 / 指针贴顶边"的来源。 */
+    mouse_packet_size = 3;
+    (void)write_mouse(0xF5);
+    (void)read_ack();
+    flush_output();
     {
         uint8_t rates[3] = {200, 100, 80};
         int ok = 1;
+        int wheel = 0;
         for (int i = 0; i < 3 && ok; i++) {
             if (write_mouse(0xF3) < 0 || read_ack() < 0) ok = 0;
             else if (write_mouse(rates[i]) < 0 || read_ack() < 0) ok = 0;
         }
         if (ok && write_mouse(0xF2) == 0 && read_ack() == 0) {
-            uint8_t dev_id = 0xFF;
-            if (read_data(&dev_id) == 0 && dev_id == 0x03) {
-                mouse_packet_size = 4;
-            }
+            uint8_t id = 0xFF;
+            if (read_data(&id) == 0 && (id == 0x03 || id == 0x04)) wheel = 1;
         }
-        flush_output();
+        if (!wheel) {
+            (void)write_mouse(0xF6);
+            (void)read_ack();
+        }
+        mouse_packet_size = wheel ? 4 : 3;
     }
+    flush_output();
+    packet_i = 0;
+    mouse_raw_head = 0;
+    mouse_raw_tail = 0;
+#else
+    mouse_packet_size = 3;
+#endif
 
     /* Enable data reporting */
     for (int attempt = 0; attempt < 4; attempt++) {
@@ -378,10 +406,40 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
              * 高速甩鼠标丢一个样本肉眼不可见。 */
             continue;
         }
+        /* X 锁死自适应：设备包长与 mouse_packet_size 不一致时（滚轮探测
+         * 半途失败 / 设备被魔法序列留在 4 字节模式），X 位移会一直为 0 而
+         * Y 正常。连续 24 个包都这样就把包长翻过来，几帧内自愈，不依赖
+         * 96 字节的 sync 统计（那条在"错位后仍能对齐 flags 字节"时不触发）。 */
+        static uint32_t x_stuck_packets;
+        if (x == 0 && y != 0) {
+            if (++x_stuck_packets >= 24) {
+                mouse_packet_size = (mouse_packet_size == 3) ? 4 : 3;
+                packet_i = 0;
+                x_stuck_packets = 0;
+            }
+        } else if (x != 0) {
+            x_stuck_packets = 0;
+        }
         int z = 0;
         if (mouse_packet_size == 4) {
             z = (int)(packet[3] & 0x0F);
             if (z & 0x08) z -= 16;
+        }
+        /* 运行时错位自检：设备其实是 3 字节包时，被当成第 4 字节的往往是
+         * 下一个包的 flags(0x08 起) —— z 会连续恒为同一个非零值。
+         * 连续 24 包如此就认定错位，退回 3 字节并重置解析。 */
+        {
+            static int last_z, z_stuck;
+            if (mouse_packet_size == 4 && z != 0 && z == last_z) {
+                if (++z_stuck >= 24) {
+                    mouse_packet_size = 3;
+                    packet_i = 0;
+                    z_stuck = 0;
+                }
+            } else {
+                z_stuck = 0;
+            }
+            last_z = z;
         }
         ps2_q_push(x, -y, z, (int)(packet[0] & 0x07));
     }

@@ -3354,7 +3354,7 @@ static void browser_save_page(gui_state_t *st) {
     vfs_node_t *node = vfs_lookup(path);
     if (!node) node = vfs_create(path);
     if (!node || node->type != VFS_NODE_FILE ||
-        vfs_truncate(node) < 0 ||
+        vfs_truncate(node, 0) < 0 ||
         vfs_write(node, 0, bs()->page, bs()->page_len) < 0) {
         br_status(st, "网页保存失败");
         return;
@@ -5244,6 +5244,8 @@ static void handle_key(gui_state_t *st, int key) {
         gui_open_selected_app(st);
     } else if (key == 'o') {
         if (st->active == PANEL_FILES) gui_open_selected_file(st);
+    } else if (key == 'h') {
+        (void)gui_open_window(st, WM_WIN_APP, GUI_APP_HPT, 1);
     } else if (key == GUI_KEY_BACKSPACE && st->active == PANEL_FILES) {
         gui_go_parent(st);
     } else if (key == '\n') {
@@ -6535,6 +6537,12 @@ static void cmd_gui(int argc, char **argv) {
              * delta immediately, capped. No carry, no gain. */
             acc_dx = clamp_delta(acc_dx);
             acc_dy = clamp_delta(acc_dy);
+            /* 必须在 wl_seat 分支更新 mx/my 之前记下旧坐标：那条分支会
+             * 直接把 mx/my 覆盖成 g_seat_mx/my 并把 acc_dx/dy 清零，
+             * 之后再比较 mx != old_mx 永远为假 —— 于是"只移动不刷新，
+             * 按一下才刷新"（按键走的是另一条 redraw=1 的路径）。 */
+            int old_mx = mx;
+            int old_my = my;
             if (g_seat) {
                 g_seat_dz = 0;
                 int tx = g_seat_mx + acc_dx;
@@ -6555,8 +6563,6 @@ static void cmd_gui(int argc, char **argv) {
                 acc_dx = 0;
                 acc_dy = 0;
             }
-            int old_mx = mx;
-            int old_my = my;
             mx += acc_dx;
             my += acc_dy;
             if (mx < 0) mx = 0;

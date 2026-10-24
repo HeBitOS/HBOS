@@ -30,6 +30,7 @@
 #include "net.h"
 #include "signal.h"
 #include "fs.h"
+#include "graphics/graphics.h"   /* console_puts/console_putchar：syscall 跟踪日志 */
 #include "core/heap.h"
 #include "elf.h"
 #include "user/ldso.h"
@@ -42,6 +43,12 @@
 #include "linux_compat.h"
 
 #define SYSCALL_HTTPS_MAX_SIZE (2u * 1024u * 1024u)
+
+/* 跟踪辅助：定义在 linux_syscall_dispatch_frame 之前，clone/mmap 等更早
+ * 的路径也要用，这里前置声明。 */
+static void trace_put_udec(uint64_t value);
+static void trace_put_hex(uint64_t value);
+
 
 /**
  * 将 POSIX 函数返回值转换为系统调用返回值
@@ -261,12 +268,29 @@ static uint64_t linux_sysinfo(linux_x86_sysinfo_t *information) {
     return 0;
 }
 
+static int linux_user_range_writable(uint64_t address, uint64_t length);
+static int linux_user_range_mapped(uint64_t address, uint64_t length);
+
 static uint64_t linux_prlimit64(int pid, unsigned int resource,
                                 const linux_x86_rlimit64_t *new_limit,
                                 linux_x86_rlimit64_t *old_limit) {
     if (pid != 0 && (uint32_t)pid != task_get_process_id())
         return (uint64_t)(-ESRCH);
     if (resource >= 16) return (uint64_t)(-EINVAL);
+    /* 目标缓冲区必须"已映射且可写"。这不只是防御性检查：Chromium 的
+     * base::internal::CheckMemoryReadOnly() 故意把一个只读页当输出缓冲区
+     * 传进来（写成功就说明这页不是只读的），并且要求返回 -1/EFAULT。
+     * 内核若不做页权限检查，prlimit64 会返回 0，它的 CHECK 立刻 int3。
+     * 顺带一提：CR0.WP 没开，ring0 真正写只读页不会 #PF，所以这类校验
+     * 只能落在系统调用入口上。 */
+    if (old_limit &&
+        !linux_user_range_writable((uint64_t)(uintptr_t)old_limit,
+                                   sizeof(*old_limit)))
+        return (uint64_t)(-EFAULT);
+    if (new_limit &&
+        !linux_user_range_mapped((uint64_t)(uintptr_t)new_limit,
+                                 sizeof(*new_limit)))
+        return (uint64_t)(-EFAULT);
     const uint64_t infinity = UINT64_MAX;
     linux_x86_rlimit64_t value = {infinity, infinity};
     switch (resource) {
@@ -339,6 +363,22 @@ static uint64_t linux_prctl(uint64_t option, uint64_t argument2,
             strncpy((char *)(uintptr_t)argument2, task->name, 15);
             return 0;
         case 21: /* PR_GET_SECCOMP */
+            return 0;
+        case 22: /* PR_SET_SECCOMP: --no-sandbox 下不装过滤器 */
+            return 0;
+        case 29: /* PR_SET_TIMERSLACK */
+            return 0;
+        case 30: /* PR_GET_TIMERSLACK */
+            return 50000;                       /* 内核默认 50us */
+        case 36: /* PR_SET_CHILD_SUBREAPER */
+            task->child_subreaper = argument2 != 0;
+            return 0;
+        case 37: /* PR_GET_CHILD_SUBREAPER */
+            if (!argument2) return (uint64_t)(-EFAULT);
+            *(int *)(uintptr_t)argument2 = task->child_subreaper ? 1 : 0;
+            return 0;
+        case 41: /* PR_SET_THP_DISABLE */
+        case 42: /* PR_GET_THP_DISABLE */
             return 0;
         case 23: /* PR_CAPBSET_READ: no ambient capabilities */
             return 0;
@@ -474,6 +514,66 @@ static uint64_t linux_clock_nanosleep(int clock_id, int flags,
     return 0;
 }
 
+/* 判断一段用户虚拟地址是否还能分配。
+ *
+ * 只查 vmm_get_phys() 是不够的：Chromium 的 PartitionAlloc 启动时先
+ * mmap(NULL, 32 GiB, PROT_NONE) 预留地址池，而我们为了不占 32 GiB 物理
+ * 内存，对 PROT_NONE 只登记 VMA、不建页表——于是池子里每一页
+ * vmm_get_phys() 都是 0，"看起来全空"。接下来的普通 mmap 从
+ * 0x100000000000 往上扫，第一步就落进池子内部，随后 PA 用
+ * mprotect(PROT_READ|WRITE) 提交池内页时，同一段 VA 上就有了两份互不
+ * 知情的使用者：堆元数据互相踩 → partition_alloc 报
+ * DoubleFreeOrCorruptionDetected / OnNoMemory。
+ *
+ * 正确做法是把已有 VMA 的覆盖范围也算作"已占用"。 */
+static int linux_va_range_free(task_t *owner, uint64_t address, size_t pages) {
+    if (!pages || address >= 0x0000800000000000ULL) return 0;
+    uint64_t span = (uint64_t)pages * PAGE_SIZE;
+    if (span > 0x0000800000000000ULL - address) return 0;
+    uint64_t end = address + span;
+    if (owner && owner->mm) {
+        for (vm_area_t *area = owner->mm->areas; area; area = area->next) {
+            if (address < area->end && end > area->start) return 0;
+        }
+    }
+    for (uint64_t va = address; va < end; va += PAGE_SIZE)
+        if (vmm_get_phys(va)) return 0;
+    return 1;
+}
+
+/* 在 [0x100000000000, limit) 里找一段没有任何 VMA 覆盖的空洞。
+ *
+ * 不能逐页扫：PartitionAlloc 那个 32 GiB 预留区就有 840 万页，TCG 下每
+ * 次 mmap 扫一遍等于卡死。这里改成"按 VMA 跳跃"：撞到哪个区就跳到它的
+ * 末尾，只有确认无 VMA 覆盖时才逐页核对残留页表项。 */
+static uint64_t linux_va_find_free(task_t *owner, size_t pages,
+                                   uint64_t limit) {
+    uint64_t span = (uint64_t)pages * PAGE_SIZE;
+    uint64_t candidate = 0x0000100000000000ULL;
+    for (int hops = 0; hops < 65536; hops++) {
+        if (candidate >= limit || span >= limit - candidate) return 0;
+        uint64_t skip_to = 0;
+        if (owner && owner->mm) {
+            for (vm_area_t *area = owner->mm->areas; area; area = area->next) {
+                if (area->start < candidate + span && area->end > candidate) {
+                    if (area->end > skip_to) skip_to = area->end;
+                }
+            }
+        }
+        if (skip_to) {
+            candidate = (skip_to + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+            continue;
+        }
+        uint64_t mapped = 0;
+        for (uint64_t va = candidate; va < candidate + span; va += PAGE_SIZE) {
+            if (vmm_get_phys(va)) { mapped = va; break; }
+        }
+        if (!mapped) return candidate;
+        candidate = mapped + PAGE_SIZE;
+    }
+    return 0;
+}
+
 static uint64_t linux_madvise(uint64_t address, uint64_t length, int advice) {
     if (address & (PAGE_SIZE - 1)) return (uint64_t)(-EINVAL);
     if (!length) return 0;
@@ -493,8 +593,10 @@ static uint64_t linux_madvise(uint64_t address, uint64_t length, int advice) {
         default:
             return (uint64_t)(-EINVAL);
     }
-    for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE)
-        if (!vmm_get_phys(address + offset)) return (uint64_t)(-ENOMEM);
+    /* 不能因为区间里有"没提交的页"就返回 ENOMEM：Linux 的 madvise 允许
+     * 区间里有洞(未映射页)，只是忽略它们。PartitionAlloc 的
+     * DecommitSystemPages 会对"预留但未提交"的区间调 madvise(DONTNEED)，
+     * 返回非 0 直接触发它的 CHECK → int3。 */
     if (advice == 4 || advice == 8) {
         task_t *current = task_current();
         for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE) {
@@ -651,6 +753,18 @@ static void linux_clone_context_from_frame(
     context->r15 = frame->r15;
 }
 
+/* clone(clone_args 版) 与 nr=56 clone 共用实现，见函数体内注释。 */
+static uint64_t linux_clone_args(linux_x86_syscall_return_frame_t *frame,
+                                 uint64_t flags, uint64_t stack,
+                                 uint64_t parent_tid, uint64_t child_tid,
+                                 uint64_t tls);
+
+static uint64_t linux_clone(linux_x86_syscall_return_frame_t *frame) {
+    if (!frame) return (uint64_t)(-EFAULT);
+    return linux_clone_args(frame, frame->call.a0, frame->call.a1,
+                            frame->call.a2, frame->call.a3, frame->call.a4);
+}
+
 static uint64_t linux_fork(linux_x86_syscall_return_frame_t *frame) {
     if (!frame || !linux_user_range_mapped(frame->rip, 1) ||
         !linux_user_range_mapped(frame->rsp, 1))
@@ -661,7 +775,13 @@ static uint64_t linux_fork(linux_x86_syscall_return_frame_t *frame) {
     return pid < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)pid;
 }
 
-static uint64_t linux_clone(linux_x86_syscall_return_frame_t *frame) {
+/* clone/clone3 共用实现。参数显式传入，**不要**写回 frame 的 a0..a4：
+ * 子线程恢复时那些槽位会被当成父线程的 rdi/rsi/rdx/r10/r8 还原，glibc 的
+ * pthread 包装器把线程入口函数放在这些寄存器里，一冲就跳到野地址。 */
+static uint64_t linux_clone_args(linux_x86_syscall_return_frame_t *frame,
+                                 uint64_t flags, uint64_t stack,
+                                 uint64_t parent_tid, uint64_t child_tid,
+                                 uint64_t tls) {
     enum {
         CLONE_VM = 0x00000100,
         CLONE_FS = 0x00000200,
@@ -682,25 +802,56 @@ static uint64_t linux_clone(linux_x86_syscall_return_frame_t *frame) {
                                CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID |
                                CLONE_DETACHED;
     if (!frame) return (uint64_t)(-EFAULT);
-    uint64_t flags = frame->call.a0;
-    uint64_t stack = frame->call.a1;
-    uint64_t parent_tid = frame->call.a2;
-    uint64_t child_tid = frame->call.a3;
-    uint64_t tls = frame->call.a4;
+    /* 不带 CLONE_VM 的 clone 是**进程 fork**，不是线程（glibc 的
+     * fork() 就是用 clone(SIGCHLD|CLONE_CHILD_SETTID|CLEARTID) 实现的）。
+     * 原来把 CLONE_VM|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD 全列为必需位，
+     * 于是一切 fork 都返回 EINVAL —— crashpad 起子进程第一步就死在这里。
+     * posix_spawn 走的是 clone(CLONE_VM|CLONE_VFORK|SIGCHLD)，也没有
+     * CLONE_THREAD；同样按 fork 处理（子进程马上 exec，共享地址空间只是
+     * vfork 的性能优化，复制一份语义等价）。 */
+    if ((flags & CLONE_THREAD) == 0) {
+        hbos_linux_clone_context_t context;
+        linux_clone_context_from_frame(frame, frame->rsp, &context);
+        int forked = task_fork_linux(&context);
+        return forked < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)forked;
+    }
     if ((flags & required) != required || (flags & ~supported) != 0)
         return (uint64_t)(-EINVAL);
+    /* pthread_create 传的是新线程栈的**最高地址**（栈向下生长），
+     * 这个地址本身通常在映射之外——第一个 push 才落到映射内。原来直接
+     * 校验 stack 是否已映射，于是所有 pthread_create 都返回 EFAULT
+     * （Chromium 报 "pthread_create: Bad address (14)"）。校验栈顶下方
+     * 一个字即可。 */
     if (!linux_user_range_mapped(frame->rip, 1) ||
-        !linux_user_range_mapped(stack, 1))
+        stack < 8 || !linux_user_range_mapped(stack - 8, 8))
         return (uint64_t)(-EFAULT);
+    /* 三处参数地址校验分开打日志：pthread_create 报 EFAULT(14) 时，
+     * 不打出来根本不知道是哪个指针被拒。 */
     if ((flags & CLONE_SETTLS) &&
-        !linux_user_range_mapped(tls, 1))
+        !linux_user_range_mapped(tls, 1)) {
+        console_puts("[CLONE] EFAULT tls=0x");
+        trace_put_hex(tls);
+        console_puts(" flags=0x");
+        trace_put_hex(flags);
+        console_putchar('\n');
         return (uint64_t)(-EFAULT);
+    }
     if ((flags & CLONE_PARENT_SETTID) &&
-        !linux_user_range_mapped(parent_tid, sizeof(uint32_t)))
+        !linux_user_range_mapped(parent_tid, sizeof(uint32_t))) {
+        console_puts("[CLONE] EFAULT parent_tid=0x");
+        trace_put_hex(parent_tid);
+        console_putchar('\n');
         return (uint64_t)(-EFAULT);
+    }
     if ((flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) &&
-        !linux_user_range_mapped(child_tid, sizeof(uint32_t)))
+        !linux_user_range_mapped(child_tid, sizeof(uint32_t))) {
+        console_puts("[CLONE] EFAULT child_tid=0x");
+        trace_put_hex(child_tid);
+        console_puts(" flags=0x");
+        trace_put_hex(flags);
+        console_putchar('\n');
         return (uint64_t)(-EFAULT);
+    }
 
     hbos_clone_request_t request = {
         .version = HBOS_CLONE_REQUEST_VERSION,
@@ -768,36 +919,14 @@ static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
      * CLONE_INTO_CGROUP is present.  Both flags are excluded by the
      * supported mask above, but glibc legitimately leaves pidfd pointing at
      * parent_tid without CLONE_PIDFD; Linux ignores that inactive field. */
+    /* clone3 与 clone 只是参数打包方式不同（clone_args 结构体 vs 寄存器）。
+     * 摊平成寄存器形态后复用 linux_clone()——那条路径已经处理过
+     * fork/vfork/线程栈顶这三类形态，没必要再维护第二套校验。 */
     uint64_t stack_top = args.stack + args.stack_size;
-    if (!linux_user_range_mapped(args.stack, args.stack_size) ||
-        !linux_user_range_mapped(frame->rip, 1))
-        return (uint64_t)(-EFAULT);
-    if ((args.flags & CLONE_SETTLS) &&
-        !linux_user_range_mapped(args.tls, 1))
-        return (uint64_t)(-EFAULT);
-    if ((args.flags & CLONE_PARENT_SETTID) &&
-        !linux_user_range_mapped(args.parent_tid, sizeof(uint32_t)))
-        return (uint64_t)(-EFAULT);
-    if ((args.flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) &&
-        !linux_user_range_mapped(args.child_tid, sizeof(uint32_t)))
-        return (uint64_t)(-EFAULT);
-
-    hbos_clone_request_t request = {
-        .version = HBOS_CLONE_REQUEST_VERSION,
-        .size = sizeof(request),
-        .flags = args.flags,
-        .entry = frame->rip,
-        .stack = stack_top,
-        .argument = 0,
-        .tls = args.tls,
-        .parent_tid = args.parent_tid,
-        .child_tid = args.child_tid,
-        .clear_child_tid = args.child_tid
-    };
-    hbos_linux_clone_context_t context;
-    linux_clone_context_from_frame(frame, stack_top, &context);
-    int tid = task_clone_linux_thread(&request, &context);
-    return tid < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)tid;
+    return linux_clone_args(frame,
+                            args.flags | (args.exit_signal & 0xffULL),
+                            stack_top, args.parent_tid, args.child_tid,
+                            args.tls);
 }
 
 static uint64_t linux_rt_sigaction(int signal_number,
@@ -820,13 +949,27 @@ static uint64_t linux_rt_sigaction(int signal_number,
         old_action->mask = task->sig_action_mask[signal_number];
     }
     if (action) {
-        if (action->handler > 1 &&
-            action->handler >= 0x0000800000000000ULL)
-            return (uint64_t)(-EFAULT);
-        if ((action->flags & LINUX_SA_RESTORER) &&
-            (!action->restorer ||
-             action->restorer >= 0x0000800000000000ULL))
-            return (uint64_t)(-EFAULT);
+        /* Linux 的 rt_sigaction 从不校验 handler/restorer 地址，只原样存。
+         * 我们原来对 >= 0x800000000000 的地址返回 EFAULT，Chromium fork 出的
+         * 子进程在 ResetChildSignalHandlersToDefaults() 里吃到 -EFAULT，随即
+         * RAW_LOG(FATAL,"sigaction (set) failed.") → int3，表现成"每个子进程
+         * 起来就崩"。改成只记录不拒绝；前 8 次打出原始字段，顺便确认 32 字节
+         * 布局（handler/flags/restorer/mask）与 glibc 一致。 */
+        static int sigaction_logs;
+        if (sigaction_logs < 8) {
+            sigaction_logs++;
+            console_puts("[SIGACT] sig=");
+            trace_put_udec((uint64_t)signal_number);
+            console_puts(" h=");
+            trace_put_hex(action->handler);
+            console_puts(" f=");
+            trace_put_hex(action->flags);
+            console_puts(" r=");
+            trace_put_hex(action->restorer);
+            console_puts(" m=");
+            trace_put_hex(action->mask);
+            console_putchar('\n');
+        }
         task->sig_handler[signal_number] =
             (void (*)(int))(uintptr_t)action->handler;
         task->sig_action_flags[signal_number] = action->flags;
@@ -1402,7 +1545,7 @@ static int linux_resolve_at_path(int dirfd, const char *path,
 
 static uint64_t linux_newfstatat(int dirfd, const char *path,
                                  linux_x86_stat_t *output, int flags) {
-    const int supported = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+    const int supported = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | 0x800;
     if (flags & ~supported) return (uint64_t)(-EINVAL);
     if (!path || !output) return (uint64_t)(-EFAULT);
     if (!path[0]) {
@@ -1469,6 +1612,65 @@ static uint64_t linux_pread64(int fd, void *buffer, uint64_t count,
     int result = vfs_read(entry->node, (uint32_t)offset, buffer,
                           (uint32_t)count);
     return result < 0 ? (uint64_t)(-EIO) : (uint64_t)result;
+}
+
+/* pwrite64：sqlite 的 xWrite 走的就是它（日志里 nr=18 标 unimplemented
+ * 之后，History/UKM 数据库立刻 "disk I/O error"）。与 pread64 对称：memfd
+ * 走兼容层，普通文件直接 vfs_write，偏移由参数给、不动 fd 的当前位置。 */
+static uint64_t linux_pwrite64(int fd, const void *buffer, uint64_t count,
+                               uint64_t offset) {
+    if (!buffer && count) return (uint64_t)(-EFAULT);
+    if (count > INT32_MAX) return (uint64_t)(-EINVAL);
+    task_t *current = task_current();
+    if (!current || !current->fd_table || fd < 0 || fd >= POSIX_MAX_FDS)
+        return (uint64_t)(-EBADF);
+    fd_entry_t *entry = &current->fd_table->entries[fd];
+    if (!entry->used) return (uint64_t)(-EBADF);
+    if (entry->type == FD_MEMFD) return (uint64_t)(-EIO);
+    if (entry->type != FD_FILE || !entry->node)
+        return (uint64_t)(-ESPIPE);
+    if (offset > UINT32_MAX || count > UINT32_MAX - offset)
+        return (uint64_t)(-EFBIG);
+    int result = vfs_write(entry->node, (uint32_t)offset, buffer,
+                           (uint32_t)count);
+    if (result < 0) return (uint64_t)(-EIO);
+    return (uint64_t)result;
+}
+
+/* fallocate(fd, mode, offset, len)：sqlite/Chromium 用来预分配文件尾部。
+ * 只支持"分配/保持大小"这一档；打洞（PUNCH_HOLE）按"读出来就是 0"处理，
+ * 不真回收块。 */
+static uint64_t linux_fallocate(int fd, int mode, uint64_t offset,
+                                uint64_t length) {
+    const int KEEP_SIZE = 0x01;
+    const int PUNCH_HOLE = 0x02;
+    task_t *current = task_current();
+    if (!current || !current->fd_table || fd < 0 || fd >= POSIX_MAX_FDS ||
+        !current->fd_table->entries[fd].used)
+        return (uint64_t)(-EBADF);
+    fd_entry_t *entry = &current->fd_table->entries[fd];
+    if (length == 0) return (uint64_t)(-EINVAL);
+    if (offset > UINT32_MAX || length > UINT32_MAX ||
+        offset + length > UINT32_MAX)
+        return (uint64_t)(-EFBIG);
+    if (mode & PUNCH_HOLE) return 0;
+    if (mode != 0 && mode != KEEP_SIZE) return (uint64_t)(-EOPNOTSUPP);
+    if (entry->type == FD_MEMFD) {
+        uint64_t size = 0;
+        if (linux_compat_memfd_size(fd, &size) < 0)
+            return (uint64_t)(-EBADF);
+        if (!(mode & KEEP_SIZE) && offset + length > size)
+            return linux_compat_memfd_truncate(fd, offset + length) < 0
+                ? (uint64_t)(-EIO) : 0;
+        return 0;
+    }
+    if (entry->type != FD_FILE || !entry->node)
+        return (uint64_t)(-ESPIPE);
+    if (mode & KEEP_SIZE) return 0;
+    if (offset + length > entry->node->size &&
+        vfs_truncate(entry->node, (uint32_t)(offset + length)) < 0)
+        return (uint64_t)(-EIO);
+    return 0;
 }
 
 static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
@@ -1585,6 +1787,36 @@ static uint64_t linux_getdents64(int fd, void *buffer, uint64_t count) {
     if (!entry->path[0]) return 0;
 
     uint64_t written = 0;
+    int is_virtual_dir =
+        strcmp(entry->path, "/") == 0 ||
+        strcmp(entry->path, "/dev") == 0 ||
+        strcmp(entry->path, "/proc") == 0 ||
+        strcmp(entry->path, "/sys") == 0 ||
+        strncmp(entry->path, "/proc/", 6) == 0 ||
+        strncmp(entry->path, "/sys/", 5) == 0;
+    if (is_virtual_dir) {
+        for (;;) {
+            char name[VFS_MAX_NAME];
+            uint32_t type;
+            if (vfs_readdir_at(entry->path, entry->offset, name, &type) < 0)
+                break;
+            size_t name_length = strlen(name) + 1;
+            uint64_t record_length = (19 + name_length + 7) & ~(uint64_t)7;
+            if (written + record_length > count) break;
+            uint8_t *record = (uint8_t *)buffer + written;
+            memset(record, 0, (size_t)record_length);
+            *(uint64_t *)(record + 0) = entry->offset + 1;
+            *(int64_t *)(record + 8) = (int64_t)(entry->offset + 1);
+            *(uint16_t *)(record + 16) = (uint16_t)record_length;
+            record[18] = type == VFS_NODE_DIR ? DT_DIR :
+                         (type == VFS_NODE_SYMLINK ? DT_LNK : DT_REG);
+            memcpy(record + 19, name, name_length);
+            entry->offset++;
+            written += record_length;
+        }
+        return written;
+    }
+
     /*
      * 顺序游标读取，避免 O(n²)。
      *
@@ -1629,7 +1861,207 @@ static uint64_t linux_getdents64(int fd, void *buffer, uint64_t count) {
     return written;
 }
 
-uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
+/* ── 未实现 Linux 系统调用的串口跟踪（C3 起步工具）─────────────────
+ *
+ * 大型程序（Chromium / glib / NSS）不能靠猜补 syscall：先让内核把它调用了
+ * 什么号、带什么参数打到串口，再按"出现顺序 → 致命性"逐个补。每个号最多
+ * 打 4 次，避免 poll 循环把串口刷爆；同号后续调用静默（仍返回 -ENOSYS）。
+ * 需要完整轨迹时把 HBOS_TRACE_ALL_LINUX_SYSCALLS 打开（音量很大）。 */
+#define HBOS_TRACE_ALL_LINUX_SYSCALLS 0
+
+static void trace_put_udec(uint64_t value) {
+    char digits[24];
+    int n = 0;
+    do {
+        digits[n++] = (char)('0' + (int)(value % 10));
+        value /= 10;
+    } while (value);
+    while (n--) console_putchar(digits[n]);
+}
+
+static void trace_put_hex(uint64_t value) {
+    static const char hex[] = "0123456789abcdef";
+    char digits[16];
+    int n = 0;
+    do {
+        digits[n++] = hex[value & 0xf];
+        value >>= 4;
+    } while (value);
+    console_puts("0x");
+    while (n--) console_putchar(digits[n]);
+}
+
+/* 静默 exit(0) 时只有"谁调用的"能定位。Linux syscall 返回帧的栈布局
+ * （见 src/core/interrupt_asm.asm linux_syscall_entry）在 a0..a5 之后还
+ * 依次保存 rcx/r11/rbx/rbp/r12..r15/rip/cs/rflags/rsp/ss，所以能从这里
+ * 取回用户态 rip/rbp 并走一遍 RBP 链。Chromium 的 x86_64 版本带帧指针，
+ * 链基本完整；链断掉时退化为扫描用户栈上的代码地址。 */
+static void linux_user_backtrace(hbos_syscall_frame_t *frame,
+                                 const char *tag) {
+    const uint64_t *slots = (const uint64_t *)frame;
+    uint64_t rip = slots[15];
+    uint64_t rbp = slots[10];
+    uint64_t rsp = slots[18];
+
+    console_puts("  [");
+    console_puts(tag);
+    console_puts("-BT] rip=");
+    trace_put_hex(rip);
+    console_putchar('\n');
+
+    int depth = 0;
+    uint64_t cursor = rbp;
+    while (depth < 24 && linux_user_range_mapped(cursor, 16)) {
+        uint64_t next = *(volatile uint64_t *)(uintptr_t)cursor;
+        uint64_t ret = *(volatile uint64_t *)(uintptr_t)(cursor + 8);
+        if (!ret) break;
+        console_puts("  [");
+        console_puts(tag);
+        console_puts("-BT] bt[");
+        trace_put_udec((uint64_t)depth);
+        console_puts("]=");
+        trace_put_hex(ret);
+        console_putchar('\n');
+        depth++;
+        if (next <= cursor) break;
+        cursor = next;
+    }
+    if (depth >= 2) return;
+
+    /* 帧指针缺失时的兜底：用户栈上落在 PIE 代码段的值当返回地址看。
+     * Chromium 主程序映射在 0x1100000000 起的地址空洞里。 */
+    uint64_t sp = rsp & ~7ULL;
+    int shown = 0;
+    for (int i = 0; i < 192 && shown < 16; i++, sp += 8) {
+        if (!linux_user_range_mapped(sp, 8)) break;
+        uint64_t value = *(volatile uint64_t *)(uintptr_t)sp;
+        if (value < 0x1100000000ULL || value >= 0x1200000000ULL) continue;
+        console_puts("  [");
+        console_puts(tag);
+        console_puts("-SCAN] sp+");
+        trace_put_udec((uint64_t)i * 8);
+        console_puts("=");
+        trace_put_hex(value);
+        console_putchar('\n');
+        shown++;
+    }
+}
+
+static void linux_trace_unimplemented(uint64_t number,
+                                      const hbos_syscall_frame_t *frame) {
+    static uint16_t seen[512];
+    if (number < sizeof(seen) / sizeof(seen[0])) {
+        if (seen[number] >= 4) return;
+        seen[number]++;
+    }
+    console_puts("[LINUX_SYSCALL] unimplemented nr=");
+    trace_put_udec(number);
+    console_puts(" a0=");  trace_put_hex(frame->a0);
+    console_puts(" a1=");  trace_put_hex(frame->a1);
+    console_puts(" a2=");  trace_put_hex(frame->a2);
+    console_puts(" a3=");  trace_put_hex(frame->a3);
+    console_putchar('\n');
+}
+
+/* 文件映射失败的诊断输出。Chromium 的 MemoryMappedFile 只报
+ * "Invalid file descriptor to ICU data received."，具体是 mmap 的哪一步
+ * 失败看不出来；把参数原样打出来，一眼能对上是 fd 无效、文件类型不对、
+ * offset 越界，还是分配物理页失败。 */
+static void mmap_log_failure(int fd, size_t length, int prot, int flags,
+                             uint64_t offset, uint64_t file_size, int error) {
+    console_puts("[MMAP] fail err=");
+    trace_put_udec((uint64_t)(-(int64_t)error));
+    console_puts(" fd=");
+    trace_put_udec((uint64_t)(unsigned)fd);
+    console_puts(" len=");
+    trace_put_udec(length);
+    console_puts(" prot=");
+    trace_put_udec((uint64_t)(unsigned)prot);
+    console_puts(" flags=");
+    trace_put_hex((uint64_t)(unsigned)flags);
+    console_puts(" off=");
+    trace_put_udec(offset);
+    console_puts(" size=");
+    trace_put_udec(file_size);
+    console_putchar('\n');
+}
+
+typedef struct {
+    int64_t  f_type;
+    int64_t  f_bsize;    int64_t  f_blocks;
+    int64_t  f_bfree;
+    int64_t  f_bavail;
+    int64_t  f_files;
+    int64_t  f_ffree;
+    int32_t  f_fsid[2];
+    int64_t  f_namelen;
+    int64_t  f_frsize;
+    int64_t  f_flags;
+    int64_t  f_spare[4];
+} linux_x86_statfs_t;
+
+/* Linux fcntl 语义适配（见下方 case 72 的说明）。
+ * 与 HBOS 原生 fcntl 的编号不同，必须单独实现：
+ *   0=F_DUPFD 1=F_GETFD 2=F_SETFD 3=F_GETFL 4=F_SETFL 1030=F_DUPFD_CLOEXEC */
+static uint64_t linux_fcntl(int fd, int cmd, long argument) {
+    task_t *cur = task_current();
+    if (!cur || !cur->fd_table || fd < 0 || fd >= POSIX_MAX_FDS ||
+        !cur->fd_table->entries[fd].used)
+        return (uint64_t)(-EBADF);
+    fd_entry_t *entry = &cur->fd_table->entries[fd];
+    switch (cmd) {
+        case 0:                                       /* F_DUPFD */
+        case 1030: {                                  /* F_DUPFD_CLOEXEC */
+            int lowest = argument > 0 ? (int)argument : 0;
+            if (lowest < 3) lowest = 3;
+            for (int i = lowest; i < POSIX_MAX_FDS; i++) {
+                if (!cur->fd_table->entries[i].used) {
+                    cur->fd_table->entries[i] = *entry;
+                    linux_compat_retain(i);
+                    return (uint64_t)i;
+                }
+            }
+            return (uint64_t)(-EMFILE);
+        }
+        case 1:                                       /* F_GETFD */
+        case 2:                                       /* F_SETFD */
+            return 0;                                 /* 未跟踪 FD_CLOEXEC */
+        case 3:                                       /* F_GETFL */
+            return (uint64_t)(unsigned)entry->flags;
+        case 4:                                       /* F_SETFL */
+            entry->flags = (entry->flags & ~O_NONBLOCK) |
+                           ((int)argument & O_NONBLOCK);
+            return 0;
+        /* 记录锁：sqlite（Chromium 的 History/UKM/Cookies 全是 sqlite）在
+         * xLock 里必须拿到 F_SETLK 的成功返回，否则 unixError 把 EINVAL
+         * 折成 SQLITE_IOERR，日志里就是 "disk I/O error"，紧接着
+         * HistoryService::Init 失败 → TerminateCurrentProcessImmediately(0)
+         * （单进程模式"静默 exit(0)"的真凶）。HBOS 目前没有跨进程文件锁
+         * 语义，先按"总能拿到锁"处理；F_GETLK 报告无人持锁。 */
+        case 5:                                       /* F_GETLK */
+        case 36: {                                    /* F_OFD_GETLK */
+            /* struct flock: short type/whence; off_t start/len; pid_t pid */
+            uint32_t *lock = (uint32_t *)argument;
+            if (!lock ||
+                !linux_user_range_writable((uint64_t)(uintptr_t)lock, 32))
+                return (uint64_t)(-EFAULT);
+            *(uint16_t *)lock = 2;                    /* F_UNLCK */
+            return 0;
+        }
+        case 6:                                       /* F_SETLK */
+        case 7:                                       /* F_SETLKW */
+        case 37:                                      /* F_OFD_SETLK */
+        case 38:                                      /* F_OFD_SETLKW */
+            if (!argument ||
+                !linux_user_range_mapped((uint64_t)(uintptr_t)argument, 32))
+                return (uint64_t)(-EFAULT);
+            return 0;
+        default:
+            return (uint64_t)(-EINVAL);
+    }
+}
+
+static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
     if (!linux_frame) return (uint64_t)(-EFAULT);
     hbos_syscall_frame_t native = *linux_frame;
 
@@ -1645,6 +2077,10 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 5:
             return linux_fstat_fd(
                 (int)linux_frame->a0,
+                (linux_x86_stat_t *)linux_frame->a1);
+        case 6:
+            return linux_lstat_path(
+                (const char *)linux_frame->a0,
                 (linux_x86_stat_t *)linux_frame->a1);
         case 7:   native.nr = HBOS_SYS_POLL; break;
         case 8:   native.nr = HBOS_SYS_LSEEK; break;
@@ -1670,6 +2106,10 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
             return linux_pread64((int)linux_frame->a0,
                                  (void *)linux_frame->a1,
                                  linux_frame->a2, linux_frame->a3);
+        case 18:
+            return linux_pwrite64((int)linux_frame->a0,
+                                  (const void *)linux_frame->a1,
+                                  linux_frame->a2, linux_frame->a3);
         case 19:
             return linux_vector_io(
                 (int)linux_frame->a0,
@@ -1683,6 +2123,10 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 21:  native.nr = HBOS_SYS_ACCESS; break;
         case 22:  native.nr = HBOS_SYS_PIPE; break;
         case 24:  native.nr = HBOS_SYS_SCHED_YIELD; break;
+        /* mremap(old, old_size, new_size, flags, new_addr)：Linux 原生参数
+         * 顺序与 HBOS_SYS_MREMAP 完全一致，直接透传。glibc 的大块
+         * realloc/calloc 会走这里。 */
+        case 25:  native.nr = HBOS_SYS_MREMAP; break;
         case 28:
             return linux_madvise(linux_frame->a0, linux_frame->a1,
                                  (int)linux_frame->a2);
@@ -1721,11 +2165,25 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
                 (linux_x86_syscall_return_frame_t *)linux_frame);
         case 59:  native.nr = HBOS_SYS_EXECVE; break;
         case 60:
-        case 231: native.nr = HBOS_SYS_EXIT; break;
+        case 231:
+            /* 静默退出最难查：不知道是哪个线程、拿什么码退的。主线程
+             * 退出时连最近的系统调用轨迹一起打出来。 */
+            console_puts("[EXIT] pid=");
+            trace_put_udec(task_get_id());
+            console_puts(" code=");
+            trace_put_udec(linux_frame->a0 & 0xFF);
+            console_putchar('\n');
+            if (task_get_id() == task_get_process_id()) {
+                linux_user_backtrace(linux_frame, "EXIT");
+                linux_syscall_trace_dump();
+            }
+            native.nr = HBOS_SYS_EXIT; break;
         case 61:  native.nr = HBOS_SYS_WAITPID; break;
         case 62:  native.nr = HBOS_SYS_KILL; break;
         case 63:  native.nr = HBOS_SYS_UNAME; break;
-        case 72:  native.nr = HBOS_SYS_FCNTL; break;
+        case 72:
+            return linux_fcntl((int)linux_frame->a0, (int)linux_frame->a1,
+                               (long)linux_frame->a2);
         case 77:  native.nr = HBOS_SYS_FTRUNCATE; break;
         case 79:  native.nr = HBOS_SYS_GETCWD; break;
         case 80:  native.nr = HBOS_SYS_CHDIR; break;
@@ -1739,8 +2197,20 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         case 88:  native.nr = HBOS_SYS_SYMLINK; break;
         case 89:  native.nr = HBOS_SYS_READLINK; break;
         case 90:  native.nr = HBOS_SYS_CHMOD; break;
+        case 91:                                       /* fchmod(fd, mode) */
+        case 95:                                       /* fchmodat 的 fd 形态 */
+            return 0;                                  /* 权限模型暂不区分 */
         case 92:  native.nr = HBOS_SYS_CHOWN; break;
+        /* fchown/lchown：HBOS 的权限模型只有单用户，属主一律 root 且不可改；
+         * 直接成功比 ENOSYS 安全（Chromium 装扩展/复制 profile 时会调）。 */
+        case 93:
+        case 94:
+            return 0;
         case 96:  native.nr = HBOS_SYS_GETTOD; break;
+        case 285:
+            return linux_fallocate((int)linux_frame->a0,
+                                   (int)linux_frame->a1,
+                                   linux_frame->a2, linux_frame->a3);
         case 98:
             return linux_getrusage(
                 (int)linux_frame->a0,
@@ -1766,6 +2236,14 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
                                linux_frame->a4);
         case 158: native.nr = HBOS_SYS_ARCH_PRCTL; break;
         case 186: native.nr = HBOS_SYS_GETTID; break;
+        case 201: {
+            linux_x86_timespec_t now;
+            int result = linux_clock_now(0, &now);
+            if (result < 0) return (uint64_t)(int64_t)result;
+            if (linux_frame->a0)
+                *(int64_t *)(uintptr_t)linux_frame->a0 = now.seconds;
+            return (uint64_t)now.seconds;
+        }
         case 202: native.nr = HBOS_SYS_FUTEX; break;
         case 217:
             return linux_getdents64(
@@ -1913,11 +2391,191 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
             return (uint64_t)(int64_t)linux_compat_memfd_create(
                 (const char *)linux_frame->a0,
                 (unsigned int)linux_frame->a1);
+        /* ── C3：Chromium/glib/NSS 启动路径上常见但此前缺失的调用 ─────
+         * 这些要么是"查询能力"，要么是"无实际语义的加固操作"。在
+         * --no-sandbox 的单进程场景里，返回合理的兼容值比返回 -ENOSYS
+         * 更接近 Linux 行为（后者会让 glib 直接 abort）。 */
+
+        /* 文件锁：HBOS 单用户、无并发写者，直接成功 */
+        case 73: native.nr = HBOS_SYS_SYNC; break;   /* flock: 走同步后返回 0 */
+        case 74:
+        case 75: return 0;                            /* fsync / fdatasync */
+
+        case 303:                                     /* name_to_handle_at */
+        case 304:                                     /* open_by_handle_at */
+            return (uint64_t)(-EOPNOTSUPP);
+        case 85: {                                    /* creat(path, mode) */
+            char path[VFS_MAX_NAME];
+            if (linux_resolve_at_path(-100, (const char *)linux_frame->a0,
+                                      path) < 0)
+                return (uint64_t)(-EFAULT);
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_OPEN, (uint64_t)path,
+                O_CREAT | O_WRONLY | O_TRUNC, linux_frame->a1, 0, 0, 0);
+        }
+        case 140:                                     /* getpriority */
+        case 141:                                     /* setpriority */
+            return 0;
+
+        case 97: {                                    /* getrlimit */
+            linux_x86_rlimit64_t *out =
+                (linux_x86_rlimit64_t *)linux_frame->a1;
+            return linux_prlimit64(0, (unsigned int)linux_frame->a0,
+                                   NULL, out);
+        }
+        case 160:                                     /* setrlimit */
+            return linux_prlimit64(0, (unsigned int)linux_frame->a0,
+                                   (const linux_x86_rlimit64_t *)
+                                       linux_frame->a1, NULL);
+
+        /* 能力集：没有 capability 模型，报告"零能力" */
+        case 125: {                                   /* capget */
+            struct cap_header {
+                uint32_t version;
+                int32_t pid;
+            } *header = (struct cap_header *)(uintptr_t)linux_frame->a0;
+            uint32_t *data = (uint32_t *)(uintptr_t)linux_frame->a1;
+            if (!header) return (uint64_t)(-EFAULT);
+            if (header->version != 0x20080522) {      /* _LINUX_CAPABILITY_VERSION_3 */
+                header->version = 0x20080522;
+                return (uint64_t)(-EINVAL);
+            }
+            if (!data) return (uint64_t)(-EFAULT);
+            for (int i = 0; i < 6; i++) data[i] = 0;  /* 2 × cap_data */
+            return 0;
+        }
+        case 126:                                     /* capset */
+            return 0;
+        case 117:                                     /* setresuid */
+        case 119:                                     /* setresgid */
+            return 0;
+        case 118: {                                   /* getresuid */
+            uint32_t *ruid = (uint32_t *)(uintptr_t)linux_frame->a0;
+            uint32_t *euid = (uint32_t *)(uintptr_t)linux_frame->a1;
+            uint32_t *suid = (uint32_t *)(uintptr_t)linux_frame->a2;
+            if (ruid) *ruid = 0;
+            if (euid) *euid = 0;
+            if (suid) *suid = 0;
+            return 0;
+        }
+        case 120: {                                   /* getresgid */
+            uint32_t *rgid = (uint32_t *)(uintptr_t)linux_frame->a0;
+            uint32_t *egid = (uint32_t *)(uintptr_t)linux_frame->a1;
+            uint32_t *sgid = (uint32_t *)(uintptr_t)linux_frame->a2;
+            if (rgid) *rgid = 0;
+            if (egid) *egid = 0;
+            if (sgid) *sgid = 0;
+            return 0;
+        }
+        /* 进程组 / 会话：crashpad 起子进程后立刻 setsid()，zygote 也依赖
+         * 它把子进程从父会话摘出去。HBOS 没有真正的会话模型，返回一个
+         * 稳定的标识即可（调用方只用返回值判错）。 */
+        case 109: return 0;                           /* setpgid */
+        case 111: return (uint64_t)task_get_id();     /* getpgrp */
+        case 112: return (uint64_t)task_get_id();     /* setsid */
+        case 122: return (uint64_t)(uint32_t)linux_frame->a0;  /* setfsuid */
+        case 123: return (uint64_t)(uint32_t)linux_frame->a0;  /* setfsgid */
+
+        /* seccomp 在 --no-sandbox 下没有过滤器要装；返回成功比 ENOSYS
+         * 更安全（调用方通常不检查返回值，但 glib 会记录错误）。 */
+        case 317: return 0;
+
+        case 324: return 0;                           /* membarrier: 单核等价 no-op */
+
+        /* sched_* 一族：HBOS 无调度策略/优先级概念，返回"成功 + 默认值"。
+         * 返回 ENOSYS 会让 glib 的 thread priority 设置直接失败，进而
+         * 在初始化线程池时 CHECK。 */
+        case 143: return 0;                           /* sched_setparam */
+        case 144: {                                   /* sched_getparam */
+            uint32_t *param = (uint32_t *)(uintptr_t)linux_frame->a1;
+            if (!param) return (uint64_t)(-EFAULT);
+            *param = 0;                               /* sched_priority = 0 */
+            return 0;
+        }
+        case 145: return 0;                           /* sched_setscheduler */
+        case 146: return 0;                           /* sched_getscheduler -> SCHED_OTHER */
+        case 147: return 0;                           /* sched_get_priority_max */
+        case 148: return 0;                           /* sched_get_priority_min */
+        case 229: return 0;                           /* sched_getattr */
+        case 203: return 0;                           /* sched_setaffinity */
+        case 204: {                                   /* sched_getaffinity */
+            size_t size = (size_t)linux_frame->a1;
+            uint8_t *mask = (uint8_t *)(uintptr_t)linux_frame->a2;
+            if (!mask || size == 0) return (uint64_t)(-EINVAL);
+            if (size > 128) size = 128;
+            memset(mask, 0, size);
+            mask[0] = 0x01;                           /* 只有一个 CPU0 */
+            return 8;
+        }
+
+        case 137:                                     /* statfs */
+        case 138: {                                   /* fstatfs */
+            /* 两个调用的缓冲区都在 a1：statfs(path, buf) / fstatfs(fd, buf) */
+            linux_x86_statfs_t *out =
+                (linux_x86_statfs_t *)(uintptr_t)linux_frame->a1;
+            if (!out) return (uint64_t)(-EFAULT);
+            memset(out, 0, sizeof(*out));
+            uint32_t capacity = fs_capacity_bytes();
+            out->f_type = 0xEF53;                     /* EXT2_SUPER_MAGIC */
+            out->f_bsize = 4096;
+            out->f_frsize = 4096;
+            out->f_blocks = capacity / 4096;
+            out->f_bfree = (capacity / 4096) / 2;
+            out->f_bavail = out->f_bfree;
+            out->f_files = MAX_FILES;
+            out->f_ffree = MAX_FILES / 2;
+            out->f_namelen = MAX_FILENAME - 1;
+            return 0;
+        }
+
+        case 263: {                                   /* unlinkat */
+            char path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            uint64_t flags = linux_frame->a2;
+            if (flags & ~(uint64_t)0x200)
+                return (uint64_t)(-EINVAL);
+            return (uint64_t)linux_native_call(
+                flags & 0x200 ? HBOS_SYS_RMDIR : HBOS_SYS_UNLINK,
+                (uint64_t)path, 0, 0, 0, 0, 0);
+        }
+        case 269: {                                   /* faccessat */
+            char path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_ACCESS, (uint64_t)path, linux_frame->a2,
+                linux_frame->a3, 0, 0, 0);
+        }
+
+        case 441: {                                   /* epoll_pwait2 */
+            const linux_x86_timespec_t *timeout =
+                (const linux_x86_timespec_t *)(uintptr_t)linux_frame->a3;
+            int milliseconds = -1;
+            if (timeout) {
+                int64_t seconds = timeout->seconds;
+                int64_t nanos = timeout->nanoseconds;
+                if (seconds > 1000000) milliseconds = 1000000000;
+                else {
+                    milliseconds = (int)(seconds * 1000 +
+                                         nanos / 1000000);
+                    if (milliseconds < 0) milliseconds = 0;
+                }
+            }
+            native.nr = HBOS_SYS_EPOLL_WAIT;
+            native.a3 = (uint64_t)(int64_t)milliseconds;
+            break;
+        }
+
         case 435:
             return linux_clone3(
                 (linux_x86_syscall_return_frame_t *)linux_frame,
                 (const void *)linux_frame->a0, linux_frame->a1);
-        default: return (uint64_t)(-ENOSYS);
+        default:
+            linux_trace_unimplemented(linux_frame->nr, linux_frame);
+            return (uint64_t)(-ENOSYS);
     }
     return syscall_dispatch_frame(&native);
 }
@@ -2052,6 +2710,47 @@ static int vm_fill_memfd_snapshot(int fd, uint64_t address,
     return copy && linux_compat_memfd_read_at(
                        fd, file_offset, (void *)(uintptr_t)address, copy) < 0
         ? -(errno > 0 ? errno : EIO) : 0;
+}
+
+/* mprotect 同时承担"提交"语义：Linux 上对 PROT_NONE 预留区做
+ * mprotect(RW) 只是改权限，等第一次写才分配物理页；HBOS 没有按需缺页
+ * 分配，于是在这里一次性补齐该范围内的页。VMA 记录了类型，所以匿名页
+ * 清零、文件页按 backing_offset 回填，语义与 mmap 时立即建页一致。 */
+static int commit_and_protect_user_range(task_mm_t *mm, uint64_t address,
+                                         size_t length, int protection) {
+    if (!mm) return -ESRCH;
+    if (!length || (address & (PAGE_SIZE - 1)) || (protection & ~0x07) ||
+        address >= 0x0000800000000000ULL ||
+        length > 0x0000800000000000ULL - address)
+        return -EINVAL;
+
+    uint64_t end = address + length;
+    for (uint64_t page = address; page < end; page += PAGE_SIZE) {
+        if (vmm_get_phys(page)) continue;
+        vm_area_t *area = NULL;
+        for (vm_area_t *candidate = mm->areas; candidate;
+             candidate = candidate->next) {
+            if (page >= candidate->start && page < candidate->end) {
+                area = candidate;
+                break;
+            }
+        }
+        if (!area || area->backing_type == VM_BACKING_MEMFD)
+            return -ENOMEM;
+        if (!vmm_alloc_page_at(page, VMM_P | VMM_U | VMM_W))
+            return -ENOMEM;
+        memset((void *)(uintptr_t)page, 0, PAGE_SIZE);
+        if ((area->backing_type == VM_BACKING_VFS_PRIVATE ||
+             area->backing_type == VM_BACKING_VFS_SHARED) &&
+            area->backing_node) {
+            uint64_t file_offset =
+                area->backing_offset + (page - area->start);
+            if (vm_fill_vfs_snapshot(area->backing_node, page, PAGE_SIZE,
+                                     file_offset) < 0)
+                return -EIO;
+        }
+    }
+    return protect_user_range(address, length, protection);
 }
 
 static int map_user_heap_growth(uint64_t old_brk, uint64_t new_brk) {
@@ -2631,12 +3330,32 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             int flags = (int)f->a3;
             int fd = (int)f->a4;
             off_t off = (off_t)f->a5;
-            if (len == 0) return (uint64_t)(-EINVAL);
+            if (len == 0) {
+                /* 申请 0 字节通常意味着调用方 fstat 拿到的 size 是 0 */
+                console_puts("[MMAP] fail len=0 fd=");
+                trace_put_udec((uint64_t)(unsigned)fd);
+                console_puts(" flags=");
+                trace_put_hex((uint64_t)(unsigned)flags);
+                console_putchar('\n');
+                return (uint64_t)(-EINVAL);
+            }
             int mapping_kind = flags & 0x03;
-            if (mapping_kind != 0x01 && mapping_kind != 0x02)
+            if (mapping_kind != 0x01 && mapping_kind != 0x02) {
+                console_puts("[MMAP] fail bad kind fd=");
+                trace_put_udec((uint64_t)(unsigned)fd);
+                console_puts(" flags=");
+                trace_put_hex((uint64_t)(unsigned)flags);
+                console_putchar('\n');
                 return (uint64_t)(-EINVAL);
-            if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1)))
+            }
+            if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
+                console_puts("[MMAP] fail bad off fd=");
+                trace_put_udec((uint64_t)(unsigned)fd);
+                console_puts(" off=");
+                trace_put_udec((uint64_t)off);
+                console_putchar('\n');
                 return (uint64_t)(-EINVAL);
+            }
             if (len > UINT64_MAX - (PAGE_SIZE - 1))
                 return (uint64_t)(-ENOMEM);
             size_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -2652,25 +3371,15 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (p && ((uint64_t)p >= 0x0000800000000000ULL ||
                       span > 0x0000800000000000ULL - (uint64_t)p))
                 return (uint64_t)(-ENOMEM);
+            task_t *va_owner = task_current();
             if (p && !fixed && !fixed_noreplace) {
-                for (size_t i = 0; i < pages; i++) {
-                    if (vmm_get_phys((uint64_t)p + i * PAGE_SIZE)) {
-                        p = NULL;
-                        break;
-                    }
-                }
+                if (!linux_va_range_free(va_owner, (uint64_t)p, pages))
+                    p = NULL;
             }
             if (!p) {
-                for (uint64_t va = 0x0000100000000000ULL;
-                     va <= 0x0000200000000000ULL - span;
-                     va += PAGE_SIZE) {
-                    int free = 1;
-                    for (uint64_t va2 = va;
-                         va2 < va + pages * PAGE_SIZE; va2 += PAGE_SIZE) {
-                        if (vmm_get_phys(va2) != 0) { free = 0; break; }
-                    }
-                    if (free) { p = (void *)va; break; }
-                }
+                uint64_t hole = linux_va_find_free(va_owner, pages,
+                                                   0x0000200000000000ULL);
+                if (hole) p = (void *)hole;
             }
             if (!p) return (uint64_t)(-ENOMEM);
             if (fixed_noreplace) {
@@ -2684,26 +3393,58 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             int anonymous = (flags & 0x20) != 0;
             fd_entry_t *mapping_entry = NULL;
             uint64_t mapping_file_size = 0;
+
+            /* PROT_NONE 是"预留地址空间"，不是"立刻占满物理内存"。
+             *
+             * Chromium 的 PartitionAlloc 启动时先 mmap(NULL, 32 GiB,
+             * PROT_NONE) 划出虚拟地址池，再用 mprotect(PROT_READ|WRITE)
+             * 按需提交。Linux 对这种预留不消耗任何物理页；我们原来对
+             * 每一页都 vmm_alloc_page_at()，32 GiB 必然 ENOMEM，随后
+             * Chromium 的 CHECK 失败 → int3。
+             *
+             * 这里对 prot==0 只登记 VMA、不碰物理页；真正提交发生在
+             * mprotect（见 commit_and_protect_user_range）。 */
+            int reserve_only = (prot == 0);
             if (!anonymous) {
                 if (fd < 0 || fd >= POSIX_MAX_FDS || !cur->fd_table ||
-                    !cur->fd_table->entries[fd].used)
+                    !cur->fd_table->entries[fd].used) {
+                    mmap_log_failure(fd, len, prot, flags, (uint64_t)off, 0,
+                                     -EBADF);
                     return (uint64_t)(-EBADF);
+                }
                 mapping_entry = &cur->fd_table->entries[fd];
                 if (mapping_entry->type == FD_MEMFD) {
-                    if (linux_compat_memfd_size(fd, &mapping_file_size) < 0)
+                    if (linux_compat_memfd_size(fd, &mapping_file_size) < 0) {
+                        mmap_log_failure(fd, len, prot, flags, (uint64_t)off,
+                                         0, -EBADF);
                         return (uint64_t)(-EBADF);
+                    }
                 } else if (mapping_entry->type == FD_FILE &&
                            mapping_entry->node &&
                            mapping_entry->node->type == VFS_NODE_FILE) {
                     mapping_file_size = mapping_entry->node->size;
                 } else {
+                    mmap_log_failure(fd, len, prot, flags, (uint64_t)off, 0,
+                                     -ENODEV);
+                    console_puts("  (fd type=");
+                    trace_put_udec((uint64_t)mapping_entry->type);
+                    console_puts(")\n");
                     return (uint64_t)(-ENODEV);
                 }
-                if ((uint64_t)off >= mapping_file_size)
+                if ((uint64_t)off >= mapping_file_size) {
+                    mmap_log_failure(fd, len, prot, flags, (uint64_t)off,
+                                     mapping_file_size, -EINVAL);
                     return (uint64_t)(-EINVAL);
-                if (mapping_kind == 0x01 && (prot & 0x02) &&
-                    mapping_entry->type != FD_MEMFD)
-                    return (uint64_t)(-EOPNOTSUPP);
+                }
+                /* 可写 MAP_SHARED 文件映射：以前直接 EOPNOTSUPP，结果
+                 * Chromium 的 base::SharedMemory（/dev/shm 下的文件）建不
+                 * 出来，visitedlink::VisitedLinkMaster::Init 失败，进而
+                 * history::ContentVisitDelegate::Init 返回 false，最后
+                 * HistoryService::Init 主动 TerminateCurrentProcessImmediately(0)
+                 * ——单进程模式"浏览器初始化完就静默 exit(0)"就是这么来的。
+                 * 这里退化成"共享文件的私有快照"：页表是私有的，但同一进程
+                 * 内所有使用者看到的是同一份页面，够单进程跑通。真正的
+                 * 跨进程可见性/回写以后再做（VMA 已标 VM_BACKING_VFS_SHARED）。 */
             }
             vm_area_t *vma = (vm_area_t *)kmalloc(sizeof(vm_area_t));
             if (!vma) return (uint64_t)(-ENOMEM);
@@ -2717,6 +3458,21 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 }
                 for (size_t i = 0; i < pages; i++)
                     vmm_release_page((uint64_t)p + i * PAGE_SIZE);
+            }
+
+            if (reserve_only) {
+                vma->backing_type = anonymous ? VM_BACKING_ANONYMOUS :
+                    (mapping_kind == 0x01 ? VM_BACKING_VFS_SHARED
+                                          : VM_BACKING_VFS_PRIVATE);
+                vma->backing_node =
+                    (!anonymous && mapping_entry->type == FD_FILE)
+                        ? mapping_entry->node : NULL;
+                vma->backing_offset = (uint64_t)off;
+                vma->start = (uint64_t)p;
+                vma->end = (uint64_t)p + pages * PAGE_SIZE;
+                vma->next = cur->mm->areas;
+                cur->mm->areas = vma;
+                return (uint64_t)p;
             }
 
             if (!anonymous && mapping_entry->type == FD_MEMFD &&
@@ -2735,6 +3491,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 int map_result = vm_allocate_owned_pages((uint64_t)p, pages);
                 if (map_result < 0) {
                     kfree(vma);
+                    mmap_log_failure(fd, len, prot, flags, (uint64_t)off,
+                                     mapping_file_size, (int)map_result);
                     return (uint64_t)map_result;
                 }
                 if (!anonymous) {
@@ -2752,6 +3510,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                         for (size_t i = 0; i < pages; i++)
                             vmm_release_page((uint64_t)p + i * PAGE_SIZE);
                         kfree(vma);
+                        mmap_log_failure(fd, len, prot, flags, (uint64_t)off,
+                                         mapping_file_size, (int)fill_result);
                         return (uint64_t)fill_result;
                     }
                     vma->backing_type = mapping_kind == 0x01 ?
@@ -2849,10 +3609,9 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 (new_pages - old_pages) * PAGE_SIZE;
             int can_extend = 1;
             if (!(mr_flags & 0x2)) {
-                for (uint64_t va = old_end;
-                     va < old_end + grow_bytes; va += PAGE_SIZE) {
-                    if (vmm_get_phys(va) != 0) { can_extend = 0; break; }
-                }
+                if (!linux_va_range_free(cur, old_end,
+                                         (size_t)(grow_bytes / PAGE_SIZE)))
+                    can_extend = 0;
                 if (can_extend &&
                     vm_allocate_owned_pages(old_end,
                                             new_pages - old_pages) < 0)
@@ -2873,17 +3632,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 (void)vm_unmap_area_range(cur->mm, dst,
                                           dst + new_pages * PAGE_SIZE);
             } else {
-                dst = 0;
-                for (uint64_t va = 0x0000100000000000ULL;
-                     va <= 0x0000200000000000ULL -
-                          new_pages * PAGE_SIZE; va += PAGE_SIZE) {
-                    int free = 1;
-                    for (uint64_t v = va;
-                         v < va + new_pages * PAGE_SIZE; v += PAGE_SIZE) {
-                        if (vmm_get_phys(v) != 0) { free = 0; break; }
-                    }
-                    if (free) { dst = va; break; }
-                }
+                dst = linux_va_find_free(cur, new_pages,
+                                         0x0000200000000000ULL);
                 if (!dst) return (uint64_t)(-ENOMEM);
             }
             if (vm_allocate_owned_pages(dst, new_pages) < 0)
@@ -2913,8 +3663,10 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         }
 
         case HBOS_SYS_MPROTECT: {
-            return (uint64_t)protect_user_range(
-                (uint64_t)f->a0, (size_t)f->a1, (int)f->a2);
+            task_t *cur = task_current();
+            return (uint64_t)commit_and_protect_user_range(
+                cur ? cur->mm : NULL, (uint64_t)f->a0, (size_t)f->a1,
+                (int)f->a2);
         }
 
         case HBOS_SYS_BRK: {
@@ -3606,6 +4358,20 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             const int ARCH_SET_FS = 0x1002;
             const int ARCH_GET_FS = 0x1003;
             int operation = (int)f->a0;
+            /* 栈 canary 存在 TCB(fs:0x28)；__stack_chk_fail 说明 canary 对不上。
+             * 记录每次 ARCH_SET_FS 的值，确认是否有谁把 fs_base 改到了
+             * 别的线程/别的地址（前 8 次即可，正常程序只会设一两次）。 */
+            if (operation == ARCH_SET_FS) {
+                static int fs_logs;
+                if (fs_logs < 8) {
+                    fs_logs++;
+                    console_puts("[TLSC] ARCH_SET_FS pid=");
+                    trace_put_udec(task_get_id());
+                    console_puts(" fs=0x");
+                    trace_put_hex(f->a1);
+                    console_putchar('\n');
+                }
+            }
             if (operation == ARCH_SET_FS)
                 return task_set_fs_base(f->a1) == 0 ? 0 :
                        (uint64_t)(-EINVAL);
@@ -3820,4 +4586,144 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         default:
             return (uint64_t)(-ENOSYS);
     }
+}
+
+/* ── 最近 Linux 系统调用环形缓冲（调试用）────────────────────────────
+ *
+ * 大型程序失败时，"最后做了什么"比"崩在哪"更有用。这里把每条 Linux
+ * 调用的 (nr, a0, a1, 返回值) 记进 128 项环，用户态异常时由
+ * isr_handler 调 linux_syscall_trace_dump() 打出来。open/openat 额外
+ * 打印路径字符串，足以判断是"没找到文件"还是"打开了但后续失败"。
+ * 只在诊断时输出，正常路径开销是两条 16 字节写入。 */
+#define LINUX_TRACE_DEPTH 128
+typedef struct {
+    uint16_t number;
+    uint16_t flags;      /* bit0: 负返回值 */
+    uint64_t a0;
+    uint64_t a1;
+    int64_t  result;
+    char     text[120];   /* open/openat/readlink 的路径：调用当场复制，
+                          * 事后用户缓冲可能已被释放，不能在 dump 时再读 */
+} linux_trace_entry_t;
+
+static linux_trace_entry_t g_linux_trace[LINUX_TRACE_DEPTH];
+static uint32_t g_linux_trace_head;
+static uint32_t g_linux_trace_count;
+
+static void linux_trace_push(uint64_t number, uint64_t a0, uint64_t a1,
+                             int64_t result) {
+    linux_trace_entry_t *slot = &g_linux_trace[g_linux_trace_head];
+    slot->number = (uint16_t)number;
+    slot->flags = result < 0 ? 1 : 0;
+    slot->a0 = a0;
+    slot->a1 = a1;
+    slot->result = result;
+    slot->text[0] = '\0';
+    if (number == 2 || number == 257 || number == 89 || number == 21) {
+        uint64_t pointer = (number == 257 || number == 21) ? a1 : a0;
+        if (pointer && pointer < 0x0000800000000000ULL &&
+            vmm_get_phys(pointer & ~(uint64_t)(PAGE_SIZE - 1))) {
+            for (uint32_t i = 0; i + 1 < sizeof(slot->text); i++) {
+                char c = *(volatile char *)(uintptr_t)(pointer + i);
+                slot->text[i] = c;
+                if (!c) break;
+            }
+            slot->text[sizeof(slot->text) - 1] = '\0';
+        }
+    }
+    g_linux_trace_head = (g_linux_trace_head + 1) % LINUX_TRACE_DEPTH;
+    if (g_linux_trace_count < LINUX_TRACE_DEPTH) g_linux_trace_count++;
+}
+
+/* 只在确认映射存在后逐字符读用户串，避免野指针把内核读崩。 */
+static void linux_trace_put_string(uint64_t address, uint32_t limit) {
+    if (!address) return;
+    console_putchar('"');
+    for (uint32_t i = 0; i < limit; i++) {
+        char c = *(volatile char *)(uintptr_t)(address + i);
+        if (!c) break;
+        console_putchar((c >= 0x20 && c < 0x7f) ? c : '.');
+    }
+    console_putchar('"');
+}
+
+void linux_syscall_trace_dump(void) {
+    if (!g_linux_trace_count) return;
+    console_puts("--- last linux syscalls (oldest first) ---\n");
+    uint32_t start = (g_linux_trace_head + LINUX_TRACE_DEPTH -
+                      g_linux_trace_count) % LINUX_TRACE_DEPTH;
+    for (uint32_t i = 0; i < g_linux_trace_count; i++) {
+        const linux_trace_entry_t *entry =
+            &g_linux_trace[(start + i) % LINUX_TRACE_DEPTH];
+        console_puts("  nr=");
+        trace_put_udec(entry->number);
+        console_puts(" ret=");
+        if (entry->flags & 1) {
+            console_putchar('-');
+            trace_put_udec((uint64_t)(-entry->result));
+        } else {
+            trace_put_udec((uint64_t)entry->result);
+        }
+        console_puts(" a0=");
+        trace_put_hex(entry->a0);
+        console_puts(" a1=");
+        trace_put_hex(entry->a1);
+        if (entry->text[0]) {
+            console_puts(" path=");
+            linux_trace_put_string((uint64_t)(uintptr_t)entry->text, 119);
+        }
+        console_putchar('\n');
+    }
+}
+
+/* 文件类调用失败时把"哪个 fd / 哪个文件 / 什么 errno"直接打出来。
+ * sqlite 之类的库只会把底层失败折成 "disk I/O error"，看不到根因；
+ * 这条日志就是用来把 errno 和路径对上的。EAGAIN/EINTR 是正常控制流，跳过。 */
+static void linux_trace_fd_error(uint64_t number,
+                                 const hbos_syscall_frame_t *frame,
+                                 int64_t result) {
+    static int budget = 80;
+    if (result >= 0 || !budget) return;
+    switch (number) {
+        case 0: case 1: case 5: case 8: case 9:
+        case 17: case 18: case 72: case 74: case 75: case 77: case 285:
+            break;
+        default:
+            return;
+    }
+    if (result == -EAGAIN || result == -EINTR) return;
+    budget--;
+    int fd = (int)frame->a0;
+    console_puts("[FDERR] nr=");
+    trace_put_udec(number);
+    console_puts(" fd=");
+    trace_put_udec((uint64_t)fd);
+    console_puts(" ret=-");
+    trace_put_udec((uint64_t)(-result));
+    task_t *cur = task_current();
+    if (cur && cur->fd_table && fd >= 0 && fd < POSIX_MAX_FDS &&
+        cur->fd_table->entries[fd].used && cur->fd_table->entries[fd].path[0]) {
+        console_puts(" path=");
+        linux_trace_put_string(
+            (uint64_t)(uintptr_t)cur->fd_table->entries[fd].path, 100);
+    }
+    console_putchar('\n');
+    /* mmap 失败是"某子系统缺能力"的强信号，前三次附上用户态调用链，
+     * 一眼看出是谁要这块内存（例如 MAP_SHARED 可写文件映射）。 */
+    static int mmap_backtraces;
+    if (number == 9 && mmap_backtraces < 3) {
+        mmap_backtraces++;
+        linux_user_backtrace((hbos_syscall_frame_t *)(uintptr_t)frame,
+                             "MMAPFAIL");
+    }
+}
+
+uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
+    if (!linux_frame) return (uint64_t)(-EFAULT);
+    uint64_t number = linux_frame->nr;
+    uint64_t result = linux_dispatch_body(linux_frame);
+    linux_trace_fd_error(number, linux_frame, (int64_t)result);
+    linux_trace_push(number, linux_frame->a0, linux_frame->a1,
+                     (int64_t)result);
+    return result;
 }

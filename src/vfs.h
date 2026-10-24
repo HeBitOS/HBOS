@@ -25,7 +25,7 @@ typedef struct vfs_node vfs_node_t;
 typedef struct {
     int (*read)(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);
     int (*write)(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count);
-    int (*truncate)(vfs_node_t *node);
+    int (*truncate)(vfs_node_t *node, uint32_t size);
     int (*unlink)(vfs_node_t *node);
     int (*ioctl)(vfs_node_t *node, uint32_t cmd, void *arg);
     int (*readdir)(vfs_node_t *node, uint32_t index, char *name, uint32_t *type);
@@ -54,7 +54,7 @@ int vfs_unlink(const char *path); /**< 按路径删除 VFS 节点 */
 int vfs_rename(const char *old_path, const char *new_path, int replace);
 int vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count); /**< 从 VFS 节点读取数据 */
 int vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count); /**< 向 VFS 节点写入数据 */
-int vfs_truncate(vfs_node_t *node); /**< 截断 VFS 节点（清零大小） */
+int vfs_truncate(vfs_node_t *node, uint32_t size); /**< 把 VFS 节点截断/扩展到 size 字节 */
 uint32_t vfs_count(void);      /**< 获取 VFS 节点数量 */
 vfs_node_t *vfs_get(uint32_t index); /**< 按索引获取 VFS 节点 */
 

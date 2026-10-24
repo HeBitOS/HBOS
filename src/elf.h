@@ -145,6 +145,11 @@ int elf64_load_and_exec(const uint8_t *data, size_t size,
 int elf64_load_vfs_and_exec(struct vfs_node *node,
                             char *const argv[], char *const envp[]);
 
+/** Stream an ELF image directly from a VFS node into a new task (no replace). */
+int elf64_load_vfs_and_spawn(struct vfs_node *node,
+                             char *const argv[], char *const envp[],
+                             const char *task_name);
+
 const char *elf64_last_error(void);
 
 #endif

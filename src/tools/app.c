@@ -4,6 +4,7 @@
 #include "../core/task.h"
 #include "../fs.h"
 #include "../graphics/graphics.h"
+#include "../libc/stdio.h"
 #include "../string.h"
 #include "../unistd.h"
 #include "../user/app.h"
@@ -11,7 +12,7 @@
 #include "../vfs.h"
 #include "tool.h"
 
-#define APP_ELF_MAX_SIZE 65536
+#define APP_ELF_MAX_SIZE 131072
 #define APP_ELF_MAX_ARGS 32
 static uint8_t elf_buf[APP_ELF_MAX_SIZE];
 
@@ -110,7 +111,7 @@ static void cmd_apps(int argc, char **argv) {
     char name[VFS_MAX_NAME];
     uint32_t type;
     for (uint32_t i = 0; vfs_readdir_at("/bin", i, name, &type) == 0; i++) {
-        if (type != VFS_NODE_FILE || name[0] == '.') continue;
+        if ((type != VFS_NODE_FILE && type != VFS_NODE_SYMLINK) || name[0] == '.') continue;
         console_puts(name);
         console_puts(" - installed package  [TUI .hax]\n");
     }
@@ -118,16 +119,105 @@ static void cmd_apps(int argc, char **argv) {
 
 /* 运行一个 ELF 文件路径（供直接路径和 hpt 安装到 /bin 的软件包使用）。
  * 返回进程退出码；加载/启动失败返回 -1。 */
+
+/*
+ * 动态 ELF 的库搜索路径（C1 方案 B）。
+ *
+ * 方案 A 已经在 /lib64 等系统目录给 hpt 装到 /opt/<pkg> 下的 .so 建了
+ * 指向包内的符号链接；这里再显式注入 LD_LIBRARY_PATH 作为兜底：
+ *   · 包内库里出现 dlopen() 相对引用（没有 soname 链接）时 A 覆盖不到；
+ *   · /opt 下的路径随装随用，不需要重新登录或改镜像。
+ * 固定的 Debian 默认目录在前，/opt/<pkg>/... 追加在后——系统库优先，
+ * 避免包内旧副本盖掉运行时真正在用的 glibc。
+ */
+#define APP_LIB_PATH_MAX 1024
+static char app_lib_path[APP_LIB_PATH_MAX];
+static char app_env_ld_path[APP_LIB_PATH_MAX + 32];
+static char *app_envp[8];
+
+static void lib_path_append(char **cursor, const char *path) {
+    size_t len = strlen(path);
+    char *p = *cursor;
+    if (p != app_lib_path) {
+        if (p + 1 >= app_lib_path + sizeof(app_lib_path) - 1) return;
+        *p++ = ':';
+    }
+    if (p + len + 1 > app_lib_path + sizeof(app_lib_path)) return;
+    memcpy(p, path, len + 1);
+    *cursor = p + len;
+}
+
+/* 扫描 /opt/<pkg>/usr/lib 与 /opt/<pkg>/usr/lib/x86_64-linux-gnu，把确实
+ * 存在的目录拼进搜索路径。hpt 的安装布局是固定两级，无需深度遍历。 */
+static void lib_path_scan_opt(char **cursor) {
+    char name[VFS_MAX_NAME];
+    uint32_t type;
+    for (uint32_t i = 0; vfs_readdir_at("/opt", i, name, &type) == 0; i++) {
+        if (type != VFS_NODE_DIR || name[0] == '.' || name[0] == 0) continue;
+        static const char *const sub[] = {
+            "/usr/lib/x86_64-linux-gnu",
+            "/usr/lib64",
+            "/usr/lib",
+        };
+        for (size_t s = 0; s < sizeof(sub) / sizeof(sub[0]); s++) {
+            char candidate[256];
+            size_t used = 0;
+            if (strlen(name) + strlen(sub[s]) + 7 >= sizeof(candidate)) continue;
+            strcpy(candidate, "/opt/");
+            used = 5;
+            strcpy(candidate + used, name);
+            used += strlen(name);
+            strcpy(candidate + used, sub[s]);
+            vfs_node_t *node = vfs_lookup(candidate);
+            if (node && node->type == VFS_NODE_DIR)
+                lib_path_append(cursor, candidate);
+        }
+    }
+}
+
+static char **build_linux_env(void) {
+    static const char *const system_dirs[] = {
+        "/lib64",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib",
+        "/lib",
+    };
+    char *cursor = app_lib_path;
+    app_lib_path[0] = 0;
+    for (size_t i = 0; i < sizeof(system_dirs) / sizeof(system_dirs[0]); i++)
+        lib_path_append(&cursor, system_dirs[i]);
+    lib_path_scan_opt(&cursor);
+
+    static const char ld_prefix[] = "LD_LIBRARY_PATH=";
+    strcpy(app_env_ld_path, ld_prefix);
+    strcpy(app_env_ld_path + sizeof(ld_prefix) - 1, app_lib_path);
+    static char env_path[] = "PATH=/bin:/usr/bin:/sbin:/usr/sbin";
+    static char env_home[] = "HOME=/root";
+    static char env_tmp[] = "TMPDIR=/tmp";
+    static char env_lang[] = "LANG=C.UTF-8";
+    app_envp[0] = app_env_ld_path;
+    app_envp[1] = env_path;
+    app_envp[2] = env_home;
+    app_envp[3] = env_tmp;
+    app_envp[4] = env_lang;
+    app_envp[5] = NULL;
+    return app_envp;
+}
+
 static int run_elf_path(const char *path, const char *display,
                         int argc, char **argv) {
-    size_t size = 0;
-    int err = read_elf_image(path, &size);
-    if (err < 0) return -1;
+    /* 流式加载：直接从 VFS 读取 PT_LOAD 段，不再受 APP_ELF_MAX_SIZE 限制。 */
+    vfs_node_t *node = vfs_lookup(path);
+    if (!node || node->type != VFS_NODE_FILE) return -1;
     char *elf_argv[APP_ELF_MAX_ARGS];
     build_elf_argv(argc, argv, 1, elf_argv);
-    int pid = elf64_load_and_spawn(elf_buf, size, elf_argv, 0,
-                                   display ? display : basename_of(path));
+    int pid = elf64_load_vfs_and_spawn(node, elf_argv, build_linux_env(),
+                                       display ? display : basename_of(path));
     if (pid < 0) return -1;
+    /* 这里才知道调用方给的完整路径；/proc/<pid>/exe 要靠它（Chromium
+     * 用 dirname(readlink(...)) 找 icudtl.dat）。 */
+    task_set_exe_path((uint32_t)pid, path);
     int status = 0;
     if (task_wait((uint32_t)pid, &status) < 0) return -1;
     return status;
@@ -136,13 +226,14 @@ static int run_elf_path(const char *path, const char *display,
 /* 非阻塞启动一个 ELF 文件路径；返回 pid 或 -1 */
 static int spawn_elf_path(const char *path, const char *display,
                           int argc, char **argv) {
-    size_t size = 0;
-    int err = read_elf_image(path, &size);
-    if (err < 0) return -1;
+    vfs_node_t *node = vfs_lookup(path);
+    if (!node || node->type != VFS_NODE_FILE) return -1;
     char *elf_argv[APP_ELF_MAX_ARGS];
     build_elf_argv(argc, argv, 1, elf_argv);
-    return elf64_load_and_spawn(elf_buf, size, elf_argv, 0,
-                                display ? display : basename_of(path));
+    int pid = elf64_load_vfs_and_spawn(node, elf_argv, build_linux_env(),
+                                       display ? display : basename_of(path));
+    if (pid > 0) task_set_exe_path((uint32_t)pid, path);
+    return pid;
 }
 
 static void cmd_run(int argc, char **argv) {
@@ -179,7 +270,7 @@ static void cmd_run(int argc, char **argv) {
                 console_puts("run: cannot load .hax app\n");
                 return;
             }
-            if (hret != 0) {
+            {
                 console_puts("run: exit ");
                 print_uint((uint32_t)hret);
                 console_putchar('\n');
@@ -194,7 +285,7 @@ static void cmd_run(int argc, char **argv) {
         strcat(bin_path, argv[1]);
         int status = run_elf_path(bin_path, argv[1], argc, argv);
         if (status >= 0) {
-            if (status != 0) {
+            {
                 console_puts("run: exit ");
                 print_uint((uint32_t)status);
                 console_putchar('\n');
@@ -204,17 +295,18 @@ static void cmd_run(int argc, char **argv) {
         /* 再按原始参数作为文件路径运行 */
         status = run_elf_path(argv[1], argv[1], argc, argv);
         if (status >= 0) {
-            if (status != 0) {
+            {
                 console_puts("run: exit ");
                 print_uint((uint32_t)status);
                 console_putchar('\n');
             }
             return;
         }
-        size_t size = 0;
-        int err = read_elf_image(argv[1], &size);
-        if (err < 0) {
-            print_elf_read_error("run", err);
+        vfs_node_t *missing = vfs_lookup(argv[1]);
+        if (!missing || missing->type != VFS_NODE_FILE)
+            missing = vfs_lookup(bin_path);
+        if (!missing || missing->type != VFS_NODE_FILE) {
+            print_elf_read_error("run", -ENOENT);
             return;
         }
         console_puts("run: invalid or unsupported ELF: ");

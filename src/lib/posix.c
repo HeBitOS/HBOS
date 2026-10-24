@@ -417,7 +417,7 @@ int open(const char *path, int flags, ...) {
     if (access_error) return set_errno(access_error);
 
     if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
-        if (vfs_truncate(node) < 0) return set_errno(EIO);
+        if (vfs_truncate(node, 0) < 0) return set_errno(EIO);
     }
 
     return fd_alloc(node, flags, full);
@@ -517,11 +517,15 @@ int access(const char *path, int mode) {
 }
 
 int ftruncate(int fd, off_t length) {
-    if (length != 0) return set_errno(EINVAL);
     fd_entry_t *ent = fd_get(fd);
     if (!ent) return set_errno(EBADF);
-    if ((ent->flags & O_ACCMODE) == O_RDONLY) return set_errno(EBADF);
-    if (vfs_truncate(ent->node) < 0) return set_errno(EIO);
+    if (length < 0) return set_errno(EINVAL);
+    /* Linux 对只读 fd 的 ftruncate 返回 EINVAL（不是 EBADF）。sqlite 打开
+     * 只读连接时确实会试探一次，errno 语义对不上会让它误判为 IO 错误。 */
+    if ((ent->flags & O_ACCMODE) == O_RDONLY) return set_errno(EINVAL);
+    if (!ent->node || ent->node->type == VFS_NODE_DIR) return set_errno(EINVAL);
+    if ((off_t)(uint32_t)length != length) return set_errno(EFBIG);
+    if (vfs_truncate(ent->node, (uint32_t)length) < 0) return set_errno(EIO);
     if (ent->offset > ent->node->size) ent->offset = ent->node->size;
     return 0;
 }
@@ -631,8 +635,7 @@ int symlink(const char *target, const char *linkpath) {
     if (vfs_lookup_nofollow(full)) return set_errno(EEXIST);
     int parent_error = rename_parent_status(full);
     if (parent_error) return set_errno(parent_error);
-    if (strcmp(fs_backend_name(), "ext2") == 0 ||
-        strcmp(fs_backend_name(), "fat32") == 0)
+    if (strcmp(fs_backend_name(), "fat32") == 0)
         return set_errno(EOPNOTSUPP);
     vfs_node_t *link = vfs_symlink(full, target);
     if (!link) return set_errno(ENOSPC);
@@ -701,9 +704,19 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
     char target[256];
     target[0] = '\0';
     if (strcmp(cursor, "exe") == 0) {
-        target[0] = '/';
-        strncpy(target + 1, task->name, sizeof(target) - 2);
-        target[sizeof(target) - 1] = '\0';
+        /* 有真实路径就用真实路径；否则退回 "/<任务名>"（旧行为）。 */
+        size_t n = 0;
+        while (n + 1 < sizeof(task->exe_path) && task->exe_path[n])
+            n++;
+        if (n > 1 && task->exe_path[0] == '/') {
+            if (n >= sizeof(target)) n = sizeof(target) - 1;
+            memcpy(target, task->exe_path, n);
+            target[n] = '\0';
+        } else {
+            target[0] = '/';
+            strncpy(target + 1, task->name, sizeof(target) - 2);
+            target[sizeof(target) - 1] = '\0';
+        }
     } else if (strncmp(cursor, "fd/", 3) == 0) {
         cursor += 3;
         int fd = 0;

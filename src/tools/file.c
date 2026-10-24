@@ -37,7 +37,22 @@ static void print_errno(const char *cmd, const char *path) {
 }
 
 static void cmd_ls(int argc, char **argv) {
-    const char *dir = argc >= 2 ? argv[1] : ".";
+    int long_format = 0;
+    const char *dir = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-l") == 0) { long_format = 1; continue; }
+        if (strcmp(argv[i], "-a") == 0) continue;
+        if (argv[i][0] == '-' && argv[i][1]) {
+            /* 以前 "-l" 被当成路径去 resolve，失败后 print_errno 又打到
+             * 了别处，用户看到的是"静默无输出"。这里明确报错。 */
+            console_puts("\x1b[31mls: 不支持的选项 ");
+            console_puts(argv[i]);
+            console_puts("\x1b[0m\n");
+            return;
+        }
+        dir = argv[i];
+    }
+    if (!dir) dir = ".";
     char cwd[256];
     char full[256];
     char name[VFS_MAX_NAME];
@@ -48,23 +63,38 @@ static void cmd_ls(int argc, char **argv) {
         return;
     }
     for (uint32_t i = 0; vfs_readdir_at(full, i, name, &type) == 0; i++) {
+        char path[256];
+        struct stat st;
+        int have_stat = 0;
+        if (vfs_resolve_path(full, name, path, sizeof(path)) == 0 &&
+            stat(path, &st) == 0)
+            have_stat = 1;
+        if (long_format) {
+            console_puts(type == VFS_NODE_DIR ? "d" : "-");
+            console_puts("rwxr-xr-x  ");
+            print_uint(have_stat ? (uint32_t)st.st_size : 0);
+            /* 对齐到 10 列 */
+            uint32_t digits = 0;
+            uint32_t v = have_stat ? (uint32_t)st.st_size : 0;
+            do { digits++; v /= 10; } while (v);
+            for (uint32_t p = digits; p < 10; p++) console_putchar(' ');
+            console_puts("  ");
+        }
         if (type == VFS_NODE_DIR) console_puts("\x1b[34m");
         else console_puts("\x1b[0m");
         console_puts(name);
         if (type == VFS_NODE_DIR) console_puts("/");
         console_puts("\x1b[0m");
-        /* Padding to align sizes */
+        if (long_format) {
+            console_puts(type == VFS_NODE_DIR ? "  <DIR>" : "  B");
+            console_putchar('\n');
+            continue;
+        }
         uint32_t nlen = 0; while (name[nlen]) nlen++;
         if (type == VFS_NODE_DIR) nlen++;
         for (uint32_t p = nlen; p < 24; p++) console_putchar(' ');
         if (type == VFS_NODE_FILE) {
-            char path[256];
-            struct stat st;
-            if (vfs_resolve_path(full, name, path, sizeof(path)) == 0 &&
-                stat(path, &st) == 0)
-                print_uint((uint32_t)st.st_size);
-            else
-                print_uint(0);
+            print_uint(have_stat ? (uint32_t)st.st_size : 0);
             console_puts(" B");
         } else {
             console_puts("<DIR>");

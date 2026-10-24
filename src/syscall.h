@@ -259,6 +259,8 @@ typedef struct {
  */
 uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *frame);
+/** 打印最近 128 条 Linux 系统调用（用户态异常时调用）。 */
+void linux_syscall_trace_dump(void);
 
 /** Rewrite a ring3 exception return frame for synchronous signal delivery.
  *  cr2/err_code describe the faulting access (CR2 and page-fault error code);

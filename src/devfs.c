@@ -266,6 +266,13 @@ static void proc_update(vfs_node_t *node) {
                         "bogomips    : 2000.00\n";
         while (*h) buf[pos++] = *h++;
         node->size = (uint32_t)pos;
+
+    } else if (strcmp(node->name,
+                      "/proc/sys/fs/inotify/max_user_watches") == 0) {
+        int pos = 0;
+        const char *h = "8192\n";
+        while (*h) buf[pos++] = *h++;
+        node->size = (uint32_t)pos;
     } else {
         const char *leaf = NULL;
         const task_t *task = proc_task_from_path(node->name, &leaf);
@@ -540,6 +547,17 @@ void devfs_init(void) {
     n->private_data = kmalloc(PROC_BUF_SIZE);
     memset(n->private_data, 0, PROC_BUF_SIZE);
 
+    // /proc/sys/fs/inotify/max_user_watches — Chromium 的 inotify 文件
+    // 监视器启动时要读它决定 watch 上限；没有这个文件会报 ERROR 但
+    // 继续跑，顺手补上减少噪音。
+    n = devfs_alloc_node();
+    set_name(n, "/proc/sys/fs/inotify/max_user_watches");
+    n->type = VFS_NODE_FILE;
+    n->mode = S_IFREG | 0444;
+    n->ops = &devfs_proc_ops;
+    n->private_data = kmalloc(PROC_BUF_SIZE);
+    memset(n->private_data, 0, PROC_BUF_SIZE);
+
     // /dev/random
     n = devfs_alloc_node();
     set_name(n, "/dev/random");
@@ -640,6 +658,7 @@ vfs_node_t *devfs_lookup(const char *path) {
             if (!n) return NULL;
             set_name(n, path);
             n->type = VFS_NODE_DIR;
+            n->mode = S_IFDIR | 0555;
             return n;
         }
 
@@ -649,6 +668,7 @@ vfs_node_t *devfs_lookup(const char *path) {
             if (!n) return NULL;
             set_name(n, path);
             n->type = VFS_NODE_DIR;
+            n->mode = S_IFDIR | 0555;
             return n;
         }
         if (leaf && (strcmp(leaf, "cmdline") == 0 ||
@@ -658,6 +678,7 @@ vfs_node_t *devfs_lookup(const char *path) {
             if (!n) return NULL;
             set_name(n, path);
             n->type = VFS_NODE_FILE;
+            n->mode = S_IFREG | 0444;
             n->ops = &devfs_proc_ops;
             n->private_data = kmalloc(PROC_BUF_SIZE);
             if (!n->private_data) { devfs_node_count--; return NULL; }

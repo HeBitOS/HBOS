@@ -171,7 +171,7 @@ static int code_save(gui_state_t *st) {
         st->status = "代码保存失败";
         return -1;
     }
-    if (vfs_truncate(node) < 0 ||
+    if (vfs_truncate(node, 0) < 0 ||
         vfs_write(node, 0, g_code_buf, cs()->len) < 0) {
         code_set_output("Save failed: VFS write error");
         st->status = "代码保存失败";

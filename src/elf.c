@@ -765,7 +765,8 @@ static int elf64_load_source_and_spawn_snapshot(
      * The padding keeps the total push count odd so the stack lands at
      * 8 mod 16; SSE2 programs (quickjs/tinycc) fault on misaligned movdqa
      * otherwise.  Plain -mno-sse apps are alignment-agnostic. */
-    if (((35 + argc + envc) & 1) == 0)
+    int want_odd_pushes = !has_interp;
+    if (((35 + argc + envc) & 1) != want_odd_pushes)
         push_user_u64(&stack_addr, 0);
 
     uint64_t phdr_address = 0;
@@ -851,6 +852,10 @@ static int elf64_load_source_and_spawn_snapshot(
     if (source->memory)
         attach_host_symtab(source->memory, (size_t)source->size, ehdr,
                            (uint32_t)new_id);
+    /* /proc/<pid>/exe 必须是真实路径：Chromium 用它定位 icudtl.dat 与
+     * *.pak（dirname(readlink("/proc/self/exe"))）。 */
+    if (source->node && source->node->name[0])
+        task_set_exe_path((uint32_t)new_id, source->node->name);
 
     return new_id;
 #undef ELF_NEW_IMAGE_FAIL
@@ -915,4 +920,30 @@ int elf64_load_vfs_and_exec(struct vfs_node *node,
     if (new_id < 0) return -1;
     task_exit();
     return 0;
+}
+
+/* Stream an ELF image from a VFS node into a NEW task (non-replacing).
+ * Unlike elf64_load_and_spawn() the file is never copied into a kernel/user
+ * buffer, so image size is bounded only by the filesystem and address space. */
+int elf64_load_vfs_and_spawn(struct vfs_node *node,
+                             char *const argv[], char *const envp[],
+                             const char *task_name) {
+    elf_arg_snapshot_t *snapshot =
+        (elf_arg_snapshot_t *)kmalloc(sizeof(*snapshot));
+    if (!snapshot) return elf_fail("argument snapshot allocation failed");
+    if (snapshot_exec_arguments(argv, envp, snapshot) < 0) {
+        kfree(snapshot);
+        return elf_fail("invalid or oversized arguments");
+    }
+    elf_image_source_t source;
+    if (prepare_vfs_source((vfs_node_t *)node, &source) < 0) {
+        kfree(snapshot);
+        return -1;
+    }
+    int new_id = elf64_load_source_and_spawn_snapshot(
+        &source, snapshot->argv, snapshot->envp,
+        task_name ? task_name : "elf_app");
+    release_image_source(&source);
+    kfree(snapshot);
+    return new_id;
 }

@@ -35,6 +35,55 @@ static void print_hex16(uint16_t v) {
     }
 }
 
+/** 打印十进制（栈帧序号用）。
+ *
+ * 用户态崩溃只有 RIP 时，只能看到"最后一跳"，看不到是谁调过来的：
+ * Chromium 这种 280 MB 的二进制里，一个 CHECK 失败往往发生在深层调用里。
+ * 这里沿 RBP 链把返回地址全部打出来——宿主侧拿同一份 ELF 用
+ * `objdump -d --start-address=<ret - base>` 就能反查到具体调用点。
+ * 内核没开 SMAP/SMEP，用户页可直接读；但仍逐页用 vmm_get_phys() 校验，
+ * 避免把野指针当成栈帧读崩内核。 */
+static void print_dec(int value) {
+    char buf[8];
+    int n = 0;
+    if (value < 0) { console_putchar('-'); value = -value; }
+    do { buf[n++] = (char)('0' + value % 10); value /= 10; } while (value);
+    while (n--) console_putchar(buf[n]);
+}
+
+static int user_va_range_mapped(uint64_t address, uint64_t length) {
+    if (!address || length == 0) return 0;
+    if (address >= 0x0000800000000000ULL ||
+        length > 0x0000800000000000ULL - address)
+        return 0;
+    uint64_t first = address & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t last = (address + length - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    for (uint64_t va = first; va <= last; va += PAGE_SIZE)
+        if (!vmm_get_phys(va)) return 0;
+    return 1;
+}
+
+static void dump_user_backtrace(uint64_t rip, uint64_t rbp) {
+    console_puts("  bt[0] rip=0x");
+    print_hex64(rip);
+    console_putchar('\n');
+    uint64_t frame = rbp;
+    for (int depth = 1; depth <= 16; depth++) {
+        if (!user_va_range_mapped(frame, 16)) break;
+        uint64_t next_rbp = *(volatile uint64_t *)(uintptr_t)frame;
+        uint64_t return_address =
+            *(volatile uint64_t *)(uintptr_t)(frame + 8);
+        if (!return_address) break;
+        console_puts("  bt[");
+        print_dec(depth);
+        console_puts("] ret=0x");
+        print_hex64(return_address);
+        console_putchar('\n');
+        if (next_rbp <= frame) break;     /* 栈必须向高地址增长 */
+        frame = next_rbp;
+    }
+}
+
 // ============================================================
 // Global Descriptor Table (GDT)
 // ============================================================
@@ -264,6 +313,52 @@ void isr_handler(isr_regs_t *regs) {
         task_t *task = task_current();
         if (task) task->sig_exit_code = SIGSEGV;
         task_set_exit_status(128 + SIGSEGV);
+        /* 未注册处理器 = 进程真死了：留下 fault 地址 + 回溯，否则只剩
+         * 一行 "run: exit 139"，无从判断崩在哪个调用链。 */
+        console_puts("\n[TRAP] user SIGSEGV addr=0x");
+        print_hex64(cr2_val);
+        console_puts(" rip=0x");
+        print_hex64(regs->rip);
+        console_putchar('\n');
+        dump_user_backtrace(regs->rip, regs->rbp);
+        task_exit();
+    }
+
+    /* User-mode synchronous traps must kill only the offending task.
+     *
+     * Chromium 的 CHECK()/IMMEDIATE_CRASH() 走 `int3`（跟 ud2 配对），
+     * 而 int3 要求 IDT 门的 DPL=3；以前 vector 3 是 DPL0，于是 ring3 的
+     * int3 被 CPU 升级成 #GP(错误码 0x1A = IDT[3] 门不可用)，整个内核
+     * panic——"用户程序一个断言失败，整机就得重启"。除了补齐 DPL，
+     * 这里把 #BP/#UD/#GP 等同步异常统一按"进程异常终止"处理，串口留下
+     * RIP，方便继续排查。 */
+    if ((regs->cs & 3) == 3 &&
+        (vec == EXC_BP || vec == EXC_UD || vec == EXC_GP ||
+         vec == EXC_DE || vec == EXC_AC || vec == EXC_MF)) {
+        int signal_number = (vec == EXC_BP) ? SIGTRAP : SIGILL;
+        console_puts("\n[TRAP] user ");
+        console_puts(name);
+        console_puts(" rip=0x");
+        print_hex64(regs->rip);
+        console_puts(" err=0x");
+        print_hex64(regs->err_code);
+        console_puts(" -> task terminated\n");
+        {
+            task_t *current = task_current();
+            console_puts("  fs_base=0x");
+            print_hex64(current ? current->fs_base : 0);
+            console_puts(" tls_marker=");
+            print_hex64((uint64_t)current);
+            console_putchar('\n');
+        }
+        dump_user_backtrace(regs->rip, regs->rbp);
+        linux_syscall_trace_dump();
+        if (linux_signal_prepare_exception(regs, signal_number, regs->rip,
+                                           regs->err_code) > 0)
+            return;
+        task_t *task = task_current();
+        if (task) task->sig_exit_code = signal_number;
+        task_set_exit_status(128 + signal_number);
         task_exit();
     }
 
@@ -283,6 +378,9 @@ void isr_handler(isr_regs_t *regs) {
     smp_panic_puts(" cr2=");
     smp_panic_hex(cr2_val);
     smp_panic_puts("\n");
+    /* 内核态崩溃也要带上"最后做了什么"：多线程并发后才出现的崩溃
+     * 单线程复现不了，只有最近系统调用轨迹能指认是哪条路径。 */
+    linux_syscall_trace_dump();
     console_puts("Exception: ");
     console_puts(name);
     console_puts(" (cpu=");
@@ -327,6 +425,24 @@ void isr_handler(isr_regs_t *regs) {
     }
     console_puts(")\n");
 
+    /* 内核栈扫描：打印栈上落在内核镜像（链接基址 16 MiB）里的 8 字节值，
+     * 基本都是返回地址。宿主侧 objdump 一查就是完整调用链——空函数指针
+     * (RIP=0x3) 这种"崩在无名地址"的场景只有靠它定位。 */
+    if (vec == EXC_UD || vec == EXC_GP || vec == EXC_DE) {
+        console_puts("kernel stack scan:\n");
+        for (uint64_t sp = regs->rsp & ~7ULL;
+             sp < (regs->rsp & ~7ULL) + 0x400; sp += 8) {
+            uint64_t v = *(volatile uint64_t *)sp;
+            if (v >= 0x1000000ULL && v < 0x1200000ULL) {
+                console_puts("  [0x");
+                print_hex64(sp);
+                console_puts("]=0x");
+                print_hex64(v);
+                console_putchar('\n');
+            }
+        }
+    }
+
     if (regs->err_code != 0) {
         console_puts("Error code: 0x");
         uint64_t ec = regs->err_code;
@@ -362,6 +478,30 @@ void isr_handler(isr_regs_t *regs) {
     }
 
     console_puts("\n\x1b[36m--- Register dump ---\x1b[0m\n");
+    {
+        task_t *current = task_current();
+        console_puts("current task: id=");
+        print_hex64(current ? current->id : 0);
+        console_puts(" name=");
+        console_puts(current ? current->name : "?");
+        console_puts(" state=");
+        print_hex64(current ? (uint64_t)current->state : 0);
+        console_puts(" ksp=0x");
+        print_hex64(current ? current->rsp : 0);
+        console_putchar('\n');
+        /* 原始栈转储：上面的"文本地址扫描"空手而归，说明 RSP 本身就是
+         * 坏的（指向数据而不是栈）。把 RSP 附近的原始内存打出来，直接
+         * 认出它是哪个结构体。 */
+        console_puts("raw stack @[rsp-0x40, rsp+0x40):");
+        uint64_t base = regs->rsp & ~7ULL;
+        for (int64_t off = -0x40; off < 0x40; off += 8) {
+            if ((off & 0x1F) == 0) console_puts("\n  ");
+            uint64_t v = *(volatile uint64_t *)(base + off);
+            print_hex64(v);
+            console_putchar(' ');
+        }
+        console_putchar('\n');
+    }
     console_puts("RAX=0x"); print_hex64(regs->rax);   console_puts(" RBX=0x"); print_hex64(regs->rbx); console_putchar('\n');
     console_puts("RCX=0x"); print_hex64(regs->rcx);   console_puts(" RDX=0x"); print_hex64(regs->rdx); console_putchar('\n');
     console_puts("RSI=0x"); print_hex64(regs->rsi);   console_puts(" RDI=0x"); print_hex64(regs->rdi); console_putchar('\n');
@@ -471,6 +611,9 @@ void gdt_idt_init(void) {
     }
     // Page fault as trap gate (preserves interrupt flag)
     idt_set_entry(EXC_PF, isr_stub_table[EXC_PF], IDT_PRESENT | IDT_DPL0 | IDT_TRAP_GATE);
+    /* #BP 必须允许 ring3 直接触发（int3 从用户态进内核），否则会被
+     * CPU 当成 IDT 门权限不足 → #GP。Chromium/glibc 的断言都依赖它。 */
+    idt_set_entry(EXC_BP, isr_stub_table[EXC_BP], IDT_PRESENT | IDT_DPL3 | IDT_INT_GATE);
 
     // Remap PIC and register IRQ handlers
     pic_remap();

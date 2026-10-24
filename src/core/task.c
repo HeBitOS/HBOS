@@ -710,7 +710,9 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     strncpy(tcb->name, name ? name : "task", TASK_NAME_MAX);
     tcb->name[TASK_NAME_MAX - 1] = '\0';
     /* 调度字段必须在入队之前定好：旧代码先 sched_mark_ready() 再填字段，
-     * 复用槽位时会把上一次的 prio/cpu 带进队列。 */
+     * 复用槽位时会把上一次的 prio/cpu 带进队列。snode 整块清零（合并自
+     * ④ 的 WIP）防止复用槽位残留 prev/next 野指针。 */
+    memset(&tcb->snode, 0, sizeof(tcb->snode));
     tcb->state = TASK_READY;
     tcb->prio = 0;
     tcb->dep_id = 0;
@@ -848,6 +850,9 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     tcb->id = next_id++;
     strncpy(tcb->name, name ? name : "user", TASK_NAME_MAX);
     tcb->name[TASK_NAME_MAX - 1] = '\0';
+    memset(&tcb->snode, 0, sizeof(tcb->snode));
+    tcb->prio = 0;
+    tcb->dep_id = 0;
     sched_mark_ready(tcb);
     tcb->entry = NULL;
     tcb->arg = NULL;
@@ -956,11 +961,58 @@ int task_create_ring3(const char *name, uint64_t user_entry, uint64_t user_stack
  * 让出 CPU — 协作式调度入口
  * 当前任务状态变为 READY，切换到下一个 READY 任务
  */
+/* ── 切换前上下文校验 ────────────────────────────────────────────────
+ * task_switch 从 next->rsp 弹 6 个 callee-saved + popfq + ret，所以
+ * [rsp+0x38] 必须是内核镜像内的返回地址。多线程化后出现过 rsp 指向
+ * 堆、槽里是 {0,3,8,...} 的坏帧，一 iret 就 #UD(RIP=0x3) 整机 panic。
+ * 这里在切换前校验，坏任务打印现场并丢弃，调度器继续选下一个。 */
+static bool sched_context_valid(task_t *next) {
+    /* id=0 (main) 跑在引导栈上，stack_base 字段不描述它的真实栈。 */
+    if (next->id == 0) return true;
+    if (!next->rsp || next->rsp < next->stack_base ||
+        next->rsp + 0x40 > next->stack_base + next->stack_size)
+        return false;
+    uint64_t ret_slot = *(volatile uint64_t *)(next->rsp + 0x38);
+    return ret_slot >= 0x1000000ULL && ret_slot < 0x5470000ULL;
+}
+
+static void sched_print_hex(uint64_t v) {
+    for (int i = 15; i >= 0; i--) {
+        int d = (v >> (i * 4)) & 0xF;
+        console_putchar(d < 10 ? '0' + d : 'A' + d - 10);
+    }
+}
+
+static task_t *sched_pick_valid(void) {
+    for (;;) {
+        task_t *next = sched_next();
+        if (!next) return NULL;
+        if (sched_context_valid(next)) return next;
+        console_puts("\n[SCHED] BAD CTX id=");
+        sched_print_hex(next->id);
+        console_puts(" name=");
+        console_puts(next->name);
+        console_puts(" rsp=0x");
+        sched_print_hex(next->rsp);
+        console_puts(" stack=0x");
+        sched_print_hex(next->stack_base);
+        console_puts("+0x");
+        sched_print_hex(next->stack_size);
+        console_puts(" frame:");
+        for (int i = 0; i < 8; i++) {
+            console_puts(" ");
+            sched_print_hex(*(volatile uint64_t *)(next->rsp + i * 8));
+        }
+        console_putchar('\n');
+        next->state = TASK_TERMINATED;
+    }
+}
+
 void task_yield(void) {
     uint64_t irq_flags = task_irq_save();
     smp_sched_lock();
     task_t *prev = current_task;
-    task_t *next = sched_next();
+    task_t *next = sched_pick_valid();
 
     if (!next || next == prev) {
         smp_sched_unlock();
@@ -1114,7 +1166,7 @@ void task_exit(void) {
     sched_mark_dead(current_task);
 
     while (1) {
-        task_t *next = sched_next();
+        task_t *next = sched_pick_valid();
         if (!next) {
             /* 本核没活可干了：退回自己的空闲任务，而不是把整个核停机。
              * 停机等于永久少一个 CPU，而且日志里的"All tasks terminated"
@@ -1163,6 +1215,17 @@ task_t *task_lookup(uint32_t id) {
     return NULL;
 }
 
+void task_set_exe_path(uint32_t id, const char *path) {
+    task_t *task = task_get_by_id(id);
+    if (!task || !path) return;
+    size_t n = 0;
+    while (path[n] && n + 1 < sizeof(task->exe_path)) {
+        task->exe_path[n] = path[n];
+        n++;
+    }
+    task->exe_path[n] = '\0';
+}
+
 void task_set_host_symtab(uint32_t id, void *symtab, char *strtab, uint64_t count) {
     for (int i = 0; i < task_count; i++) {
         if (task_pool[i].id == id) {
@@ -1185,6 +1248,13 @@ int task_wait(uint32_t id, int *status) {
     if (!target || target == current_task) return -1;
 
     while (target->state != TASK_TERMINATED) {
+        /* 槽位可能已被回收/复用（exit_group 会先清掉属主线程），此时它已不是
+         * 我们要等的任务。以前这里只认 TASK_TERMINATED，一旦槽位被复用就会
+         * 永远 yield —— 表现就是 "tree 打印完、提示符再也不回来"。 */
+        if (target->id != id) {
+            if (status) *status = 0;
+            return 0;
+        }
         task_yield();
     }
     if (status) *status = target->exit_status;
@@ -1706,10 +1776,10 @@ void task_schedule(void) {
     task_t *cur = current_task;
     if (cur->state == TASK_RUNNING)
         sched_mark_ready(cur);
-    /* 与 task_yield 共用一个健壮的轮转选择原语，消除此处原先
-     * "盲跟 next 指针 + checked 兜底"的重复扫描及其越界风险。 */
-    task_t *next = sched_next();
-    if (!next) {
+    /* 合并：sched_pick_valid（④）在轮转选择之上加了切换前上下文校验，
+     * 坏帧任务直接丢弃，调度器继续选下一个。 */
+    task_t *next = sched_pick_valid();
+    if (!next || next == cur) {
         /* 这一轮没换成别的任务：把状态改回 RUNNING。
          * sched_mark_ready 会把 state 置成 READY，但任务其实一步都没离开
          * CPU。若就这么返回，它下次 yield 时"只有 RUNNING 才入队"的判断

@@ -326,7 +326,8 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/apps/app_uwc.c \
 	$(SRC_DIR)/gui/apps/app_diag.c \
 	$(SRC_DIR)/gui/apps/app_notes.c \
-	$(SRC_DIR)/gui/apps/app_code.c
+	$(SRC_DIR)/gui/apps/app_code.c \
+	$(SRC_DIR)/gui/apps/app_hpt.c
 
 ifeq ($(HBOS_ENABLE_GUI),1)
 C_SRCS += $(GUI_C_SRCS)
@@ -617,6 +618,7 @@ $(ISO_BIOS): $(KERNEL_BIOS) $(GRUB_CFG)
 	@mkdir -p $(BUILD_DIR)/isodir-bios/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-bios/boot/hbos.bin
 	@cp $(GRUB_CFG) $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
+	@if [ -n "$(ISO_PAYLOAD)" ]; then cp -a "$(ISO_PAYLOAD)" $(BUILD_DIR)/isodir-bios/payload; fi
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios
 	@cp $@ "$(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 	@echo "✓ BIOS ISO: $@"
@@ -642,6 +644,23 @@ iso: $(ISO_BIOS) $(ISO_UEFI)
 bios-iso: $(ISO_BIOS)
 
 uefi-iso: $(ISO_UEFI)
+
+# ── 应用安装 / 镜像读写（宿主机侧） ─────────────────────────────
+# make install-app APP_DEB=./x.deb      把 deb 装进镜像并开 QEMU 看效果
+# make img-ls  P=/opt/x                列镜像里的目录
+# make img-get P=/opt/x/f -o? O=/tmp/f 从镜像取文件
+# make img-put F=./f D=/opt/x/f        往镜像写文件
+APP_DEB ?= $(firstword $(wildcard $(CURDIR)/*.deb))
+APP_IMG ?= $(BUILD_DIR)/c3-chromium.img
+install-app: $(ISO_BIOS)
+	@test -n "$(APP_DEB)" || { echo "用法: make install-app APP_DEB=./x.deb"; exit 1; }
+	@python3 scripts/install_app.py --deb "$(APP_DEB)" --img "$(APP_IMG)" --iso $(ISO_BIOS)
+img-ls:
+	@python3 scripts/install_app.py --img "$(APP_IMG)" --img-ls "$(P)"
+img-get:
+	@python3 scripts/install_app.py --img "$(APP_IMG)" --img-get "$(P)" -o "$(O)"
+img-put:
+	@python3 scripts/install_app.py --img "$(APP_IMG)" --img-put "$(F)" --img-dest "$(D)"
 
 run: run-hdd-bios
 
@@ -1116,7 +1135,7 @@ USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o) $(BUILD_DIR)/
 #   3. $(APP_DIR)/lib/<lib>/        独立库
 HBOS_COMPAT_SMOKE ?= 0
 HBOS_MUSL_SYSROOT ?=
-HBOS_GLIBC_LIBDIR ?=
+HBOS_GLIBC_LIBDIR ?= $(patsubst %/libc.so.6,%,$(firstword $(wildcard /lib/x86_64-linux-gnu/libc.so.6 /usr/lib/libc.so.6)))
 ifeq ($(HBOS_BUNDLE_APPS),1)
 HAX_APPS_MK := $(wildcard $(HAX_COMPILE_DIR)/mk/hax-apps.mk)
 ifneq ($(strip $(HAX_APPS_MK)),)
@@ -1126,6 +1145,11 @@ $(error HAX-Compile 模块缺失：找不到 $(HAX_COMPILE_DIR)/mk/hax-apps.mk�
 endif
 HAX_ALL_BINS = $(HAX_APP_BINS) $(HAX_DIR_APP_BINS) $(HAX_PREBUILT) $(BUILD_DIR)/app/tcc.hax \
 	$(BUILD_DIR)/app/js.hax $(BUSYBOX_HAX)
+ifneq ($(strip $(HBOS_GLIBC_LIBDIR)),)
+HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_glibc.hax \
+	$(BUILD_DIR)/tests/linux_glibc_loader.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libc.hax
+endif
 ifeq ($(HBOS_COMPAT_SMOKE),1)
 HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_compat_thread.hax \
 	$(BUILD_DIR)/tests/linux_socket2.hax \
@@ -1160,11 +1184,6 @@ HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_musl.hax \
 	$(BUILD_DIR)/tests/linux_musl_pthread.hax \
 	$(BUILD_DIR)/tests/linux_musl_loader.hax \
 	$(BUILD_DIR)/tests/linux_musl_stream.hax
-endif
-ifneq ($(strip $(HBOS_GLIBC_LIBDIR)),)
-HAX_ALL_BINS += $(BUILD_DIR)/tests/linux_glibc.hax \
-	$(BUILD_DIR)/tests/linux_glibc_loader.hax \
-	$(BUILD_DIR)/tests/linux_glibc_libc.hax
 endif
 endif
 else
@@ -1391,6 +1410,65 @@ $(BUILD_DIR)/tests/linux_glibc_libc.hax: | $(BUILD_DIR)
 		{ echo "glibc libc.so.6 not found in HBOS_GLIBC_LIBDIR" >&2; exit 2; }
 	cp "$(HBOS_GLIBC_LIBDIR)/libc.so.6" $@
 	@echo "✓ Native glibc libc image: $@"
+
+# ── glibc 运行时补充库 ─────────────────────────────────────────────────
+# 只种 libc.so.6 不够：Debian 的 libglib-2.0 / Chromium 的 DT_NEEDED 里还有
+# libm.so.6、libpthread.so.0、libdl.so.2、librt.so.1、libresolv.so.2 等
+# （glibc 2.34 起 pthread/dl 已并入 libc，但 soname 依赖仍然存在）。
+# 它们都在 libc6 包里，这里按"内核自带最小 glibc 运行时"一并种进 /lib64。
+GLIBC_EXTRA_HAX := $(BUILD_DIR)/tests/linux_glibc_libm.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libpthread.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libdl.hax \
+	$(BUILD_DIR)/tests/linux_glibc_librt.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libresolv.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libutil.hax \
+	$(BUILD_DIR)/tests/linux_glibc_libgcc_s.hax
+
+# 七个补充库逐个 cp：名字即 genhax 的 blob 名（无 .haxmeta 时取文件名）。
+$(BUILD_DIR)/tests/linux_glibc_libm.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/libm.so.6" || \
+		{ echo "glibc libm.so.6 not found" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/libm.so.6" $@
+	@echo "✓ Native glibc runtime lib: libm.so.6"
+
+$(BUILD_DIR)/tests/linux_glibc_libpthread.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/libpthread.so.0" || \
+		{ echo "glibc libpthread.so.0 not found" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/libpthread.so.0" $@
+	@echo "✓ Native glibc runtime lib: libpthread.so.0"
+
+$(BUILD_DIR)/tests/linux_glibc_libdl.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/libdl.so.2" || \
+		{ echo "glibc libdl.so.2 not found" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/libdl.so.2" $@
+	@echo "✓ Native glibc runtime lib: libdl.so.2"
+
+$(BUILD_DIR)/tests/linux_glibc_librt.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/librt.so.1" || \
+		{ echo "glibc librt.so.1 not found" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/librt.so.1" $@
+	@echo "✓ Native glibc runtime lib: librt.so.1"
+
+$(BUILD_DIR)/tests/linux_glibc_libresolv.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/libresolv.so.2" || \
+		{ echo "glibc libresolv.so.2 not found" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/libresolv.so.2" $@
+	@echo "✓ Native glibc runtime lib: libresolv.so.2"
+
+$(BUILD_DIR)/tests/linux_glibc_libutil.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/libutil.so.1" || \
+		{ echo "glibc libutil.so.1 not found" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/libutil.so.1" $@
+	@echo "✓ Native glibc runtime lib: libutil.so.1"
+
+$(BUILD_DIR)/tests/linux_glibc_libgcc_s.hax: | $(BUILD_DIR)
+	@test -f "$(HBOS_GLIBC_LIBDIR)/libgcc_s.so.1" || \
+		{ echo "libgcc_s.so.1 not found" >&2; exit 2; }
+	cp "$(HBOS_GLIBC_LIBDIR)/libgcc_s.so.1" $@
+	@echo "✓ Native glibc runtime lib: libgcc_s.so.1"
+
+# 追加到内核嵌入清单（此处晚于 HAX_ALL_BINS 的初始赋值、早于 genhax 规则）
+HAX_ALL_BINS += $(GLIBC_EXTRA_HAX)
 
 $(BUILD_DIR)/tests/linux_abi.hax: tests/linux_abi.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)

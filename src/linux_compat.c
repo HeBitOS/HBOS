@@ -50,6 +50,7 @@
 
 
 #define LINUX_SOCK_STREAM 1
+#define LINUX_SOCK_SEQPACKET 5   /* 保序报文；HBOS 按字节流兼容处理 */
 #define LINUX_SOCK_TYPE_MASK 0xf
 #define LINUX_SOCK_NONBLOCK 0x800
 #define LINUX_SOCK_CLOEXEC 0x80000
@@ -1685,6 +1686,13 @@ int linux_compat_unix_socket(int type, int protocol) {
     int base_type = type & LINUX_SOCK_TYPE_MASK;
     int flags = type & (LINUX_SOCK_NONBLOCK | LINUX_SOCK_CLOEXEC);
     if (protocol != 0) return compat_set_errno(EPROTONOSUPPORT);
+    /* SOCK_SEQPACKET(5)：Chromium 的 crashpad / Mojo 通道用它在父子进程间
+     * 传消息边界。HBOS 的 unix socket 是字节流实现，没有保序消息语义，
+     * 但按 STREAM 处理可以正常收发（对端也是本内核的实现，边界由上层
+     * 的长度前缀维系）。直接拒绝会让 Chromium 在 crash handler 初始化时
+     * CHECK 失败退出（错误码 94=ESOCKTNOSUPPORT）。 */
+    if (base_type == LINUX_SOCK_SEQPACKET)
+        base_type = LINUX_SOCK_STREAM;
     if (base_type != LINUX_SOCK_STREAM)
         return compat_set_errno(ESOCKTNOSUPPORT);
     if (type & ~(LINUX_SOCK_TYPE_MASK | LINUX_SOCK_NONBLOCK |

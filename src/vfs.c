@@ -86,7 +86,7 @@ static void vfs_notify_node(vfs_node_t *node, uint32_t mask) {
 
 /* 内置 HAX 兼容文件 + TCC runtime/37 个头文件 + web vendor。
  * 这些资源直接引用内核 incbin 数据，避免启动时复制/写入 HBFS。 */
-#define VFS_STATIC_FILES_MAX 96
+#define VFS_STATIC_FILES_MAX 128
 
 typedef struct {
     vfs_node_t node;
@@ -121,10 +121,16 @@ static int vfs_static_noop(vfs_node_t *node) {
     return -1;
 }
 
+static int vfs_static_truncate_noop(vfs_node_t *node, uint32_t size) {
+    (void)node;
+    (void)size;
+    return -1;
+}
+
 static const vfs_ops_t vfs_static_ops = {
     .read = vfs_static_read,
     .write = vfs_static_readonly,
-    .truncate = vfs_static_noop,
+    .truncate = vfs_static_truncate_noop,
     .unlink = vfs_static_noop,
 };
 
@@ -437,11 +443,22 @@ int vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count
     return result;
 }
 
-/** 截断 VFS 节点（清零大小），通过节点操作接口调用底层 truncate */
-int vfs_truncate(vfs_node_t *node) {
+/** 把 VFS 节点截断/扩展到 size 字节，通过节点操作接口调用底层 truncate */
+int vfs_truncate(vfs_node_t *node, uint32_t size) {
     if (!node || !node->ops || !node->ops->truncate) return -1;
-    int result = node->ops->truncate(node);
-    if (result == 0) vfs_notify_node(node, LINUX_IN_MODIFY);
+    int result = node->ops->truncate(node, size);
+    if (result == 0) {
+        if (size == 0) {
+            node->size = 0;
+            node->capacity = 0;
+        } else if (size > node->size) {
+            node->size = size;
+            if (size > node->capacity) node->capacity = size;
+        } else {
+            node->size = size;   /* 缩小：底层可能暂不回收块，但可见长度必须变 */
+        }
+        vfs_notify_node(node, LINUX_IN_MODIFY);
+    }
     return result;
 }
 

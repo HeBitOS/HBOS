@@ -50,7 +50,12 @@
 #define SIG_UNBLOCK 1   /**< 解除阻塞信号集 */
 #define SIG_SETMASK 2   /**< 设置信号掩码 */
 
-#define _NSIG       64   /**< 信号总数 */
+/* Linux 的 _NSIG 是 65 —— 合法信号号是 1..64，65 只作为上界。
+ * 以前写成 64，于是 sigaction(64) 被当成非法参数返回 EINVAL；Chromium 在
+ * fork 出来的子进程里做 "for (sig = 1; sig < NSIG; ++sig) sigaction(...)"，
+ * 撞到 64 就 RAW_LOG(FATAL, "sigaction (set) failed.") → int3，
+ * 表现成"每个子进程起来就崩"。数组按 _NSIG 开，比 64 多一格即可。 */
+#define _NSIG       65   /**< 信号号上界（合法 1..64） */
 #define _NSIG_BPW   64
 #define _NSIG_WORDS (_NSIG / _NSIG_BPW)
 

@@ -162,8 +162,15 @@ int ext2_free_inode(ext2_fs_t *fs, uint32_t inode_num);
 int ext2_write_file(ext2_fs_t *fs, uint32_t inode_num,
                     uint32_t offset, const uint8_t *buf, uint32_t count);
 int ext2_create_file(ext2_fs_t *fs, uint32_t dir_ino, const char *name, uint8_t file_type);
+/** 创建符号链接：<=60 字节走 inode 内联（fast symlink），更长则占一个数据块。
+ *  返回新建 inode 号，失败返回 -1。 */
+int ext2_symlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
+                 const char *target);
+/** 读取符号链接目标到 buf（不含 '\0'），返回字节数。 */
+int ext2_readlink(ext2_fs_t *fs, const ext2_inode_t *inode, char *buf,
+                  uint32_t capacity);
 int ext2_unlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name);
-int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num);
+int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num, uint32_t new_size);
 int ext2_mkdir(ext2_fs_t *fs, uint32_t parent_ino, const char *name);
 
 #endif

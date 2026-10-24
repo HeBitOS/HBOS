@@ -4,381 +4,157 @@
 
 # HBOS
 
-> He Bit OS — 面向 x86_64 的轻量实验操作系统
+**English** · [简体中文](README.zh-CN.md)
 
-当前版本：`v0.1-beta5-pre6` · 支持 BIOS / UEFI · 正在积极开发
+> He Bit OS — a small experimental operating system for x86_64
 
-GUI 版本：`HIVE 0.1-beta5-gui.4`（Toolkit API 1.4 / TUI Kit 1.0）
+Version: `v0.1-beta5-pre18` · BIOS / UEFI · early development
+GUI: `HIVE 0.1-beta5-gui.4` (Toolkit API 1.4 / TUI Kit 1.0)
 
-![HBOS 桌面截图](docs/screenshots/hive-desktop.jpg)
+![HBOS desktop](docs/screenshots/hive-desktop.jpg)
 
-_实机截图来自 beta5 pre6（QEMU，浅色主题）。_
-
-HBOS 从引导、内核、驱动、文件系统、网络栈到桌面环境均以“小而可用”为目标。
-项目优先照顾低配置设备和清晰的模块边界；构建完成后直接运行在裸机或虚拟机，
-不依赖 Linux 或其他宿主操作系统提供运行时。
+HBOS is a from-scratch OS: bootloader glue, kernel, drivers, filesystems, network
+stack and desktop all live in this tree. It runs on bare metal or in a VM and does
+not depend on Linux as a runtime host — although it ships a Linux syscall
+compatibility layer so that unmodified Debian binaries can be loaded and run.
 
 > [!WARNING]
-> HBOS 仍处于早期开发阶段，不适合保存重要数据或用于生产环境。UEFI 启动时
-> 需要关闭 Secure Boot；真机支持取决于具体硬件。
+> HBOS is early-stage: do not store important data on it and do not use it in
+> production. Secure Boot must be disabled for UEFI boots.
 
-## 项目概览
-
-| 领域 | 当前能力 |
-|---|---|
-| 启动 | x86_64 长模式、Multiboot2 BIOS、UEFI、ISO 与硬盘镜像 |
-| 内核 | 物理/虚拟内存、任务调度、系统调用、ELF/HAX 用户程序、动态链接 |
-| 终端 | framebuffer/VGA 输出、ANSI 颜色、UTF-8/CJK、Shell 与命令历史 |
-| 桌面 | [HIVE](https://github.com/HeBitOS/HIVE) 桌面、窗口管理、合成器、应用启动器 |
-| 应用 | TinyCC、BusyBox applets、文件管理器、终端、编辑器、计算器、浏览器等 |
-| 存储 | ramfs、FAT32、ext2、exFAT（读写）、HBFS；NVMe → AHCI → ATA PIO → USB MSC 自动选择 |
-| 网络 | E1000、DHCP、ARP、ICMP、DNS、TCP、HTTP/HTTPS、用户态 socket API |
-| 输入 | PS/2 键鼠、USB xHCI + EHCI HID 键鼠（含 HID 报告描述符解析） |
-
-HBOS 也提供不包含桌面和图形应用的 no-GUI 构建，可单独验证内核、Shell、
-文件系统、网络和用户态程序。
-
-## 快速开始
-
-### 1. 安装构建依赖
-
-最省事的方式（自动识别 apt / pacman / dnf，装完再跑 `make deps` 检查一遍）：
+## Build and run
 
 ```bash
-sudo ./install.sh
+export TMPDIR=$PWD/build/tmp        # the system /tmp is tiny; always override it
+make bios-iso -j16                  # -> build/hbos-bios.iso
+python3 scripts/qemu_session.py build/hbos-bios.iso \
+    --mem 4096M --log build/tmp/run.log -- "help"
 ```
 
-手工安装，Ubuntu / Debian：
+* There is no KVM in most containers, so QEMU runs under TCG: **one VM at a time**,
+  each boot costs 1–2 minutes.
+* `scripts/qemu_session.py --disk <img>` boots with a persistent AHCI disk.
+
+## Installing Debian packages (`.deb`)
+
+HBOS does not run `dpkg`. A `.deb` is converted into an HPT package, published in
+an HPT repository, and installed inside HBOS with `hpt`.
+
+### 1. Convert and pack (host side)
 
 ```bash
-sudo apt update
-sudo apt install build-essential nasm grub-pc-bin grub-efi-amd64-bin \
-  xorriso mtools dosfstools qemu-system-x86 qemu-utils ovmf \
-  python3 python3-pil python3-jsonschema python3-jinja2 python3-yaml \
-  cmake llvm autoconf automake pkg-config
+python3 HPT/tools/pkg2hax.py pkg.deb -o out/        # deb -> payload + manifest
+python3 scripts/mk_deb_repo.py --out build/repo build/debs/*.deb   # repo + deps
 ```
 
-Arch Linux：
+### 2. Deliver the repository to HBOS
 
-```bash
-sudo pacman -Sy
-sudo pacman -S --needed base-devel nasm grub xorriso mtools dosfstools \
-  qemu-system-x86 qemu-img edk2-ovmf python python-pillow \
-  python-jsonschema python-jinja python-yaml \
-  cmake llvm autoconf automake pkgconf
-```
+* **file repository (recommended, no 2 MiB network limit)** — bake `build/repo`
+  into a disk image (`scripts/mk_bigpkg_ext2.sh`, `scripts/mk_test_img.sh`) and
+  point HPT at `/packages`;
+* **HTTP repository** — `hpt-server --root build/repo --port 8080`, then use
+  `10.0.2.2` from inside QEMU.
 
-其中几个容易被漏掉、但 `make` 一定会用到的：
-
-| 依赖 | 谁需要它 |
-|---|---|
-| `cmake` + `python3-jsonschema/jinja2/yaml` | mbedTLS 走 CMake 构建，缺了会在生成头文件阶段报 `ModuleNotFoundError` |
-| `llvm`（`llvm-objcopy`） | limine 的 `./configure` 要它，缺了报 `llvm-objcopy invalid` |
-| `autoconf` / `automake` / `pkg-config` | limine 的 `./bootstrap` |
-| `mtools` / `dosfstools` | 制作 FAT32 安装镜像、跑 `make fat32-smoke` |
-
-Windows 推荐使用 WSL2 + Ubuntu。仓库也提供
-`scripts/build-windows.ps1` 和 `scripts/build-windows.cmd` 作为入口。
-
-### 2. 构建
-
-```bash
-git clone --recurse-submodules https://github.com/HeBitOS/HBOS.git
-cd HBOS
-make deps   # 递归拉齐子模块（含 mbedtls 嵌套子模块）+ 检查工具链
-make
-```
-
-如果已经用普通 `git clone` 下载，或者子模块没拉全，`make deps` 同样能补齐；
-等价的手工命令是：
-
-```bash
-git submodule update --init --recursive
-```
-
-`make deps` 是幂等的：已经就位的子模块不会重复下载，缺包时只打印对应发行版
-的安装命令，不会自己 `sudo`。
-
-默认生成：
-
-- `build/hbos-bios.iso`
-- `build/hbos-uefi.iso`
-
-常用构建目标：
-
-| 命令 | 作用 |
-|---|---|
-| `make` | 构建 BIOS 与 UEFI ISO |
-| `make run` | 在 QEMU 中启动 BIOS 硬盘镜像 |
-| `make run-uefi` | 在 QEMU 中启动 UEFI 硬盘镜像 |
-| `make release` | 生成 ISO、VMware VMDK 和 VirtualBox VDI |
-| `make smoke` | 构建并启动验证全部发布格式 |
-| `make bench-boot` | 测量冷启动时间（BIOS/UEFI，分引导器与内核两段） |
-| `make nogui` | 构建不含 HIVE 和内嵌应用的 BIOS/UEFI ISO |
-| `make run-nogui` | 构建并在 QEMU 中启动 no-GUI BIOS 版 |
-| `make run-nogui-uefi` | 构建并在 QEMU 中启动 no-GUI UEFI 版 |
-| `make nogui-smoke` | 验证 no-GUI 的组件边界与启动 |
-| `make core-only` | 构建 HIVE-capable 核心，但不打包应用 |
-| `make hive-test` | 运行 HIVE 控件与事件测试 |
-| `make chromium-baseline` | 检查 Chromium 兼容层阶段基线 |
-
-运行 `make help` 可以查看完整目标列表。
-
-### 3. 启动
-
-QEMU 可直接使用上面的 `make run` / `make run-uefi`。虚拟机建议至少分配
-`512 MiB` 内存：
-
-- VMware BIOS：挂载 `build/hbos-bios.iso`
-- VMware UEFI：关闭 Secure Boot，挂载 `build/hbos-uefi.iso`
-- VirtualBox BIOS：关闭 EFI，挂载 `build/hbos-bios.iso`
-- VirtualBox UEFI：启用 EFI、关闭 Secure Boot，挂载 `build/hbos-uefi.iso`
-
-进入系统后可先运行：
+### 3. Install inside HBOS
 
 ```text
-drivers
-status
-hive
+run hpt init
+run hpt source file /packages
+run hpt update
+run hpt search <name>
+run hpt install <name>
+run hpt list --installed
+run hpt remove <name>
 ```
 
-`drivers` 用于确认输入设备、USB、块设备、文件系统和网卡是否被识别；
-`hive` 启动图形桌面，`gui` 与 `startx` 保留为兼容别名。
+There is also a graphical installer in HIVE (search / details / progress bar).
 
-### 4. 启动时间与开机菜单
-
-BIOS 与 UEFI 的开机菜单等待时间由同一个变量控制（默认 1 秒，改动后自动重建
-ISO/镜像）：
-
-```sh
-make                       # 默认：菜单显示 1 秒后自动进默认项
-make BOOT_MENU_TIMEOUT=0   # 不等待：自动化/冒烟测试最快（约 1.9s 进内核）
-make BOOT_MENU_TIMEOUT=5   # 旧行为：留足时间手动选择 text fallback
-make bench-boot RUNS=5     # 实测冷启动时间（引导器阶段 + 内核阶段）
-```
-
-注意 `BOOT_MENU_TIMEOUT=0` 时 GRUB 的菜单**按键也唤不回来**（已实测），需要
-在 gfxterm 失败的真机上手动选 text fallback 时请保留非零值。
-
-参考数字（QEMU 512M，BIOS ISO）：默认配置约 **3.0 s**（其中内核阶段
-**0.04 s**），`BOOT_MENU_TIMEOUT=0` 约 **1.9 s**。测量方法与历代对比见
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
-### 5. 构建失败对照表
-
-| 报错 | 原因 | 处理 |
-|---|---|---|
-| `upload-pack: not our ref` / `没有包含 <sha>` | 子模块锁定了一个上游已不存在（或还没推上去）的 commit | `make deps`；仍有问题就 `git submodule sync --recursive && git submodule update --init --recursive` |
-| `HAX-Compile 模块缺失：找不到 .../mk/hax-apps.mk` | `HAX-Compile` 子模块没拉，或拉到了不含 `mk/`、`tools/genhax.py` 的旧提交 | `make deps`；临时绕过用 `make HBOS_BUNDLE_APPS=0` |
-| `mbedtls/ssl.h: No such file or directory` | mbedTLS 的嵌套子模块（`framework`、`tf-psa-crypto`、`mldsa-native`）没拉 | `make deps`，或 `git -C third_party/mbedtls submodule update --init --recursive` |
-| `No module named 'jsonschema'` | 缺 mbedTLS CMake 生成脚本的 python 依赖 | `sudo apt install python3-jsonschema python3-jinja2 python3-yaml` |
-| `Configure with --enable-uefi-x86-64 to build this port` | limine 的 configure 没开 UEFI | `cd limine-bin && ./configure --enable-uefi-x86-64 --enable-bios-x86-64` |
-| `llvm-objcopy invalid` | 没有 `llvm-objcopy` | `sudo apt install llvm` |
-| `设备上没有空间`（grub-mkrescue 阶段） | `/tmp` 太小（tmpfs 常见 10 MB） | `TMPDIR=$PWD/.tmp make` |
-
-网络受限时，子模块拉取可以走代理；`make deps` 只是调用 `git submodule`，
-沿用你 git 的代理配置。
-
-limine 的 `./bootstrap` 还会再拉 8 个 pin 死 commit 的小仓库（flanterm、
-libfdt、picoefi 等），第一次构建且网络不好时最容易卡在这一步；把代理配好
-重试即可，已经拉过的不会重复下载。
-
-## HIVE 桌面环境
-
-[HIVE（HBOS Interface & Visual Environment）](https://github.com/HeBitOS/HIVE)
-是 HBOS 的独立桌面项目，并以 `HIVE/` Git 子模块固定在 HBOS 仓库中。它包含
-窗口管理器、合成器、桌面 Shell、用户态控件库和应用 SDK；HIVE 内部还递归
-包含必需的 HPT 子模块。
-
-当前 HIVE Toolkit API 1.4 提供：
-
-- Label、Button、Textbox、Checkbox、Radio、Toggle、List、Dropdown、
-  Progress、Slider、Spinbox、Scrollbar、Menu、Image、Canvas、Panel、
-  Groupbox、Separator；
-- 行布局、网格布局、控件树与窗口尺寸变化后的重新排布；
-- 鼠标悬停、按下、拖动、松开和窗口外释放捕获；
-- Tab 焦点、Enter/Space、方向键、Home/End、PageUp/PageDown；
-- 集中式主题配置、文本选区和 UTF-8 安全编辑。
-
-HBOS 暂时保留 HIVE runtime 的集成副本，以确保完整版本和 no-GUI 版本都能
-持续构建。拆仓边界与迁移顺序见
-[`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md)。
-使用 `git clone --recurse-submodules` 会同时取得 HIVE、HPT 和其他依赖。
-`make hive-sync` 默认同步仓库内的 `HIVE/`；若需要操作其他 HIVE 工作副本，
-可显式传入 `HIVE_REPO=/path/to/HIVE`。
-
-## 应用开发
-
-HAX（HBOS Application eXecutable）是 HBOS 的用户应用格式。应用本质上是带
-`.haxmeta` 元数据的 ELF64 用户态程序，可作为 TUI、GUI 或两者兼容的应用。
-
-最小 TUI 应用：
-
-```c
-#include <hax.h>
-
-HAX_APP("myapp", "My HBOS application", HAX_KIND_TUI);
-
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-    hax_println("Hello, HBOS!");
-    return 0;
-}
-```
-
-把源码保存到 `app/myapp.c` 后运行 `make`，构建系统会自动生成并打包
-`myapp.hax`。这只是开发示例，不作为系统预装应用。应用也可以放在独立仓库：
+### One-shot shortcut: `make install-app`
 
 ```bash
-make APP_DIR=/path/to/apps hax-apps
+make install-app APP_DEB=./some-package.deb
 ```
 
-图形应用优先包含 `<hive.h>`，只依赖公开的 HAX/HIVE SDK，不直接访问
-framebuffer、窗口管理器或桌面私有状态。
+This converts the `.deb`, injects the whole tree into the disk image under the
+manifest's `install_prefix` (`/opt/<pkg>` by default) and boots QEMU with the
+result visible. Example with `cowsay-off`:
 
-完整开发资料：
-
-- [HBOS HAX 应用开发手册（PDF）](HBOS_HAX_API.pdf)
-- [HAX API HTML 源文档](docs/HBOS_HAX_API.html)
-- [HIVE 桌面与控件 API](docs/HIVE_DESKTOP_API.md)
-
-## 模块化构建
-
-HBOS、HIVE 与应用遵循以下依赖方向：
-
-```mermaid
-graph TD
-    App["应用 (Apps)"] --> SDK["HAX / HIVE SDK"]
-    SDK --> HIVE["HIVE"]
-    HIVE --> UAPI["HBOS Kernel UAPI / gui_service"]
-    UAPI --> Core["HBOS Core<br/>(不依赖具体 GUI 或应用)"]
+```
+[install-app] cowsay-off 3.03+dfsg2-8 -> /opt/cowsay-off  (4 files, 2 links)
+hbos:/# ls /opt/cowsay-off
+usr/  <DIR>
 ```
 
-| 变体 | 命令 | HIVE | 内嵌应用 |
-|---|---|---:|---:|
-| 完整系统 | `make` | 是 | 是 |
-| no-GUI | `make nogui` | 否 | 否 |
-| GUI 核心 | `make core-only` | 是 | 否 |
-| 外部应用 | `make APP_DIR=/path/to/apps hax-apps` | 仅 SDK | 单独产物 |
+## Host-side access to the guest filesystem
 
-构建开关包括 `HBOS_ENABLE_GUI=0|1`、`HBOS_BUNDLE_APPS=0|1`、
-`APP_DIR=/path` 和 `BUILD_DIR=/path`。
+The ext2 filesystem starts at a 1 MiB offset (MBR partition table), so the host can
+read and write it directly with `debugfs` — no VM required:
 
-## 硬件支持
-
-| 硬件 | 状态 | 说明 |
-|---|---:|---|
-| x86_64 CPU | 可用 | 需要长模式 |
-| BIOS / UEFI | 可用 | UEFI 不支持 Secure Boot |
-| PS/2 键盘、鼠标 | 可用 | 建议真机优先测试 |
-| USB xHCI HID | 可用 | **多控制器**（不再只看第一台）；按 HID 报告描述符解析鼠标字段（report protocol），兼容 `bInterfaceProtocol=0` 的现代鼠标 |
-| USB EHCI (USB 2.0) HID | 可用 | 真机键鼠主力总线；多控制器、根端口复位、EP0 控制传输、周期调度中断 IN（纯轮询） |
-| AHCI SATA | 可用 | 优先块设备后端 |
-| ATA PIO | 可用 | AHCI 不可用时回退 |
-| Intel E1000 (8254x) | 可用 | 轮询收发、DHCP/协议栈已接通 |
-| Intel E1000e / I219 | 可用 | 82571/82574/82583/80003ES2LAN/ICH8-10/I217/I218/I219 与 I210/I211；MAC 复位、NVM/flash 读 MAC、MDIC 链路判定 |
-| Realtek RTL8168/8111/8169/8125 | 可用 | 按 XID 识别真实型号并走对应 PHY 配置；RTL8168h/8111h 等真机常见型号 |
-| RTL8139 | 可用 | 轮询收发、DHCP/协议栈已接通 |
-| VirtIO-net | 可用 | virtio 1.0 PCI 轮询收发，DHCP/协议栈已接通（QEMU 默认 0x1000/0x1041） |
-| AC97 | 基础可用 | 依设备和虚拟机配置而定 |
-
-发现真机问题时，请附上 `drivers`、`status` 和串口日志，并注明 CPU、主板、
-存储控制器、网卡及启动方式。
-
-## 仓库结构
-
-```text
-HBOS/
-├── app/                HAX 应用与公开 SDK 头文件
-├── docs/               API、模块边界与兼容性文档
-├── scripts/            构建、启动和 smoke test 脚本
-├── src/
-│   ├── api/            内核与可选组件的公开契约
-│   ├── core/           任务、内存和中断核心
-│   ├── crypto/         TLS 使用的密码学实现
-│   ├── graphics/       终端、字体与 GUI 图形资源
-│   ├── gui/            HIVE runtime 集成副本
-│   ├── input/          键盘与鼠标输入
-│   ├── shell/          Shell 和命令注册
-│   ├── tools/          系统、文件、网络和图形命令
-│   └── user/           用户态运行时、libc 和程序加载
-├── third_party/        移植的第三方组件
-├── Makefile            构建入口
-└── version.mk          版本号来源
+```bash
+make img-ls  P=/opt/cowsay-off/usr/share/cowsay/cows
+make img-get P=/opt/.../bong.cow O=/tmp/bong.cow
+make img-put F=./a.txt D=/opt/cowsay-off/usr/share/cowsay/cows/a.txt
 ```
 
-## 文档与路线图
+Use `APP_IMG=build/some.img` to target a specific disk image.
 
-| 文档 | 内容 |
+## Attaching files to the ISO
+
+```bash
+make bios-iso ISO_PAYLOAD=./payload-dir     # copied to payload/ inside the ISO
+```
+
+## Compatibility status
+
+| Area | State |
 |---|---|
-| [`docs/README.md`](docs/README.md) | 文档索引与 PDF 生成方式 |
-| [`docs/HIVE_DESKTOP_API.md`](docs/HIVE_DESKTOP_API.md) | HIVE 控件、事件和应用迁移 |
-| [`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md) | 内核、GUI、应用拆仓边界 |
-| [`docs/CHROMIUM_COMPAT_BASELINE.md`](docs/CHROMIUM_COMPAT_BASELINE.md) | Chromium 兼容工作的阶段 1 基线 |
-| [`CHROMIUM_COMPAT_ROADMAP.md`](CHROMIUM_COMPAT_ROADMAP.md) | Chromium 平台兼容层十阶段计划 |
-| [`docs/LINUX_KDE_COMPAT.md`](docs/LINUX_KDE_COMPAT.md) | 轻量 Linux ABI 与原版 KDE 分阶段路线 |
-| [`HIVE/docs/BROWSER_BILIBILI_UPGRADE.md`](HIVE/docs/BROWSER_BILIBILI_UPGRADE.md) | 浏览器现状、Vue/Bilibili 技术栈审计与分级验收方案 |
-| [`docs/CODE_STYLE.md`](docs/CODE_STYLE.md) | 代码规范、注释规范与性能纪律 |
-| [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | 性能工作记录：测量方法、已做优化、刻意不改的项与待办清单 |
+| ELF loading, `ld.so`, shared-library closure | works (Chromium + 41 dependencies) |
+| File I/O: open/read/write/pread/pwrite/ftruncate/fallocate/rename/unlink/symlink | works |
+| sqlite (locking, WAL, page-aligned truncation) | works |
+| Threads (`clone`/`clone3`, TLS switch), futex, epoll/poll/eventfd | works |
+| Unix sockets, TCP/IP stack | protocol layer works, link configuration still rough |
+| `statx`, `rseq` | `ENOSYS` |
+| `unlink()` of an open file | not yet (deferred inode free missing) |
+| multi-process shared memory (`MAP_SHARED`) | private snapshot only |
+| **tty / termios / pty** | **missing** — every interactive program fails here |
 
-Chromium 目前尚未移植；路线图描述的是兼容层建设计划，而不是已经可运行的
-Chromium 浏览器。
+Concrete example — `sl` installs fine but cannot run:
 
-## HBOS Linux ABI 兼容层进展
+```
+hbos:/# run /opt/sl/usr/games/sl
+Error opening te…                       ← ncurses: "Error opening terminal: …"
+kernel: ioctl(1, TCGETS) = -EBADF
+```
 
-HBOS 正在建设轻量级 Linux ABI 兼容层，长期目标是在不修改上游源码的情况下运行 **KDE/Qt/Plasma**。
+Anything curses/readline based (`sl`, `top`, `vim`, `bash`, `zsh`) needs termios
+first; shells additionally need pty and job control.
 
----
+## Chromium notes
 
-### 核心特性与进展
+* The Debian `chromium` package is **not built with the headless shell**, so
+  `--headless --dump-dom` only produces "no window → clean exit".
+* `--ozone-platform=headless` (without `--headless`) keeps the browser alive, which
+  is the useful starting point for CDP / Wayland work.
+* Symbolize any guest RIP with `python3 scripts/symbolize_rip.py 0x110xxxxxxx`
+  (Chromium PIE base `0x1100000000`).
 
-* **核心 ABI & 系统调用**
-  * 支持原生 x86-64 `syscall`、静态 ELF/PIE 加载。
-  * 提供 `poll` / `epoll` / `eventfd` / `futex` / `memfd` 及 `MAP_SHARED` 基础支持。
+## Troubleshooting
 
-* **网络与 AF_UNIX**
-  * 支持 AF_UNIX 套接字、`getsockname`/`getpeername` 与 `SCM_RIGHTS` (文件描述符传递)。
-  * 本地/对端地址及 Abstract Socket 语义已通过回归测试。
+* `ls -l` is not supported by the HBOS shell — use plain `ls`.
+* Read Chromium's full logs without flooding the serial port:
+  `--enable-logging --v=1 --log-file=/tmp/vlog.txt`, then on the host
+  `debugfs -R "cat /tmp/vlog.txt" "img?offset=1048576"`.
+* Only one QEMU may run at a time; a stale one locks the disk image.
 
-* **动态链接与重定位**
-  * **流式加载**：主程序 `execve` 按 ELF 段流式加载，支持 `PT_INTERP`。
-  * **符号重定位**：支持 `dlopen` 共享库（GD `__thread`）、GNU 符号版本/`dlvsym` 及 ring3 安全执行的 GNU IFUNC/IRELATIVE。
-  * **并发安全**：Loader 采用按 TID 递归事务锁，覆盖构造函数重入与多线程并发引用压力。
+## Documentation
 
-* **进程与 Libc 兼容性**
-  * **线程控制**：支持 `clone`/`clone3` 线程子集，可恢复新栈、FS/TLS 与 TID 生命周期。
-  * **musl 1.2.5**：通过多线程 `pthread`、mutex、条件变量、读写锁、`pthread_once` 及 FPU 继承。
-  * **glibc 2.43**：通过真实动态 loader、2.1 MiB `libc.so.6`、`malloc` 及基础 pthread/静态 TLS 验证。
+* `docs/jindu.md` — day-by-day engineering log with evidence for every change
+* `docs/ROADMAP-C1-C3-RESULT.md` — Linux compatibility milestones
+* `CHROMIUM_COMPAT_ROADMAP.md` — Chromium bring-up plan
+* `HPT/docs/HPT.md` — package manager reference
 
-* **文件系统与 VFS**
-  * **目录与符号链接**：支持 `openat`/`renameat2` 目录整树改名（watch 随迁移）；提供无堆分配、最多 8 层的符号链接解析。
-  * **文件监控 & 伪文件系统**：支持固定容量 `inotify` 机制，以及只读 `procfs` (`self/exe`, `maps`, `status` 等) 与 `sysfs`。
+## Translations
 
-* **内存与信号处理**
-  * **COW Fork**：原生 `fork` 基于物理页引用计数与软件 PTE 位实现 4 KiB 写时复制。
-  * **Page Fault Handler**：Page Fault 转为同步 `SIGSEGV`，支持通过 `rt_sigreturn` 修复映射并重试故障指令。
-
-> **注意**：完整 TLS ABI、复杂共享库程序和通用发行版 Linux 二进制目前仍不在支持范围内。
-
----
-
-## 当前限制
-
-- 项目 ABI、文件格式和桌面接口仍可能在 beta 阶段变化。
-- 真机驱动覆盖有限，QEMU E1000 + AHCI 是最稳定的验证组合。
-- 自研网络栈和浏览器仍以基础兼容性为主，不能替代成熟浏览器。
-- HIVE runtime 正从内核链接代码迁移为独立用户态服务。
-- 不提供 Secure Boot、权限隔离和生产级安全保证。
-
-## 版本简史
-
-- `beta5 pre6`：HIVE Toolkit API 1.4（Radio/Toggle/Dropdown/Spinbox/Groupbox/Separator）、TUI Kit 1.0 文本控件、浅色省墨控制台。
-- `beta5 pre5`：HIVE Toolkit API 1.3、no-GUI 构建边界、浏览器/TLS 兼容性和模块化路线。
-- `beta4`：新桌面、TinyCC、动态链接、BusyBox、网络栈和真机输入修复。
-- `beta3`：桌面交互、任务栏、日历、字体、终端刷新与虚拟机启动改进。
-- `beta2`：BIOS/UEFI 双 ISO、文件工作流、HBFS、系统自测与磁盘工具。
-- `beta1`：CJK 输出、模块化 Shell、PS/2 输入和早期任务框架。
-
-## License
-
-HBOS 使用 [GNU General Public License v3.0](LICENSE) 发布。
+Default language is English. Add a new language by creating `README.<lang>.md`
+(e.g. `README.ja.md`) and adding it to the language line at the top of every
+README variant.

@@ -291,7 +291,11 @@ int ext2_read_file(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t offset,
         if (chunk > count - done) chunk = count - done;
 
         uint32_t phys_block = ext2_inode_block(fs, inode, block_idx);
-        if (!phys_block) return (int)done;
+        if (!phys_block) {
+            memset(buf + done, 0, chunk);
+            done += chunk;
+            continue;
+        }
 
         if (ext2_read_block(fs, phys_block, block_buf) < 0) return (int)done;
         memcpy(buf + done, block_buf + block_off, chunk);
@@ -463,6 +467,10 @@ int ext2_write_block(ext2_fs_t *fs, uint32_t block, const uint8_t *buf)
 {
     if (fs && fs->read_only) return -1;   /* ext4 布局：拒绝一切写入 */
     if (!fs || !fs->mounted || !buf || !block) return -1;
+    for (int s = 0; s < EXT2_IND_SLOTS; s++) {
+        if (g_ind_slot_block[s] == block)
+            g_ind_slot_block[s] = 0;
+    }
     uint32_t spb = fs->block_size / BLOCK_SECTOR_SIZE;
     uint32_t start = block * spb;
     return block_write_sectors(fs->partition_lba + start, buf, spb) == 0 ? 0 : -1;
@@ -679,8 +687,8 @@ static int ext2_inode_set_block(ext2_fs_t *fs, ext2_inode_t *inode,
         return ext2_write_inode(fs, inode_num, inode);
     }
     block_idx -= EXT2_NDIR_BLOCKS;
+    uint8_t buf[4096] __attribute__((aligned(4)));
     if (block_idx < apb) {
-        uint8_t buf[4096] __attribute__((aligned(2)));
         if (!inode->i_block[EXT2_IND_BLOCK]) {
             uint32_t nb = ext2_alloc_block(fs);
             if (!nb) return -1;
@@ -692,6 +700,32 @@ static int ext2_inode_set_block(ext2_fs_t *fs, ext2_inode_t *inode,
         if (ext2_read_block(fs, inode->i_block[EXT2_IND_BLOCK], buf) < 0) return -1;
         ((uint32_t *)buf)[block_idx] = phys;
         return ext2_write_block(fs, inode->i_block[EXT2_IND_BLOCK], buf);
+    }
+    block_idx -= apb;
+    if (block_idx < apb * apb) {
+        if (!inode->i_block[EXT2_DIND_BLOCK]) {
+            uint32_t nb = ext2_alloc_block(fs);
+            if (!nb) return -1;
+            memset(buf, 0, fs->block_size);
+            ext2_write_block(fs, nb, buf);
+            inode->i_block[EXT2_DIND_BLOCK] = nb;
+            ext2_write_inode(fs, inode_num, inode);
+        }
+        uint32_t l1 = block_idx / apb;
+        uint32_t l2 = block_idx % apb;
+        if (ext2_read_block(fs, inode->i_block[EXT2_DIND_BLOCK], buf) < 0) return -1;
+        uint32_t ind2 = ((uint32_t *)buf)[l1];
+        if (!ind2) {
+            ind2 = ext2_alloc_block(fs);
+            if (!ind2) return -1;
+            ((uint32_t *)buf)[l1] = ind2;
+            if (ext2_write_block(fs, inode->i_block[EXT2_DIND_BLOCK], buf) < 0) return -1;
+            memset(buf, 0, fs->block_size);
+            if (ext2_write_block(fs, ind2, buf) < 0) return -1;
+        }
+        if (ext2_read_block(fs, ind2, buf) < 0) return -1;
+        ((uint32_t *)buf)[l2] = phys;
+        return ext2_write_block(fs, ind2, buf);
     }
     return -1;
 }
@@ -747,7 +781,14 @@ int ext2_create_file(ext2_fs_t *fs, uint32_t dir_ino, const char *name, uint8_t 
 
     ext2_inode_t new_inode;
     memset(&new_inode, 0, sizeof(new_inode));
-    new_inode.i_mode = (file_type == 2) ? (EXT2_S_IFDIR | 0755u) : (EXT2_S_IFREG | 0644u);
+    /* file_type 与 ext2 目录项的 EXT2_FT_* 约定一致：
+     *   1 = 普通文件, 2 = 目录, 7 = 符号链接 */
+    if (file_type == 2)
+        new_inode.i_mode = EXT2_S_IFDIR | 0755u;
+    else if (file_type == 7)
+        new_inode.i_mode = EXT2_S_IFLNK | 0777u;
+    else
+        new_inode.i_mode = EXT2_S_IFREG | 0644u;
     new_inode.i_links_count = 1;
     if (ext2_write_inode(fs, new_ino, &new_inode) < 0) { ext2_free_inode(fs, new_ino); return -1; }
 
@@ -845,16 +886,56 @@ int ext2_unlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
     return -1;
 }
 
-int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num)
+/* ftruncate(fd, len) 的落地点。sqlite（Chromium 的 History/UKM/Cookies 全是
+ * sqlite）在提交事务后会把 journal 截成 0，也会把数据库扩到页边界；以前这里
+ * 只认 len==0，其它长度一律 EINVAL，sqlite 折成 SQLITE_IOERR —— 就是日志里
+ * 的 "disk I/O error"，再往后 HistoryService::Init 直接
+ * TerminateCurrentProcessImmediately(0)。
+ *
+ * 缩小：非 extent inode 逐块 free 并把指针清零；extent inode 的 extent 树
+ * 回收还没实现，只改 i_size（读会被 i_size 截断，等价于补零，仅浪费空间）。
+ * 扩大：只改 i_size 造空洞，写的时候 ext2_write_file 会按需分配块。 */
+int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num, uint32_t new_size)
 {
     if (!fs || !fs->mounted || !inode_num) return -1;
     ext2_inode_t inode;
     if (ext2_read_inode(fs, inode_num, &inode) < 0) return -1;
-    for (int i = 0; i < EXT2_NDIR_BLOCKS; i++) {
-        if (inode.i_block[i]) { ext2_free_block(fs, inode.i_block[i]); inode.i_block[i] = 0; }
+
+    uint32_t block_size = fs->block_size ? fs->block_size : 1024;
+    int extent_based = (inode.i_flags & EXT2_EXTENTS_FL) != 0;
+
+    if (new_size >= inode.i_size || extent_based) {
+        inode.i_size = new_size;
+        if (new_size == 0) inode.i_blocks = 0;
+        return ext2_write_inode(fs, inode_num, &inode);
     }
-    inode.i_size = 0;
-    inode.i_blocks = 0;
+
+    uint32_t new_blocks = (new_size + block_size - 1) / block_size;
+    uint32_t old_blocks = (inode.i_size + block_size - 1) / block_size;
+
+    /* 释放尾部块：必须先 free 再清指针，顺序反了会漏块；每块都回写一次
+     * inode，代价是 O(n) 次 inode 写，journal 级别（几块）可以接受。 */
+    for (uint32_t idx = new_blocks; idx < old_blocks; idx++) {
+        uint32_t phys = ext2_inode_block(fs, &inode, idx);
+        if (!phys) continue;
+        ext2_free_block(fs, phys);
+        ext2_inode_set_block(fs, &inode, inode_num, idx, 0);
+        if (inode.i_blocks >= block_size / 512)
+            inode.i_blocks -= block_size / 512;
+        else
+            inode.i_blocks = 0;
+    }
+
+    /* 数据块全没了，连带把（单/双/三）间接块也还给文件系统。 */
+    if (new_blocks == 0) {
+        for (int i = EXT2_IND_BLOCK; i <= EXT2_TIND_BLOCK; i++) {
+            if (!inode.i_block[i]) continue;
+            ext2_free_block(fs, inode.i_block[i]);
+            inode.i_block[i] = 0;
+        }
+    }
+
+    inode.i_size = new_size;
     return ext2_write_inode(fs, inode_num, &inode);
 }
 
@@ -915,4 +996,77 @@ int ext2_mkdir(ext2_fs_t *fs, uint32_t parent_ino, const char *name)
     }
 
     return (int)new_ino;
+}
+
+/* ── Symbolic links ────────────────────────────────────────────────
+ *
+ * ext2 有两种布局：
+ *   fast symlink — 目标 <= 60 字节，直接塞在 inode 的 i_block（15 个 u32）
+ *                  里，i_blocks == 0，不占数据块；
+ *   slow symlink — 目标写在一个数据块里，i_block[0] 指向它。
+ * 两者在磁盘上都必须是 S_IFLNK inode + 目录项 file_type = 7，否则重新挂载
+ * 后内核会把链接当成普通文件读（HBOS 之前的实现正是这样：链接在内存里
+ * 有效、一重启就变成一段存着路径文本的普通文件）。 */
+int ext2_symlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name,
+                 const char *target)
+{
+    if (!fs || !fs->mounted || !name || !name[0] || !target || !target[0])
+        return -1;
+    uint32_t length = (uint32_t)strlen(target);
+    if (length > fs->block_size) return -1;
+    if (length > 4095) return -1;
+
+    int ino = ext2_create_file(fs, dir_ino, name, 7);
+    if (ino < 0) return -1;
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, (uint32_t)ino, &inode) < 0) {
+        (void)ext2_unlink(fs, dir_ino, name);
+        return -1;
+    }
+    inode.i_size = length;
+    inode.i_links_count = 1;
+    inode.i_blocks = 0;
+    if (length <= 60) {
+        memset(inode.i_block, 0, sizeof(inode.i_block));
+        memcpy((uint8_t *)inode.i_block, target, length);
+    } else {
+        uint8_t block_buf[4096] __attribute__((aligned(2)));
+        uint32_t blk = ext2_alloc_block(fs);
+        if (!blk) {
+            (void)ext2_unlink(fs, dir_ino, name);
+            return -1;
+        }
+        memset(block_buf, 0, fs->block_size);
+        memcpy(block_buf, target, length);
+        if (ext2_write_block(fs, blk, block_buf) < 0) {
+            (void)ext2_free_block(fs, blk);
+            (void)ext2_unlink(fs, dir_ino, name);
+            return -1;
+        }
+        inode.i_block[0] = blk;
+        inode.i_blocks = fs->block_size / 512;
+    }
+    if (ext2_write_inode(fs, (uint32_t)ino, &inode) < 0) return -1;
+    return ino;
+}
+
+int ext2_readlink(ext2_fs_t *fs, const ext2_inode_t *inode, char *buf,
+                  uint32_t capacity)
+{
+    if (!fs || !inode || !buf || !capacity) return -1;
+    if ((inode->i_mode & EXT2_S_IFMT) != EXT2_S_IFLNK) return -1;
+    uint32_t length = inode->i_size;
+    if (length == 0 || length > 4095) return -1;
+    if (length > capacity) length = capacity;
+
+    if (inode->i_blocks == 0 && inode->i_size <= 60) {
+        memcpy(buf, (const uint8_t *)inode->i_block, length);
+        return (int)length;
+    }
+    if (!inode->i_block[0]) return -1;
+    uint8_t block_buf[4096] __attribute__((aligned(2)));
+    if (ext2_read_block(fs, inode->i_block[0], block_buf) < 0) return -1;
+    memcpy(buf, block_buf, length);
+    return (int)length;
 }

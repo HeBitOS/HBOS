@@ -35,6 +35,18 @@
 #define PAGE_SIZE   4096ULL   /**< 页大小: 4KB */
 #define PAGE_SHIFT  12        /**< 页大小对应的位移 (2^12 = 4096) */
 
+/**
+ * 恒等映射上限（必须与 boot.asm 建表范围一致）。
+ *
+ * boot.asm 只用 4 张 PD 建了 0-4 GiB 的 2 MiB 大页恒等映射，内核访问任何
+ * 物理页（清零、memcpy、页表本身）都依赖这段映射。QEMU -m 4096M 时
+ * Multiboot2 会报告 4 GiB 以上的可用区（PCI 洞之上的那段），若不截断，
+ * pmm_alloc_page() 会返回内核根本访问不到的物理页——一写就是分页异常，
+ * 表现为"内存越大越容易崩"。这里把可管理物理内存钳在恒等映射范围内，
+ * 4 GiB 以上的 RAM 只是暂时不用，不是丢失。
+ */
+#define PMM_IDENTITY_LIMIT 0x100000000ULL
+
 // ============================================================
 // Multiboot2 内存映射结构（与 GRUB 规范一致）
 // ============================================================
@@ -241,6 +253,9 @@ void pmm_init(void *mbi) {
     }
 
     if (max_addr == 0) max_addr = 16 * 1024 * 1024;  // 回退: 16MB
+    /* 见 PMM_IDENTITY_LIMIT：超过恒等映射的 RAM 一律不纳入管理，
+     * 否则分配出去的页内核写不了。 */
+    if (max_addr > PMM_IDENTITY_LIMIT) max_addr = PMM_IDENTITY_LIMIT;
     max_addr = (max_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);  // 页对齐
 
     g_total_pages = max_addr >> PAGE_SHIFT;

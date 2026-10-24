@@ -160,6 +160,40 @@ void kmain(void *mbi) {
     (void)hax_seed_embedded_file(
         "linux_glibc_libc", "/lib/x86_64-linux-gnu/libc.so.6");
     (void)hax_seed_embedded_file("linux_glibc_libc", "/lib/libc.so.6");
+    (void)hax_seed_embedded_file("linux_glibc_libc", "/usr/lib/libc.so.6");
+    (void)hax_seed_embedded_file("linux_glibc_libc", "/lib64/libc.so.6");
+    /* glibc 运行时的其余 soname（libm/libpthread/libdl/librt/libresolv/
+     * libutil/libgcc_s）。Debian 的 glib 与 Chromium 都直接 DT_NEEDED
+     * 这些库；缺一个就是 "error while loading shared libraries"。 */
+    {
+        static const struct {
+            const char *blob;
+            const char *soname;
+        } glibc_extras[] = {
+            { "linux_glibc_libm", "libm.so.6" },
+            { "linux_glibc_libpthread", "libpthread.so.0" },
+            { "linux_glibc_libdl", "libdl.so.2" },
+            { "linux_glibc_librt", "librt.so.1" },
+            { "linux_glibc_libresolv", "libresolv.so.2" },
+            { "linux_glibc_libutil", "libutil.so.1" },
+            { "linux_glibc_libgcc_s", "libgcc_s.so.1" },
+        };
+        for (size_t i = 0; i < sizeof(glibc_extras) / sizeof(glibc_extras[0]);
+             i++) {
+            char path[96];
+            size_t j = 0;
+            const char *prefix = "/lib64/";
+            while (prefix[j]) { path[j] = prefix[j]; j++; }
+            const char *name = glibc_extras[i].soname;
+            size_t k = 0;
+            while (name[k] && j + k + 1 < sizeof(path)) {
+                path[j + k] = name[k];
+                k++;
+            }
+            path[j + k] = '\0';
+            (void)hax_seed_embedded_file(glibc_extras[i].blob, path);
+        }
+    }
     (void)hax_seed_embedded_file("linux_glibc", "/linux_glibc");
     (void)hax_seed_embedded_file("linux_file_mmap", "/linux_file_mmap");
     (void)hax_seed_embedded_file(

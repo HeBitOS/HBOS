@@ -77,7 +77,11 @@ typedef struct {
 // ============================================================
 
 #define TASK_NAME_MAX 32
-#define TASK_STACK_SIZE 8192
+/* 8KB 内核栈在 Chromium 这类深层调用链（vfs->socket->epoll 一路向下）
+ * 上必然溢出：溢出向下写，正好砸穿相邻任务的栈（栈区连续分配），
+ * 表现为"切换帧内容变成 {0,3,8,...}"、iret 到 RIP=0x3 的 #UD 整机
+ * panic。64 任务 x 32KB = 2MB，代价可接受。 */
+#define TASK_STACK_SIZE (32 * 1024)
 #define MAX_TASKS 64
 #define PIT_DEFAULT_FREQUENCY_HZ 100U
 #define TASK_USER_HEAP_START 0x0000002000000000ULL
@@ -102,6 +106,7 @@ typedef enum {
 typedef struct task {
     uint32_t id;
     char name[TASK_NAME_MAX];
+    char exe_path[128];   /**< /proc/<pid>/exe 的真实路径（空=未知） */
     task_state_t state;
     uint8_t prio;              /**< 就绪优先级：数值越小越高；同值先来后到 */
     sched_node_t snode;        /**< 就绪队列节点（每任务一个，空间 O(N)） */
@@ -152,6 +157,7 @@ typedef struct task {
     uint8_t parent_death_signal;
     bool dumpable;
     bool no_new_privs;
+    bool child_subreaper;   /**< prctl(PR_SET_CHILD_SUBREAPER) 状态（仅记录） */
     uint32_t *clear_child_tid;
     void *robust_list_head;
     size_t robust_list_length;
@@ -267,6 +273,8 @@ task_t *task_lookup(uint32_t id);
 // elf64_load_and_spawn) so a later dlopen()'d shared library can resolve
 // symbols back into it — see src/user/ldso.c.
 void task_set_host_symtab(uint32_t id, void *symtab, char *strtab, uint64_t count);
+/** 记录可执行文件路径，供 /proc/<pid>/exe 使用（Chromium 靠它定位资源目录）。 */
+void task_set_exe_path(uint32_t id, const char *path);
 
 // Get number of active (non-terminated) tasks
 int task_get_count(void);

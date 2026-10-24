@@ -69,6 +69,172 @@ def read_hax_meta(path: Path):
     return None
 
 
+def build_multifile_test_package(out_dir: Path) -> str:
+    import io
+    import json
+    import tarfile
+
+    pkg_name = "zlib-tree"
+    version = "1.3.1"
+    lib_bytes = b"\x7fELF\x02\x01\x01\x00libz-test-payload\n"
+    lib_sha = hashlib.sha256(lib_bytes).hexdigest()
+    manifest = {
+        "schema": 2,
+        "format": 2,
+        "name": pkg_name,
+        "version": version,
+        "architecture": NAME,
+        "install_prefix": f"/opt/{pkg_name}",
+        "installed_size": len(lib_bytes),
+        "description": "Multi-file HAX v2 directory tree package",
+        "depends": [],
+        "files": [
+            {"path": "usr", "type": "dir", "mode": "0755", "size": 0},
+            {"path": "usr/lib", "type": "dir", "mode": "0755", "size": 0},
+            {
+                "path": "usr/lib/libz.so.1.3.1",
+                "type": "file",
+                "mode": "0644",
+                "size": len(lib_bytes),
+                "sha256": lib_sha,
+            },
+            {
+                "path": "usr/lib/libz.so.1",
+                "type": "symlink",
+                "mode": "0777",
+                "size": 0,
+                "target": "libz.so.1.3.1",
+            },
+        ],
+    }
+    manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w:", format=tarfile.USTAR_FORMAT) as tf:
+        minfo = tarfile.TarInfo(name=".HPT/manifest.json")
+        minfo.type = tarfile.REGTYPE
+        minfo.mode = 0o644
+        minfo.size = len(manifest_bytes)
+        tf.addfile(minfo, io.BytesIO(manifest_bytes))
+
+        for dpath in ("root/usr", "root/usr/lib"):
+            dinfo = tarfile.TarInfo(name=dpath)
+            dinfo.type = tarfile.DIRTYPE
+            dinfo.mode = 0o755
+            tf.addfile(dinfo)
+
+        finfo = tarfile.TarInfo(name="root/usr/lib/libz.so.1.3.1")
+        finfo.type = tarfile.REGTYPE
+        finfo.mode = 0o644
+        finfo.size = len(lib_bytes)
+        tf.addfile(finfo, io.BytesIO(lib_bytes))
+
+        sinfo = tarfile.TarInfo(name="root/usr/lib/libz.so.1")
+        sinfo.type = tarfile.SYMTYPE
+        sinfo.mode = 0o777
+        sinfo.linkname = "libz.so.1.3.1"
+        tf.addfile(sinfo)
+
+    raw_tar = tar_buf.getvalue()
+    payload = b"HPK2\x00\x00\x00\x00" + struct.pack("<Q", len(raw_tar)) + raw_tar
+    payload_name = f"{pkg_name}.hax"
+    (out_dir / payload_name).write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    return (
+        f"{pkg_name}|{version}|{NAME}|{len(payload)}|{digest}|"
+        f"{payload_name}||Multi-file HAX v2 directory tree package\n"
+    )
+
+
+def build_libc6_package(out_dir: Path) -> str:
+    import io
+    import json
+    import tarfile
+
+    pkg_name = "libc6"
+    version = "2.40-1"
+    manifest = {
+        "schema": 2,
+        "format": 2,
+        "name": pkg_name,
+        "version": version,
+        "architecture": NAME,
+        "install_prefix": "/lib64",
+        "installed_size": 0,
+        "description": "GNU C Library: Shared libraries (installed to /lib64)",
+        "depends": [],
+        "files": [
+            {"path": "lib64", "type": "dir", "mode": "0755", "size": 0},
+            {
+                "path": "lib64/ld-lsb-x86-64.so.3",
+                "type": "symlink",
+                "mode": "0777",
+                "size": 0,
+                "target": "/lib64/ld-linux-x86-64.so.2",
+            },
+        ],
+    }
+    manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w:", format=tarfile.USTAR_FORMAT) as tf:
+        minfo = tarfile.TarInfo(name=".HPT/manifest.json")
+        minfo.type = tarfile.REGTYPE
+        minfo.mode = 0o644
+        minfo.size = len(manifest_bytes)
+        tf.addfile(minfo, io.BytesIO(manifest_bytes))
+
+        dinfo = tarfile.TarInfo(name="root/lib64")
+        dinfo.type = tarfile.DIRTYPE
+        dinfo.mode = 0o755
+        tf.addfile(dinfo)
+
+        sinfo = tarfile.TarInfo(name="root/lib64/ld-lsb-x86-64.so.3")
+        sinfo.type = tarfile.SYMTYPE
+        sinfo.mode = 0o777
+        sinfo.linkname = "/lib64/ld-linux-x86-64.so.2"
+        tf.addfile(sinfo)
+
+    raw_tar = tar_buf.getvalue()
+    payload = b"HPK2\x00\x00\x00\x00" + struct.pack("<Q", len(raw_tar)) + raw_tar
+    payload_name = f"{pkg_name}.hax"
+    (out_dir / payload_name).write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    return (
+        f"{pkg_name}|{version}|{NAME}|{len(payload)}|{digest}|"
+        f"{payload_name}||GNU C Library: Shared libraries (/lib64)\n"
+    )
+
+
+def include_debian_hpk2_packages(out_dir: Path) -> list[str]:
+    import json
+
+    repo_root = Path(__file__).resolve().parent.parent
+    conv_dir = repo_root / "out"
+    records = []
+    for name in ("hello", "tree", "zlib1g"):
+        hax_path = conv_dir / f"{name}.hax"
+        manifest_path = conv_dir / f"{name}.manifest.json"
+        if not hax_path.is_file() or not manifest_path.is_file():
+            continue
+        payload = hax_path.read_bytes()
+        if payload[:5] != b"HPK2\x00":
+            continue
+        meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+        version = meta.get("version", VERSION)
+        arch = meta.get("architecture", NAME)
+        depends = ",".join(meta.get("depends", []))
+        desc = meta.get("description", f"Debian package {name}").replace("|", "/")
+        payload_name = f"{name}.hax"
+        (out_dir / payload_name).write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        records.append(
+            f"{name}|{version}|{arch}|{len(payload)}|{digest}|"
+            f"{payload_name}|{depends}|{desc}\n"
+        )
+    return records
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: genhpt_repo.py <apps-dir> <out-repo-dir>", file=sys.stderr)
@@ -101,6 +267,11 @@ def main() -> int:
             f"{name}|{VERSION}|{NAME}|{len(payload)}|{digest}|"
             f"{payload_name}||{description}\n"
         )
+
+    records.insert(0, build_multifile_test_package(out_dir))
+    for rec in reversed(include_debian_hpk2_packages(out_dir)):
+        records.insert(0, rec)
+    records.insert(0, build_libc6_package(out_dir))
 
     if not records:
         print("[genhpt_repo] no bundled packages (core-only build)")

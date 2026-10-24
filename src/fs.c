@@ -53,8 +53,7 @@ typedef struct {
     uint8_t type;                 /**< 文件类型（0=文件, 1=目录） */
     uint16_t reserved0;           /**< 保留字段 */
     uint32_t size;                /**< 文件大小（字节） */
-    char name[MAX_FILENAME];      /**< 文件名 */
-    uint8_t reserved1[24];        /**< 保留字段，对齐到 64 字节 */
+    char name[HBFS_NAME_MAX];     /**< 文件名（兼容旧 32B 表项并利用 24B 预留区） */
 } __attribute__((packed)) hbfs_entry_t;
 
 // 全局文件系统实例
@@ -70,7 +69,7 @@ static const char *fs_error = "ok"; /**< 最近一次错误描述 */
 
 static int ramfs_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);   /**< ramfs VFS 读取操作 */
 static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count); /**< ramfs VFS 写入操作 */
-static int ramfs_vfs_truncate(vfs_node_t *node); /**< ramfs VFS 截断操作 */
+static int ramfs_vfs_truncate(vfs_node_t *node, uint32_t size); /**< ramfs VFS 截断操作 */
 static int ramfs_vfs_unlink(vfs_node_t *node);   /**< ramfs VFS 删除操作 */
 
 static ext2_fs_t ext2_fs; /**< EXT2 文件系统实例 */
@@ -81,12 +80,12 @@ static int fat32_try_mount(void);
 static uint32_t fat32_resolve_parent(const char *norm, char *basename_out);
 static int ext2_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);
 static int ext2_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count);
-static int ext2_vfs_truncate(vfs_node_t *node);
+static int ext2_vfs_truncate(vfs_node_t *node, uint32_t size);
 static int ext2_vfs_unlink(vfs_node_t *node);
 
 static int fat32_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count);
 static int fat32_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count);
-static int fat32_vfs_truncate(vfs_node_t *node);
+static int fat32_vfs_truncate(vfs_node_t *node, uint32_t size);
 static int fat32_vfs_unlink(vfs_node_t *node);
 
 /** 设置错误信息并返回失败 */
@@ -183,43 +182,37 @@ static const char *normalize_path(const char *path, char *out) {
     return out;
 }
 
-/** 从完整路径中提取文件名（最后一个 / 之后的部分） */
-static const char *path_basename(const char *path) {
-    const char *last = path;
-    while (*path) { if (*path == '/') last = path + 1; path++; }
-    return last;
-}
-
 /** 提取父目录 inode 号（EXT2 后端专用），文件名写入 name_out */
 static uint32_t ext2_resolve_parent(const char *full_path, char *name_out) {
     if (!full_path || !name_out) return 0;
-    /* 复制路径以便分割 */
-    char tmp[256];
-    uint32_t len = 0;
-    while (full_path[len] && len < 255) { tmp[len] = full_path[len]; len++; }
-    tmp[len] = '\0';
-
-    /* 找到最后一个 / */
-    int last_slash = -1;
-    for (uint32_t i = 0; i < len; i++) if (tmp[i] == '/') last_slash = (int)i;
-
-    if (last_slash <= 0) {
-        /* 无 / 或以 / 开头 → 父目录是 root */
-        const char *base = path_basename(full_path);
-        uint32_t blen = 0; while (base[blen] && blen < MAX_FILENAME - 1) { name_out[blen] = base[blen]; blen++; }
-        name_out[blen] = '\0';
-        return EXT2_ROOT_INO;
+    uint32_t dir_ino = EXT2_ROOT_INO;
+    const char *p = full_path;
+    while (*p == '/') p++;
+    char comp[MAX_FILENAME];
+    for (;;) {
+        const char *slash = strchr(p, '/');
+        if (!slash) {
+            uint32_t len = (uint32_t)strlen(p);
+            if (len == 0 || len >= MAX_FILENAME) return 0;
+            memcpy(name_out, p, len + 1);
+            return dir_ino;
+        }
+        uint32_t clen = (uint32_t)(slash - p);
+        if (clen == 0 || clen >= MAX_FILENAME) return 0;
+        memcpy(comp, p, clen);
+        comp[clen] = '\0';
+        ext2_inode_t dir_inode;
+        if (ext2_read_inode(&ext2_fs, dir_ino, &dir_inode) < 0) return 0;
+        uint32_t next_ino = 0;
+        if (ext2_lookup(&ext2_fs, &dir_inode, comp, &next_ino) < 0 || !next_ino) {
+            int created = ext2_mkdir(&ext2_fs, dir_ino, comp);
+            if (created <= 0) return 0;
+            next_ino = (uint32_t)created;
+        }
+        dir_ino = next_ino;
+        p = slash + 1;
+        while (*p == '/') p++;
     }
-
-    /* 分割: tmp[0..last_slash-1] = 目录路径, tmp[last_slash+1..] = 文件名 */
-    tmp[last_slash] = '\0';
-    const char *base = &tmp[last_slash + 1];
-    uint32_t blen = 0; while (base[blen] && blen < MAX_FILENAME - 1) { name_out[blen] = base[blen]; blen++; }
-    name_out[blen] = '\0';
-
-    uint32_t dir_ino = 0;
-    if (ext2_path_to_inode(&ext2_fs, tmp, &dir_ino) < 0) return 0;
-    return dir_ino;
 }
 
 /** 重置文件系统为 ramfs 模式，初始化所有文件槽位 */
@@ -347,44 +340,62 @@ static void hbfs_rebuild_files_from_table(void) {
 /** 更新指定文件的 HBFS 文件表项并同步到磁盘 */
 static int hbfs_update_entry(file_t *f) {
     if (!f || f->disk_slot >= HBFS_MAX_FILES) return -1;
+    if (f->used && strlen(f->name) >= HBFS_NAME_MAX) return -1;
     hbfs_entry_t *e = &hbfs_table[f->disk_slot];
     memset(e, 0, sizeof(*e));
     if (f->used) {
         e->used = 1;
         e->type = f->type;
         e->size = f->size;
-        strcpy(e->name, f->name);
+        strncpy(e->name, f->name, HBFS_NAME_MAX - 1);
     }
     return hbfs_sync_table();
 }
 
-/** 从 EXT2 根目录读取文件条目并填充 fs.files[] */
+typedef struct {
+    const char *prefix;
+    int depth;
+} ext2_walk_t;
+
+/** 从 EXT2 目录递归读取文件条目并填充 fs.files[] */
 /* ext2/ext4 目录扫描：一次遍历完成，不再对每个名字调用 lookup（那是 O(n²)）。 */
 static int ext2_scan_cb(void *ctx, const char *name, uint32_t ftype, uint32_t ino) {
-    (void)ctx;
+    ext2_walk_t *w = (ext2_walk_t *)ctx;
     if (name[0] == '.') return 0;
     if (fs.file_count >= MAX_FILES) return 1;   /* 满了就停 */
 
     ext2_inode_t inode;
     if (ext2_read_inode(&ext2_fs, ino, &inode) < 0) return 0;
-    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG &&
-        (inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
+    /* 普通文件、目录、符号链接都要进文件表：链接必须能在重启后依然被
+     * vfs_expand_symlinks() 看到，否则 /lib64/xxx.so → /opt/... 的
+     * 库导出链接一重启就"消失"，动态链接器直接找不到依赖。 */
+    uint32_t kind = inode.i_mode & EXT2_S_IFMT;
+    if (kind != EXT2_S_IFREG && kind != EXT2_S_IFDIR &&
+        kind != EXT2_S_IFLNK) return 0;
+
+    uint32_t plen = w && w->prefix ? (uint32_t)strlen(w->prefix) : 0;
+    uint32_t nlen = (uint32_t)strlen(name);
+    if (plen + (plen ? 1u : 0u) + nlen >= MAX_FILENAME) return 0;
 
     char nm[MAX_FILENAME];
-    uint32_t nlen = 0;
-    while (name[nlen] && nlen < MAX_FILENAME - 1) nlen++;
-    memcpy(nm, name, nlen);
-    nm[nlen] = 0;
+    uint32_t pos = 0;
+    for (uint32_t i = 0; i < plen; i++) nm[pos++] = w->prefix[i];
+    if (plen) nm[pos++] = '/';
+    for (uint32_t i = 0; i < nlen; i++) nm[pos++] = name[i];
+    nm[pos] = 0;
 
+    int is_dir = (ftype == 2) || ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
+    int is_link = (ftype == 7) || ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK);
     file_t *f = &fs.files[fs.file_count];
-    memcpy(f->name, nm, nlen + 1);
+    memcpy(f->name, nm, pos + 1);
     f->size = inode.i_size;
     f->capacity = inode.i_size > RAMFS_MAX_FILE_SIZE ? inode.i_size : RAMFS_MAX_FILE_SIZE;
     f->data = NULL;
     f->disk_slot = ino;
     f->used = 1;
-    f->type = (ftype == 2) ? 1 : 0;
-    f->node.type = f->type ? VFS_NODE_DIR : VFS_NODE_FILE;
+    f->type = is_dir ? 1 : (is_link ? 2 : 0);
+    f->node.type = is_dir ? VFS_NODE_DIR :
+                   (is_link ? VFS_NODE_SYMLINK : VFS_NODE_FILE);
     f->node.size = f->size;
     f->node.capacity = f->capacity;
     f->node.private_data = f;
@@ -392,8 +403,13 @@ static int ext2_scan_cb(void *ctx, const char *name, uint32_t ftype, uint32_t in
     f->node.uid = inode.i_uid;
     f->node.gid = inode.i_gid;
     f->node.mode = inode.i_mode;
-    memcpy(f->node.name, f->name, nlen + 1);
+    memcpy(f->node.name, f->name, pos + 1);
     fs.file_count++;
+
+    if (is_dir && (!w || w->depth < 12)) {
+        ext2_walk_t child = { nm, w ? w->depth + 1 : 1 };
+        (void)ext2_iter_dir(&ext2_fs, &inode, ext2_scan_cb, &child);
+    }
     return 0;
 }
 
@@ -401,7 +417,8 @@ static void ext2_rebuild_files(void) {
     fs.file_count = 0;
     ext2_inode_t root;
     if (ext2_read_inode(&ext2_fs, EXT2_ROOT_INO, &root) < 0) return;
-    (void)ext2_iter_dir(&ext2_fs, &root, ext2_scan_cb, NULL);
+    ext2_walk_t walk = { "", 0 };
+    (void)ext2_iter_dir(&ext2_fs, &root, ext2_scan_cb, &walk);
 }
 
 /** EXT2 VFS 读取操作 */
@@ -413,6 +430,18 @@ static int ext2_vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t 
     if (count > avail) count = avail;
     ext2_inode_t inode;
     if (ext2_read_inode(&ext2_fs, f->disk_slot, &inode) < 0) return 0;
+    /* 符号链接的 "数据" 就是目标路径：fast symlink 在 inode 里，slow 在
+     * i_block[0] 指向的块里，都不能按普通文件读（那样会读到块指针）。 */
+    if ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
+        char target[256];
+        int got = ext2_readlink(&ext2_fs, &inode, target, sizeof(target));
+        if (got <= 0) return 0;
+        uint32_t n = (uint32_t)got;
+        if (offset >= n) return 0;
+        if (count > n - offset) count = n - offset;
+        memcpy(buf, target + offset, count);
+        return (int)count;
+    }
     return ext2_read_file(&ext2_fs, &inode, offset, (uint8_t *)buf, count);
 }
 
@@ -426,17 +455,28 @@ static int ext2_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, ui
         if (ext2_read_inode(&ext2_fs, f->disk_slot, &inode) == 0) {
             f->size = inode.i_size;
             f->node.size = inode.i_size;
+            if (inode.i_size > f->capacity) {
+                f->capacity = inode.i_size;
+                f->node.capacity = inode.i_size;
+            }
         }
     }
     return ret;
 }
 
 /** EXT2 VFS 截断操作 */
-static int ext2_vfs_truncate(vfs_node_t *node) {
+static int ext2_vfs_truncate(vfs_node_t *node, uint32_t size) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used) return -1;
-    int ret = ext2_truncate(&ext2_fs, f->disk_slot);
-    if (ret == 0) { f->size = 0; f->node.size = 0; }
+    int ret = ext2_truncate(&ext2_fs, f->disk_slot, size);
+    if (ret == 0) {
+        f->size = size;
+        f->node.size = size;
+        if (size > f->capacity) {
+            f->capacity = size;
+            f->node.capacity = size;
+        }
+    }
     return ret;
 }
 
@@ -491,9 +531,10 @@ static int fat32_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, u
 }
 
 /** FAT32 VFS 截断操作 */
-static int fat32_vfs_truncate(vfs_node_t *node) {
+static int fat32_vfs_truncate(vfs_node_t *node, uint32_t size) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used) return -1;
+    if (size != 0) return -1;   /* FAT32 只支持清零，扩/缩长度暂不支持 */
     /* FAT32 truncate: write zero-length via write_file at offset 0 with count 0 */
     uint32_t sz = 0;
     fat32_write_file(&fat32_fs, f->disk_slot, &sz, 0, NULL, 0);
@@ -684,9 +725,10 @@ static int exfat_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, u
     }
     return (int)count;
 }
-static int exfat_vfs_truncate(vfs_node_t *node) {
+static int exfat_vfs_truncate(vfs_node_t *node, uint32_t size) {
     file_t *f = (file_t *)node->private_data;
     if (!f || !f->used) return -1;
+    if (size != 0) return -1;
     char base[MAX_FILENAME];
     uint32_t dir = 0;
     if (exfat_split(f->name, base, &dir) < 0) return -1;
@@ -1746,7 +1788,7 @@ int fs_install_boot_kernel(const uint8_t *data, uint32_t len) {
     if (!f) return fs_fail("创建 /boot/hbos.bin 失败");
     /* 先截断：旧镜像可能比新镜像长，直接覆盖会留下尾部残留，GRUB 读到的
      * 长度虽由目录项给出，但残留数据仍会占盘且容易误判。 */
-    (void)vfs_truncate(f);
+    (void)vfs_truncate(f, 0);
     if (vfs_write(f, 0, data, len) < 0) return fs_fail("写入内核镜像失败");
     return 0;
 }
@@ -2081,9 +2123,45 @@ file_t *fs_create_symlink(const char *name, const char *target) {
     if (!name || !target || !target[0]) return NULL;
     size_t length = strlen(target);
     if (length >= VFS_MAX_NAME) return NULL;
-    if (fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_FAT32)
+    if (fs_backend == FS_BACKEND_FAT32)
         return NULL;
     if (fs_find_file(name)) return NULL;
+
+    /* ext2 走真实 inode：S_IFLNK + 目录项 file_type=7，否则重新挂载后
+     * 链接会变成"内容为目标路径的普通文件"。 */
+    if (fs_backend == FS_BACKEND_EXT2) {
+        char norm[MAX_FILENAME];
+        char basename[MAX_FILENAME];
+        if (!normalize_path(name, norm)) return NULL;
+        if (fs_find_file(norm)) return NULL;
+        uint32_t parent = ext2_resolve_parent(norm, basename);
+        if (!parent) return NULL;
+        int ino = ext2_symlink(&ext2_fs, parent, basename, target);
+        if (ino < 0) return NULL;
+        for (uint32_t i = 0; i < MAX_FILES; i++) {
+            file_t *f = &fs.files[i];
+            if (f->used) continue;
+            strcpy(f->name, norm);
+            strcpy(f->node.name, norm);
+            f->size = (uint32_t)length;
+            f->capacity = (uint32_t)length;
+            f->data = NULL;
+            f->disk_slot = (uint32_t)ino;
+            f->used = 1;
+            f->type = 2;
+            f->node.type = VFS_NODE_SYMLINK;
+            f->node.size = (uint32_t)length;
+            f->node.capacity = (uint32_t)length;
+            f->node.private_data = f;
+            f->node.ops = &ext2_ops;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFLNK | 0777;
+            fs.file_count++;
+            return f;
+        }
+        return NULL;
+    }
 
     file_t *link = fs_create_file(name);
     if (!link) return NULL;
@@ -2260,15 +2338,16 @@ int fs_rename_file(const char *old_name, const char *new_name) {
         if (fs_path_in_tree(new_norm, old_norm))
             return fs_fail("不能把目录移动到自身内部");
 
-        uint8_t moved[MAX_FILES];
-        char previous[MAX_FILES][MAX_FILENAME];
+        static uint8_t moved[MAX_FILES];
+        static char previous[MAX_FILES][MAX_FILENAME];
         memset(moved, 0, sizeof(moved));
+        size_t max_name_cap = (fs_backend == FS_BACKEND_HBFS) ? HBFS_NAME_MAX : MAX_FILENAME;
         for (uint32_t i = 0; i < MAX_FILES; i++) {
             file_t *entry = &fs.files[i];
             if (!entry->used || !fs_path_in_tree(entry->name, old_norm))
                 continue;
             const char *suffix = entry->name + old_length;
-            if (new_length + strlen(suffix) >= MAX_FILENAME)
+            if (new_length + strlen(suffix) >= max_name_cap)
                 return fs_fail("重命名后的后代路径过长");
             moved[i] = 1;
             strcpy(previous[i], entry->name);
@@ -2293,16 +2372,20 @@ int fs_rename_file(const char *old_name, const char *new_name) {
             strcpy(fs.files[i].name, new_norm);
             strcat(fs.files[i].name, suffix);
             strcpy(fs.files[i].node.name, fs.files[i].name);
-            if (fs_backend == FS_BACKEND_HBFS)
-                strcpy(hbfs_table[fs.files[i].disk_slot].name,
-                       fs.files[i].name);
+            if (fs_backend == FS_BACKEND_HBFS) {
+                strncpy(hbfs_table[fs.files[i].disk_slot].name,
+                        fs.files[i].name, HBFS_NAME_MAX - 1);
+                hbfs_table[fs.files[i].disk_slot].name[HBFS_NAME_MAX - 1] = '\0';
+            }
         }
         if (fs_backend == FS_BACKEND_HBFS && hbfs_sync_table() < 0) {
             for (uint32_t i = 0; i < MAX_FILES; i++) {
                 if (!moved[i]) continue;
                 strcpy(fs.files[i].name, previous[i]);
                 strcpy(fs.files[i].node.name, previous[i]);
-                strcpy(hbfs_table[fs.files[i].disk_slot].name, previous[i]);
+                strncpy(hbfs_table[fs.files[i].disk_slot].name,
+                        previous[i], HBFS_NAME_MAX - 1);
+                hbfs_table[fs.files[i].disk_slot].name[HBFS_NAME_MAX - 1] = '\0';
             }
             (void)hbfs_sync_table();
             return fs_fail("同步目录重命名失败");
@@ -2324,10 +2407,10 @@ int fs_rename_file(const char *old_name, const char *new_name) {
 int fs_truncate_file(file_t *f) {
     if (!f || !f->used) return -1;
     if (fs_backend == FS_BACKEND_EXT2) {
-        return ext2_vfs_truncate(&f->node);
+        return ext2_vfs_truncate(&f->node, 0);
     }
     if (fs_backend == FS_BACKEND_FAT32) {
-        return fat32_vfs_truncate(&f->node);
+        return fat32_vfs_truncate(&f->node, 0);
     }
     f->size = 0;
     f->node.size = 0;
@@ -2407,11 +2490,24 @@ static int ramfs_vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, u
 }
 
 /** ramfs VFS 截断操作回调 */
-static int ramfs_vfs_truncate(vfs_node_t *node) {
+static int ramfs_vfs_truncate(vfs_node_t *node, uint32_t size) {
     if (!node) return -1;
-    int ret = fs_truncate_file((file_t *)node->private_data);
-    if (ret == 0) node->size = 0;
-    return ret;
+    file_t *f = (file_t *)node->private_data;
+    if (!f || !f->used) return -1;
+    if (size == 0) {
+        int ret = fs_truncate_file(f);
+        if (ret == 0) node->size = 0;
+        return ret;
+    }
+    /* 内存文件：只调整可见长度。扩大后的区间读出来是旧的残留字节，
+     * 调用方（sqlite 等）会用整页写覆盖，暂不做清零。 */
+    f->size = size;
+    node->size = size;
+    if (size > f->capacity) {
+        f->capacity = size;
+        node->capacity = size;
+    }
+    return 0;
 }
 
 /** ramfs VFS 删除操作回调 */
