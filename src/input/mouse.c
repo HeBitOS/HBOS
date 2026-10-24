@@ -45,7 +45,10 @@ static int mouse_fallback_to_usb(void);
 static int ps2_mouse_has_data(void);
 static uint8_t packet[4];
 static uint8_t packet_i;
-static volatile uint8_t mouse_raw_queue[128];
+/* 128 字节只有 ~32 个包：GUI 在 1080p 下画一整帧要上百毫秒（TCG），
+ * 期间 IRQ 持续塞字节，队列一满就丢字节——丢字节 = 包流错位 = 乱码包。
+ * 扩到 256 少丢一些，剩下的靠下面的自愈逻辑兜底。 */
+static volatile uint8_t mouse_raw_queue[256];
 static volatile uint8_t mouse_raw_head = 0;
 static volatile uint8_t mouse_raw_tail = 0;
 
@@ -260,7 +263,7 @@ extern void kb_clear_modifiers(void);
 
 
 void ps2_mouse_enqueue_byte(uint8_t b) {
-    uint8_t next = (uint8_t)((mouse_raw_head + 1) & 127);
+    uint8_t next = (uint8_t)((mouse_raw_head + 1) & 255);
     if (next == mouse_raw_tail) return; /* drop if full */
     mouse_raw_queue[mouse_raw_head] = b;
     mouse_raw_head = next;
@@ -269,7 +272,7 @@ void ps2_mouse_enqueue_byte(uint8_t b) {
 static int ps2_mouse_dequeue_byte(void) {
     if (mouse_raw_tail == mouse_raw_head) return -1;
     uint8_t b = mouse_raw_queue[mouse_raw_tail];
-    mouse_raw_tail = (uint8_t)((mouse_raw_tail + 1) & 127);
+    mouse_raw_tail = (uint8_t)((mouse_raw_tail + 1) & 255);
     return b;
 }
 
@@ -304,6 +307,26 @@ static void ps2_button_edge(int buttons) {
     }
 }
 
+/* ── 包流自愈 ─────────────────────────────────────────────────
+ * 正常对齐时，每个包的首字节一定是 flags（bit3 恒为 1），被同步检查
+ * 跳过的字节应该非常少。一旦"包长和设备实际包长不一致"（滚轮探测
+ * 半途失败：设备进了 wheel 模式发 4 字节，我们却按 3 字节收，或相反），
+ * 流会每包漂移 1 字节：X 的位置读到的变成近似常数，真正的 X 位移跑到
+ * Y 的位置上——表现就是"只能沿 Y 移动，X 锁死"。
+ * 跳过数超过完整包数就把包长翻过来重试，几帧内自动恢复。 */
+static uint32_t sync_skips, sync_oks;
+
+static void ps2_resync_check(void) {
+    uint32_t total = sync_skips + sync_oks;
+    if (total < 96) return;
+    if (sync_skips > sync_oks) {
+        mouse_packet_size = (mouse_packet_size == 3) ? 4 : 3;
+        packet_i = 0;
+    }
+    sync_skips = 0;
+    sync_oks = 0;
+}
+
 static int ps2_mouse_poll(mouse_event_t *ev) {
     if (ps2_q_tail != ps2_q_head) {
         *ev = ps2_q[ps2_q_tail];
@@ -333,17 +356,28 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
         }
         if (b == 0 && queued < 0) break;
 
-        if (packet_i == 0 && !(b & 0x08)) continue;
+        if (packet_i == 0 && !(b & 0x08)) {
+            sync_skips++;
+            ps2_resync_check();
+            continue;
+        }
         packet[packet_i++] = b;
         if (packet_i < mouse_packet_size) continue;
 
         packet_i = 0;
+        sync_oks++;
+        ps2_resync_check();
         int x = (int)packet[1];
         int y = (int)packet[2];
         if (packet[0] & 0x10) x -= 256;
         if (packet[0] & 0x20) y -= 256;
-        if (packet[0] & 0x40) x = 0;
-        if (packet[0] & 0x80) y = 0;
+        if (packet[0] & 0xC0) {
+            /* X/Y 溢出位：这份样本不可信（多半是流丢过字节后凑出来的
+             * 假包）。旧行为只把溢出的那一轴清 0——0x40 一旦被错误置位，
+             * X 就恒为 0，正好是"只能沿 Y 移动"的症状。整包丢弃：
+             * 高速甩鼠标丢一个样本肉眼不可见。 */
+            continue;
+        }
         int z = 0;
         if (mouse_packet_size == 4) {
             z = (int)(packet[3] & 0x0F);
