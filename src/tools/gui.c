@@ -3793,8 +3793,9 @@ static void winbuf_invalidate_all(void) {
     for (int i = 0; i < WM_MAX_WINDOWS; i++) g_winbuf[i].valid = 0;
 }
 
-/* 拖动中的窗口索引（-1 = 没在拖）。拖动时内容不变，可以只贴 buffer。 */
-static int g_drag_win = -1;
+/* 渲染整窗时保存/恢复外层脏区裁剪用 */
+static int g_winbuf_restore_clip;
+static int g_winbuf_saved_clip[4];
 
 static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     wm_window_t *win = wm_get_window(&st->wm, idx);
@@ -3836,12 +3837,25 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     /* 缓存只在"拖动这个窗口"时复用：其余情况应用可能在无输入的情况下
      * 自己变（时钟、加载中的网页），贴旧图会看到不动的画面。
      * 拖动时内容必然不变，正是缓存该生效的场景。 */
-    if (wb && wb->valid && g_drag_win == idx) {
+    if (wb && wb->valid) {
         winbuf_blit_screen(wb, bx, by);
     } else {
         if (wb) {
             winbuf_seed_from_screen(wb, bx, by);
             gui_target_begin(wb->px, bw, bh, (uint32_t)bw, bx, by);
+            /* 整窗重画：底图是从屏幕拷的，可能带着上一帧画上去的光标；
+             * 只有把整窗内容都画一遍才能把那些像素全部盖掉，否则缓冲里
+             * 会烙出一个"僵死光标"，之后每帧贴缓存都把它贴回来——表现
+             * 就是光标卡住不动/拖影。渲染完恢复外层脏区裁剪。 */
+            int scx = -(1 << 20), scy = -(1 << 20), scw = 1 << 21, sch = 1 << 21;
+            int clip_was_on = gui_clip_active();
+            (void)gui_clip_intersect(&scx, &scy, &scw, &sch);
+            gui_clip_set(bx, by, bw, bh);
+            g_winbuf_restore_clip = clip_was_on;
+            g_winbuf_saved_clip[0] = scx;
+            g_winbuf_saved_clip[1] = scy;
+            g_winbuf_saved_clip[2] = scw;
+            g_winbuf_saved_clip[3] = sch;
         }
 
     /* 客户区裁剪：内容必须被限制在窗口内部。
@@ -3886,6 +3900,11 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
 
         if (wb) {
             gui_target_end();
+            if (g_winbuf_restore_clip)
+                gui_clip_set(g_winbuf_saved_clip[0], g_winbuf_saved_clip[1],
+                             g_winbuf_saved_clip[2], g_winbuf_saved_clip[3]);
+            else
+                gui_clip_clear();
             wb->valid = 1;
             winbuf_blit_screen(wb, bx, by);
         }
@@ -6771,7 +6790,6 @@ static void cmd_gui(int argc, char **argv) {
                 st.snap_preview = WM_SNAP_NONE;
                 snap_shown = WM_SNAP_NONE;
                 dragging_window = -1;
-                g_drag_win = -1;
                 drag_pending = 0;
                 drag_bounds_valid = 0;
             }
@@ -7143,7 +7161,6 @@ static void cmd_gui(int argc, char **argv) {
                                     dragging_window = title_idx;
                                     /* 拖动期间内容不变：让缓存从这一帧重新
                                      * 填充，之后每帧只贴 buffer。 */
-                                    g_drag_win = title_idx;
                                     winbuf_invalidate(title_idx);
                                     // Dragging a maximized window restores it
                                     // first so it follows the cursor (standard
