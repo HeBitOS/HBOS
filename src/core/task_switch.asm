@@ -18,11 +18,23 @@ global task_switch
 global task_entry_trampoline
 global task_enter_ring3
 global task_resume_linux_syscall
+; 排错用：非 0 时给 clone 子进程的首次 iret 打上单步标志（TF），
+; 让 CPU 在执行完第一条用户指令后抛 #DB。见下方 task_resume_linux_syscall。
+global task_debug_single_step
+; 排错用：非 0 时在 task_resume_linux_syscall 里打印子进程的恢复现场。
+global task_debug_trace_resume
 extern task_exit
 extern smp_sched_unlock
+extern task_debug_report_resume
 
 section .text
 bits 64
+
+section .data
+align 4
+task_debug_single_step: dd 0
+task_debug_trace_resume: dd 0
+section .text
 
 task_switch:
     ; rdx/rcx (prev_fpu/next_fpu) don't survive the stack juggling below
@@ -117,13 +129,36 @@ task_enter_ring3:
 ; except Linux's specified child return value RAX=0 and the requested RSP/TLS.
 task_resume_linux_syscall:
     mov rax, rdi
+    ; 诊断：只在 task_debug_trace_resume 打开时才打（shell 里
+    ; `setenv resume 1`）。默认静默——串口在 QEMU 里是逐字符模拟的，
+    ; fork 热路径上每多打一行都可能把 zygote 握手拖过超时。
+    cmp dword [rel task_debug_trace_resume], 0
+    je .no_resume_trace
+    push rax
+    push rdi
+    mov rdi, [rax]          ; arg1 = 上下文里的目标 rip
+    mov rsi, [rax+8]        ; arg2 = 目标 rsp
+    call task_debug_report_resume
+    pop rdi
+    pop rax
+.no_resume_trace:
 
-    push 0x23
-    push qword [rax+8]
-    push qword [rax+16]
-    push 0x1B
-    push qword [rax]
+    ; iretq 帧：SS, RSP, RFLAGS, CS, RIP（栈顶是 RIP）。
+    ; RFLAGS 先算进 r11，按 task_debug_single_step 决定是否打 TF。
+    mov r11, [rax+16]
+    cmp dword [rel task_debug_single_step], 0
+    je .step_done
+    or r11, 0x100               ; TF：执行完第一条用户指令后抛 #DB
+.step_done:
+    push 0x23                   ; SS
+    push qword [rax+8]          ; RSP
+    push r11                    ; RFLAGS（可能带 TF）
+    push 0x1B                   ; CS
+    push qword [rax]            ; RIP
 
+    ; Context layout (all 8-byte slots):
+    ;   0 rip   8 rsp   16 rflags   24 rdi   32 rsi   40 rdx   48 r10
+    ;  56 r8   64 r9    72 rbx     80 rbp   88 r12   96 r13  104 r14  112 r15
     mov rbx, [rax+72]
     mov rbp, [rax+80]
     mov r12, [rax+88]

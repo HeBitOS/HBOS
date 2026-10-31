@@ -247,14 +247,18 @@ void gui_wl_init(uint32_t *pixels, int w, int h, uint32_t pitch_px) {
     g_root_buf.release_ctx = 0;
     g_root_buf.busy = 0;
 
-    g_root = wl_surface_create(w, h);
-    if (!g_root) return;
-    wl_surface_set_commit_listener(g_root, wl_on_commit, 0);
+    if (!g_root) {
+        g_root = wl_surface_create(w, h);
+        if (!g_root) return;
+        wl_surface_set_commit_listener(g_root, wl_on_commit, 0);
+        g_comp = wl_comp_create(0, 0);
+        if (g_comp) (void)wl_comp_add(g_comp, g_root, 0, 0, 0);
+    } else {
+        g_root->w = w;
+        g_root->h = h;
+    }
     (void)wl_surface_attach(g_root, &g_root_buf);
     (void)wl_surface_commit(g_root);
-
-    g_comp = wl_comp_create(0, 0);
-    if (g_comp) (void)wl_comp_add(g_comp, g_root, 0, 0, 0);
 }
 
 int gui_wl_active(void) { return g_root != 0; }
@@ -468,8 +472,8 @@ void gd_fill_round_rect(int x, int y, int w, int h, int r,
 
 /* 1px 圆角边框：外层圆角填边框色，内层圆角填内容色。
  * 圆角不能靠 gd_border 画直线段实现——四角会露方角。 */
-static void gd_round_border(int x, int y, int w, int h, int r,
-                            uint32_t border_c, uint32_t body_c) {
+void gd_round_border(int x, int y, int w, int h, int r,
+                     uint32_t border_c, uint32_t body_c) {
     if (r < 1) r = 1;
     if (r * 2 > w || r * 2 > h) r = (w < h ? w : h) / 2;
     gd_fill_round_rect(x, y, w, h, r, border_c, RR_ALL);

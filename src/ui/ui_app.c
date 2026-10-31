@@ -177,10 +177,13 @@ int ui_wm_open(ui_wm_t *wm, const char *title, int w, int h) {
     win->dirty_rect = (ui_rect_t){ win->x, win->y, win->w, win->h };
     content_from_geom(win);
 
-    /* 打开动画：旧实现是淡入，这里保留但只用少量帧 */
+    /* 打开动画：淡入 + 从 92% 缩放浮起（见 wm_get_window_rect 的
+     * anim_scale 处理）。t0/时长在 wm 侧按 PIT 时钟赋值。 */
     win->anim = UI_ANIM_OPEN;
+    win->anim_type = UI_ANIM_OPEN;
     win->anim_frame = 0;
     win->anim_total = 8;
+    win->anim_scale = 92;
     win->anim_from = (ui_rect_t){ win->x, win->y, win->w, win->h };
 
     if (idx >= wm->count) wm->count = idx + 1;

@@ -1,3 +1,4 @@
+#include "tty.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -16,6 +17,7 @@
 #include "../shell/shell.h"
 #include "../vfs.h"
 #include "../fs.h"
+#include "../linux_compat.h"
 
 static int g_errno;
 static char g_posix_cwd[256] = "/";
@@ -240,7 +242,7 @@ ssize_t read(int fd, void *buf, size_t count) {
                 uint32_t got = 0;
                 while (got < count) {
                     if (p->count == 0) {
-                        if (p->ref_count < 2) break;
+                        if (!posix_pipe_write_end_open(p)) break;
                         if (redir->flags & O_NONBLOCK)
                             return got ? (ssize_t)got : set_errno(EAGAIN);
                         task_yield();
@@ -260,20 +262,7 @@ ssize_t read(int fd, void *buf, size_t count) {
             redir->offset += got;
             return (ssize_t)got;
         }
-        char *out = buf;
-        size_t i = 0;
-        while (i < count) {
-            int key = kb_get_key();
-            if (key < 0 || key > 0xff) continue;
-            if (key == '\b') {
-                if (i > 0) { i--; console_putchar('\b'); console_putchar(' '); console_putchar('\b'); }
-                continue;
-            }
-            out[i++] = (char)key;
-            console_putchar((char)key);
-            if (key == '\n') break;
-        }
-        return (ssize_t)i;
+        return (ssize_t)tty_console_read((char *)buf, (uint32_t)count);
     }
 
     fd_entry_t *ent = fd_get(fd);
@@ -284,7 +273,7 @@ ssize_t read(int fd, void *buf, size_t count) {
         uint32_t got = 0;
         while (got < count) {
             if (p->count == 0) {
-                if (p->ref_count < 2) break;
+                if (!posix_pipe_write_end_open(p)) break;
                 if (ent->flags & O_NONBLOCK)
                     return got ? (ssize_t)got : set_errno(EAGAIN);
                 task_yield();
@@ -344,7 +333,10 @@ int close(int fd) {
 
 int isatty(int fd) {
     if (fd >= STDIN_FILENO && fd <= STDERR_FILENO) return 1;
-    return set_errno(EBADF);
+    fd_entry_t *te = fd_get(fd);
+    if (!te) return set_errno(EBADF);
+    if (te->type == FD_FILE && tty_node_is_tty(te->node)) return 1;
+    return set_errno(ENOTTY);
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
@@ -388,7 +380,10 @@ int open(const char *path, int flags, ...) {
         return set_errno(EEXIST);
     vfs_node_t *node = vfs_lookup(full);
     int created = 0;
-    if (!node) {
+    if (node && !strcmp(full, "/dev/ptmx")) {
+        node = (vfs_node_t *)pty_open_master();
+        if (!node) return set_errno(ENOMEM);
+    } else if (!node) {
         if (entry && entry->type == VFS_NODE_SYMLINK)
             return set_errno(ENOENT);
         if (!(flags & O_CREAT)) return set_errno(ENOENT);

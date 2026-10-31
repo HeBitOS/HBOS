@@ -108,10 +108,58 @@ typedef struct gui_state {
     int  showdesk_active;
     int theme_light;
     int taskbar_show_seconds;  /* 任务栏时钟是否显示秒数，默认开启 */
+    int desktop_style;         /* 0 = GNOME 40+ (Top Bar + Floating Dock), 1 = Windows 11 */
+    int dock_pos;              /* 0 = 底部 (Bottom), 1 = 左侧 (Left) */
+    int dpi_scale_override;    /* 0 = 自动按分辨率/EDID自适应, >0 = 手动指定百分比 (如 100/125/150) */
+    int req_res_w, req_res_h;  /* >0 时请求主循环立即切换为该分辨率 */
     int effects_enabled;       /* 窗口动效总开关，默认开启（③） */
+    /* ── 手稿②：窗口拖动 / 立体层级 / 降维打击 ──────────────────
+     * drag_enabled      允许自由拖动窗口（关掉后标题栏只剩点击聚焦）
+     * drag3d_enabled    拖动时把后面的窗口渲染成 3D 层次（视差 + 压暗）
+     * knock_down_enabled 被拖窗口撞到别的窗口时，把它降一层
+     * drag3d / drag3d_dx / drag3d_dy 是运行时状态：仅当次拖动有效，
+     *   主循环每帧写入，绘制层据此算视差；松手归零。 */
+    int drag_enabled;
+    int drag3d_enabled;
+    int knock_down_enabled;
+    int drag3d;
+    int drag3d_dx, drag3d_dy;
+    /* 「动态玻璃」：GNOME 风格的可选开关。开启后窗口框、开始菜单、快捷设置
+     * 面板会先对身后的画面做降采样高斯近似模糊，再以半透明底色覆盖，
+     * 做出"磨砂玻璃"的层次感（见 src/gui/glass.c）。默认关闭——它在软件
+     * 合成下是纯 CPU 成本，得让用户自己选。 */
+    int glass_enabled;
+    int glass_strength;        /* 0=轻 1=中 2=强，决定模糊半径与降采样倍率 */
+    /* ── GNOME 顶栏自动隐藏（waybar 风格）──────────────────────
+     * topbar_autohide 开启后顶栏滑出屏幕，鼠标顶到屏幕上缘 (y<=2)
+     * 时滑出；点开日历/快捷设置/概览期间保持显示。
+     * topbar_revealed 是运行时状态，每帧更新、不持久化。 */
+    int topbar_autohide;
+    int topbar_revealed;
+    int topbar_anim;           /* 滑动动画当前值 0(全隐)..GNOME_TOPBAR_H(全显)，运行时 */
+    int topbar_hide_at;        /* 鼠标移开后收回的 frame_tick 期限，0=无计时 */
+    /* 滑动动画的时间基准。
+     *
+     * 早期这里是一条"每帧走 diff/4"的指数逼近：它没有终点、没有曲线，
+     * 帧率高时 3 帧就弹到位、帧率低时又肉得像拖影 —— 这就是"没有像样
+     * 的动画"的直接原因。现在改成标准三条 CSS 语义：
+     *   topbar_from   动画起点像素
+     *   topbar_to     动画终点像素
+     *   topbar_t0     起始时刻（毫秒）
+     *   topbar_ms     时长（毫秒，0 = 立即到位）
+     * 每帧只按 (now-t0)/ms 套缓动曲线插值，与帧率彻底解耦。 */
+    int  topbar_from, topbar_to;
+    uint64_t topbar_t0;
+    int  topbar_ms;
     int sm_cat;                /* 开始菜单分类：0 全部 1 面板 2 应用 3 磁盘/hax */
     int brightness;            /* 屏幕亮度 20..100，默认 100 */
     int brightness_popup_open; /* 任务栏亮度滑杆弹窗是否打开 */
+    int quick_settings_open;   /* GNOME 快捷设置控制中心弹窗是否打开 */
+    int ov_selected;           /* 概览中键盘当前选中的窗口索引 */
+    /* 指针在屏幕上的当前位置（主循环每帧写入）。
+     * 应用拿不到鼠标回调里的坐标时用它做悬停高亮——设置页的侧栏导航
+     * 与按钮 hover 都依赖它。只读，应用不应改写。 */
+    int cursor_x, cursor_y;
     char console_input[120];
     uint32_t console_input_len;
     char console_history[64][120];

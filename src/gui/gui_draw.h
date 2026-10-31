@@ -37,6 +37,12 @@ void gui_rect_alpha(int x, int y, int w, int h, uint32_t color);
  * 使用。 */
 void gui_blit_rgb888(int x, int y, const uint8_t *rgb, int img_w, int img_h,
                       int clip_x, int clip_y, int clip_w, int clip_h);
+/* 整块贴一张 32 位 ARGB8888 位图（Wayland wl_shm 的原生格式）。
+ * 与 gui_blit_rgb888 的区别：源已经是目标像素格式，不需要逐像素转换，
+ * 一个 32 位拷贝就完事。alpha=0xFF 的像素走不透明路径，其余做混合。 */
+void gui_blit_argb8888(int x, int y, const uint8_t *argb, int img_w, int img_h,
+                       int src_stride, int clip_x, int clip_y, int clip_w,
+                       int clip_h);
 void gui_border(int x, int y, int w, int h, uint32_t color);
 void gui_vgradient(int x, int y, int w, int h, uint32_t top, uint32_t bottom);
 void gui_soft_shadow(int x, int y, int w, int h);
@@ -119,6 +125,7 @@ enum {
 };
 
 void gd_fill_round_rect(int x, int y, int w, int h, int r, uint32_t color, int corners);
+void gd_round_border(int x, int y, int w, int h, int r, uint32_t border_c, uint32_t body_c);
 void gd_draw_panel_shell(int x, int y, int w, int h, uint32_t top, uint32_t bottom,
                          uint32_t border_c, uint32_t accent);
 void gd_draw_inset_shell(int x, int y, int w, int h, uint32_t border_c);

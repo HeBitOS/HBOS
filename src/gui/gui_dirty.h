@@ -3,7 +3,9 @@
 
 #include <stdint.h>
 
-#define GUI_DIRTY_MAX 12
+/* 脏矩形数量上限。超过就退化为整屏重绘（最贵的一条路径），所以给足
+ * 余量：只合并真正重叠的矩形后，矩形数会比以前多，12 太容易撞上限。 */
+#define GUI_DIRTY_MAX 32
 #define GUI_DIRTY_PAD 12
 
 void gui_dirty_reset(void);

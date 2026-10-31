@@ -101,7 +101,33 @@ typedef struct {
     int start_menu_open;
     int menu_x, menu_y, menu_w, menu_h;
     int desk_w, desk_h;
+    int top_bar_h;
+    /* 「降维打击」层级计数器：每次聚焦/新建窗口取 ++layer_seq。
+     * 上限 UINT32_MAX（笔记「层级上限 2^32-1」），逼近上限时重标定。 */
+    uint32_t layer_seq;
 } wm_state_t;
+
+/** 层级上限（笔记：2^32-1）。 */
+#define WM_LAYER_MAX 0xFFFFFFFFu
+
+/* 取窗口当前层级；不存在返回 0。 */
+uint32_t wm_window_layer(wm_state_t *wm, int idx);
+/* 把 idx 的层级降到 target 之下（降维打击）；返回新层级。
+ * target_layer 为撞击者层级；降层后若与更下层冲突则整体下移一档，
+ * 但不会低于 0，也不会超过撞击者。 */
+uint32_t wm_knock_down(wm_state_t *wm, int idx, uint32_t target_layer);
+/* 「降维打击」的实际动作：把它和在它**正下方**的那个窗口换层，
+ * 也就是只下沉一层。返回 1 表示真的沉了（已经在最底层则返回 0）。
+ *
+ * 为什么是"换层"而不是"layer--"：层级号必须是全局唯一的（笔记要求），
+ * 而单调序号之间有空隙，直接减一会撞到别人的号上，出现"两个窗口同层"
+ * 的非法状态。与紧邻的下层交换号既保证了唯一性，又恰好是"下沉一层"
+ * 的语义——视觉顺序来自 layer 的排序，交换即换位。 */
+int  wm_sink_one(wm_state_t *wm, int idx);
+/* 每帧调用：递减撞击冷却/高亮帧数。 */
+void wm_tick_knock(wm_state_t *wm);
+/* 两个窗口矩形是否相交（用于「撞击」判定）。 */
+int  wm_windows_collide(wm_state_t *wm, int a, int b);
 
 void wm_init(wm_state_t *wm, int desk_w, int desk_h);
 void wm_set_panel_title(int panel, const char *title);
@@ -116,6 +142,9 @@ void wm_resize_window(wm_state_t *wm, int idx, int w, int h);
 void wm_minimize_window(wm_state_t *wm, int idx);
 void wm_maximize_window(wm_state_t *wm, int idx);
 void wm_restore_window(wm_state_t *wm, int idx);
+/* 只查询"还原后的矩形"，不改状态。UI 层拖动最大化窗口时先用它算出
+ * 指针锚点，再调 wm_restore_window()，避免二次读状态拿到旧几何。 */
+void wm_restore_target(const wm_state_t *wm, int idx, int *x, int *y, int *w, int *h);
 void wm_toggle_maximize(wm_state_t *wm, int idx);
 void wm_snap_window(wm_state_t *wm, int idx, int side);
 /* 从吸附态退出：恢复到吸附前的几何。返回 1 表示确实做了还原。 */

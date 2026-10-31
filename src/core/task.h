@@ -70,6 +70,12 @@ typedef struct {
     uint64_t r13;
     uint64_t r14;
     uint64_t r15;
+    /* 下面两个字段**不是**寄存器现场，只在 fork 路径上临时携带
+     * CLONE_CHILD_SETTID 的目标地址：子任务 id 要等 task_fork_common
+     * 分配完才知道，那时再去写这个槽位。它们排在最末尾，所以前面 15 个
+     * 寄存器的偏移（0..112）保持不变，task_resume_linux_syscall 不受影响。 */
+    uint64_t child_tid_slot;
+    uint64_t child_tid_written;
 } hbos_linux_clone_context_t;
 
 // ============================================================
@@ -157,6 +163,11 @@ typedef struct task {
     uint8_t parent_death_signal;
     bool dumpable;
     bool no_new_privs;
+    uint32_t pgid;          /**< 进程组 ID（作业控制） */
+    uint32_t sid;           /**< 会话 ID */
+    volatile bool stopped;  /**< SIGSTOP/SIGTSTP 停止中 */
+    int stop_sig;           /**< 导致停止的信号 */
+    bool stop_reported;     /**< WUNTRACED 已上报 */
     bool child_subreaper;   /**< prctl(PR_SET_CHILD_SUBREAPER) 状态（仅记录） */
     uint32_t *clear_child_tid;
     void *robust_list_head;
@@ -238,6 +249,11 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
 /* A nonzero pml4_phys is transferred to task_create_ring3_full, including
  * failure paths; callers must not destroy it after the call. */
 
+/* execve 语义：把当前任务"应当由 exec 继承"的状态（父进程/进程组/会话/非
+ * CLOEXEC 的 fd 表）交给刚加载好的新任务 new_id，随后调用者应当 task_exit()。
+ * HBOS 的 exec 是"建新任务 + 老任务退出"，没有这一步新进程会丢掉全部 fd。 */
+void task_exec_inherit(int new_id);
+
 // Cooperative yield — switch to next ready task
 void task_yield(void);
 
@@ -246,6 +262,11 @@ void task_exit(void);
 void task_set_exit_status(int status);
 int task_wait(uint32_t id, int *status);
 int task_kill(uint32_t id, int sig);
+int task_kill_pgrp(uint32_t pgid, int sig);          /* 向进程组发信号；返回送达数 */
+int task_setpgid(uint32_t pid, uint32_t pgid);       /* 0/-errno */
+int task_setsid(void);                               /* 新 sid 或 -errno */
+int task_getpgid(uint32_t pid);                      /* pgid 或 -ESRCH */
+int task_getsid(uint32_t pid);
 
 // Fork current task (clone with same context)
 int task_fork(void);

@@ -45,6 +45,27 @@ const char *elf64_last_error(void) {
     return elf_error;
 }
 
+/* execve 的**绝对路径**暂存区。
+ *
+ * VFS 节点只存 basename，loader 拿不到完整路径；但 /proc/<pid>/exe 必须是
+ * 真路径 —— Chromium 用 dirname(readlink("/proc/self/exe")) 找 icudtl.dat
+ * 和 *.pak。execve 的调用方（syscall 层）手里正好有那个路径字符串，于是
+ * 在调用 loader 之前塞进来，loader 建完新任务后取走。
+ *
+ * 只在一次 execve 调用内有效，读完立刻清空，避免影响后续 run/spawn。 */
+static char elf_exec_path[128];
+
+void elf_set_exec_path(const char *path) {
+    elf_exec_path[0] = '\0';
+    if (!path || path[0] != '/') return;
+    size_t i = 0;
+    while (path[i] && i + 1 < sizeof(elf_exec_path)) {
+        elf_exec_path[i] = path[i];
+        i++;
+    }
+    elf_exec_path[i] = '\0';
+}
+
 static int elf_fail(const char *msg) {
     elf_error = msg;
     return -1;
@@ -761,10 +782,15 @@ static int elf64_load_source_and_spawn_snapshot(
     sp = (uint8_t *)((uintptr_t)sp & ~15ULL);
 
     uintptr_t stack_addr = (uintptr_t)sp;
-    /* SysV ABI: main() entry has rsp % 16 == 8 (as if entered by call).
-     * The padding keeps the total push count odd so the stack lands at
-     * 8 mod 16; SSE2 programs (quickjs/tinycc) fault on misaligned movdqa
-     * otherwise.  Plain -mno-sse apps are alignment-agnostic. */
+    /* SysV ABI: 进程入口 rsp % 16 == 0（指向 argc）。
+     *
+     * 静态程序没有 ld.so 接手，_start 直接就是 crt0，所以这里额外把
+     * push 次数补成奇数，让 main 里 rsp % 16 == 8；否则 GCC 在 main 里
+     * 生成的 movaps 会 #GP（quickjs/tinycc 踩过）。
+     *
+     * 动态程序**不能**这么补：实测补成奇数会让 glibc 的 ld.so 一进去就
+     * #GP（rip 落在 0x1200022xxx 的 loader 代码里，exit 132）。也就是说
+     * 入口必须保持 ABI 的 0 mod 16，那 8 字节的差由 ld.so 自己处理。 */
     int want_odd_pushes = !has_interp;
     if (((35 + argc + envc) & 1) != want_odd_pushes)
         push_user_u64(&stack_addr, 0);
@@ -797,6 +823,8 @@ static int elf64_load_source_and_spawn_snapshot(
         AT_GID = 13,
         AT_EGID = 14,
         AT_CLKTCK = 17,
+        AT_HWCAP = 16,
+        AT_HWCAP2 = 26,
         AT_SECURE = 23,
         AT_RANDOM = 25,
         AT_PLATFORM = 15,
@@ -812,6 +840,19 @@ static int elf64_load_source_and_spawn_snapshot(
     PUSH_AUX(AT_RANDOM, (uintptr_t)random_bytes);
     PUSH_AUX(AT_SECURE, 0);
     PUSH_AUX(AT_CLKTCK, PIT_DEFAULT_FREQUENCY_HZ);
+    /* CPU 特性位：这两个值**必须**如实反映"内核能提供什么"，不能抄宿主。
+     * 以前根本没推 AT_HWCAP/AT_HWCAP2，glibc 会当成"宿主什么都没报告"，
+     * 于是它自己挑一套最保守的字符串/内存例程——能跑但慢。更关键的是：
+     * AT_HWCAP2 里只要有 HWCAP2_RSEQ 位，glibc 就会积极去调 rseq(2)
+     * 并在失败时回退到慢路径；我们从一开始就不置这位，语义是"本内核
+     * 不支持 rseq"，进程内所有 dlopen/exec 都不会再走那条分支。
+     *
+     * 目前只声明 AVX2/SSE2 与 x86-64-v1 基线始终具备的项，其余保持 0：
+     * 内核本身编译时禁用了 SSE（-mno-sse），用户态能不能用完全取决于
+     * CPUID 直通，这里保守声明不会误伤（glibc 只在 AT_HWCAP 置位时才
+     * 用，没置位就用等价的安全实现）。 */
+    PUSH_AUX(AT_HWCAP, 0);
+    PUSH_AUX(AT_HWCAP2, 0);
     PUSH_AUX(AT_EGID, 0);
     PUSH_AUX(AT_GID, 0);
     PUSH_AUX(AT_EUID, 0);
@@ -853,9 +894,18 @@ static int elf64_load_source_and_spawn_snapshot(
         attach_host_symtab(source->memory, (size_t)source->size, ehdr,
                            (uint32_t)new_id);
     /* /proc/<pid>/exe 必须是真实路径：Chromium 用它定位 icudtl.dat 与
-     * *.pak（dirname(readlink("/proc/self/exe"))）。 */
-    if (source->node && source->node->name[0])
+     * *.pak（dirname(readlink("/proc/self/exe"))）。
+     *
+     * 优先级：execve 传下来的绝对路径 > VFS 节点的 basename。
+     * basename 单独用是**错的** —— 它不以 '/' 开头，readlink 会当成"未知"
+     * 并退回 "/<任务名>"，Chromium 于是把 dirname 算成 "/"，去 /icudtl.dat
+     * 找资源，必然 ENOENT，然后无限重试。 */
+    if (elf_exec_path[0] == '/') {
+        task_set_exe_path((uint32_t)new_id, elf_exec_path);
+        elf_exec_path[0] = '\0';
+    } else if (source->node && source->node->name[0]) {
         task_set_exe_path((uint32_t)new_id, source->node->name);
+    }
 
     return new_id;
 #undef ELF_NEW_IMAGE_FAIL
@@ -894,6 +944,7 @@ int elf64_load_and_exec(const uint8_t *data, size_t size,
                         char *const argv[], char *const envp[]) {
     int new_id = elf64_load_and_spawn(data, size, argv, envp, "elf_app");
     if (new_id < 0) return -1;
+    task_exec_inherit(new_id);
     task_exit();
     return 0;
 }
@@ -918,6 +969,17 @@ int elf64_load_vfs_and_exec(struct vfs_node *node,
     release_image_source(&source);
     kfree(snapshot);
     if (new_id < 0) return -1;
+    /* execve 在 Linux 里是**原地替换**：进程 id 不变、父进程不变、fd 表
+     * 里非 FD_CLOEXEC 的文件继续有效、信号处理器重置为默认。
+     *
+     * HBOS 的实现是"新建一个任务 + 老任务退出"，上面那条 spawn 只做了一半：
+     * 新任务拿到全新的空 fd 表、全新的 parent_id（指向马上要死的自己），
+     * 于是 fork 出来的子进程 exec 之后**管道 fd 全丢**。Chromium 的 zygote
+     * 正是靠 fork 时继承的 socketpair 和浏览器进程通信，fd 一丢，
+     * 父进程立刻报 "Cannot communicate with zygote"。
+     *
+     * 这里把 exec 该继承的东西交给新任务，再让本任务退出。 */
+    task_exec_inherit(new_id);
     task_exit();
     return 0;
 }

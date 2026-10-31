@@ -194,6 +194,9 @@ typedef enum {
 
     // ---- Linux/POSIX compatibility event core ----
     HBOS_SYS_POLL,           /**< poll(fds,nfds,timeout_ms) */
+    /** ppoll(fds,nfds,timespec,sigmask)：Chromium 的事件循环主等待点。
+     * 和 poll 的唯一区别是超时用 timespec（纳秒精度），sigmask 这里忽略。 */
+    HBOS_SYS_PPOLL,
     HBOS_SYS_PIPE2,          /**< pipe2(pipefd,flags) */
     HBOS_SYS_EVENTFD2,       /**< eventfd2(initial_value,flags) */
     HBOS_SYS_EPOLL_CREATE1,  /**< epoll_create1(flags) */
@@ -261,6 +264,31 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 /** 打印最近 128 条 Linux 系统调用（用户态异常时调用）。 */
 void linux_syscall_trace_dump(void);
+
+/** 排错开关（shell `setenv` 命令用），见 linux_debug_set_flag 定义处。 */
+enum {
+    LINUX_DEBUG_TRACE_CLONE3 = 1,
+    /** 解开 fork 型 CLONE_CHILD_CLEARTID 的 child_tid 校验（A/B 实验用）。
+     *  zygote 的 clone3 把 child_tid 指向 fs:0x2d0，若那里映射出问题就会被
+     *  误判成 EFAULT；打开这个开关可以确认到底是哪一侧的问题。 */
+    LINUX_DEBUG_FORK_CLEARTID = 2,
+    /** 让 fork 出来的子进程在执行完第一条用户指令后抛 #DB（单步探针）。
+     *  用来确认子进程到底有没有真正进用户态、落点在哪。 */
+    LINUX_DEBUG_STEP_CHILD = 3,
+    /** 打印 fork/clone 子进程第一次被调度时的恢复现场（rip/rsp/tcb…）。
+     *  默认关闭：串口日志在 QEMU 里是逐字符模拟的，热路径上白打日志
+     *  足以把 zygote 的 5 秒握手拖超时。 */
+    LINUX_DEBUG_TRACE_RESUME = 4,
+    /** 打印 ppoll 的 nfds / 超时 / 返回值（前几条）。
+     *  Chromium 连上 Wayland、收完 registry 事件后不再发请求，怀疑它卡在
+     *  ppoll 上等一个永远不会就绪的 fd。默认关闭。 */
+    LINUX_DEBUG_PPOLL_TRACE = 5,
+};
+void linux_debug_set_flag(int which, int value);
+
+/** 只对指定 pid 实时打印每条 Linux 系统调用（`setenv tracepid <pid>`）。
+ *  pid 传 0 关闭。fork 出的子进程"跑几步就停住"且无异常可 dump 时用。 */
+void linux_debug_set_trace_pid(int pid);
 
 /** Rewrite a ring3 exception return frame for synchronous signal delivery.
  *  cr2/err_code describe the faulting access (CR2 and page-fault error code);

@@ -30,13 +30,17 @@ void hpt_repo_seed_init(void) {
                                       (uint32_t)(_binary_build_hpt_repo_bin_end -
                                                  _binary_build_hpt_repo_bin_start),
                                       &unpacked, &raw_len);
-    if (!base) return;
+    if (!base) {
+        console_puts("[KERN] hpt repo: blob unpack failed (pmm?)\n");
+        return;
+    }
 
     const uint8_t *p = base;
     const uint8_t *end = base + raw_len;
     if (end <= p + 4) return;
 
     uint32_t count;
+    uint32_t n_files = 0;
     __builtin_memcpy(&count, p, 4);
     p += 4;
 
@@ -68,5 +72,17 @@ void hpt_repo_seed_init(void) {
             return;
         }
         p += data_len;
+        n_files++;
     }
+    console_puts("[KERN] hpt repo: ");
+    {
+        char nbuf[16];
+        int v = (int)n_files, i = 0;
+        if (v == 0) nbuf[i++] = '0';
+        else { char t[8]; int k = 0; while (v) { t[k++] = '0' + v % 10; v /= 10; }
+               while (k) nbuf[i++] = t[--k]; }
+        nbuf[i] = 0;
+        console_puts(nbuf);
+    }
+    console_puts(" files registered\n");
 }

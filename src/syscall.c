@@ -10,6 +10,7 @@
  *   - 失败: 返回负的 errno 值（如 -ENOENT）
  */
 
+#include "tty.h"
 #include <stdint.h>
 
 #include "errno.h"
@@ -729,9 +730,16 @@ typedef struct {
     uint64_t cgroup;
 } linux_x86_clone_args_t;
 
+/* 排错开关读取（定义在 linux_clone3 附近的开关区）。
+ * 单独前置声明是因为 linux_clone_args 比它先用到。 */
+static int linux_debug_flag(int which);
+
 #define LINUX_CLONE_ARGS_SIZE_VER0 64U
 #define LINUX_CLONE_ARGS_SIZE_VER2 88U
 
+/* 子进程/子线程的初始寄存器现场。
+ * 两条路径在这里**没有区别**：都用 call.a0..a5 里保存的 syscall 时刻用户
+ * 寄存器。区别只在 RSP（fork 用父进程 rsp，线程用新栈顶）上，由调用者传。 */
 static void linux_clone_context_from_frame(
     const linux_x86_syscall_return_frame_t *frame, uint64_t stack,
     hbos_linux_clone_context_t *context) {
@@ -739,6 +747,14 @@ static void linux_clone_context_from_frame(
     context->rip = frame->rip;
     context->rsp = stack;
     context->rflags = frame->rflags;
+    /* syscall 入口把用户寄存器原样压进 call.a0..a5（见 interrupt_asm.asm
+     * 的 linux_syscall_entry：push rdi / rsi / rdx / r10 / r8 / r9），所以
+     * 这六个槽位里就是 syscall 那一刻的**真值**，fork 与线程两种路径通用。
+     *
+     * fork 子进程从 __clone 返回到 `leave` 时会 pop rbp，一旦这里被灌成
+     * clone 的参数（比如 a0 = SIGCHLD 标志），rbp 就是垃圾，`pop rbp`
+     * 立刻读野地址 → SIGSEGV addr=0 err=P|U。zygote 每次 fork 都死在那里，
+     * 父进程只看到 "Cannot communicate with zygote"。 */
     context->rdi = frame->call.a0;
     context->rsi = frame->call.a1;
     context->rdx = frame->call.a2;
@@ -771,7 +787,22 @@ static uint64_t linux_fork(linux_x86_syscall_return_frame_t *frame) {
         return (uint64_t)(-EFAULT);
     hbos_linux_clone_context_t context;
     linux_clone_context_from_frame(frame, frame->rsp, &context);
+    /* vfork 语义的子进程：没有 CLONE_CHILD_SETTID，但 clear_child_tid 由
+     * task_fork_common 从父进程继承（Linux 语义）。 */
     int pid = task_fork_linux(&context);
+    /* zygote 走的就是这条路：父进程 curl 到 pid 之后立刻往管道里写请求，
+     * 子进程则 exec 成 zygote。子进程从 __clone 返回到哪里、返回后寄存器
+     * 是否还是 syscall 那一刻的样子，是排查 "Cannot communicate with
+     * zygote" 的第一现场，这里固定打一行（量小，不影响性能）。 */
+    console_puts("[FORK] pid=");
+    trace_put_udec(pid);
+    console_puts(" rip=0x");
+    trace_put_hex(frame->rip);
+    console_puts(" rsp=0x");
+    trace_put_hex(frame->rsp);
+    console_puts(" rbp=0x");
+    trace_put_hex(frame->rbp);
+    console_putchar('\n');
     return pid < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)pid;
 }
 
@@ -810,10 +841,66 @@ static uint64_t linux_clone_args(linux_x86_syscall_return_frame_t *frame,
      * CLONE_THREAD；同样按 fork 处理（子进程马上 exec，共享地址空间只是
      * vfork 的性能优化，复制一份语义等价）。 */
     if ((flags & CLONE_THREAD) == 0) {
+        /* fork 型的 CLONE_CHILD_SETTID / CLEARTID 目标指针要先验一遍，
+         * 否则内核会往用户地址里写（退出时 clear_child_tid 唤醒 futex）。
+         * zygote 用 clone3 传的是 fs:0x2d0，正常情况下当然映射着；但为了
+         * 区分"地址真没映射"和"我们把它误判了"，A/B 开关见
+         * LINUX_DEBUG_FORK_CLEARTID。 */
+        if ((flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) &&
+            !linux_debug_flag(LINUX_DEBUG_FORK_CLEARTID) &&
+            !linux_user_range_mapped(child_tid, sizeof(uint32_t))) {
+            console_puts("[FORK] EFAULT child_tid=0x");
+            trace_put_hex(child_tid);
+            console_puts(" fl=0x");
+            trace_put_hex(flags);
+            console_putchar('\n');
+            return (uint64_t)(-EFAULT);
+        }
         hbos_linux_clone_context_t context;
         linux_clone_context_from_frame(frame, frame->rsp, &context);
+        /* CLONE_CHILD_SETTID 是"往子进程的 pthread_t 槽里写子进程 tid"。
+         * Linux 在 fork 返回到用户态**之前**就写好了，所以子进程第一行
+         * 读这个槽必须是自己的 pid。内核这边只有 task_fork_common 分配
+         * id 之后才知道 pid，于是把目标地址塞进 context 让它代写。 */
+        if ((flags & CLONE_CHILD_SETTID) && child_tid) {
+            context.child_tid_slot = child_tid;
+            context.child_tid_written = 1;
+        }
         int forked = task_fork_linux(&context);
-        return forked < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)forked;
+        if (forked < 0) return (uint64_t)(-EAGAIN);
+        /* 单步探针：让子进程执行完第一条用户指令就抛 #DB，用来确认它
+         * 究竟有没有真正落到用户态、落点是不是 _Fork 的恢复点。 */
+        if (linux_debug_flag(LINUX_DEBUG_STEP_CHILD)) {
+            extern int task_debug_single_step;
+            task_debug_single_step = 1;
+        }
+        /* zygote 就走这条道。子进程被调度起来却一条 syscall 都没有时，
+         * 必须知道内核交给它的 rip/rsp 究竟是什么 —— 是 libc 的 __clone
+         * 返回点，还是已经被谁改掉了。 */
+        console_puts("[FORK] pid=");
+        trace_put_udec(forked);
+        console_puts(" rip=0x");
+        trace_put_hex(frame->rip);
+        console_puts(" rsp=0x");
+        trace_put_hex(frame->rsp);
+        console_puts(" rbp=0x");
+        trace_put_hex(frame->rbp);
+        console_puts(" fl=0x");
+        trace_put_hex(flags);
+        /* 附上 PIT tick，用来量"从 fork 到 execve"实际花了多少时间。
+         * zygote 握手是硬超时，只有知道真实耗时才能判断是内核慢还是
+         * 根本走错了路（TCG 下 100Hz 的 tick 精度足够）。 */
+        console_puts(" t=");
+        trace_put_udec(pit_get_ticks());
+        console_putchar('\n');
+        /* CLONE_PARENT_SETTID / CLONE_CHILD_SETTID：父进程侧当场写；子进程侧
+         * 那份在 task_fork_common 里已经写过（子任务 id 分配完才知道）。
+         * 不写的话 glibc 的 fork() 拿到的 tid 槽是旧值，pthread_atfork 之后
+         * 任何依赖它判"我在子进程里吗"的逻辑都会失效。 */
+        if (flags & CLONE_PARENT_SETTID)
+            __atomic_store_n((uint32_t *)(uintptr_t)parent_tid,
+                             (uint32_t)forked, __ATOMIC_RELEASE);
+        return (uint64_t)forked;
     }
     if ((flags & required) != required || (flags & ~supported) != 0)
         return (uint64_t)(-EINVAL);
@@ -874,6 +961,43 @@ static uint64_t linux_clone_args(linux_x86_syscall_return_frame_t *frame,
     return tid < 0 ? (uint64_t)(-EAGAIN) : (uint64_t)tid;
 }
 
+/* 排错开关：登录 shell 里 `setenv 1` 之后，clone3 的原始参数会打到串口。
+ * A/B 一次就能区分"库不开 rseq 就不崩"和"exclude 位没被尊重"。 */
+static int hbos_trace_clone3;
+static int hbos_debug_fork_cleartid;
+static int hbos_debug_step_child;
+static int hbos_debug_trace_resume;
+/* 按 pid 实时追踪 syscall（`setenv tracepid <pid>`），0 = 关闭。 */
+static int hbos_trace_pid;
+
+static int linux_debug_flag(int which) {
+    if (which == LINUX_DEBUG_FORK_CLEARTID) return hbos_debug_fork_cleartid;
+    if (which == LINUX_DEBUG_STEP_CHILD) return hbos_debug_step_child;
+    return 0;
+}
+
+/* 定义在 src/core/task.c，与 clone3 日志同步开关。 */
+extern int task_debug_trace_clone;
+
+/* 按 pid 实时追踪 syscall，见 linux_syscall_dispatch_frame 里的用法。 */
+void linux_debug_set_trace_pid(int pid) {
+    hbos_trace_pid = pid;
+}
+
+void linux_debug_set_flag(int which, int value) {    if (which == LINUX_DEBUG_TRACE_CLONE3) {
+        hbos_trace_clone3 = !!value;
+        task_debug_trace_clone = !!value;
+    } else if (which == LINUX_DEBUG_FORK_CLEARTID) {
+        hbos_debug_fork_cleartid = !!value;
+    } else if (which == LINUX_DEBUG_STEP_CHILD) {
+        hbos_debug_step_child = !!value;
+    } else if (which == LINUX_DEBUG_TRACE_RESUME) {
+        extern int task_debug_trace_resume;
+        hbos_debug_trace_resume = !!value;
+        task_debug_trace_resume = !!value;
+    }
+}
+
 static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
                              const void *arguments, uint64_t size) {
     enum {
@@ -888,9 +1012,13 @@ static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
         CLONE_CHILD_CLEARTID = 0x00200000,
         CLONE_CHILD_SETTID = 0x01000000
     };
-    const uint64_t required = CLONE_VM | CLONE_FILES |
-                              CLONE_SIGHAND | CLONE_THREAD;
-    const uint64_t supported = required | CLONE_FS | CLONE_SYSVSEM |
+    const uint64_t thread_required = CLONE_VM | CLONE_FILES |
+                                     CLONE_SIGHAND | CLONE_THREAD;
+    /* fork 型 clone3（不带 CLONE_VM）只需要 SIGCHLD 那一类 exit_signal，
+     * 其它位按 fork 语义处理（和 clone(56) 的 no-CLONE_THREAD 分支一致）。 */
+    const uint64_t fork_allowed = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID |
+                                  CLONE_PARENT_SETTID | CLONE_FS;
+    const uint64_t supported = thread_required | CLONE_FS | CLONE_SYSVSEM |
                                CLONE_SETTLS | CLONE_PARENT_SETTID |
                                CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
     if (!frame || !arguments || size < LINUX_CLONE_ARGS_SIZE_VER0)
@@ -903,6 +1031,23 @@ static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
     memset(&args, 0, sizeof(args));
     uint64_t copied = size < sizeof(args) ? size : sizeof(args);
     memcpy(&args, arguments, (size_t)copied);
+    if (hbos_trace_clone3) {
+        console_puts("[CLONE3] size=");
+        trace_put_udec(size);
+        console_puts(" flags=0x");
+        trace_put_hex(args.flags);
+        console_puts(" exit_sig=0x");
+        trace_put_hex(args.exit_signal);
+        console_puts(" stack=0x");
+        trace_put_hex(args.stack);
+        console_puts("+0x");
+        trace_put_hex(args.stack_size);
+        console_puts(" tls=0x");
+        trace_put_hex(args.tls);
+        console_puts(" ctid=0x");
+        trace_put_hex(args.child_tid);
+        console_putchar('\n');
+    }
     if (size > LINUX_CLONE_ARGS_SIZE_VER2) {
         const uint8_t *tail =
             (const uint8_t *)arguments + LINUX_CLONE_ARGS_SIZE_VER2;
@@ -910,7 +1055,18 @@ static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
             if (tail[i - LINUX_CLONE_ARGS_SIZE_VER2] != 0)
                 return (uint64_t)(-E2BIG);
     }
-    if ((args.flags & required) != required ||
+    /* fork 型（不带 CLONE_VM）先分流：栈字段在 Linux 里被忽略，子进程
+     * 沿用父进程 rsp。必须在下面那套"线程必需位"校验之前判掉，否则
+     * zygote 的 clone3(SIGCHLD|CLEARTID|CHILD_SETTID) 会被拒成 EINVAL。 */
+    if ((args.flags & CLONE_VM) == 0) {
+        if (args.flags & ~fork_allowed) return (uint64_t)(-EINVAL);
+        if (args.exit_signal != 0 &&
+            args.exit_signal != SIGCHLD) return (uint64_t)(-EINVAL);
+        return linux_clone_args(
+            frame, args.flags | (args.exit_signal & 0xffULL),
+            frame->rsp, args.parent_tid, args.child_tid, args.tls);
+    }
+    if ((args.flags & thread_required) != thread_required ||
         (args.flags & ~supported) != 0 || args.exit_signal != 0 ||
         args.set_tid || args.set_tid_size || !args.stack ||
         !args.stack_size || args.stack > UINT64_MAX - args.stack_size)
@@ -921,7 +1077,11 @@ static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
      * parent_tid without CLONE_PIDFD; Linux ignores that inactive field. */
     /* clone3 与 clone 只是参数打包方式不同（clone_args 结构体 vs 寄存器）。
      * 摊平成寄存器形态后复用 linux_clone()——那条路径已经处理过
-     * fork/vfork/线程栈顶这三类形态，没必要再维护第二套校验。 */
+     * fork/vfork/线程栈顶这三类形态，没必要再维护第二套校验。
+     *
+     * 注意 stack 的语义分两种（fork 那种已在上面的提前返回里处理）：
+     *   - 线程（有 CLONE_VM）必须显式给栈：glibc/musl 传栈基址 + 大小，
+     *     子线程从 stack+size 开始长。 */
     uint64_t stack_top = args.stack + args.stack_size;
     return linux_clone_args(frame,
                             args.flags | (args.exit_signal & 0xffULL),
@@ -935,8 +1095,7 @@ static uint64_t linux_rt_sigaction(int signal_number,
                                    uint64_t signal_set_size) {
     if (signal_set_size != sizeof(uint64_t))
         return (uint64_t)(-EINVAL);
-    if (signal_number <= 0 || signal_number >= _NSIG ||
-        signal_number == SIGKILL || signal_number == SIGSTOP)
+    if (signal_number <= 0 || signal_number >= _NSIG)
         return (uint64_t)(-EINVAL);
     task_t *task = task_current();
     if (!task) return (uint64_t)(-ESRCH);
@@ -948,6 +1107,18 @@ static uint64_t linux_rt_sigaction(int signal_number,
         old_action->restorer = task->sig_action_restorer[signal_number];
         old_action->mask = task->sig_action_mask[signal_number];
     }
+    /* SIGKILL / SIGSTOP 不可捕获、不可忽略，Linux 对它们的 rt_sigaction
+     * 返回 EINVAL —— 但**只查 act，不查 oldact**：只要 act 为空（纯查询），
+     * 这两个信号也能正常读回 SIG_DFL/空掩码。原来的代码把这两个信号的
+     * 判断提到了填 old_action 之前，于是 glibc 的
+     *   sigaction(SIGSTOP, NULL, &old)
+     * 拿到 EINVAL，而 old 还是调用方的未初始化栈内存。
+     * 子进程在 fork 之后要连续做十几次 sigaction，其中就有对 SIGKILL 的
+     * 查询；EINVAL 让它走错误恢复路径，白白多绕一圈。 */
+    if ((signal_number == SIGKILL || signal_number == SIGSTOP) && action)
+        return (uint64_t)(-EINVAL);
+    if (signal_number == SIGKILL || signal_number == SIGSTOP)
+        return 0;
     if (action) {
         /* Linux 的 rt_sigaction 从不校验 handler/restorer 地址，只原样存。
          * 我们原来对 >= 0x800000000000 的地址返回 EFAULT，Chromium fork 出的
@@ -955,8 +1126,13 @@ static uint64_t linux_rt_sigaction(int signal_number,
          * RAW_LOG(FATAL,"sigaction (set) failed.") → int3，表现成"每个子进程
          * 起来就崩"。改成只记录不拒绝；前 8 次打出原始字段，顺便确认 32 字节
          * 布局（handler/flags/restorer/mask）与 glibc 一致。 */
+        /* 前几条打一次原始字段，用来核对 32 字节布局（handler/flags/
+         * restorer/mask）与 glibc 是否一致。原来这里是"前 8 次全打"，
+         * 而 fork 出来的子进程要连续做十几次 sigaction —— 串口在 QEMU
+         * 里是逐字符模拟的，几十行日志就足以把 zygote 握手拖到超时。
+         * 降到 2 次，够核对布局，又不会给热路径加负担。 */
         static int sigaction_logs;
-        if (sigaction_logs < 8) {
+        if (sigaction_logs < 2) {
             sigaction_logs++;
             console_puts("[SIGACT] sig=");
             trace_put_udec((uint64_t)signal_number);
@@ -1688,21 +1864,38 @@ static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
     if (send_operation && message->control && message->control_length) {
         if (message->control_length < sizeof(linux_x86_cmsghdr_t))
             return (uint64_t)(-EINVAL);
-        linux_x86_cmsghdr_t *header =
-            (linux_x86_cmsghdr_t *)message->control;
-        if (header->length < sizeof(*header) ||
-            header->length > message->control_length ||
-            header->level != 1 || header->type != 1 ||
-            (header->length - sizeof(*header)) % sizeof(int))
-            return (uint64_t)(-EOPNOTSUPP);
-        rights_count =
-            (size_t)((header->length - sizeof(*header)) / sizeof(int));
-        if (!rights_count || rights_count > 4)
-            return (uint64_t)(-EINVAL);
-        memcpy(rights, (uint8_t *)message->control + sizeof(*header),
-               rights_count * sizeof(int));
-        if (linux_compat_unix_send_rights(fd, rights, rights_count) < 0)
-            return (uint64_t)(-(errno > 0 ? errno : EINVAL));
+        /* 按 CMSG_NXTHDR 的规则**遍历所有** control message，而不是只看
+         * 第一条。Linux 对不认识的 cmsg 类型是**静默忽略**（只有 SCM_RIGHTS
+         * 会被内核处理），原来这里一律返回 EOPNOTSUPP，于是 Chromium 给
+         * zygote 发消息时（control 里不止 SCM_RIGHTS，还带着
+         * SCM_CREDENTIALS 之类）直接失败 —— 父进程随即判定 "Cannot
+         * communicate with zygote"。 */
+        uint8_t *cursor = (uint8_t *)message->control;
+        uint8_t *control_end = cursor + message->control_length;
+        while (cursor + sizeof(linux_x86_cmsghdr_t) <= control_end) {
+            linux_x86_cmsghdr_t *header = (linux_x86_cmsghdr_t *)cursor;
+            if (header->length < sizeof(*header))
+                return (uint64_t)(-EINVAL);
+            if (cursor + header->length > control_end) break;
+            if (header->level == 1 /* SOL_SOCKET */ &&
+                header->type == 1  /* SCM_RIGHTS */) {
+                if ((header->length - sizeof(*header)) % sizeof(int))
+                    return (uint64_t)(-EINVAL);
+                size_t count =
+                    (size_t)((header->length - sizeof(*header)) / sizeof(int));
+                if (!count || count > 4) return (uint64_t)(-EINVAL);
+                memcpy(rights, cursor + sizeof(*header), count * sizeof(int));
+                if (linux_compat_unix_send_rights(fd, rights, count) < 0)
+                    return (uint64_t)(-(errno > 0 ? errno : EINVAL));
+                rights_count = count;
+            } else {
+                /* 其它 cmsg（SCM_CREDENTIALS 等）：Linux 忽略，我们也忽略。 */
+            }
+            uint64_t advance = (header->length + sizeof(uint64_t) - 1) &
+                               ~(uint64_t)(sizeof(uint64_t) - 1);
+            if (!advance) break;
+            cursor += advance;
+        }
     } else if (send_operation && message->control_length) {
         return (uint64_t)(-EFAULT);
     }
@@ -2083,6 +2276,23 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 (const char *)linux_frame->a0,
                 (linux_x86_stat_t *)linux_frame->a1);
         case 7:   native.nr = HBOS_SYS_POLL; break;
+        /* 271 = ppoll。实测 Chromium 的事件循环主等待点就在这条上，
+         * 缺了它浏览器起不来（日志里刷 "unimplemented nr=271"）。 */
+        case 271: native.nr = HBOS_SYS_PPOLL; break;
+
+        /* 444/445/446 = landlock（LSM 沙箱）。HBOS 没有 LSM。
+         *
+         * 必须返回 **ENOSYS**，不能返回 EPERM/EOPNOTSUPP：
+         * ENOSYS 的语义是"这个内核根本没有这个系统调用"，Chromium 会
+         * 判定不支持、安静地走无沙箱路径；而 EPERM 会被理解成"支持但
+         * 不让你用"，沙箱初始化直接失败，进程 FATAL 退出。
+         *
+         * 三个一起挡掉：只挡 create_ruleset 的话，add_rule / restrict_self
+         * 还是会被记进 unimplemented 日志，看着像还有活没干完。 */
+        case 444:  /* landlock_create_ruleset */
+        case 445:  /* landlock_add_rule */
+        case 446:  /* landlock_restrict_self */
+            return (uint64_t)(-ENOSYS);
         case 8:   native.nr = HBOS_SYS_LSEEK; break;
         case 9:   native.nr = HBOS_SYS_MMAP; break;
         case 10:  native.nr = HBOS_SYS_MPROTECT; break;
@@ -2470,9 +2680,19 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         /* 进程组 / 会话：crashpad 起子进程后立刻 setsid()，zygote 也依赖
          * 它把子进程从父会话摘出去。HBOS 没有真正的会话模型，返回一个
          * 稳定的标识即可（调用方只用返回值判错）。 */
-        case 109: return 0;                           /* setpgid */
-        case 111: return (uint64_t)task_get_id();     /* getpgrp */
-        case 112: return (uint64_t)task_get_id();     /* setsid */
+        case 109: {                                   /* setpgid */
+            int r = task_setpgid((uint32_t)linux_frame->a0, (uint32_t)linux_frame->a1);
+            return r == 0 ? 0 : (uint64_t)(r == -3 ? -ESRCH : -EPERM);
+        }
+        case 111: return (uint64_t)task_getpgid(0);   /* getpgrp */
+        case 112: {                                   /* setsid */
+            int r = task_setsid();
+            return r < 0 ? (uint64_t)(-EPERM) : (uint64_t)r;
+        }
+        case 124: {                                   /* getsid */
+            int r = task_getsid((uint32_t)linux_frame->a0);
+            return r < 0 ? (uint64_t)(-ESRCH) : (uint64_t)r;
+        }
         case 122: return (uint64_t)(uint32_t)linux_frame->a0;  /* setfsuid */
         case 123: return (uint64_t)(uint32_t)linux_frame->a0;  /* setfsgid */
 
@@ -2573,6 +2793,14 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             return linux_clone3(
                 (linux_x86_syscall_return_frame_t *)linux_frame,
                 (const void *)linux_frame->a0, linux_frame->a1);
+
+        /* rseq(2)。glibc 2.35+ 在 `__libc_setup_tls` 里**每次** dlopen / exec
+         * 都会调一次，按"返回 ENOSYS 就彻底关闭 rseq"处理。我们已经不再
+         * 登记 rseq 特性位，所以这里返回 ENOSYS 是正确的落地（以前落到
+         * default 分支，日志上看起来像"内核缺功能"）。 */
+        case 334:
+            return (uint64_t)(-ENOSYS);
+
         default:
             linux_trace_unimplemented(linux_frame->nr, linux_frame);
             return (uint64_t)(-ENOSYS);
@@ -3188,8 +3416,19 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (fd < 0 || fd >= POSIX_MAX_FDS)
                 return (uint64_t)(-EBADF);
             task_t *cur = task_current();
-            if (!cur || !cur->fd_table->entries[fd].used)
+            if (!cur) return (uint64_t)(-EBADF);
+            fd_entry_t *ie = &cur->fd_table->entries[fd];
+            if (!ie->used) {
+                if (fd <= 2) return (uint64_t)(long)tty_ioctl(0, (uint32_t)f->a1, (void *)f->a2);
                 return (uint64_t)(-EBADF);
+            }
+            if ((uint32_t)f->a1 == 0x5421 /* FIONBIO */) {
+                if (!f->a2) return (uint64_t)(-EFAULT);
+                if (*(int *)f->a2) ie->flags |= O_NONBLOCK; else ie->flags &= ~O_NONBLOCK;
+                return 0;
+            }
+            if (ie->type == FD_FILE && ie->node && ie->node->ops && ie->node->ops->ioctl)
+                return (uint64_t)(long)ie->node->ops->ioctl(ie->node, (uint32_t)f->a1, (void *)f->a2);
             return (uint64_t)(-ENOTTY);
         }
 
@@ -3212,9 +3451,29 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             char *const *argv = (char *const *)f->a1;
             char *const *envp = (char *const *)f->a2;
             if (!path) return (uint64_t)(-EFAULT);
+            /* execve 是"fork → exec"那段路的终点，也是 zygote 握手能
+             * 成功的前提。带上 pid 和 tick，才能把它和 fork 那一行对上：
+             * 如果 fork 之后一直没等到这条 execve，说明子进程在半路。 */
+            console_puts("[EXEC] pid=");
+            trace_put_udec((uint64_t)(task_current() ? task_current()->id : 0));
+            console_puts(" t=");
+            trace_put_udec(pit_get_ticks());
+            console_puts(" path=");
+            if ((uint64_t)(uintptr_t)path < 0x0000800000000000ULL &&
+                vmm_get_phys((uint64_t)(uintptr_t)path & ~0xfffULL)) {
+                for (int i = 0; i < 96; i++) {
+                    char c = *(volatile char *)(uintptr_t)(path + i);
+                    if (!c) break;
+                    console_putchar((c >= 0x20 && c < 0x7f) ? c : '.');
+                }
+            }
+            console_putchar('\n');
             vfs_node_t *node = vfs_lookup(path);
             if (!node) return (uint64_t)(-ENOENT);
             if (node->type != VFS_NODE_FILE) return (uint64_t)(-EACCES);
+            /* 把绝对路径交给 loader：/proc/<pid>/exe 需要它，Chromium
+             * 靠 dirname(readlink(...)) 找 icudtl.dat / *.pak。 */
+            elf_set_exec_path(path);
             int ret = elf64_load_vfs_and_exec(node, argv, envp);
             if (ret < 0) return (uint64_t)(-ENOEXEC);
             return 0;
@@ -3225,13 +3484,42 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             int *status = (int *)f->a1;
             int options = (int)f->a2;
             if (pid <= 0) return (uint64_t)(-ECHILD);
+            /* 先把调用者的地址空间钉住：task_wait / task_yield 会让出 CPU，
+             * 期间别的任务可能切过 CR3。回来时如果 CR3 不是发起者的，
+             * 后面那几处 `*status = ...` 就会往别人的地址空间里写 —— 命中
+             * 未映射的页时表现为内核 GPF（实测 rip 落在 mov %eax,(%rbp)，
+             * err=0）。Linux 里 wait4 的 status 一定写回调用者自己。 */
+            task_t *caller = task_current();
+            uint64_t caller_pml4 =
+                caller && caller->mm ? caller->mm->pml4_phys : 0;
             int st = 0;
+            if (status && caller_pml4 &&
+                !linux_user_range_writable((uint64_t)(uintptr_t)status,
+                                           sizeof(int)))
+                return (uint64_t)(-EFAULT);
+            if (options & 2 /* WUNTRACED */) {
+                task_t *wt = task_lookup((uint32_t)pid);
+                while (wt && wt->state != TASK_TERMINATED) {
+                    if (wt->stopped && !wt->stop_reported) {
+                        wt->stop_reported = true;
+                        if (caller_pml4 &&
+                            vmm_get_pml4() != caller_pml4)
+                            vmm_set_pml4(caller_pml4);
+                        if (status) *status = 0x7f | (wt->stop_sig << 8);
+                        return (uint64_t)pid;
+                    }
+                    if (options & WNOHANG) return 0;
+                    task_yield();
+                }
+            }
             int ret = task_wait((uint32_t)pid, &st);
             if (ret < 0) return (uint64_t)(-ECHILD);
             if (options & WNOHANG) {
                 const task_t *t = task_get_by_id((uint32_t)pid);
                 if (t && t->state != TASK_TERMINATED) return 0;
             }
+            if (caller_pml4 && vmm_get_pml4() != caller_pml4)
+                vmm_set_pml4(caller_pml4);
             if (status)
                 *status = W_EXITCODE(st, 0);
             return (uint64_t)pid;
@@ -3240,6 +3528,11 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_KILL: {
             pid_t pid = (pid_t)f->a0;
             int sig = (int)f->a1;
+            if (pid <= 0 && sig > 0) {
+                uint32_t pg = pid == 0 ? (uint32_t)task_getpgid(0) : (uint32_t)(-pid);
+                if (pid == -1) return (uint64_t)(-ESRCH);
+                return task_kill_pgrp(pg, sig) > 0 ? 0 : (uint64_t)(-ESRCH);
+            }
             if (pid <= 0) return (uint64_t)(-ESRCH);
             if (task_kill((uint32_t)pid, sig) < 0)
                 return (uint64_t)(-ESRCH);
@@ -4308,6 +4601,46 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return finish_syscall(ret);
         }
 
+        /* ppoll(fds, nfds, timespec*, sigset*, sigsetsize)
+         *
+         * Chromium 的事件循环就停在这里（原来的 "unimplemented nr=271"）。
+         * 和 poll 的唯一实质差别是超时用 timespec：纳秒精度，而且分
+         * "绝对/相对"由第二个参数决定，用的是相对超时。
+         *
+         * sigmask 直接忽略：HBOS 的信号模型里没有"等待期间原子地换信号
+         * 掩码"这个语义，忽略它只会让信号晚一点送达，不会丢。 */
+        case HBOS_SYS_PPOLL: {
+            static int ppoll_trace_budget = 6;
+            int timeout_ms = -1;
+            const uint64_t *ts = (const uint64_t *)(uintptr_t)f->a2;
+            if (ts && linux_user_range_mapped((uint64_t)(uintptr_t)ts, 16)) {
+                uint64_t seconds = ts[0];
+                uint64_t nanos = ts[1];
+                if (seconds > 0x7fffffffULL) seconds = 0x7fffffffULL;
+                uint64_t millis = seconds * 1000ULL + nanos / 1000000ULL;
+                if (millis > 0x7fffffffULL) millis = 0x7fffffffULL;
+                timeout_ms = (int)millis;
+            }
+            int ret = linux_compat_poll((linux_pollfd_t *)f->a0,
+                                        (uint32_t)f->a1, timeout_ms);
+            /* 诊断：Chromium 连上 Wayland 后不再发请求，怀疑它卡在这里。
+             * 打印 nfds / 超时 / 返回值，就能区分"等错了 fd"和"根本没等到"。
+             * 只打前 6 条，正常运行时不会刷屏。 */
+            if (ppoll_trace_budget > 0) {
+                ppoll_trace_budget--;
+                console_puts("[PPOLL] nfds=");
+                trace_put_udec(f->a1);
+                console_puts(" to=");
+                trace_put_udec((uint64_t)(timeout_ms < 0
+                                           ? 0xffffffffu
+                                           : (uint32_t)timeout_ms));
+                console_puts(" ret=");
+                trace_put_udec((uint64_t)(uint32_t)ret);
+                console_putchar('\n');
+            }
+            return finish_syscall(ret);
+        }
+
         case HBOS_SYS_PIPE2: {
             int ret = linux_compat_pipe2((int *)f->a0, (int)f->a1);
             return finish_syscall(ret);
@@ -4595,10 +4928,17 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
  * isr_handler 调 linux_syscall_trace_dump() 打出来。open/openat 额外
  * 打印路径字符串，足以判断是"没找到文件"还是"打开了但后续失败"。
  * 只在诊断时输出，正常路径开销是两条 16 字节写入。 */
-#define LINUX_TRACE_DEPTH 128
+/* 环形缓冲必须够深才能覆盖"失败之前的那一段"：Chromium 起 zygote 时，
+ * fork 之后父子加起来要跑几百条调用，128 条会被完全冲掉，
+ * dump 出来只剩 fork 之后的残片，看不到 socketpair 是怎么建的。 */
+#define LINUX_TRACE_DEPTH 512
 typedef struct {
     uint16_t number;
     uint16_t flags;      /* bit0: 负返回值 */
+    uint32_t pid;        /* 发起这次调用的任务 id：fork 之后父子都在跑，
+                          * 不带 pid 就分不清"这条是子进程发的还是父进程
+                          * 发的"，zygote 那种"子进程零 syscall"的场景
+                          * 全靠这一列才看得出来。 */
     uint64_t a0;
     uint64_t a1;
     int64_t  result;
@@ -4615,9 +4955,14 @@ static void linux_trace_push(uint64_t number, uint64_t a0, uint64_t a1,
     linux_trace_entry_t *slot = &g_linux_trace[g_linux_trace_head];
     slot->number = (uint16_t)number;
     slot->flags = result < 0 ? 1 : 0;
+    slot->pid = task_current() ? (uint32_t)task_current()->id : 0;
     slot->a0 = a0;
     slot->a1 = a1;
     slot->result = result;
+    /* 只有 open/openat/execve/access 这几类才值得抓路径字符串：抓一次要
+     * 逐字节读用户内存并把 120 字节写进环形缓冲。其余调用把首字符置 0
+     * 就够 dump 时判断"这条没有路径"了 —— 这是 syscall 热路径，fork 之后
+     * 子进程要连做上百次调用，每多一次 memset 都在 TCG 下被放大。 */
     slot->text[0] = '\0';
     if (number == 2 || number == 257 || number == 89 || number == 21) {
         uint64_t pointer = (number == 257 || number == 21) ? a1 : a0;
@@ -4655,7 +5000,9 @@ void linux_syscall_trace_dump(void) {
     for (uint32_t i = 0; i < g_linux_trace_count; i++) {
         const linux_trace_entry_t *entry =
             &g_linux_trace[(start + i) % LINUX_TRACE_DEPTH];
-        console_puts("  nr=");
+        console_puts("  pid=");
+        trace_put_udec(entry->pid);
+        console_puts(" nr=");
         trace_put_udec(entry->number);
         console_puts(" ret=");
         if (entry->flags & 1) {
@@ -4725,5 +5072,19 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
     linux_trace_fd_error(number, linux_frame, (int64_t)result);
     linux_trace_push(number, linux_frame->a0, linux_frame->a1,
                      (int64_t)result);
+    /* 按 pid 实时追踪（`setenv tracepid <pid>`）：fork 出来的子进程在
+     * "跑了几步就停住"的时候，环形缓冲要被 dump 才能看，而它停住时
+     * 往往没有异常可 dump。这里直接把它每一条调用打到串口上，代价大，
+     * 所以默认关闭、且只对指定 pid 生效。 */
+    if (hbos_trace_pid && task_current() &&
+        (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
+        console_puts("[T] nr=");
+        trace_put_udec(number);
+        console_puts(" a0=0x");
+        trace_put_hex(linux_frame->a0);
+        console_puts(" ret=0x");
+        trace_put_hex(result);
+        console_putchar('\n');
+    }
     return result;
 }

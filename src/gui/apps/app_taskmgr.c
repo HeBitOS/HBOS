@@ -6,11 +6,26 @@
 #include "../../string.h"
 #include "../../core/task.h"
 #include "../../core/pmm.h"
+#include "../../fs.h"
+#include "../wm.h"
 
 /* 任务管理器私有状态：原先挂在全局 gui_state_t。
  * 选中行 + 每秒刷新节流，只有本文件使用。 */
 static int g_taskmgr_selected;
 static uint8_t g_taskmgr_last_sec;
+static char g_tm_status_buf[64];
+
+typedef struct {
+    bool is_win;
+    uint32_t pid;
+    uint32_t ppid;
+    const char *name;
+    const char *state_str;
+    uint32_t state_color;
+    uint32_t prio;
+    uint32_t cpu;
+    int win_idx;
+} tm_item_t;
 
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -86,9 +101,58 @@ static int tm_visible_rows(int win_h) {
     return rows > 0 ? rows : 0;
 }
 
+static int tm_collect_items(gui_state_t *st, tm_item_t *items, int max) {
+    int total = 0;
+    int kcount = task_get_count();
+    for (int i = 0; i < kcount && total < max; i++) {
+        const task_t *t = task_get_active((uint32_t)i);
+        if (!t) continue;
+        items[total].is_win = false;
+        items[total].pid = t->id;
+        items[total].ppid = t->parent_id;
+        items[total].name = t->name[0] ? t->name : "(未命名)";
+        items[total].state_str = tm_state_name(t->state);
+        items[total].state_color = tm_state_color(t->state);
+        items[total].prio = t->prio;
+        items[total].cpu = (uint32_t)task_get_cpu(t);
+        items[total].win_idx = -1;
+        total++;
+    }
+    if (st) {
+        for (int i = 0; i < st->wm.window_count && total < max; i++) {
+            wm_window_t *w = wm_get_window(&st->wm, i);
+            if (!w || !w->used) continue;
+            items[total].is_win = true;
+            items[total].pid = (uint32_t)(100 + i);
+            items[total].ppid = 0;
+            const char *tname = wm_window_title(w);
+            items[total].name = (tname && tname[0]) ? tname : "窗口应用";
+            if (w->state == WM_STATE_MINIMIZED) {
+                items[total].state_str = "最小化";
+                items[total].state_color = UI_DIM;
+            } else if (i == st->wm.active_window) {
+                items[total].state_str = "运行中";
+                items[total].state_color = UI_OK;
+            } else {
+                items[total].state_str = "就绪";
+                items[total].state_color = UI_ACCENT;
+            }
+            items[total].prio = 1;
+            items[total].cpu = 0;
+            items[total].win_idx = i;
+            total++;
+        }
+    }
+    return total;
+}
+
+static int tm_total_items(gui_state_t *st) {
+    tm_item_t items[64];
+    return tm_collect_items(st, items, 64);
+}
+
 static void tm_clamp_selection(gui_state_t *st) {
-    (void)st;   /* 状态已私有化 */
-    int count = task_get_count();
+    int count = tm_total_items(st);
     if (count <= 0) { g_taskmgr_selected = 0; return; }
     if (g_taskmgr_selected >= count) g_taskmgr_selected = count - 1;
     if (g_taskmgr_selected < 0) g_taskmgr_selected = 0;
@@ -97,7 +161,31 @@ static void tm_clamp_selection(gui_state_t *st) {
 static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h) {
     char line[96];
     tm_clamp_selection(st);
-    int count = task_get_count();
+    tm_item_t items[64];
+    int count = tm_collect_items(st, items, 64);
+
+    uint32_t disk_cap = fs_capacity_bytes();
+    uint32_t disk_used = fs_used_bytes();
+    uint32_t disk_cap_mb10 = (uint32_t)(((uint64_t)disk_cap * 10) / (1024u * 1024u));
+    uint32_t disk_used_mb10 = (uint32_t)(((uint64_t)disk_used * 10) / (1024u * 1024u));
+    uint32_t disk_pct = disk_cap > 0 ? (uint32_t)(((uint64_t)disk_used * 100) / disk_cap) : 0;
+
+    uint32_t spos = 0; g_tm_status_buf[0] = 0;
+    gui_append_str(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, "磁盘已用 ");
+    gui_append_uint(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, disk_used_mb10 / 10);
+    gui_append_char(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, '.');
+    gui_append_uint(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, disk_used_mb10 % 10);
+    gui_append_str(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, " MB / ");
+    gui_append_uint(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, disk_cap_mb10 / 10);
+    gui_append_char(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, '.');
+    gui_append_uint(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, disk_cap_mb10 % 10);
+    gui_append_str(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, " MB (");
+    gui_append_uint(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, disk_pct);
+    gui_append_str(g_tm_status_buf, sizeof(g_tm_status_buf), &spos, "%)");
+
+    if (st && (!st->status || strncmp(st->status, "磁盘已用", 12) == 0)) {
+        st->status = g_tm_status_buf;
+    }
 
     int aw = tm_avail_w(win_w);
     int ah = tm_avail_h(win_h);
@@ -110,7 +198,7 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
         int cy = ty + 30;
 
         gui_fill_round_rect(tx, cy, card_w, card_h, 10, UI_SURFACE2);
-        gui_text(tx + 12, cy + 8, "进程", UI_FG2, 1);
+        gui_text(tx + 12, cy + 8, "进程与窗口", UI_FG2, 1);
         uint32_t p2 = 0;
         line[0] = 0;
         gui_append_uint(line, sizeof(line), &p2, (uint32_t)count);
@@ -118,7 +206,7 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
 
         int cx2 = tx + card_w + 16;
         gui_fill_round_rect(cx2, cy, card_w, card_h, 10, UI_SURFACE2);
-        gui_text(cx2 + 12, cy + 8, "内存", UI_FG2, 1);
+        gui_text(cx2 + 12, cy + 8, "物理内存", UI_FG2, 1);
         p2 = 0; line[0] = 0;
         gui_append_uint(line, sizeof(line), &p2,
                         (uint32_t)(pmm_get_total_mem() / (1024u * 1024u)));
@@ -147,38 +235,37 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
 
     int rows = tm_visible_rows(win_h);
     for (int i = 0; i < rows && i < count; i++) {
-        const task_t *t = task_get_active((uint32_t)i);
-        if (!t) break;
+        tm_item_t *item = &items[i];
         int ry = ty + TM_LIST_TOP + i * TM_ROW_H;
         if (i == g_taskmgr_selected) {
             gui_rect(tx - 8, ry - 3, aw + 16, TM_ROW_H - 2, UI_ACCENT);
         }
         uint32_t pos = 0; line[0] = 0;
-        gui_append_uint(line, sizeof(line), &pos, t->id);
+        gui_append_uint(line, sizeof(line), &pos, item->pid);
         gui_text(tx + TM_COL_PID, ry, line, UI_FG2, 1);
 
         gui_text_clipped(tx + TM_COL_NAME, ry, name_clip_x,
-                         t->name[0] ? t->name : "(未命名)", UI_FG2, 1);
+                         item->name[0] ? item->name : "(未命名)", UI_FG2, 1);
 
         if (show_state)
-            gui_text(tx + TM_COL_STATE, ry, tm_state_name(t->state), tm_state_color(t->state), 1);
+            gui_text(tx + TM_COL_STATE, ry, item->state_str, item->state_color, 1);
 
         /* 优先级/核心：调度器的真实决策依据，和 smpstat 显示的一致。 */
         if (show_prio) {
             pos = 0; line[0] = 0;
             gui_append_str(line, sizeof(line), &pos, "P");
-            gui_append_uint(line, sizeof(line), &pos, t->prio);
+            gui_append_uint(line, sizeof(line), &pos, item->prio);
             gui_text(tx + TM_COL_PRIO, ry, line, UI_FG2, 1);
         }
         if (show_cpu) {
             pos = 0; line[0] = 0;
-            gui_append_uint(line, sizeof(line), &pos, (uint32_t)task_get_cpu(t));
+            gui_append_uint(line, sizeof(line), &pos, item->cpu);
             gui_text(tx + TM_COL_CPU, ry, line, UI_FG2, 1);
         }
 
         if (show_ppid) {
             pos = 0; line[0] = 0;
-            gui_append_uint(line, sizeof(line), &pos, t->parent_id);
+            gui_append_uint(line, sizeof(line), &pos, item->ppid);
             gui_text(tx + TM_COL_PPID, ry, line, UI_FG2, 1);
         }
     }
@@ -194,7 +281,7 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     gui_rect(tx, fy, aw, 1, UI_SURFACE3);
 
     gui_text_clipped(tx, fy + 6, tx + aw,
-                     "点击选中任务，按 Delete 结束任务（不能结束主任务 0）",
+                     "点击选中任务/窗口，按 Delete 结束任务或关闭窗口",
                      UI_DIM, 1);
 
     uint64_t total = pmm_get_total_mem();
@@ -215,21 +302,31 @@ static void app_taskmgr_draw(gui_state_t *st, int tx, int ty, int win_w, int win
     gui_append_uint(line, sizeof(line), &pos, (uint32_t)(used / (1024 * 1024)));
     gui_append_str(line, sizeof(line), &pos, " MB / ");
     gui_append_uint(line, sizeof(line), &pos, (uint32_t)(total / (1024 * 1024)));
-    gui_append_str(line, sizeof(line), &pos, " MB    任务数: ");
-    gui_append_int(line, sizeof(line), &pos, count);
+    gui_append_str(line, sizeof(line), &pos, " MB  |  ");
+    gui_append_str(line, sizeof(line), &pos, g_tm_status_buf);
     gui_text_clipped(tx, by + bar_h + 6, tx + aw, line, UI_FG2, 1);
 }
 
 static void tm_kill_selected(gui_state_t *st) {
     tm_clamp_selection(st);
-    const task_t *t = task_get_active((uint32_t)g_taskmgr_selected);
-    if (!t || t->id == 0) { st->status = "无法结束该任务"; return; }
-    if (task_kill(t->id, 15) == 0) st->status = "已发送结束信号";
-    else st->status = "结束任务失败";
+    tm_item_t items[64];
+    int count = tm_collect_items(st, items, 64);
+    if (g_taskmgr_selected < 0 || g_taskmgr_selected >= count) return;
+    tm_item_t *it = &items[g_taskmgr_selected];
+    if (it->is_win) {
+        if (it->win_idx >= 0 && it->win_idx < st->wm.window_count) {
+            wm_close_window(&st->wm, it->win_idx);
+            st->status = "已关闭应用窗口";
+        }
+    } else {
+        if (it->pid == 0) { st->status = "无法结束该任务"; return; }
+        if (task_kill(it->pid, 15) == 0) st->status = "已发送结束信号";
+        else st->status = "结束任务失败";
+    }
 }
 
 static int app_taskmgr_key(gui_state_t *st, int key) {
-    int count = task_get_count();
+    int count = tm_total_items(st);
     if (key == GUI_KEY_UP) {
         if (g_taskmgr_selected > 0) g_taskmgr_selected--;
         return 1;
@@ -249,7 +346,7 @@ static int app_taskmgr_click(gui_state_t *st, int mx, int my, int tx, int ty, in
     (void)st;   /* 状态已私有化 */
     int aw = tm_avail_w(win_w);
     int rows = tm_visible_rows(win_h);
-    int count = task_get_count();
+    int count = tm_total_items(st);
     for (int i = 0; i < rows && i < count; i++) {
         int ry = ty + TM_LIST_TOP + i * TM_ROW_H;
         if (my >= ry - 3 && my < ry + TM_ROW_H - 2 &&

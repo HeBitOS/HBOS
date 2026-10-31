@@ -1,4 +1,6 @@
 #include "gui_effects.h"
+#include "../gui/glass.h"
+#include "../gui/hiverc.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -43,6 +45,7 @@
 #include "../gui/gui_panel.h"
 #include "../gui/browser_backend.h"
 #include "../gui/browser_layout.h"
+#include "../gui/app_registry.h"
 
 /* app_imgview.c / app_hexview.c 各自路径 setter，供 gui_open_selected_file()
  * 打开对应查看器前写入要打开的文件路径 */
@@ -145,6 +148,18 @@ int ui_s(int v) { return v * g_ui_scale / 100; }
 #define GUI_MOUSE_POLL_BUDGET 64   /* drain the queue fully so motion doesn't
                                       back up into bursty "忽快忽慢" jumps */
 #define TASKBAR_H ui_s(50)
+#define GNOME_TOPBAR_H ui_s(32)
+
+enum {
+    DESKTOP_STYLE_GNOME = 0,
+    DESKTOP_STYLE_WIN11 = 1,
+};
+
+enum {
+    DOCK_POS_BOTTOM = 0,
+    DOCK_POS_LEFT   = 1,
+};
+static gui_state_t *g_gui_st;
 /* NOTE_EDIT_CAP/BROWSER_URL_CAP/BROWSER_PAGE_CAP/CODE_EDIT_CAP 都在
  * gui_state.h（上面已 include）——这里以前有一份重复定义，用的是旧的
  * 更小的值，会把 gui_state.h 的实际值静默盖掉（宏后定义生效），不要
@@ -188,12 +203,17 @@ static inline uint32_t cyber_card_bg_bot(int light) { (void)light; return ui_the
  * 都经此函数，避免任何一条漏掉导致"提示已切换但画面没变"。
  * 记录已生效的值用于变更检测（见主循环里的说明）。 */
 static int g_applied_theme_light = -1;
+static void winbuf_invalidate_all(void);
 
 static void gui_apply_theme(int light) {
     const gui_theme_t *want = light ? ui_theme_builtin_light()
                                     : ui_theme_builtin_dark();
-    if (ui_theme_set(want->name) == 0)
+    if (ui_theme_set(want->name) == 0) {
         g_applied_theme_light = light;
+        (void)ui_theme_save_choice(want->name);
+    }
+    winbuf_invalidate_all();
+    gui_dirty_mark_full();
 }
 
 typedef struct {
@@ -251,6 +271,7 @@ void gui_select_file(gui_state_t *st, int index);
 static int gui_select_path(gui_state_t *st, const char *path);
 static void draw_desktop(int w, int h, gui_state_t *st);
 static void draw_start_menu(gui_state_t *st);
+static int sm_clamp_h(int h, int screen_h);
 
 /* 分类 chips 的命中区（绘制时记录，点击时使用） */
 static int g_sm_chip_x[4];
@@ -258,15 +279,26 @@ static int g_sm_chip_y, g_sm_chip_cw, g_sm_chip_gap;
 static void draw_context_menu(gui_state_t *st);
 static void draw_calendar_popup(int w, int h, gui_state_t *st);
 static void draw_window_switcher(int w, int h, gui_state_t *st);
+static void gui_damage_region(int x, int y, int rw, int rh, int scr_w, int scr_h);
 void gui_sync_focus(gui_state_t *st);
 
+/* 顶栏自动隐藏：autohide 开启时窗口区占满顶部（顶栏滑出后浮在窗口上） */
+static int topbar_visible(const gui_state_t *st);
+static int hive_topbar_h(const gui_state_t *st);
+
 static void clamp_window(gui_state_t *st, int w, int h, int win_w, int win_h) {
-    if (st->win_x < 4) st->win_x = 4;
-    if (st->win_y < 4) st->win_y = 4;
+    int top_margin = (st->desktop_style == DESKTOP_STYLE_GNOME) ?
+                     (hive_topbar_h(st) + 4) : 4;
+    int bot_margin = (st->desktop_style == DESKTOP_STYLE_GNOME) ?
+                     (st->dock_pos == DOCK_POS_BOTTOM ? ui_s(64) : 4) : (TASKBAR_H + 4);
+    int left_margin = (st->desktop_style == DESKTOP_STYLE_GNOME && st->dock_pos == DOCK_POS_LEFT) ?
+                      ui_s(64) : 4;
+    if (st->win_x < left_margin) st->win_x = left_margin;
+    if (st->win_y < top_margin) st->win_y = top_margin;
     if (st->win_x + win_w > w - 4) st->win_x = w - win_w - 4;
-    if (st->win_y + win_h > h - TASKBAR_H - 4) st->win_y = h - TASKBAR_H - win_h - 4;
-    if (st->win_x < 4) st->win_x = 4;
-    if (st->win_y < 4) st->win_y = 4;
+    if (st->win_y + win_h > h - bot_margin) st->win_y = h - bot_margin - win_h;
+    if (st->win_x < left_margin) st->win_x = left_margin;
+    if (st->win_y < top_margin) st->win_y = top_margin;
 }
 
 static wm_window_t *gui_active_window(gui_state_t *st) {
@@ -368,9 +400,17 @@ static int gui_open_window(gui_state_t *st, int kind, int mode, int unique) {
                     (gui_app_meta_at(i)->want_w > 0 || gui_app_meta_at(i)->want_h > 0)) {
                     wm_window_t *w = wm_get_window(&st->wm, idx);
                     if (w) {
-                        wm_resize_window(&st->wm, idx,
-                                         gui_app_meta_at(i)->want_w > 0 ? gui_app_meta_at(i)->want_w : w->w,
-                                         gui_app_meta_at(i)->want_h > 0 ? gui_app_meta_at(i)->want_h : w->h);
+                        /* 建议尺寸是 100% 缩放下的逻辑像素，高 DPI 下要按
+                         * 同一比例放大——否则 150% 时窗口还是原来那么宽，
+                         * 内容区被挤窄，分段控件和说明文字全被裁掉（实测）。 */
+                        int ww = gui_app_meta_at(i)->want_w > 0
+                                 ? ui_s(gui_app_meta_at(i)->want_w) : w->w;
+                        int wh = gui_app_meta_at(i)->want_h > 0
+                                 ? ui_s(gui_app_meta_at(i)->want_h) : w->h;
+                        /* 别超出桌面可用区 */
+                        if (ww > st->wm.desk_w - ui_s(40)) ww = st->wm.desk_w - ui_s(40);
+                        if (wh > st->wm.desk_h - ui_s(80)) wh = st->wm.desk_h - ui_s(80);
+                        wm_resize_window(&st->wm, idx, ww, wh);
                     }
                     break;
                 }
@@ -379,6 +419,7 @@ static int gui_open_window(gui_state_t *st, int kind, int mode, int unique) {
         gui_sync_focus(st);
         const char *t = wm_window_title(wm_get_window(&st->wm, idx));
         gui_toast(st, "已打开 ", t ? t : "窗口");
+        gui_dirty_mark_full();
     } else {
         st->status = "窗口数量已满";
         gui_toast(st, "窗口数量已满", "");
@@ -390,12 +431,14 @@ static void gui_close_window(gui_state_t *st, int idx) {
     wm_close_window(&st->wm, idx);
     gui_sync_focus(st);
     st->status = "窗口已关闭";
+    gui_dirty_mark_full();
 }
 
 static void gui_focus_next_window(gui_state_t *st, int dir) {
     wm_focus_next(&st->wm, dir);
     gui_sync_focus(st);
     st->status = "已切换窗口";
+    gui_dirty_mark_full();
 }
 
 static void gui_open_panel_window(gui_state_t *st, int panel) {
@@ -473,6 +516,7 @@ static inline void vgradient(int x,int y,int w,int h,uint32_t t,uint32_t b){ gd_
 static inline void hgradient(int x,int y,int w,int h,uint32_t l,uint32_t r){ gd_hgradient(x,y,w,h,l,r); }
 static inline void soft_shadow(int x,int y,int w,int h){ gd_soft_shadow(x,y,w,h); }
 static inline void fill_round_rect(int x,int y,int w,int h,int r,int c,uint32_t col){ gd_fill_round_rect(x,y,w,h,r,c,col); }
+static inline void round_border(int x,int y,int w,int h,int r,uint32_t bdc,uint32_t bgc){ gd_round_border(x,y,w,h,r,bdc,bgc); }
 static inline void draw_panel_shell(int x,int y,int w,int h,uint32_t t,uint32_t b,uint32_t bc,uint32_t a){ gd_draw_panel_shell(x,y,w,h,t,b,bc,a); }
 static inline void draw_inset_shell(int x,int y,int w,int h,uint32_t bc){ gd_draw_inset_shell(x,y,w,h,bc); }
 static inline void blit_glyph(int x,int y,const gui_glyph_t *g,uint32_t c,int s){ gd_blit_glyph(x,y,g,c,s); }
@@ -703,6 +747,34 @@ static int clamp_delta(int v) {
     if (v < -127) return -127;
     return v;
 }
+
+/* ── 指针位置对外可见 ─────────────────────────────────────────
+ *
+ * HIVE 主循环里的 mx/my 是局部变量，外部（shell 命令、自动化测试、
+ * 调试器）完全看不到指针在哪。这里每帧钳制完之后发布一份。
+ *
+ * 用途：`mouse` 命令打印坐标，`make mouse-test` 靠它验证"QEMU 注入的
+ * 鼠标移动真的走完了 PS/2 → 内核 → HIVE 这条链路"，而不是只看截图猜。 */
+static int g_pointer_x;
+static int g_pointer_y;
+static unsigned g_pointer_moves;
+
+void gui_pointer_publish(int x, int y) {
+    static int last_x = -1, last_y = -1;
+    if (x != last_x || y != last_y) {
+        last_x = x;
+        last_y = y;
+        g_pointer_moves++;
+    }
+    g_pointer_x = x;
+    g_pointer_y = y;
+}
+
+int gui_pointer_x(void) { return g_pointer_x; }
+int gui_pointer_y(void) { return g_pointer_y; }
+/** 指针位置变化过的次数（单调递增，测试用它判断"动过没有"）。 */
+unsigned gui_pointer_move_count(void) { return g_pointer_moves; }
+
 
 static void draw_button(int x, int y, const char *label, uint32_t color) {
     soft_shadow(x, y, ACTION_W, ACTION_H);
@@ -1149,13 +1221,74 @@ int gui_app_pollmouse(int *x, int *y) {
 
 // Cover-fit the wallpaper across (0,0)-(DW,DH), sampling only the pixels inside
 // the current clip rect so cost scales with the damaged area, not the screen.
-static void blit_wallpaper(int DW, int DH) {
+// 整帧重绘很频繁（玻璃 hover/顶栏动画/时钟秒），逐像素定点缩放一次就是
+// 2M 像素的 64 位乘法——太贵。第一次整帧时把 cover-fit 结果缓存进离屏
+// buffer，之后整帧退化为按行 memcpy（分辨率/壁纸变了才重建）。
+static uint32_t *g_wall_cache;
+static int g_wall_cw, g_wall_ch;
+static const uint32_t *g_wall_cache_src;   /* 缓存对应的源像素指针 */
+static int g_wall_cache_sw, g_wall_cache_sh;
+
+static void wall_cache_release(void) {
+    if (g_wall_cache)
+        pmm_free_blocks((uint64_t)(uintptr_t)g_wall_cache,
+                        ((size_t)g_wall_cw * (size_t)g_wall_ch * 4u + 4095u) / 4096u);
+    g_wall_cache = 0;
+    g_wall_cw = g_wall_ch = 0;
+    g_wall_cache_src = 0;
+    g_wall_cache_sw = g_wall_cache_sh = 0;
+}
+
+static void wall_cache_build(int DW, int DH) {
     int sw = 0, sh = 0;
     const uint32_t *src = gui_wall_pixels(&sw, &sh);
-    if (!src || !gd_surface_ptr() || sw <= 0 || sh <= 0) {
-        rect(0, 0, DW, DH, UI_SURFACE);
-        return;
+    size_t pages = ((size_t)DW * (size_t)DH * 4u + 4095u) / 4096u;
+    uint32_t *buf = (uint32_t *)(uintptr_t)pmm_alloc_blocks(pages);
+    if (!buf) return;   /* 分配失败走慢路径 */
+    if (!src) {
+        for (size_t i = 0; i < (size_t)DW * DH; i++) buf[i] = UI_SURFACE;
+        goto done;
     }
+    // 16.16 fixed-point "cover" mapping (dest -> source), centered crop.
+    {
+        int64_t inv_x = ((int64_t)sw << 16) / DW;
+        int64_t inv_y = ((int64_t)sh << 16) / DH;
+        int64_t inv = inv_x < inv_y ? inv_x : inv_y;
+        int64_t cropx = (((int64_t)sw << 16) - (int64_t)DW * inv) / 2;
+        int64_t cropy = (((int64_t)sh << 16) - (int64_t)DH * inv) / 2;
+        for (int dy = 0; dy < DH; dy++) {
+            int syi = (int)((cropy + (int64_t)dy * inv) >> 16);
+            if (syi < 0) syi = 0;
+            if (syi > sh - 1) syi = sh - 1;
+            const uint32_t *srow = src + (int64_t)syi * sw;
+            uint32_t *drow = buf + (size_t)dy * DW;
+            for (int dx = 0; dx < DW; dx++) {
+                int sxi = (int)((cropx + (int64_t)dx * inv) >> 16);
+                if (sxi < 0) sxi = 0;
+                if (sxi > sw - 1) sxi = sw - 1;
+                drow[dx] = 0xFF000000u | (srow[sxi] & 0x00FFFFFFu);
+            }
+        }
+    }
+done:
+    wall_cache_release();
+    g_wall_cache = buf;
+    g_wall_cw = DW;
+    g_wall_ch = DH;
+    g_wall_cache_src = src;
+    g_wall_cache_sw = sw;
+    g_wall_cache_sh = sh;
+}
+
+static int wall_cache_valid(int DW, int DH) {
+    /* 换壁纸（源指针/分辨率变化）时重建 */
+    int sw = 0, sh = 0;
+    const uint32_t *src = gui_wall_pixels(&sw, &sh);
+    return g_wall_cache && g_wall_cw == DW && g_wall_ch == DH &&
+           g_wall_cache_src == src && g_wall_cache_sw == sw && g_wall_cache_sh == sh;
+}
+
+static void blit_wallpaper(int DW, int DH) {
     int cx = 0, cy = 0, cw = DW, ch = DH;
     if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
     if (cx < 0) { cw += cx; cx = 0; }
@@ -1165,7 +1298,26 @@ static void blit_wallpaper(int DW, int DH) {
     if (cy + ch > gd_surface_h()) ch = gd_surface_h() - cy;
     if (cw <= 0 || ch <= 0) return;
 
-    // 16.16 fixed-point "cover" mapping (dest -> source), centered crop.
+    if (!wall_cache_valid(DW, DH)) wall_cache_build(DW, DH);
+    if (g_wall_cache && g_wall_cw == DW && g_wall_ch == DH) {
+        /* 快路径：整帧壁纸 = 按行 memcpy */
+        for (int yy = 0; yy < ch; yy++) {
+            uint32_t *drow = gd_surface_ptr() +
+                             (uint32_t)(cy + yy) * gd_surface_pitch() + (uint32_t)cx;
+            const uint32_t *srow = g_wall_cache +
+                                   (size_t)(cy + yy) * DW + cx;
+            for (int xx = 0; xx < cw; xx++) drow[xx] = srow[xx];
+        }
+        return;
+    }
+
+    /* 慢路径（缓存分配失败时兜底）：原有逐像素缩放 */
+    int sw = 0, sh = 0;
+    const uint32_t *src = gui_wall_pixels(&sw, &sh);
+    if (!src || !gd_surface_ptr() || sw <= 0 || sh <= 0) {
+        rect(0, 0, DW, DH, UI_SURFACE);
+        return;
+    }
     int64_t inv_x = ((int64_t)sw << 16) / DW;
     int64_t inv_y = ((int64_t)sh << 16) / DH;
     int64_t inv = inv_x < inv_y ? inv_x : inv_y;
@@ -1189,15 +1341,47 @@ static void blit_wallpaper(int DW, int DH) {
     }
 }
 
-static void draw_wallpaper(int w, int h, int light) {
-    int tb_y = h - TASKBAR_H;
+static void blit_wallpaper_rect(int dx, int dy, int dw, int dh) {
+    int sw = 0, sh = 0;
+    const uint32_t *src = gui_wall_pixels(&sw, &sh);
+    if (!src || !gd_surface_ptr() || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
+        fill_round_rect(dx, dy, dw, dh, 12, UI_SURFACE2, RR_ALL);
+        return;
+    }
+    int cx = dx, cy = dy, cw = dw, ch = dh;
+    if (!gui_clip_intersect(&cx, &cy, &cw, &ch)) return;
+    if (cx < 0) { cw += cx; cx = 0; }
+    if (cy < 0) { ch += cy; cy = 0; }
+    if (cx >= gd_surface_w() || cy >= gd_surface_h()) return;
+    if (cx + cw > gd_surface_w()) cw = gd_surface_w() - cx;
+    if (cy + ch > gd_surface_h()) ch = gd_surface_h() - cy;
+    if (cw <= 0 || ch <= 0) return;
 
+    for (int yy = 0; yy < ch; yy++) {
+        int cdy = cy + yy;
+        int syi = (cdy - dy) * sh / dh;
+        if (syi < 0) syi = 0;
+        if (syi >= sh) syi = sh - 1;
+        const uint32_t *srow = src + (size_t)syi * sw;
+        uint32_t *drow = gd_surface_ptr() + (size_t)cdy * gd_surface_pitch() + cx;
+        for (int xx = 0; xx < cw; xx++) {
+            int cdx = cx + xx;
+            int sxi = (cdx - dx) * sw / dw;
+            if (sxi < 0) sxi = 0;
+            if (sxi >= sw) sxi = sw - 1;
+            drow[xx] = 0xFF000000 | (srow[sxi] & 0x00FFFFFF);
+        }
+    }
+}
+
+static void draw_wallpaper(int w, int h, int light) {
     // Photographic wallpaper across the whole screen; panels float on top.
     blit_wallpaper(w, h);
-    // Windows 11-style floating taskbar bar (translucent glass); its centered
-    // icon cluster + clock are drawn by draw_taskbar().
-    rect_alpha(0, tb_y, w, TASKBAR_H, (0xF0u << 24) | (light ? 0xE9EBEEu : 0x20242Au));
-    rect(0, tb_y, w, 1, UI_SURFACE3);
+    if (g_gui_st && g_gui_st->desktop_style == DESKTOP_STYLE_WIN11) {
+        int tb_y = h - TASKBAR_H;
+        rect_alpha(0, tb_y, w, TASKBAR_H, (0xF0u << 24) | (light ? 0xE9EBEEu : 0x20242Au));
+        rect(0, tb_y, w, 1, UI_SURFACE3);
+    }
 }
 
 static void draw_usage_bar(int x, int y, int w, int h, uint32_t used, uint32_t total, uint32_t color) {
@@ -1271,24 +1455,24 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
     int detail_x = main_x + main_w + 12;
 
     uint32_t count = gui_file_count(mst);
-    text(tx, ty, "文件管理器", UI_OK, 1);
+    text(tx, ty, "文件管理器", UI_FG, 1);
     line_u32(line, sizeof(line), "当前: ", count, " 项");
     text(tx + 112, ty + 2, line, UI_FG2, 1);
     vgradient(tx, ty + 30, content_w, 30, UI_SURFACE2, UI_SURFACE);
-    rect(tx, ty + 30, content_w, 1, UI_ACCENT);
+    rect(tx, ty + 30, content_w, 1, UI_LINE2);
     rect(tx, ty + 59, content_w, 1, UI_BG);
-    border(tx, ty + 30, content_w, 30, UI_ACCENT);
+    border(tx, ty + 30, content_w, 30, UI_LINE2);
     line2(line, sizeof(line), "位置 ", gui_file_path(mst));
     text_clipped(tx + 12, ty + 42, tx + content_w - 12, line, UI_FG, 1);
 
     draw_file_action_bar(tx, ty, content_w);
 
     vgradient(tx, ty + 114, side_w, L.box_h, UI_SURFACE, UI_BG);
-    border(tx, ty + 114, side_w, L.box_h, UI_ACCENT);
-    rect(tx, ty + 114, side_w, 1, UI_ACCENT);
+    border(tx, ty + 114, side_w, L.box_h, UI_LINE2);
+    rect(tx, ty + 114, side_w, 1, UI_LINE2);
     text(tx + 14, ty + 128, "位置", UI_FG, 1);
-    vgradient(tx + 10, ty + 154, side_w - 20, 28, UI_ACCENT, UI_SURFACE2);
-    rect(tx + 10, ty + 154, 3, 28, UI_OK);
+    vgradient(tx + 10, ty + 154, side_w - 20, 28, UI_SURFACE3, UI_SURFACE2);
+    rect(tx + 10, ty + 154, 3, 28, UI_ACCENT);
     text_clipped(tx + 22, ty + 164, tx + side_w - 10, gui_file_path(mst), UI_FG, 1);
     text(tx + 22, ty + 202, "/home", UI_DIM, 1);
     text(tx + 22, ty + 232, "/dev  /proc", UI_DIM, 1);
@@ -1303,9 +1487,9 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
     }
 
     vgradient(main_x, ty + 114, main_w, L.box_h, UI_SURFACE, UI_SURFACE);
-    border(main_x, ty + 114, main_w, L.box_h, UI_ACCENT);
+    border(main_x, ty + 114, main_w, L.box_h, UI_LINE2);
     vgradient(main_x, ty + 114, main_w, 26, UI_SURFACE3, UI_SURFACE);
-    rect(main_x, ty + 139, main_w, 1, UI_ACCENT);
+    rect(main_x, ty + 139, main_w, 1, UI_LINE2);
     text(main_x + 14, ty + 122, "名称", UI_FG, 1);
     text(main_x + main_w - 166, ty + 122, "类型", UI_FG, 1);
     text(main_x + main_w - 82, ty + 122, "大小", UI_FG, 1);
@@ -1315,7 +1499,7 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         text(main_x + 18, list_y + 18, "目录为空", UI_FG, 1);
         text(main_x + 18, list_y + 42, "点击新建或按 N 创建", UI_FG2, 1);
         vgradient(detail_x, ty + 114, detail_w, L.box_h, UI_SURFACE, UI_BG);
-        border(detail_x, ty + 114, detail_w, L.box_h, UI_ACCENT);
+        border(detail_x, ty + 114, detail_w, L.box_h, UI_LINE2);
         text(detail_x + 12, ty + 130, "详细信息", UI_FG, 1);
         text(detail_x + 12, ty + 164, "未选择文件", UI_FG2, 1);
         return;
@@ -1363,7 +1547,7 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
         if (gui_file_entry(mst, (uint32_t)selected, name, &type, &node, full, sizeof(full)) < 0)
             return;
         vgradient(detail_x, ty + 114, detail_w, L.box_h, UI_SURFACE, UI_BG);
-        border(detail_x, ty + 114, detail_w, L.box_h, UI_ACCENT);
+        border(detail_x, ty + 114, detail_w, L.box_h, UI_LINE2);
         vgradient(detail_x, ty + 114, detail_w, 30, UI_SURFACE2, UI_SURFACE);
         rect(detail_x, ty + 143, detail_w, 1, UI_BG);
         text(detail_x + 12, ty + 124, "详细信息", UI_FG, 1);
@@ -1418,9 +1602,9 @@ static void draw_files_panel(int tx, int ty, int win_w, int win_h, const gui_sta
 
         int sy = ty + L.status_y;
         vgradient(tx, sy - 10, content_w, 28, UI_SURFACE, UI_SURFACE);
-        rect(tx, sy - 10, content_w, 1, UI_ACCENT);
+        rect(tx, sy - 10, content_w, 1, UI_LINE2);
         rect(tx, sy + 17, content_w, 1, UI_BG);
-        border(tx, sy - 10, content_w, 28, UI_ACCENT);
+        border(tx, sy - 10, content_w, 28, UI_LINE2);
         if (st->rename_active) {
             int input_x = tx + 72;
             int hint_w = 132;
@@ -1609,12 +1793,18 @@ static void draw_apps_panel(int tx, int ty, int win_w, const gui_state_t *st) {
         int sel = ((int)i == selected);
 
         // Translucent glass tile; selected gets an accent wash + ring.
-        fill_round_rect(x, y, w, h, UI_RADIUS, ((sel ? 0x99u : 0x66u) << 24) | (UI_SURFACE3 & 0xFFFFFFu), RR_ALL);
+        uint32_t tile_base = st->theme_light ? UI_SURFACE2 : UI_SURFACE3;
+        fill_round_rect(x, y, w, h, UI_RADIUS, ((sel ? 0x99u : 0x66u) << 24) | (tile_base & 0xFFFFFFu), RR_ALL);
         if (sel) {
             rect(x + 10, y, w - 20, 1, accent);
             rect(x + 10, y + h - 1, w - 20, 1, accent);
             rect(x, y + 10, 1, h - 20, accent);
             rect(x + w - 1, y + 10, 1, h - 20, accent);
+        } else if (st->theme_light) {
+            rect(x + 10, y, w - 20, 1, UI_LINE2);
+            rect(x + 10, y + h - 1, w - 20, 1, UI_LINE2);
+            rect(x, y + 10, 1, h - 20, UI_LINE2);
+            rect(x + w - 1, y + 10, 1, h - 20, UI_LINE2);
         }
 
         int isz = ui_s(52), ix = x + (w - isz) / 2, iy = y + ui_s(16);
@@ -3588,7 +3778,7 @@ static void draw_browser_app(int tx, int ty, int win_w, int win_h, gui_state_t *
     }
 }
 
-static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int icon_id, int active, int state, int light) {
+static void draw_window_frame(int x, int y, int win_w, int win_h, const char *title, int icon_id, int active, int state, int light, int glass) {
     (void)light;
     int R = (state == WM_STATE_MAXIMIZED) ? 0 : 12;
     if (state != WM_STATE_MAXIMIZED) {
@@ -3604,33 +3794,53 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
 
     // Rounded Breeze frame: rounded body, rounded-top titlebar, 1px separator,
     // focus border on the straight edges (corners carried by the AA fill).
+    /* 动态玻璃：只有**标题栏**降透明度，让身后已经糊好的画面透上来。
+     * 正文区保持不透明——那里的底色是给应用内容打的底，透出来会变成
+     * 一层洗白的壁纸，既不好看也伤可读性。
+     *
+     * 透明度定在 150/255（约 6 成不透明）：低于它标题文字会被背后的
+     * 高光壁纸吃掉对比度，高于它磨砂层根本看不见（实测 206 时整条
+     * 标题栏只差 3/255，等于没开）。 */
+    uint8_t keep_a = gui_get_layer_opacity();
     fill_round_rect(x, y, win_w, win_h, R, body_bg, RR_ALL);
+    if (glass) gui_set_layer_opacity(150);
     fill_round_rect(x, y, win_w, WM_TITLE_H, R, title_bg, RR_TOP);
+    if (glass) gui_set_layer_opacity(keep_a);
     rect(x + 1, y + WM_TITLE_H, win_w - 2, 1, UI_SURFACE3);
     rect(x + R, y, win_w - 2 * R, 1, border_c);
     rect(x + R, y + win_h - 1, win_w - 2 * R, 1, border_c);
     rect(x, y + R, 1, win_h - 2 * R, border_c);
     rect(x + win_w - 1, y + R, 1, win_h - 2 * R, border_c);
 
-    // Window controls: flat, close=red, min/max neutral (no accent strip).
-    uint32_t nbtn = active ? (UI_SURFACE3)
-                           : (UI_SURFACE3);
+    // Window controls: GNOME Adwaita circular buttons (close=soft red, min/max=neutral).
+    uint32_t nbtn = (0x22u << 24) | (UI_FG & 0x00FFFFFFu);
+    int bsz = ui_s(20);
+    int btn_y = y + (WM_TITLE_H - bsz) / 2;
+
     int btn_x = x + win_w - WM_BTN_W - 8;
-    int btn_y = y + 7;
-    fill_round_rect(btn_x, btn_y, WM_BTN_W, 20, 10, UI_ERR, RR_ALL);
-    draw_window_control_icon(btn_x + 7, btn_y + 6, GUI_CTRL_CLOSE, 0,
-                             UI_FG);
+    int bx = btn_x + (WM_BTN_W - bsz) / 2;
+    fill_round_rect(bx, btn_y, bsz, bsz, bsz / 2, UI_ERR, RR_ALL);
+    int ccx = bx + bsz / 2, ccy = btn_y + bsz / 2;
+    for (int d = -3; d <= 3; d++) {
+        rect(ccx + d, ccy + d, 2, 2, UI_FG);
+        rect(ccx - d, ccy + d, 2, 2, UI_FG);
+    }
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    fill_round_rect(btn_x, btn_y, WM_BTN_W, 20, 10, nbtn, RR_ALL);
-    draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MAX,
-                             state == WM_STATE_MAXIMIZED,
-                             UI_FG);
+    bx = btn_x + (WM_BTN_W - bsz) / 2;
+    fill_round_rect(bx, btn_y, bsz, bsz, bsz / 2, nbtn, RR_ALL);
+    int mcx = bx + bsz / 2, mcy = btn_y + bsz / 2;
+    border(mcx - 4, mcy - 4, 9, 9, UI_FG);
+    if (state == WM_STATE_MAXIMIZED) {
+        rect(mcx - 2, mcy - 6, 7, 1, UI_FG);
+        rect(mcx + 4, mcy - 6, 1, 7, UI_FG);
+    }
 
     btn_x -= WM_BTN_W + WM_BTN_GAP;
-    fill_round_rect(btn_x, btn_y, WM_BTN_W, 20, 10, nbtn, RR_ALL);
-    draw_window_control_icon(btn_x + 6, btn_y + 4, GUI_CTRL_MIN, 0,
-                             UI_FG);
+    bx = btn_x + (WM_BTN_W - bsz) / 2;
+    fill_round_rect(bx, btn_y, bsz, bsz, bsz / 2, nbtn, RR_ALL);
+    int lcx = bx + bsz / 2, lcy = btn_y + bsz / 2;
+    rect(lcx - 4, lcy, 9, 2, UI_FG);
 
     // Titlebar app icon (real atlas tile; fallback = rounded accent square)
     // + vertically-centered title.
@@ -3652,7 +3862,12 @@ static void draw_window_frame(int x, int y, int win_w, int win_h, const char *ti
         rect(icon_x + 4, icy + 5, ico - 8, ico - 9, UI_FG);
     }
     int tty = y + (WM_TITLE_H - gui_font_line_height()) / 2;
-    text_clipped(x + 34, tty, x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16,
+    int tw = text_width(title, 1);
+    int center_tx = x + (win_w - tw) / 2;
+    int min_tx = icon_x + ico + 10;
+    int max_tx = x + win_w - WM_BTN_W * 3 - WM_BTN_GAP * 2 - 16;
+    if (center_tx < min_tx) center_tx = min_tx;
+    text_clipped(center_tx, tty, max_tx,
                  title, active ? UI_FG : (UI_FG2), 1);
 }
 
@@ -3807,12 +4022,54 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     int old_y = st->win_y;
     int win_x, win_y, win_w, win_h;
     gui_window_metrics(st, w, h, win, idx, &win_x, &win_y, &win_w, &win_h);
+
+    /* ── 手稿②「降维打击」：拖动时把后面的窗口渲染成 3D 层次 ──────────
+     * 只改绘制坐标（视差后退 + 压暗 + 层边缘高光），不动窗口真实几何，
+     * 松手后视差归零，窗口回到原位。层级差越大，后退越多、越暗。
+     * 视差量按"当次拖动的帧位移"算，因此拖得越快后面退得越明显——
+     * 这比固定偏移更像真的透视。 */
+    int depth = 0, par_x = 0, par_y = 0;
+    if (st->drag3d && idx != st->wm.active_window) {
+        uint32_t al = wm_window_layer(&st->wm, st->wm.active_window);
+        uint32_t wl = wm_window_layer(&st->wm, idx);
+        if (al > wl) {
+            uint32_t d = al - wl;
+            depth = d > 3 ? 3 : (int)d;      /* 3 层以外视觉上不再变化 */
+            par_x = -(st->drag3d_dx * depth) / 3;
+            par_y = -(st->drag3d_dy * depth) / 3;
+            int lim = ui_s(26);
+            if (par_x > lim) par_x = lim;
+            if (par_x < -lim) par_x = -lim;
+            if (par_y > lim) par_y = lim;
+            if (par_y < -lim) par_y = -lim;
+        }
+    }
+    win_x += par_x;
+    win_y += par_y;
+
+    /* ── 动态玻璃：把窗口身后的画面糊掉 ────────────────────────────
+     * 只处理标题栏与状态栏两条：正文区里是应用自己画的不透明内容，糊了
+     * 也看不见，白白吃掉一整屏的像素带宽。这两条恰好也是 GNOME 里唯一
+     * 真正"透"的部分。
+     *
+     * 必须在画窗口框**之前**做——模糊读的是当前表面上已经画好的东西
+     * （壁纸 + 更低层的窗口），窗口框一旦画上去就把它盖住了。 */
+    int glass_on = st->glass_enabled && win->opacity >= 255 &&
+                   win->anim_type == WM_ANIM_NONE && win->state != WM_STATE_MAXIMIZED;
+    if (glass_on) {
+        int rr = ui_s(12);
+        glass_rect(win_x, win_y, win_w, WM_TITLE_H + ui_s(2), rr, RR_TOP,
+                   UI_SURFACE2, 118, st->glass_strength);
+        glass_rect(win_x, win_y + win_h - ui_s(33), win_w, ui_s(33), rr, RR_BOT,
+                   UI_SURFACE, 128, st->glass_strength);
+    }
     uint8_t saved_opacity = gui_get_layer_opacity();
     if (win->opacity < 255) gui_set_layer_opacity(win->opacity);
     draw_window_frame(win_x, win_y, win_w, win_h, gui_window_title(win),
                       win->kind == WM_WIN_PANEL ? panel_icon_id(win->mode)
                                                 : app_icon_id(win->mode),
-                      idx == st->wm.active_window, win->state, st->theme_light);
+                      idx == st->wm.active_window, win->state, st->theme_light,
+                      glass_on);
 
     st->win_x = win_x;
     st->win_y = win_y;
@@ -3915,17 +4172,51 @@ static void draw_one_window(int w, int h, gui_state_t *st, int idx) {
     st->win_x = old_x;
     st->win_y = old_y;
     gui_set_layer_opacity(saved_opacity);
+
+    /* 立体层收尾：越深越暗 + 左侧一道"层厚"高光，制造 3D 堆叠感。
+     * 放在整窗画完之后叠加，这样标题栏/内容/状态栏一起被压暗，
+     * 不会出现"只暗了客户区"的割裂感。 */
+    if (depth > 0) {
+        uint32_t dim = (uint32_t)(0x30u * (uint32_t)depth) << 24;
+        gui_rect_alpha(win_x, win_y, win_w, win_h, dim);
+        int edge_w = ui_s(3) + ui_s(2) * depth;
+        gui_vgradient(win_x - edge_w, win_y + ui_s(6),
+                      edge_w, win_h - ui_s(12),
+                      ui_shade(UI_SURFACE2, -30 + 8 * depth),
+                      UI_SURFACE);
+    }
+
+    /* 撞击闪光：被「降维打击」压下去的窗口边缘亮一瞬再淡出。
+     * 光改层级的话，用户只能看到"顺序变了"，感知不到"被撞"这件事；
+     * 这一圈高光是把因果补上的关键。alpha 随帧数线性衰减。 */
+    if (win->knock_flash > 0) {
+        int fa = win->knock_flash;
+        if (fa > 14) fa = 14;
+        uint32_t accent_rgb = UI_ACCENT & 0x00FFFFFFu;
+        gui_border(win_x - 1, win_y - 1, win_w + 2, win_h + 2,
+                   ((uint32_t)(fa * 16) << 24) | accent_rgb);
+        gui_border(win_x, win_y, win_w, win_h,
+                   ((uint32_t)(fa * 12) << 24) | accent_rgb);
+        gui_rect_alpha(win_x, win_y, win_w, win_h,
+                       ((uint32_t)(fa * 5) << 24) | accent_rgb);
+    }
 }
 
 // ---- Windows 11-style centered taskbar ----
 #define TB_BTN ui_s(46)
 #define TB_GAP ui_s(8)
-#define TBHIT_NONE  -1
-#define TBHIT_START -2
-#define TBHIT_CLOCK -3        /* 时钟/日期区域 → 日历弹窗 */
-#define TBHIT_SHOWDESK -4     /* 最右侧竖条 → 显示桌面 */
-#define TBHIT_BRIGHTNESS -5   /* 亮度图标 → 亮度滑杆弹窗 */
-#define TBHIT_WIN_BASE 100
+#define TBHIT_NONE        -1
+#define TBHIT_START       -2
+#define TBHIT_CLOCK       -3        /* 时钟/日期区域 → 日历弹窗 */
+#define TBHIT_SHOWDESK    -4        /* 最右侧竖条 → 显示桌面 */
+#define TBHIT_BRIGHTNESS  -5        /* 亮度图标 → 亮度滑杆弹窗 */
+#define TBHIT_ACTIVITIES  -6        /* GNOME 顶栏「活动」按钮 → 概览 */
+#define TBHIT_THEME       -7        /* 顶栏快速切换深浅色 */
+#define TBHIT_STYLE       -8        /* 顶栏快速切换 GNOME / Win11 桌面样式 */
+#define TBHIT_DOCK_POS    -9        /* 顶栏快速切换 Dock 位置 (底部/左侧) */
+#define TBHIT_POWER       -10       /* 顶栏关机按钮 */
+#define TBHIT_QUICK_SETTINGS -11    /* GNOME 顶栏右侧聚合快捷控制卡片 */
+#define TBHIT_WIN_BASE    100
 #define TB_SHOWDESK_W ui_s(10)
 
 /* 亮度图标 + 滑杆弹窗的几何布局，绘制和点击测试共用，避免两处数字不一致。
@@ -3944,8 +4235,13 @@ static void brightness_icon_xy(int w, int h, int *bx, int *by) {
 }
 
 static void brightness_popup_xy(int w, int h, int *px, int *py) {
-    *px = w - 16 - BR_POPUP_W;
-    *py = h - TASKBAR_H - BR_POPUP_H - 8;
+    if (g_gui_st && g_gui_st->desktop_style == DESKTOP_STYLE_GNOME) {
+        *px = w - BR_POPUP_W - ui_s(16);
+        *py = GNOME_TOPBAR_H + ui_s(8);
+    } else {
+        *px = w - 16 - BR_POPUP_W;
+        *py = h - TASKBAR_H - BR_POPUP_H - 8;
+    }
 }
 
 /* 滑杆轨道范围（弹窗内边距 18px），返回轨道左右端点 x 与竖直位置 y。 */
@@ -3963,11 +4259,19 @@ static const struct { const char *label; int panel; } g_taskbar_pins[] = {
 };
 #define TB_PIN_COUNT ((int)(sizeof(g_taskbar_pins) / sizeof(g_taskbar_pins[0])))
 
+static int is_pinned_panel(int kind, int mode) {
+    if (kind != WM_WIN_PANEL) return 0;
+    for (int p = 0; p < TB_PIN_COUNT; p++) {
+        if (g_taskbar_pins[p].panel == mode) return 1;
+    }
+    return 0;
+}
+
 static int taskbar_windows(const gui_state_t *st, int *out, int max) {
     int n = 0;
     for (int i = 0; i < st->wm.window_count && n < max; i++) {
         wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, i);
-        if (win && win->used) out[n++] = i;
+        if (win && win->used && !is_pinned_panel(win->kind, win->mode)) out[n++] = i;
     }
     return n;
 }
@@ -4044,6 +4348,106 @@ static void draw_brightness_icon(int x, int y, int size, uint32_t color) {
     }
 }
 
+static void draw_network_icon(int x, int y, int size, uint32_t color) {
+    (void)size;
+    fill_round_rect(x + 1, y + 10, 2, 4, 1, color, RR_ALL);
+    fill_round_rect(x + 5, y + 7,  2, 7, 1, color, RR_ALL);
+    fill_round_rect(x + 9, y + 4,  2, 10, 1, color, RR_ALL);
+    fill_round_rect(x + 13, y + 1, 2, 13, 1, color, RR_ALL);
+}
+
+static void draw_volume_icon(int x, int y, int size, uint32_t color) {
+    (void)size;
+    rect(x + 2, y + 5, 3, 5, color);
+    rect(x + 5, y + 4, 1, 7, color);
+    rect(x + 6, y + 3, 1, 9, color);
+    rect(x + 7, y + 2, 1, 11, color);
+    rect(x + 10, y + 4, 1, 7, color);
+    rect(x + 11, y + 3, 1, 2, color);
+    rect(x + 11, y + 10, 1, 2, color);
+    rect(x + 13, y + 2, 1, 11, color);
+    rect(x + 14, y + 1, 1, 2, color);
+    rect(x + 14, y + 12, 1, 2, color);
+}
+
+static void draw_power_icon(int x, int y, int size, uint32_t color) {
+    (void)size;
+    int cx = x + 7, cy = y + 7;
+    for (int dy = -5; dy <= 5; dy++) {
+        for (int dx = -5; dx <= 5; dx++) {
+            int d2 = dx * dx + dy * dy;
+            if (d2 >= 16 && d2 <= 30) {
+                if (dy < -1 && dx >= -1 && dx <= 1) continue;
+                rect(cx + dx, cy + dy, 1, 1, color);
+            }
+        }
+    }
+    rect(cx, y + 1, 2, 6, color);
+}
+
+static void draw_moon_icon(int x, int y, int size, uint32_t color) {
+    (void)size;
+    int cx = x + 7, cy = y + 7;
+    for (int dy = -6; dy <= 6; dy++) {
+        for (int dx = -6; dx <= 6; dx++) {
+            int d1 = dx * dx + dy * dy;
+            int ox = dx - 3, oy = dy - 1;
+            int d2 = ox * ox + oy * oy;
+            if (d1 <= 34 && d2 > 24) {
+                rect(cx + dx, cy + dy, 1, 1, color);
+            }
+        }
+    }
+}
+
+static void draw_grid_icon(int x, int y, int size, uint32_t color) {
+    (void)size;
+    fill_round_rect(x + 1, y + 1, 5, 5, 1, color, RR_ALL);
+    fill_round_rect(x + 8, y + 1, 5, 5, 1, color, RR_ALL);
+    fill_round_rect(x + 1, y + 8, 5, 5, 1, color, RR_ALL);
+    fill_round_rect(x + 8, y + 8, 5, 5, 1, color, RR_ALL);
+}
+
+static void draw_dock_icon(int x, int y, int size, int bottom, uint32_t color) {
+    (void)size;
+    round_border(x + 1, y + 1, 13, 13, 3, color, UI_SURFACE);
+    if (bottom) {
+        fill_round_rect(x + 3, y + 10, 9, 2, 1, color, RR_ALL);
+    } else {
+        fill_round_rect(x + 3, y + 3, 2, 9, 1, color, RR_ALL);
+    }
+}
+
+static void draw_clock_icon(int x, int y, int size, uint32_t color) {
+    (void)size;
+    int cx = x + 7, cy = y + 7;
+    for (int dy = -6; dy <= 6; dy++) {
+        for (int dx = -6; dx <= 6; dx++) {
+            int d2 = dx * dx + dy * dy;
+            if (d2 >= 24 && d2 <= 36) rect(cx + dx, cy + dy, 1, 1, color);
+        }
+    }
+    rect(cx, cy - 4, 1, 5, color);
+    rect(cx, cy, 4, 1, color);
+}
+
+static void draw_refresh_icon(int x, int y, int size, uint32_t color) {
+    (void)size;
+    int cx = x + 7, cy = y + 7;
+    for (int dy = -5; dy <= 5; dy++) {
+        for (int dx = -5; dx <= 5; dx++) {
+            int d2 = dx * dx + dy * dy;
+            if (d2 >= 16 && d2 <= 28) {
+                if (dx < 0 && dy < -1) continue;
+                rect(cx + dx, cy + dy, 1, 1, color);
+            }
+        }
+    }
+    rect(cx - 3, cy - 6, 4, 1, color);
+    rect(cx - 3, cy - 5, 3, 1, color);
+    rect(cx - 3, cy - 4, 2, 1, color);
+}
+
 /* 任务栏亮度弹窗：标题 + 百分比 + 可拖动滑杆。 */
 static void draw_brightness_popup(int w, int h, const gui_state_t *st) {
     int light = st->theme_light;
@@ -4076,6 +4480,10 @@ static void draw_brightness_popup(int w, int h, const gui_state_t *st) {
 
 static void draw_taskbar(int w, int h, const gui_state_t *st) {
     int light = st->theme_light;
+    int tb_y = h - TASKBAR_H;
+    rect_alpha(0, tb_y, w, TASKBAR_H, (0xF0u << 24) | (light ? 0xE9EBEEu : 0x20242Au));
+    rect(0, tb_y, w, 1, light ? UI_LINE2 : UI_SURFACE3);
+
     uint32_t accent = UI_ACCENT;
     int wins[WM_MAX_WINDOWS];
     int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
@@ -4093,6 +4501,15 @@ static void draw_taskbar(int w, int h, const gui_state_t *st) {
             int panel = g_taskbar_pins[i - 1].panel;
             int isz = ui_s(30), ix = rx + (TB_BTN - isz) / 2, iy = ry + (TB_BTN - isz) / 2;
             blit_icon(ix, iy, isz, panel_icon_id(panel));
+            for (int wi = 0; wi < st->wm.window_count; wi++) {
+                wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, wi);
+                if (win && win->used && win->kind == WM_WIN_PANEL && win->mode == panel) {
+                    int act = (wi == st->wm.active_window);
+                    rect(rx + TB_BTN / 2 - 7, ry + TB_BTN - 1, 14, 3,
+                         act ? accent : UI_FG2);
+                    break;
+                }
+            }
         } else {
             int slot = wins[i - 1 - TB_PIN_COUNT];
             wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, slot);
@@ -4176,6 +4593,578 @@ static int taskbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
     return TBHIT_NONE;
 }
 
+/* ── GNOME 40+ 桌面样式：Top Bar 与浮动 Dash (Dock) ───────────────── */
+#define QS_MENU_W ui_s(280)
+#define QS_MENU_H ui_s(214)
+
+static void gnome_topbar_xy(int w, int *act_x, int *act_w, int *clk_x, int *clk_w, int *pill_x, int *pill_w) {
+    (void)w;
+    *act_x = ui_s(10);
+    *act_w = ui_s(64);
+    *pill_w = ui_s(84);
+    *pill_x = w - *pill_w - ui_s(10);
+    *clk_w = ui_s(260);
+    *clk_x = (w - *clk_w) / 2;
+}
+
+static void make_gnome_clock_str(char *out, size_t max, const char *dline, const char *tline) {
+    out[0] = '\0';
+    strncat(out, dline, max - 1);
+    strncat(out, "  ", max - strlen(out) - 1);
+    strncat(out, tline, max - strlen(out) - 1);
+}
+
+static void quick_settings_xy(int w, int *qx, int *qy) {
+    *qx = w - QS_MENU_W - ui_s(10);
+    *qy = GNOME_TOPBAR_H + ui_s(6);
+}
+
+static void draw_quick_settings_menu(int w, int h, const gui_state_t *st) {
+    (void)h;
+    int qx, qy;
+    quick_settings_xy(w, &qx, &qy);
+
+    /* Adwaita 现代浮动卡片（自适应浅色/深色主题）
+     * 玻璃开时卡片底色降到 0xAE、玻璃着色 130，与开始菜单同一组参数：
+     * 背后约 25% 的糊画面透上来，滑块与文字仍有足够对比度。 */
+    if (st->glass_enabled) {
+        glass_rect(qx, qy, QS_MENU_W, QS_MENU_H, ui_s(16), RR_ALL,
+                   UI_SURFACE, 130, st->glass_strength);
+    }
+    uint32_t card_bg = st->glass_enabled
+                     ? ((0xAEu << 24) | (UI_SURFACE & 0x00FFFFFFu))
+                     : ((0xF8u << 24) | (UI_SURFACE & 0x00FFFFFFu));
+    round_border(qx, qy, QS_MENU_W, QS_MENU_H, ui_s(16), UI_LINE2, card_bg);
+
+    /* 1. 亮度滑块行 */
+    int sy = qy + ui_s(14);
+    draw_brightness_icon(qx + ui_s(14), sy + ui_s(2), ui_s(18), UI_FG);
+    int tr_x0 = qx + ui_s(40);
+    int tr_x1 = qx + QS_MENU_W - ui_s(54);
+    int tr_y = sy + ui_s(10);
+    fill_round_rect(tr_x0, tr_y - 3, tr_x1 - tr_x0, 6, 3, UI_SURFACE2, RR_ALL);
+    int fill_w = (tr_x1 - tr_x0) * (st->brightness - BR_MIN) / (BR_MAX - BR_MIN);
+    if (fill_w > 0)
+        fill_round_rect(tr_x0, tr_y - 3, fill_w, 6, 3, UI_ACCENT, RR_ALL);
+    gui_fill_circle(tr_x0 + fill_w, tr_y, 7, UI_FG);
+
+    char bpct[16];
+    uint32_t bpos = 0;
+    append_uint(bpct, sizeof(bpct), &bpos, (uint32_t)st->brightness);
+    append_char(bpct, sizeof(bpct), &bpos, '%');
+    bpct[bpos] = '\0';
+    text(tr_x1 + ui_s(8), sy + ui_s(4), bpct, UI_FG2, 1);
+
+    /* 2. 4 个 Adwaita 快速切换磁贴 (2x2 网格) */
+    int tile_w = (QS_MENU_W - ui_s(28) - ui_s(8)) / 2;
+    int tile_h = ui_s(38);
+    int r1_y = qy + ui_s(48);
+    int r2_y = r1_y + tile_h + ui_s(8);
+
+    /* Tile 1: 主题切换 */
+    int t1_x = qx + ui_s(14);
+    int t1_act = !st->theme_light;
+    fill_round_rect(t1_x, r1_y, tile_w, tile_h, ui_s(10),
+                    t1_act ? UI_ACCENT : UI_SURFACE2, RR_ALL);
+    if (t1_act) {
+        draw_moon_icon(t1_x + ui_s(8), r1_y + ui_s(11), 16, 0xFFFFFFFF);
+        text(t1_x + ui_s(28), r1_y + ui_s(12), "深色主题", 0xFFFFFFFF, 1);
+    } else {
+        draw_brightness_icon(t1_x + ui_s(8), r1_y + ui_s(11), 16, UI_FG);
+        text(t1_x + ui_s(28), r1_y + ui_s(12), "浅色主题", UI_FG, 1);
+    }
+
+    /* Tile 2: 样式切换 */
+    int t2_x = t1_x + tile_w + ui_s(8);
+    int t2_act = (st->desktop_style == DESKTOP_STYLE_GNOME);
+    fill_round_rect(t2_x, r1_y, tile_w, tile_h, ui_s(10),
+                    t2_act ? UI_ACCENT : UI_SURFACE2, RR_ALL);
+    draw_grid_icon(t2_x + ui_s(8), r1_y + ui_s(11), 16, t2_act ? 0xFFFFFFFF : UI_FG);
+    text(t2_x + ui_s(28), r1_y + ui_s(12),
+         t2_act ? "GNOME样式" : "Win11样式",
+         t2_act ? 0xFFFFFFFF : UI_FG, 1);
+
+    /* Tile 3: Dock 方位 */
+    int t3_act = (st->dock_pos == DOCK_POS_BOTTOM);
+    fill_round_rect(t1_x, r2_y, tile_w, tile_h, ui_s(10),
+                    t3_act ? UI_ACCENT : UI_SURFACE2, RR_ALL);
+    draw_dock_icon(t1_x + ui_s(8), r2_y + ui_s(11), 16, t3_act, t3_act ? 0xFFFFFFFF : UI_FG);
+    text(t1_x + ui_s(28), r2_y + ui_s(12),
+         t3_act ? "底部 Dock" : "左侧 Dock",
+         t3_act ? 0xFFFFFFFF : UI_FG, 1);
+
+    /* Tile 4: 时钟秒数 */
+    int t4_act = st->taskbar_show_seconds;
+    fill_round_rect(t2_x, r2_y, tile_w, tile_h, ui_s(10),
+                    t4_act ? UI_ACCENT : UI_SURFACE2, RR_ALL);
+    draw_clock_icon(t2_x + ui_s(8), r2_y + ui_s(11), 16, t4_act ? 0xFFFFFFFF : UI_FG);
+    text(t2_x + ui_s(28), r2_y + ui_s(12),
+         t4_act ? "秒针: 开启" : "秒针: 关闭",
+         t4_act ? 0xFFFFFFFF : UI_FG, 1);
+
+    /* 3. 底部操作栏：[刷新桌面]  [关机] */
+    int by = r2_y + tile_h + ui_s(12);
+    int bw = (QS_MENU_W - ui_s(28) - ui_s(8)) / 2;
+    int bh = ui_s(32);
+    fill_round_rect(t1_x, by, bw, bh, ui_s(8), UI_SURFACE2, RR_ALL);
+    draw_refresh_icon(t1_x + ui_s(12), by + ui_s(8), 16, UI_FG);
+    text(t1_x + ui_s(32), by + ui_s(8), "刷新桌面", UI_FG, 1);
+
+    fill_round_rect(t2_x, by, bw, bh, ui_s(8), (0x28u << 24) | (UI_ERR & 0x00FFFFFFu), RR_ALL);
+    draw_power_icon(t2_x + ui_s(18), by + ui_s(8), 16, UI_ERR);
+    text(t2_x + ui_s(38), by + ui_s(8), "关机", UI_ERR, 1);
+}
+
+static void quick_settings_handle_click(int w, int h, gui_state_t *st, int mx, int my) {
+    (void)h;
+    int qx, qy;
+    quick_settings_xy(w, &qx, &qy);
+
+    if (mx < qx || mx >= qx + QS_MENU_W || my < qy || my >= qy + QS_MENU_H) {
+        st->quick_settings_open = 0;
+        return;
+    }
+
+    int sy = qy + ui_s(14);
+    int tr_x0 = qx + ui_s(40);
+    int tr_x1 = qx + QS_MENU_W - ui_s(54);
+    int tr_y = sy + ui_s(10);
+    if (my >= tr_y - 12 && my < tr_y + 14 && mx >= tr_x0 && mx <= tr_x1) {
+        int pct = BR_MIN + (mx - tr_x0) * (BR_MAX - BR_MIN) / (tr_x1 - tr_x0);
+        if (pct < BR_MIN) pct = BR_MIN;
+        if (pct > BR_MAX) pct = BR_MAX;
+        st->brightness = pct;
+        gui_set_brightness(pct);
+        return;
+    }
+
+    int tile_w = (QS_MENU_W - ui_s(28) - ui_s(8)) / 2;
+    int tile_h = ui_s(38);
+    int r1_y = qy + ui_s(48);
+    int r2_y = r1_y + tile_h + ui_s(8);
+    int t1_x = qx + ui_s(14);
+    int t2_x = t1_x + tile_w + ui_s(8);
+
+    /* Tile 1: 主题 */
+    if (mx >= t1_x && mx < t1_x + tile_w && my >= r1_y && my < r1_y + tile_h) {
+        st->theme_light = !st->theme_light;
+        gui_apply_theme(st->theme_light);
+        (void)gui_service_theme_set(st->theme_light);
+        st->status = st->theme_light ? "已切换为浅色主题" : "已切换为深色主题";
+        return;
+    }
+    /* Tile 2: 样式 */
+    if (mx >= t2_x && mx < t2_x + tile_w && my >= r1_y && my < r1_y + tile_h) {
+        st->desktop_style = (st->desktop_style == DESKTOP_STYLE_GNOME) ? DESKTOP_STYLE_WIN11 : DESKTOP_STYLE_GNOME;
+        st->wm.top_bar_h = hive_topbar_h(st);
+        st->status = (st->desktop_style == DESKTOP_STYLE_GNOME) ? "已切换为 GNOME 样式" : "已切换为 Windows 任务栏";
+        return;
+    }
+    /* Tile 3: Dock 方位 */
+    if (mx >= t1_x && mx < t1_x + tile_w && my >= r2_y && my < r2_y + tile_h) {
+        st->dock_pos = (st->dock_pos == DOCK_POS_BOTTOM) ? DOCK_POS_LEFT : DOCK_POS_BOTTOM;
+        st->status = (st->dock_pos == DOCK_POS_BOTTOM) ? "Dock 已置于底部" : "Dock 已置于左侧";
+        return;
+    }
+    /* Tile 4: 秒数 */
+    if (mx >= t2_x && mx < t2_x + tile_w && my >= r2_y && my < r2_y + tile_h) {
+        st->taskbar_show_seconds = !st->taskbar_show_seconds;
+        st->status = st->taskbar_show_seconds ? "已开启秒数显示" : "已关闭秒数显示";
+        return;
+    }
+
+    int by = r2_y + tile_h + ui_s(12);
+    int bw = (QS_MENU_W - ui_s(28) - ui_s(8)) / 2;
+    int bh = ui_s(32);
+    /* 刷新桌面 */
+    if (mx >= t1_x && mx < t1_x + bw && my >= by && my < by + bh) {
+        gui_dirty_mark_full();
+        st->status = "桌面已刷新";
+        st->quick_settings_open = 0;
+        return;
+    }
+    /* 关机 */
+    if (mx >= t2_x && mx < t2_x + bw && my >= by && my < by + bh) {
+        st->quick_settings_open = 0;
+        acpi_poweroff();
+        st->status = "关机中...";
+        return;
+    }
+}
+
+/* 顶栏滑动动画的 y 偏移（负值=上移出屏）；仅 draw_gnome_topbar 内使用 */
+static int g_topbar_yoff;
+
+static void draw_gnome_topbar(int w, int h, const gui_state_t *st) {
+    (void)h;
+    int yo = g_topbar_yoff;
+    uint32_t bar_bg = (0xFAu << 24) | (UI_BG & 0x00FFFFFFu);
+    uint32_t bar_line = UI_LINE2;
+    uint32_t text_c = UI_FG;
+    uint32_t pill_bg = (0x24u << 24) | (UI_FG & 0x00FFFFFFu);
+    int lh = gui_font_line_height();
+
+    /* 顶栏背景 + 底部微线 */
+    rect_alpha(0, yo, w, GNOME_TOPBAR_H, bar_bg);
+    rect(0, yo + GNOME_TOPBAR_H - 1, w, 1, bar_line);
+
+    int act_x, act_w, clk_x, clk_w, pill_x, pill_w;
+    gnome_topbar_xy(w, &act_x, &act_w, &clk_x, &clk_w, &pill_x, &pill_w);
+
+    /* 1. 左侧：活动 (Activities) 胶囊按钮 */
+    int act_h = ui_s(24);
+    int act_y = (GNOME_TOPBAR_H - act_h) / 2 + yo;
+    fill_round_rect(act_x, act_y, act_w, act_h, act_h / 2,
+                    st->overview ? UI_ACCENT : pill_bg, RR_ALL);
+    if (st->overview) {
+        /* GNOME 40 概览下左侧胶囊显示工作区指示器 [ —  · ] */
+        fill_round_rect(act_x + ui_s(16), act_y + (act_h - 4) / 2, ui_s(16), 4, 2, 0xFFFFFFFF, RR_ALL);
+        fill_round_rect(act_x + ui_s(38), act_y + (act_h - 4) / 2, 4, 4, 2, (0x99u << 24) | 0xFFFFFFu, RR_ALL);
+    } else {
+        int atw = text_width("活动", 1);
+        text(act_x + (act_w - atw) / 2, act_y + (act_h - lh) / 2, "活动",
+             st->overview ? 0xFFFFFFFF : text_c, 1);
+    }
+
+    /* 2. 中间：日期 + 时钟胶囊 */
+    char tline[32], dline[40], clock_str[72];
+    time_line(tline, sizeof(tline), st->taskbar_show_seconds);
+    date_line(dline, sizeof(dline));
+    make_gnome_clock_str(clock_str, sizeof(clock_str), dline, tline);
+    int ctw = text_width(clock_str, 1);
+    int cpw = ctw + ui_s(24);
+    int cph = ui_s(24);
+    int cpx = (w - cpw) / 2;
+    int cpy = (GNOME_TOPBAR_H - cph) / 2 + yo;
+    fill_round_rect(cpx, cpy, cpw, cph, cph / 2,
+                    st->cal_open ? UI_ACCENT : pill_bg, RR_ALL);
+    text(cpx + (cpw - ctw) / 2, cpy + (cph - lh) / 2, clock_str,
+         st->cal_open ? 0xFFFFFFFF : text_c, 1);
+
+    /* 3. 右侧：GNOME 43+ 聚合快捷设置胶囊 [📶 🔊 ⏻] */
+    int py = (GNOME_TOPBAR_H - act_h) / 2 + yo;
+    fill_round_rect(pill_x, py, pill_w, act_h, act_h / 2,
+                    st->quick_settings_open ? UI_ACCENT : pill_bg, RR_ALL);
+
+    uint32_t icon_c = st->quick_settings_open ? 0xFFFFFFFF : text_c;
+    draw_network_icon(pill_x + ui_s(12), py + ui_s(4), ui_s(16), icon_c);
+    draw_volume_icon(pill_x + ui_s(36), py + ui_s(4), ui_s(16), icon_c);
+    draw_power_icon(pill_x + ui_s(60), py + ui_s(4), ui_s(16), icon_c);
+}
+
+static int gnome_topbar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
+    (void)h;
+    if (my < 0 || my >= GNOME_TOPBAR_H) return TBHIT_NONE;
+    if (!topbar_visible(st)) return TBHIT_NONE;   /* 自动隐藏时不响应 */
+
+    int act_x, act_w, clk_x, clk_w, pill_x, pill_w;
+    gnome_topbar_xy(w, &act_x, &act_w, &clk_x, &clk_w, &pill_x, &pill_w);
+
+    if (mx >= act_x && mx < act_x + act_w) return TBHIT_ACTIVITIES;
+
+    char tline[32], dline[40], clock_str[72];
+    time_line(tline, sizeof(tline), st->taskbar_show_seconds);
+    date_line(dline, sizeof(dline));
+    make_gnome_clock_str(clock_str, sizeof(clock_str), dline, tline);
+    int ctw = text_width(clock_str, 1);
+    int cpw = ctw + ui_s(24);
+    int cpx = (w - cpw) / 2;
+    if (mx >= cpx && mx < cpx + cpw) return TBHIT_CLOCK;
+
+    if (mx >= pill_x && mx < pill_x + pill_w) return TBHIT_QUICK_SETTINGS;
+
+    return TBHIT_NONE;
+}
+
+static int gnome_dock_btn_sz(int w, int h, int is_left, int item_count) {
+    int max_span = is_left ? (h - GNOME_TOPBAR_H - ui_s(32)) : (w - ui_s(32));
+    int gap = ui_s(6);
+    int pad = ui_s(8);
+    int sz = ui_s(44);
+    if (item_count <= 0) return sz;
+    while (sz > ui_s(26) && (item_count * (sz + gap) - gap + pad * 2) > max_span) {
+        sz -= 2;
+    }
+    return sz;
+}
+
+static void gnome_dock_metrics(int w, int h, const gui_state_t *st, int item_count,
+                               int *dock_x, int *dock_y, int *dock_w, int *dock_h) {
+    int is_left = (st->dock_pos == DOCK_POS_LEFT);
+    int btn_sz = gnome_dock_btn_sz(w, h, is_left, item_count);
+    int gap = ui_s(6);
+    int pad = ui_s(8);
+    if (is_left) {
+        *dock_w = btn_sz + pad * 2;
+        *dock_h = item_count * (btn_sz + gap) - gap + pad * 2;
+        *dock_x = ui_s(10);
+        *dock_y = GNOME_TOPBAR_H + (h - GNOME_TOPBAR_H - *dock_h) / 2;
+        if (*dock_y < GNOME_TOPBAR_H + 4) *dock_y = GNOME_TOPBAR_H + 4;
+    } else {
+        *dock_w = item_count * (btn_sz + gap) - gap + pad * 2;
+        *dock_h = btn_sz + pad * 2;
+        *dock_x = (w - *dock_w) / 2;
+        if (*dock_x < 8) *dock_x = 8;
+        *dock_y = h - *dock_h - ui_s(12);
+    }
+}
+
+static void gnome_dock_item_xy(int idx, int dock_x, int dock_y, int is_left, int btn_sz, int *ix, int *iy) {
+    int gap = ui_s(6);
+    int pad = ui_s(8);
+    if (is_left) {
+        *ix = dock_x + pad;
+        *iy = dock_y + pad + idx * (btn_sz + gap);
+    } else {
+        *ix = dock_x + pad + idx * (btn_sz + gap);
+        *iy = dock_y + pad;
+    }
+}
+
+/* ── Dock 伸缩动画 ────────────────────────────────────────────────
+ *
+ * 这里做的是"真 · 伸缩"，不是简单的缩放贴图：
+ *   1. 胶囊的**长度**沿主方向线性增长（内容区长度 × 进度）；
+ *   2. 图标尺寸按同一条曲线从 0.4 长到 1.0；
+ *   3. 每个槽位的**偏移**按进度摊开，因此图标是"从抽屉里依次推出来"的，
+ *      而不是整体放大 -- 后者在软件渲染下看着像贴纸在动。
+ *
+ * 触发时机跟 CSS 里 :hover 触发的 transition 一样，由输入层调
+ * dock_anim_trigger() 重新起一段动画；绘制层只负责读当前值。
+ * 曲线统一 Ease-Out-Back：末段越过目标 9% 再弹回，就是 macOS 那种
+ * "弹一下"的手感，也是这次要的"像 HTML 动画"。
+ */
+typedef struct {
+    int      from_len;     /* 内容区起点长度（不含内边距） */
+    int      to_len;
+    uint64_t t0;
+    uint32_t ms;
+    int      running;
+} dock_anim_t;
+
+static dock_anim_t s_dock_anim;
+
+/* 当前伸缩进度 0..512（可 >512：回弹超调）。 */
+static int dock_anim_progress(void) {
+    if (!s_dock_anim.running) return 512;
+    int eased = gui_effects_ease_curve(s_dock_anim.t0, s_dock_anim.ms,
+                                       GUI_EASE_OUT_BACK);
+    if (eased >= 512) {
+        s_dock_anim.running = 0;
+        return 512;
+    }
+    return eased;
+}
+
+/* 内容区长度变化时重新起一段伸缩。
+ *
+ * 关键点：from_len 取**当前正在显示的**长度，而不是写死 0。这样连续
+ * 增删应用（比如快速连开三个窗口）时，胶囊是从当前位置续着长/缩，
+ * 不会每一帧都被打回零重新弹出、看起来像在抖。 */
+static void dock_anim_trigger(const gui_state_t *st, int new_len) {
+    (void)st;
+    int cur_eased = s_dock_anim.running ? dock_anim_progress() : 512;
+    int cur_len = s_dock_anim.to_len * cur_eased / 512;
+    s_dock_anim.from_len = cur_len;
+    s_dock_anim.to_len = new_len;
+    s_dock_anim.t0 = gui_effects_now_ms();
+    s_dock_anim.ms = gui_effects_enabled() ? 320 : 0;
+    s_dock_anim.running = 1;
+}
+
+static int s_last_dock_x = 0, s_last_dock_y = 0, s_last_dock_w = 0, s_last_dock_h = 0;
+
+/* 伸缩是否还在进行（供主循环决定要不要继续出帧）。 */
+static int dock_anim_active(void) {
+    return s_dock_anim.running ? 1 : 0;
+}
+
+/* 上一帧 draw_gnome_dock 实际画出的几何。命中测试必须用它，而不是用
+ * gnome_dock_metrics 的"最终"几何 —— 伸缩动画进行中两者不一致，用最终
+ * 几何会让图标看起来在那儿却点不到（或者点到空白处）。 */
+static int s_dock_hit_x = -1, s_dock_hit_y, s_dock_hit_w, s_dock_hit_h;
+static int s_dock_hit_btn, s_dock_hit_content, s_dock_hit_eased, s_dock_hit_pad;
+
+static void draw_gnome_dock(int w, int h, const gui_state_t *st) {
+    int is_left = (st->dock_pos == DOCK_POS_LEFT);
+    int wins[WM_MAX_WINDOWS];
+    int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
+    /* 布局：[固定应用 (TB_PIN_COUNT)] [运行中应用 (n)] [9宫格抽屉 (1)] */
+    int item_count = TB_PIN_COUNT + n + 1;
+
+    int dock_x, dock_y, dock_w, dock_h;
+    gnome_dock_metrics(w, h, st, item_count, &dock_x, &dock_y, &dock_w, &dock_h);
+    int btn_sz = gnome_dock_btn_sz(w, h, is_left, item_count);
+    int gap = ui_s(6);
+    int pad = ui_s(8);
+
+    /* 内容区长度（胶囊总长 = 内容区 + 2*pad） */
+    int content_len = item_count * (btn_sz + gap) - gap;
+    if (content_len < 1) content_len = 1;
+    /* 首次布局 / 内容数量变化 → 重新起一段伸缩。
+     * to_len 的初值是 0，所以"第一次画 dock"也会从零长度弹出来，正好
+     * 对应用户要的"dock 也要有伸缩"。 */
+    if (s_dock_anim.to_len != content_len) dock_anim_trigger(st, content_len);
+
+    int eased = dock_anim_progress();
+    /* 在 from_len → to_len 之间按进度插值（回弹时可略微超过 to_len） */
+    int cur_len = s_dock_anim.from_len +
+                  ((content_len - s_dock_anim.from_len) * eased) / 512;
+    if (cur_len < 0) cur_len = 0;
+    int max_len = content_len * 600 / 512 + 8;
+    if (cur_len > max_len) cur_len = max_len;
+
+    /* 胶囊几何：沿主方向取 cur_len，另一方向保持 btn_sz */
+    if (is_left) {
+        dock_h = cur_len + pad * 2;
+        dock_y = GNOME_TOPBAR_H + (h - GNOME_TOPBAR_H - dock_h) / 2;
+        if (dock_y < GNOME_TOPBAR_H + 4) dock_y = GNOME_TOPBAR_H + 4;
+    } else {
+        dock_w = cur_len + pad * 2;
+        dock_x = (w - dock_w) / 2;
+        if (dock_x < 8) dock_x = 8;
+        dock_y = h - dock_h - ui_s(12);
+    }
+    if (dock_w < 2) dock_w = 2;
+    if (dock_h < 2) dock_h = 2;
+
+    /* 避免残余方框：如果 dock 位置/尺寸改变，标记上次和本次区域为 dirty */
+    if (s_last_dock_w > 0 && (s_last_dock_x != dock_x || s_last_dock_y != dock_y ||
+                              s_last_dock_w != dock_w || s_last_dock_h != dock_h)) {
+        gui_damage_region(s_last_dock_x - 2, s_last_dock_y - 2, s_last_dock_w + 4, s_last_dock_h + 4, w, h);
+        /* 伸缩时会收起，原区域可能比新区域大：把两者的并集都标脏 */
+        gui_damage_region(dock_x - 2, dock_y - 2, dock_w + 4, dock_h + 4, w, h);
+    }
+    s_last_dock_x = dock_x; s_last_dock_y = dock_y; s_last_dock_w = dock_w; s_last_dock_h = dock_h;
+
+    /* 记录本帧真实几何给命中测试用 */
+    s_dock_hit_x = dock_x; s_dock_hit_y = dock_y;
+    s_dock_hit_w = dock_w; s_dock_hit_h = dock_h;
+    s_dock_hit_btn = btn_sz; s_dock_hit_content = content_len;
+    s_dock_hit_eased = eased; s_dock_hit_pad = pad;
+    if (st->dock_pos != DOCK_POS_LEFT) s_dock_hit_w = dock_w;
+
+    /* 纯正 GNOME 40+ 悬浮深色半透明胶囊，无任何直角黑框残余 */
+    int r = is_left ? (dock_w / 2) : (dock_h / 2);
+    uint32_t dock_bg = (0xC8u << 24) | (0x1E1E1Eu & 0x00FFFFFFu);
+    uint32_t dock_line = (0x30u << 24) | (UI_FG & 0x00FFFFFFu);
+    fill_round_rect(dock_x, dock_y, dock_w, dock_h, r, dock_line, RR_ALL);
+    fill_round_rect(dock_x + 1, dock_y + 1, dock_w - 2, dock_h - 2, r - 1, dock_bg, RR_ALL);
+
+    for (int i = 0; i < item_count; i++) {
+        /* 槽位按伸缩进度摊开：进度 0 时所有图标叠在胶囊中心，进度 512
+         * 时正好落在最终位置。用"偏移 = 名义偏移 × 进度"实现，膨胀方向
+         * 以胶囊中心为原点，看起来像抽屉从中间拉开。 */
+        int nom_ix, nom_iy;
+        gnome_dock_item_xy(i, dock_x, dock_y, is_left, btn_sz, &nom_ix, &nom_iy);
+        int center_x = dock_x + pad + content_len / 2;
+        int center_y = dock_y + pad + content_len / 2;
+        int ix = center_x + ((nom_ix - center_x) * eased) / 512;
+        int iy = center_y + ((nom_iy - center_y) * eased) / 512;
+        int bsz = btn_sz * eased / 512;      /* 图标尺寸随伸缩长出 */
+        if (i == 0 && bsz < 3) bsz = 3;
+
+        if (i < TB_PIN_COUNT) {
+            /* 1. 固定应用 */
+            int panel = g_taskbar_pins[i].panel;
+            int isz = bsz * 65 / 100;
+            int px = ix + (bsz - isz) / 2, py = iy + (bsz - isz) / 2;
+            if (isz > 1) blit_icon(px, py, isz, panel_icon_id(panel));
+        } else if (i < TB_PIN_COUNT + n) {
+            /* 2. 运行中应用（附带 GNOME 标志性 Active Dot 指示点） */
+            int slot = wins[i - TB_PIN_COUNT];
+            wm_window_t *win = wm_get_window((wm_state_t *)&st->wm, slot);
+            int act = (slot == st->wm.active_window);
+            int isz = bsz * 65 / 100;
+            int px = ix + (bsz - isz) / 2, py = iy + (bsz - isz) / 2 - 2 * eased / 512;
+            if (isz > 1) {
+                if (win->kind == WM_WIN_PANEL)
+                    blit_icon(px, py, isz, panel_icon_id(win->mode));
+                else
+                    blit_icon(px, py, isz, app_icon_id(win->mode));
+            }
+
+            /* 活动指示点：只在伸缩完成后淡入（乘 eased），避免快速出点时闪烁 */
+            if (eased > 400) {
+                if (is_left) {
+                    int dot_x = dock_x + ui_s(3);
+                    int dot_y = iy + bsz / 2;
+                    gui_fill_circle(dot_x, dot_y, act ? 3 : 2, act ? UI_ACCENT : UI_FG);
+                } else {
+                    int dot_x = ix + bsz / 2;
+                    int dot_y = dock_y + dock_h - ui_s(4);
+                    gui_fill_circle(dot_x, dot_y, act ? 3 : 2, act ? UI_ACCENT : UI_FG);
+                }
+            }
+        } else {
+            /* 3. GNOME 40+ 标志性：9 宫格应用抽屉图标（位于最末尾） */
+            if (st->wm.start_menu_open)
+                fill_round_rect(ix, iy, bsz, bsz, ui_s(10), (0x33u << 24) | (UI_FG & 0x00FFFFFFu), RR_ALL);
+            int dsz = ui_s(4) * eased / 512, dgap = ui_s(3) * eased / 512;
+            if (dsz < 1) dsz = 1;
+            if (dgap < 0) dgap = 0;
+            int g_left = ix + (bsz - (3 * dsz + 2 * dgap)) / 2;
+            int g_top  = iy + (bsz - (3 * dsz + 2 * dgap)) / 2;
+            for (int row = 0; row < 3; row++) {
+                for (int col = 0; col < 3; col++) {
+                    fill_round_rect(g_left + col * (dsz + dgap),
+                                    g_top  + row * (dsz + dgap),
+                                    dsz, dsz, 2, UI_FG, RR_ALL);
+                }
+            }
+        }
+    }
+}
+
+static int gnome_dock_hit(int w, int h, const gui_state_t *st, int mx, int my) {
+    (void)w; (void)h;
+    int wins[WM_MAX_WINDOWS];
+    int n = taskbar_windows(st, wins, WM_MAX_WINDOWS);
+    int item_count = TB_PIN_COUNT + n + 1;
+    int is_left = (st->dock_pos == DOCK_POS_LEFT);
+
+    /* 用绘制层上一帧留下的真实几何（含伸缩进度），否则动画中点击位置
+     * 和视觉位置对不上。 */
+    if (s_dock_hit_x < 0) return TBHIT_NONE;
+    int dock_x = s_dock_hit_x, dock_y = s_dock_hit_y;
+    int dock_w = s_dock_hit_w, dock_h = s_dock_hit_h;
+    int btn_sz = s_dock_hit_btn;
+    int content_len = s_dock_hit_content;
+    int eased = s_dock_hit_eased;
+    int pad = s_dock_hit_pad;
+
+    if (mx < dock_x || mx >= dock_x + dock_w || my < dock_y || my >= dock_y + dock_h)
+        return TBHIT_NONE;
+
+    int center_x = dock_x + pad + content_len / 2;
+    int center_y = dock_y + pad + content_len / 2;
+    int bsz = btn_sz * eased / 512;
+    if (bsz < 3) bsz = 3;
+
+    for (int i = 0; i < item_count; i++) {
+        int nom_ix, nom_iy;
+        gnome_dock_item_xy(i, dock_x, dock_y, is_left, btn_sz, &nom_ix, &nom_iy);
+        int ix = center_x + ((nom_ix - center_x) * eased) / 512;
+        int iy = center_y + ((nom_iy - center_y) * eased) / 512;
+        if (mx >= ix && mx < ix + bsz && my >= iy && my < iy + bsz) {
+            if (i < TB_PIN_COUNT) return i;                          // pin index
+            if (i < TB_PIN_COUNT + n) return TBHIT_WIN_BASE + wins[i - TB_PIN_COUNT];
+            return TBHIT_START;                                      // 9 宫格应用抽屉
+        }
+    }
+    return TBHIT_NONE;
+}
+
+static int desktop_bar_hit(int w, int h, const gui_state_t *st, int mx, int my) {
+    if (st->desktop_style == DESKTOP_STYLE_GNOME) {
+        int tbh = gnome_topbar_hit(w, h, st, mx, my);
+        if (tbh != TBHIT_NONE) return tbh;
+        return gnome_dock_hit(w, h, st, mx, my);
+    } else {
+        return taskbar_hit(w, h, st, mx, my);
+    }
+}
+
 /* ── 并发应用窗口合成 ───────────────────────────────────────── */
 #define APPWIN_TITLE_H ui_s(26)
 
@@ -4231,7 +5220,7 @@ static void draw_app_windows(void) {
  *   - 后续 3D 层叠直接拿快照做透视，不需要重画窗口。
  * 池只有 4 块，按需申请；申请不到就跳过该窗口（降级为无快照）。 */
 #define WBUF_SLOTS 4
-#define WBUF_MAX   512          /* 单张缩略图最大 512x512 */
+#define WBUF_MAX   768          /* 单张缩略图最大 768x768 */
 typedef struct {
     uint32_t *px;
     int w, h;                   /* 缩略图实际尺寸 */
@@ -4296,8 +5285,12 @@ static wbuf_t *wbuf_acquire(int win_index, int sw, int sh, int *f_out) {
 }
 
 /* 把窗口矩形**降采样**拷进快照。
- * 概览只需要缩略图，按 1/f 采样即可：1920×1080 的窗口只要 ~480×270，
- * 内存从 8MB 降到 0.5MB，避免 pmm 连续大块分配失败（之前就是因此拿到空快照）。 */
+ *
+ * 这里是"概览看起来粗糙"的第二个来源：原来只取块内左上角那一个像素
+ * （点采样），1920 宽的画面被抽成 480 时，一半以上的信息直接丢掉，
+ * 细笔画文字会闪、图标边缘会断裂。改成对 f×f 的块做均值（盒式滤波），
+ * 代价是每个输出像素读 f² 次——但缩略图只有几百像素宽，总量很小，
+ * 换来的平滑度提升非常明显。 */
 static void wbuf_capture_scaled(wbuf_t *b, int sx, int sy, int f,
                                 int scr_w, int scr_h) {
     if (!b || !b->px || f < 1) return;
@@ -4305,12 +5298,28 @@ static void wbuf_capture_scaled(wbuf_t *b, int sx, int sy, int f,
     if (!surface) return;
     uint32_t pitch = gd_surface_pitch();
     for (int y = 0; y < b->h; y++) {
-        int dy = sy + y * f;
-        if (dy < 0 || dy >= scr_h) continue;
+        int dy0 = sy + y * f;
         for (int x = 0; x < b->w; x++) {
-            int dx = sx + x * f;
-            if (dx < 0 || dx >= scr_w) continue;
-            b->px[y * b->w + x] = surface[dy * pitch + dx];
+            int dx0 = sx + x * f;
+            uint32_t sr = 0, sg = 0, sb = 0, n = 0;
+            for (int oy = 0; oy < f; oy++) {
+                int dy = dy0 + oy;
+                if (dy < 0 || dy >= scr_h) continue;
+                const uint32_t *row = surface + (size_t)dy * pitch;
+                for (int ox = 0; ox < f; ox++) {
+                    int dx = dx0 + ox;
+                    if (dx < 0 || dx >= scr_w) continue;
+                    uint32_t p = row[dx];
+                    sr += (p >> 16) & 0xFF;
+                    sg += (p >> 8) & 0xFF;
+                    sb += p & 0xFF;
+                    n++;
+                }
+            }
+            if (!n) { b->px[y * b->w + x] = 0; continue; }
+            b->px[y * b->w + x] = (((sr / n) & 0xFF) << 16) |
+                                  (((sg / n) & 0xFF) << 8) |
+                                   ((sb / n) & 0xFF);
         }
     }
 }
@@ -4320,43 +5329,143 @@ static void wbuf_capture_scaled(wbuf_t *b, int sx, int sy, int f,
 static ov_layout_t g_ov_layout;
 static int g_ov_win[OV_MAX_WINDOWS];
 
+/* 缩放贴图：双线性插值。
+ *
+ * 原来是点采样（每个目标像素取最近的一个源像素），缩略图从 768 再缩到
+ * 卡片宽度（通常 300~500）时，比值非整数，整列整行的像素被丢掉，
+ * 结果是"分辨率看着降了一档"的粗糙感——用户反馈的正是这一点。
+ * 双线性按 8.8 定点做，代价约为点采样的 4 倍，但只在概览打开时跑
+ * （一屏最多几张卡片），完全可接受。 */
 static void blit_scaled(const uint32_t *src, int sw, int sh,
                         int dx, int dy, int dw, int dh) {
     if (!src || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
     for (int y = 0; y < dh; y++) {
-        int sy = y * sh / dh;
-        const uint32_t *row = &src[sy * sw];
+        int fy = ((y * 256) / dh) * sh;          /* 8.8 定点 */
+        int sy0 = fy >> 8;
+        int wy = fy & 0xFF;
+        int sy1 = sy0 + 1;
+        if (sy0 >= sh) sy0 = sh - 1;
+        if (sy1 >= sh) sy1 = sh - 1;
+        const uint32_t *r0 = src + (size_t)sy0 * sw;
+        const uint32_t *r1 = src + (size_t)sy1 * sw;
         for (int x = 0; x < dw; x++) {
-            int sx = x * sw / dw;
-            rect(dx + x, dy + y, 1, 1, row[sx]);
+            int fx = ((x * 256) / dw) * sw;
+            int sx0 = fx >> 8;
+            int wx = fx & 0xFF;
+            int sx1 = sx0 + 1;
+            if (sx0 >= sw) sx0 = sw - 1;
+            if (sx1 >= sw) sx1 = sw - 1;
+            uint32_t a = r0[sx0], b = r0[sx1], c = r1[sx0], d = r1[sx1];
+            int r = (((a >> 16) & 0xFF) * (256 - wx) + ((b >> 16) & 0xFF) * wx) >> 8;
+            int g = (((a >> 8) & 0xFF) * (256 - wx) + ((b >> 8) & 0xFF) * wx) >> 8;
+            int bl = ((a & 0xFF) * (256 - wx) + (b & 0xFF) * wx) >> 8;
+            int r2 = (((c >> 16) & 0xFF) * (256 - wx) + ((d >> 16) & 0xFF) * wx) >> 8;
+            int g2 = (((c >> 8) & 0xFF) * (256 - wx) + ((d >> 8) & 0xFF) * wx) >> 8;
+            int b2 = ((c & 0xFF) * (256 - wx) + (d & 0xFF) * wx) >> 8;
+            r = (r * (256 - wy) + r2 * wy) >> 8;
+            g = (g * (256 - wy) + g2 * wy) >> 8;
+            bl = (bl * (256 - wy) + b2 * wy) >> 8;
+            rect(dx + x, dy + y, 1, 1,
+                 ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl);
         }
     }
 }
 
-static void draw_overview(int w, int h, gui_state_t *st) {
-    rect_alpha(0, 0, w, h, 0xB4000000u);   /* 暗色蒙版 */
-
-    int n = 0;
-    for (int i = 0; i < st->wm.window_count && n < OV_MAX_WINDOWS; i++) {
+static void gui_overview_capture(int w, int h, gui_state_t *st) {
+    for (int i = 0; i < st->wm.window_count && i < OV_MAX_WINDOWS; i++) {
         wm_window_t *win = wm_get_window(&st->wm, i);
         if (!win || !win->used || win->state == WM_STATE_MINIMIZED) continue;
         int x, y, ww, wh;
         gui_window_metrics(st, w, h, NULL, i, &x, &y, &ww, &wh);
         int f = 1;
         wbuf_t *b = wbuf_acquire(i, ww, wh, &f);
-        if (b) wbuf_capture_scaled(b, x, y, f, w, h);
+        if (!b || !b->px) continue;
+        if (g_winbuf[i].valid && g_winbuf[i].px && g_winbuf[i].w > 0 && g_winbuf[i].h > 0) {
+            /* 从窗口自己的缓冲缩到快照尺寸。同样用盒式平均：这里比值
+             * 往往不是整数（'窗宽/快照宽'），点采样会漏掉整列像素，
+             * 概览里表现为字被切断、竖线时有时无。 */
+            int src_w = g_winbuf[i].w, src_h = g_winbuf[i].h;
+            for (int ty = 0; ty < b->h; ty++) {
+                int sy0 = ty * src_h / b->h;
+                int sy1 = (ty + 1) * src_h / b->h;
+                if (sy1 <= sy0) sy1 = sy0 + 1;
+                if (sy1 > src_h) sy1 = src_h;
+                uint32_t *drow = b->px + (size_t)ty * b->w;
+                for (int tx = 0; tx < b->w; tx++) {
+                    int sx0 = tx * src_w / b->w;
+                    int sx1 = (tx + 1) * src_w / b->w;
+                    if (sx1 <= sx0) sx1 = sx0 + 1;
+                    if (sx1 > src_w) sx1 = src_w;
+                    uint32_t sr = 0, sg = 0, sb = 0, n = 0;
+                    for (int yy = sy0; yy < sy1; yy++) {
+                        const uint32_t *srow = g_winbuf[i].px + (size_t)yy * src_w;
+                        for (int xx = sx0; xx < sx1; xx++) {
+                            uint32_t p = srow[xx];
+                            sr += (p >> 16) & 0xFF;
+                            sg += (p >> 8) & 0xFF;
+                            sb += p & 0xFF;
+                            n++;
+                        }
+                    }
+                    if (!n) { drow[tx] = 0; continue; }
+                    drow[tx] = (((sr / n) & 0xFF) << 16) |
+                               (((sg / n) & 0xFF) << 8) |
+                                ((sb / n) & 0xFF);
+                }
+            }
+        } else {
+            wbuf_capture_scaled(b, x, y, f, w, h);
+        }
+    }
+}
+
+static void draw_overview(int w, int h, gui_state_t *st) {
+    /* 1. GNOME 40+ 全屏深色画布背景（不露下层桌面窗口，彻底杜绝混叠与马赛克） */
+    uint32_t ov_bg = (0xFFu << 24) | 0x1E1E1Eu;
+    rect(0, 0, w, h, ov_bg);
+
+    if (st->desktop_style == DESKTOP_STYLE_GNOME) {
+        draw_gnome_topbar(w, h, st);
+    }
+
+    int n = 0;
+    for (int i = 0; i < st->wm.window_count && n < OV_MAX_WINDOWS; i++) {
+        wm_window_t *win = wm_get_window(&st->wm, i);
+        if (!win || !win->used || win->state == WM_STATE_MINIMIZED) continue;
         g_ov_win[n++] = i;
     }
 
+    /* GNOME 概览顶部搜索条胶囊 */
+    int sw = ui_s(340), sh = ui_s(34);
+    int sx = (w - sw) / 2, sy = ui_s(44);
+    round_border(sx, sy, sw, sh, sh / 2, UI_LINE2, (0xF0u << 24) | (UI_SURFACE2 & 0x00FFFFFFu));
+    const char *prompt = "键入以搜索活动与窗口 (Esc 退出)";
+    int ptw = text_width(prompt, 1);
+    text(sx + (sw - ptw) / 2, sy + (sh - gui_font_line_height()) / 2, prompt, UI_FG2, 1);
+
+    /* 2. GNOME 40+ 中央主工作区浮动卡片（圆角 18px，内嵌桌面壁纸预览） */
+    int cw = w * 72 / 100, ch = h * 60 / 100;
+    int cx = (w - cw) / 2, cy = ui_s(90);
+    round_border(cx, cy, cw, ch, ui_s(18), UI_LINE2, UI_SURFACE);
+    blit_wallpaper_rect(cx + 2, cy + 2, cw - 4, ch - 4);
+
+    /* 右侧相邻工作区露出卡片（GNOME 40 标志性水平多工作区） */
+    int peek_x = cx + cw + ui_s(20);
+    int peek_w = w - peek_x;
+    if (peek_w > ui_s(24)) {
+        round_border(peek_x, cy, peek_w + ui_s(20), ch, ui_s(18), UI_LINE2, UI_SURFACE);
+        blit_wallpaper_rect(peek_x + 2, cy + 2, peek_w + ui_s(16), ch - 4);
+        rect_alpha(peek_x, cy, peek_w, ch, 0x66000000u);
+    }
+
     if (n == 0) {
-        text(w / 2 - 40, h / 2, "没有打开的窗口", UI_FG, 1);
+        text(w / 2 - 40, h / 2, "没有打开的窗口", 0xFFFFFFFF, 1);
+        if (st->desktop_style == DESKTOP_STYLE_GNOME) draw_gnome_dock(w, h, st);
         return;
     }
 
     ov_win_t wins[OV_MAX_WINDOWS];
     for (int i = 0; i < n; i++) {
-        /* 用真实几何（包含动效/最大化后的结果），不能用 wm 里的原始字段：
-         * 最大化窗口的 win->w/h 可能还是 0 或旧值，会让缩放算错。 */
         int x, y, ww, wh;
         gui_window_metrics(st, w, h, NULL, g_ov_win[i], &x, &y, &ww, &wh);
         wins[i].x = x;
@@ -4365,9 +5474,11 @@ static void draw_overview(int w, int h, gui_state_t *st) {
         wins[i].h = wh;
     }
 
-    int mx = 120, my = 120;
-    if (ov_layout_compute(wins, n, mx, my, w - 2 * mx, h - my - 160, 24,
+    int mx = cx + ui_s(16), my = cy + ui_s(16);
+    if (ov_layout_compute(wins, n, mx, my, cw - ui_s(32), ch - ui_s(36), 20,
                           &g_ov_layout) <= 0) return;
+
+    if (st->ov_selected < 0 || st->ov_selected >= n) st->ov_selected = 0;
 
     for (int i = 0; i < n; i++) {
         ov_cell_t *c = &g_ov_layout.cells[i];
@@ -4376,28 +5487,51 @@ static void draw_overview(int w, int h, gui_state_t *st) {
         for (int k = 0; k < WBUF_SLOTS; k++)
             if (g_wbuf[k].win_index == g_ov_win[c->src_index]) b = &g_wbuf[k];
 
-        fill_round_rect(c->x - 3, c->y - 3, c->w + 6, c->h + 6, 10,
-                        UI_SURFACE3, RR_ALL);
+        int is_sel = (i == st->ov_selected);
+        if (is_sel) {
+            round_border(c->x - 2, c->y - 2, c->w + 4, c->h + 4, ui_s(10), UI_ACCENT, UI_SURFACE);
+            round_border(c->x - 1, c->y - 1, c->w + 2, c->h + 2, ui_s(9), UI_ACCENT, UI_SURFACE);
+        } else {
+            round_border(c->x - 1, c->y - 1, c->w + 2, c->h + 2, ui_s(10), UI_LINE2, UI_SURFACE);
+        }
+
         if (b && b->px) blit_scaled(b->px, b->w, b->h, c->x, c->y, c->w, c->h);
         else rect(c->x, c->y, c->w, c->h, UI_BG);
-        border(c->x, c->y, c->w, c->h, UI_LINE2);
+
+        /* GNOME 标志性：窗口预览底边居中的应用圆形图标徽标 Badge */
+        int badge_sz = ui_s(32);
+        int bx = c->x + (c->w - badge_sz) / 2;
+        int by = c->y + c->h - badge_sz / 2;
+        round_border(bx - 2, by - 2, badge_sz + 4, badge_sz + 4, (badge_sz + 4) / 2,
+                     UI_LINE2, (0xF8u << 24) | (UI_SURFACE & 0x00FFFFFFu));
+        int icon_id = (win && win->kind == WM_WIN_PANEL) ? panel_icon_id(win->mode)
+                                                         : (win ? app_icon_id(win->mode) : 0);
+        blit_icon(bx, by, badge_sz, icon_id);
+
         if (win) {
             int tw = text_width(win->title, 1);
-            text(c->x + (c->w - tw) / 2, c->y + c->h + 8, win->title,
-                 UI_FG, 1);
+            text(c->x + (c->w - tw) / 2, by + badge_sz + 4, win->title,
+                 0xFFFFFFFF, 1);
         }
     }
-    text(mx, 48, "概览 · Tab/Esc 退出", UI_FG2, 1);
+
+    if (st->desktop_style == DESKTOP_STYLE_GNOME) {
+        draw_gnome_dock(w, h, st);
+    }
 }
 
 static void draw_gui_screen(int w, int h, gui_state_t *st) {
     gui_sync_focus(st);
-    draw_desktop(w, h, st);
-    draw_app_windows();
-    if (st->overview) draw_overview(w, h, st);
-    draw_start_menu(st);
+    if (st->overview) {
+        draw_overview(w, h, st);
+    } else {
+        draw_desktop(w, h, st);
+        draw_app_windows();
+        draw_start_menu(st);
+    }
     if (st->brightness_popup_open) draw_brightness_popup(w, h, st);
     draw_calendar_popup(w, h, st);
+    if (st->quick_settings_open) draw_quick_settings_menu(w, h, st);
     draw_window_switcher(w, h, st);
     if (st->splash_ticks > 0)
         draw_splash_window(w, h, st->splash_ticks, st->theme_light);
@@ -4422,7 +5556,6 @@ static void gui_damage_region(int x, int y, int rw, int rh, int scr_w, int scr_h
  * 2MB）；窗口内容仍然直接画到共享画布，surface 承担的是"提交 + 脏区"
  * 这一层。缓冲区池化见 WAYLAND_PLAN.md 的内存策略一节。 */
 static wl_surface_t *g_win_surf[WM_MAX_WINDOWS];
-static gui_state_t  *g_gui_st;
 static int g_gui_w, g_gui_h;
 
 static void win_surface_commit_cb(wl_surface_t *s, wl_buffer_t *buf,
@@ -4470,6 +5603,22 @@ static wl_surface_t *win_surface(int idx, int ww, int wh) {
 static void gui_damage_window(gui_state_t *st, int scr_w, int scr_h, int idx) {
     int wx, wy, ww, wh;
     gui_window_metrics(st, scr_w, scr_h, NULL, idx, &wx, &wy, &ww, &wh);
+    /* 开始菜单是**浮在最上层**的浮层，但它在 draw_gui_screen 里排在窗口
+     * 之后绘制 —— 这意味着只要某个窗口矩形与菜单相交，那块区域的最终
+     * 像素由菜单决定。窗口自己标脏时如果不把相交部分的菜单一起标脏，
+     * 增量重绘会先画窗口、再把菜单裁剪到脏区内画，结果只有**脏区内的
+     * 那部分菜单**被恢复，脏区外的菜单像素仍是上一次的旧内容；窗口
+     * 移动/刷新时就表现为"菜单被切开一块"（用户截图：设置窗口把开始
+     * 菜单右边切掉了一截）。这里把菜单矩形并入脏区即可。 */
+    if (st->wm.start_menu_open) {
+        int mx = st->wm.menu_x, my = st->wm.menu_y;
+        int mh = st->wm.menu_h > 0 ? st->wm.menu_h : SM_H;
+        /* 菜单高度是动态的（应用多了会多出几行），按实际高度标脏，
+         * 不能写死 SM_H，否则最下面那几行仍会残留。 */
+        mh = sm_clamp_h(mh, scr_h);
+        if (mx < wx + ww && mx + SM_W > wx && my < wy + wh && my + mh > wy)
+            gui_damage_region(mx, my, SM_W, mh, scr_w, scr_h);
+    }
     wl_surface_t *s = win_surface(idx, ww, wh);
     if (!s) {   /* 内存拿不到就退回直接标脏区，不能因此不重绘 */
         gui_damage_region(wx, wy, ww, wh, scr_w, scr_h);
@@ -4492,6 +5641,11 @@ static int cursor_overlaps_rect(int mx, int my, int rx, int ry, int rw, int rh) 
 }
 
 static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, int mx, int my, int edge) {
+    /* 把指针位置同步给应用层：应用没有 on_hover 回调，但绘制时需要知道
+     * "鼠标现在在哪"才能画悬停态。放这里是因为每帧任何一条绘制路径都会
+     * 经过它，且 draw_gui_screen 内部的应用绘制在之后执行。 */
+    st->cursor_x = mx;
+    st->cursor_y = my;
     if (gui_dirty_is_full() || gui_dirty_count() == 0) {
         g_full_redraws++;
         /* 整屏重绘 = 全部重画，窗口缓存也随之作废（下一次画窗口时会
@@ -4528,6 +5682,83 @@ static void draw_gui_frame(const fb_info_t *fb, int w, int h, gui_state_t *st, i
     gui_dirty_reset();
 }
 
+/* ── 已安装应用（HPT 注册的 .desktop）───────────────────────────
+ * 以前这里是"盲扫 /bin"：列出来的名字是包名，图标全是同一个，
+ * 连 libc6 / zlib-tree 这种纯库包也会冒出来（点了一定失败）。
+ * 现在只认注册表：安装器把 .desktop 写进 ~/.local/share/applications
+ * 或 /usr/share/applications，这里读出 Name/Icon/Exec 三样，
+ * 菜单里显示的就是"计算器"而不是 "calc"。 */
+#define GUI_DISK_APP_MAX 16
+typedef struct {
+    char name[48];        /* Name=，菜单显示名 */
+    char kw[72];          /* Keywords=，搜索关键词（含包名，便于英文/拼音检索） */
+    char exec[96];        /* Exec=，可执行文件绝对路径 */
+    int  icon;            /* ICON_* */
+} disk_app_t;
+static disk_app_t disk_apps[GUI_DISK_APP_MAX];
+static int disk_app_count;
+static uint32_t disk_app_gen = 0xFFFFFFFFu;   /* 哨兵：首帧必定扫描一次 */
+static uint8_t disk_hax_buf[131072];
+
+static void gui_scan_disk_apps(void) {
+    appreg_rescan();
+    disk_app_gen = appreg_generation();
+    disk_app_count = 0;
+    for (int i = 0; i < appreg_count() && disk_app_count < GUI_DISK_APP_MAX; i++) {
+        const app_reg_t *r = appreg_at(i);
+        if (!r || !r->de.name[0]) continue;
+        if (r->de.no_display) continue;      /* NoDisplay=true：后台组件 */
+        if (r->de.terminal) continue;        /* 命令行应用要终端，不进应用网格 */
+        disk_app_t *d = &disk_apps[disk_app_count];
+        uint32_t n = 0;
+        for (; r->de.name[n] && n + 1 < sizeof(d->name); n++) d->name[n] = r->de.name[n];
+        d->name[n] = 0;
+        n = 0;
+        for (; r->de.exec[n] && n + 1 < sizeof(d->exec); n++) d->exec[n] = r->de.exec[n];
+        d->exec[n] = 0;
+        if (r->de.keywords[0]) {
+            n = 0;
+            for (; r->de.keywords[n] && n + 1 < sizeof(d->kw); n++) d->kw[n] = r->de.keywords[n];
+            d->kw[n] = 0;
+        } else {
+            n = 0;
+            for (; r->de.name[n] && n + 1 < sizeof(d->kw); n++) d->kw[n] = r->de.name[n];
+            d->kw[n] = 0;
+        }
+        d->icon = r->de.icon;
+        disk_app_count++;
+    }
+}
+
+/* 启动一个已注册的磁盘应用（HPT 装的 GUI 程序）。
+ * 非阻塞加载：应用自己 hax_win_open 连合成器，同步等待会把主循环卡死。 */
+static int gui_launch_disk_app(gui_state_t *st, int idx) {
+    if (idx < 0 || idx >= disk_app_count) return 0;
+    const char *path = disk_apps[idx].exec;
+    if (!path[0]) return 0;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        gui_toast(st, "无法读取 ", disk_apps[idx].name);
+        return 0;
+    }
+    size_t total = 0;
+    long rn;
+    while (total < sizeof(disk_hax_buf) &&
+           (rn = read(fd, disk_hax_buf + total, sizeof(disk_hax_buf) - total)) > 0)
+        total += (size_t)rn;
+    close(fd);
+    if (total == 0) return 0;
+    char *av[2];
+    av[0] = (char *)disk_apps[idx].name;
+    av[1] = 0;
+    if (elf64_load_and_spawn(disk_hax_buf, total, av, 0, av[0]) < 0) {
+        gui_toast(st, "不是可执行的 GUI 程序: ", disk_apps[idx].name);
+        return 0;
+    }
+    gui_toast(st, "已启动 ", disk_apps[idx].name);
+    return 1;
+}
+
 /* ── 桌面「软件夹」：图标网格 + 双击打开（⑤） ────────────────────
  * 笔记要求桌面复刻 Windows 的图标网格，并且双击才打开。原来是一列写死
  * 的 4 个快捷方式、单击即开；现在改成两列网格（多了记事本/任务管理器/
@@ -4551,38 +5782,74 @@ static const desktop_icon_t g_desktop_icons[] = {
 static int g_di_sel = -1;             /* 选中的图标（单击） */
 static uint32_t g_di_sel_tick;        /* 上次点击时刻，用于判双击 */
 
+/* 桌面图标 = 内置 8 个 + HPT 安装的应用（注册表里来的）。
+ * 装了新应用后不重启就该看到图标，所以每次绘制前比对注册表代号，
+ * 变了就重新扫一遍（扫描本身只是读几个小文件）。 */
+static void gui_sync_disk_apps(void) {
+    /* 内核内注册（GUI 商店装/卸）会推 generation，直接对比即可。
+     * 但 CLI `hpt install --user` 是用户进程写 ~/.local/share/applications，
+     * generation 不会变 —— 所以再叠一个 2 秒周期的兜底重扫，装完稍等
+     * 开始菜单/桌面就会出现新应用。 */
+    static unsigned poll_tick;
+    if (disk_app_gen != appreg_generation() || ++poll_tick >= 120) {
+        poll_tick = 0;
+        gui_scan_disk_apps();
+    }
+}
+
+static int desktop_icon_total(void) {
+    return DESKTOP_ICON_COUNT + disk_app_count;
+}
+
 static void desktop_icon_rect(int i, int *x, int *y, int *w, int *h) {
-    int rows = (DESKTOP_ICON_COUNT + DESKTOP_ICON_COLS - 1) / DESKTOP_ICON_COLS;
+    int total = desktop_icon_total();
+    int rows = (total + DESKTOP_ICON_COLS - 1) / DESKTOP_ICON_COLS;
+    if (rows < 1) rows = 1;
     int col = i / rows;
     int row = i % rows;
     *w = ui_s(96); *h = ui_s(100);
-    *x = ui_s(42) + col * ui_s(104);
-    *y = ui_s(46) + row * ui_s(112);
+    int start_x = ui_s(42);
+    if (g_gui_st && g_gui_st->desktop_style == DESKTOP_STYLE_GNOME && g_gui_st->dock_pos == DOCK_POS_LEFT) {
+        start_x = ui_s(76);
+    }
+    *x = start_x + col * ui_s(104);
+    *y = ui_s(48) + row * ui_s(112);
 }
 
 
 static void draw_desktop_icons(void) {
-    for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
-        const desktop_icon_t *d = &g_desktop_icons[i];
+    gui_sync_disk_apps();
+    int total = desktop_icon_total();
+    for (int i = 0; i < total; i++) {
         int x, y, w, h;
         desktop_icon_rect(i, &x, &y, &w, &h);
         if (i == g_di_sel)
             fill_round_rect(x - 6, y - 4, w + 12, h + 12, UI_RADIUS_SM,
                             UI_SURFACE2, RR_ALL);
         int isz = ui_s(58), ix = x + (w - isz) / 2, iy = y;
-        if (d->kind == WM_WIN_PANEL)
-            blit_icon(ix, iy, isz, panel_icon_id(d->mode));
-        else
-            blit_icon(ix, iy, isz, app_icon_id(d->mode));
-        int tw = text_width(d->label, 1);
+        const char *label;
+        int icon_id;
+        if (i < DESKTOP_ICON_COUNT) {
+            const desktop_icon_t *d = &g_desktop_icons[i];
+            label = d->label;
+            icon_id = (d->kind == WM_WIN_PANEL) ? panel_icon_id(d->mode)
+                                                : app_icon_id(d->mode);
+        } else {
+            int k = i - DESKTOP_ICON_COUNT;
+            label = disk_apps[k].name;
+            icon_id = disk_apps[k].icon;
+        }
+        blit_icon(ix, iy, isz, icon_id);
+        int tw = text_width(label, 1);
         int lx = x + (w - tw) / 2;
-        text(lx + 1, iy + isz + 6, d->label, UI_BG, 1);          // shadow
-        text(lx, iy + isz + 5, d->label, UI_FG, 1);
+        text(lx + 1, iy + isz + 6, label, UI_BG, 1);          // shadow
+        text(lx, iy + isz + 5, label, UI_FG, 1);
     }
 }
 
 static int hit_desktop_icon(int mx, int my) {
-    for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+    int total = desktop_icon_total();
+    for (int i = 0; i < total; i++) {
         int x, y, w, h;
         desktop_icon_rect(i, &x, &y, &w, &h);
         if (mx >= x && mx < x + w && my >= y && my < y + h + 16) return i;
@@ -4592,12 +5859,15 @@ static int hit_desktop_icon(int mx, int my) {
 
 /* 单击选中、双击启动。返回 1 表示这次点击真的启动了窗口。 */
 static int desktop_icon_click(gui_state_t *st, int idx) {
-    if (idx < 0 || idx >= DESKTOP_ICON_COUNT) return 0;
+    if (idx < 0 || idx >= desktop_icon_total()) return 0;
     uint32_t now = (uint32_t)pit_get_ticks();
     int dbl = (idx == g_di_sel) && (now - g_di_sel_tick) <= DESKTOP_DBL_TICKS;
     g_di_sel = idx;
     g_di_sel_tick = now;
     if (!dbl) return 0;
+    if (idx >= DESKTOP_ICON_COUNT) {
+        return gui_launch_disk_app(st, idx - DESKTOP_ICON_COUNT);
+    }
     const desktop_icon_t *d = &g_desktop_icons[idx];
     if (d->kind == WM_WIN_PANEL) gui_open_panel_window(st, d->mode);
     else gui_open_window(st, WM_WIN_APP, d->mode, 0);
@@ -4609,22 +5879,24 @@ static int desktop_icon_click(gui_state_t *st, int idx) {
  * 一直留在桌面上（issue #8）。 */
 static void snap_preview_rect(int side, int w, int h,
                               int *px, int *py, int *pw, int *ph) {
-    *px = 0; *py = 0; *pw = w; *ph = h - TASKBAR_H;
+    int top_y = (g_gui_st && g_gui_st->desktop_style == DESKTOP_STYLE_GNOME) ? GNOME_TOPBAR_H : 0;
+    int bot_margin = (g_gui_st && g_gui_st->desktop_style == DESKTOP_STYLE_GNOME) ?
+                     (g_gui_st->dock_pos == DOCK_POS_BOTTOM ? ui_s(64) : 0) : TASKBAR_H;
+    int left_x = (g_gui_st && g_gui_st->desktop_style == DESKTOP_STYLE_GNOME && g_gui_st->dock_pos == DOCK_POS_LEFT) ?
+                 ui_s(64) : 0;
+    *px = left_x; *py = top_y; *pw = w - left_x; *ph = h - top_y - bot_margin;
     if (side == WM_SNAP_LEFT) {
-        *pw = w / 2;
+        *pw = (w - left_x) / 2;
     } else if (side == WM_SNAP_RIGHT) {
-        *px = w / 2; *pw = w - w / 2;
+        *px = left_x + (w - left_x) / 2; *pw = w - *px;
     } else if (side == WM_SNAP_BOTTOM) {
-        /* 最小化预览：贴近任务栏的小框，提示窗口将收起 */
-        *pw = w / 5; *px = (w - *pw) / 2; *ph = 64; *py = h - TASKBAR_H - *ph - 8;
+        /* 最小化预览：贴近底部的提示框 */
+        *pw = w / 5; *px = (w - *pw) / 2; *ph = 64; *py = h - bot_margin - *ph - 8;
     }
 }
 
 static void draw_desktop(int w, int h, gui_state_t *st) {
     draw_wallpaper(w, h, st->theme_light);
-
-    // Clean desktop: just shortcut icons over the wallpaper (launchers live on
-    // the Windows 11-style bottom taskbar now, not a left dock).
     draw_desktop_icons();
 
     for (int i = 0; i < st->wm.window_count; i++) {
@@ -4643,7 +5915,28 @@ static void draw_desktop(int w, int h, gui_state_t *st) {
         rect(px + pw - 7, py + 4, 3, ph - 8, accent);
     }
 
-    draw_taskbar(w, h, st);
+    if (st->desktop_style == DESKTOP_STYLE_GNOME) {
+        int ah = st->topbar_autohide;
+        if (!ah || st->topbar_anim > 0) {
+            /* 滑动动画：顶栏整体上移 (GNOME_TOPBAR_H - anim) 像素 */
+            g_topbar_yoff = ah ? (st->topbar_anim - GNOME_TOPBAR_H) : 0;
+            draw_gnome_topbar(w, h, st);
+            if (ah) {
+                int vis = st->topbar_anim;
+                /* 底边投影：跟随滑动，让"浮起"层次更柔和 */
+                if (vis < GNOME_TOPBAR_H && vis > 2)
+                    rect_alpha(0, vis, w, 2,
+                               (0x38u << 24) | (UI_BG & 0x00FFFFFFu));
+            }
+            g_topbar_yoff = 0;
+        } else {
+            /* 全隐藏时留 2px 提示条：鼠标顶到这里即滑出 */
+            rect(0, 0, w, 2, UI_LINE2);
+        }
+        draw_gnome_dock(w, h, st);
+    } else {
+        draw_taskbar(w, h, st);
+    }
 }
 
 static file_t *selected_file(gui_state_t *st) {
@@ -4977,6 +6270,16 @@ static void handle_wheel(gui_state_t *st, int dz) {
         bs()->scroll -= steps;
         if (bs()->scroll < 0) bs()->scroll = 0;
         st->status = "滚动网页";
+    } else if (st->app_mode == GUI_APP_SETTINGS) {
+        /* 设置页内容比窗口高（分辨率/DPI、窗口与层级、时区、系统信息都要
+         * 占位置），必须能滚。之前 app_settings_wheel 只在头文件里声明、
+         * 没有任何调用点，等于滚轮在设置里完全无效，下面几段永远看不到。 */
+        app_settings_wheel(st, steps);
+        gui_dirty_mark_full();
+        st->status = "滚动设置";
+    } else if (st->app_mode == GUI_APP_CODE) {
+        (void)app_code_wheel(st, steps);
+        gui_dirty_mark_full();
     }
 }
 
@@ -5110,10 +6413,31 @@ static int hit_browser_link(int w, int h, const gui_state_t *st, int mx, int my)
 }
 
 
+/* 哪些应用要自己消费 Tab 键。
+ *
+ * 之前 Tab 在主循环里被无条件截走打开概览，于是：记事本/代码编辑器里按
+ * Tab 不会缩进（它们明明实现了 '\t' 分支，却永远收不到），设置页也没法
+ * 用 Tab 在控件之间跳。用户反馈的"Tab 只能选择窗口"就是这个。
+ *
+ * 现在只有这些应用会拦住 Tab；其它情况下 Tab 仍然打开/关闭概览，
+ * 保持原来的肌肉记忆。Alt+Tab 不受影响（在 handle_app_key 顶部先处理）。 */
+static int app_wants_tab(gui_state_t *st) {
+    if (st->overview) return 0;              /* 概览里 Tab 仍归概览 */
+    if (kb_alt_pressed()) return 0;          /* Alt+Tab 是切窗口 */
+    switch (st->app_mode) {
+    case GUI_APP_SETTINGS:                   /* 控件间跳焦点 */
+    case GUI_APP_NOTES:                      /* 插入缩进 */
+    case GUI_APP_CODE:                       /* 插入缩进 */
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void handle_app_key(gui_state_t *st, int key) {
-    if (key == KB_KEY_F6) {
+    if (key == KB_KEY_F6 || (key == '\t' && kb_alt_pressed())) {
         gui_focus_next_window(st, 1);
-        if (st->wm.window_count > 1) st->switcher_ticks = 40;
+        if (st->wm.window_count > 1) st->switcher_ticks = 50;
         return;
     }
     gui_sync_focus(st);
@@ -5171,9 +6495,9 @@ static void handle_app_key(gui_state_t *st, int key) {
 static void handle_key(gui_state_t *st, int key) {
     gui_sync_focus(st);
     if (gui_handle_rename_key(st, key)) return;
-    if (key == KB_KEY_F6 || key == ' ') {
+    if (key == KB_KEY_F6 || (key == '\t' && kb_alt_pressed()) || key == ' ') {
         gui_focus_next_window(st, 1);
-        if (st->wm.window_count > 1) st->switcher_ticks = 40;
+        if (st->wm.window_count > 1) st->switcher_ticks = 50;
     } else if (key == GUI_KEY_RIGHT && st->wm.window_count > 0 && st->app_mode == GUI_APP_NONE) {
         wm_window_t *win = gui_active_window(st);
         st->active = (st->active + 1) & 3;
@@ -5255,44 +6579,61 @@ static void handle_key(gui_state_t *st, int key) {
     }
 }
 
-// F6 窗口切换器浮层：列出全部窗口并高亮当前焦点
+// GNOME 40+ 现代 Alt+Tab / F6 应用切换器浮层（居中水平横向大卡片）
 static void draw_window_switcher(int w, int h, gui_state_t *st) {
     if (st->switcher_ticks <= 0) return;
     int n = st->wm.window_count;
     if (n <= 0) return;
 
-    int row_h = 30;
-    int pad = 14;
-    int ow = 360;
-    int oh = pad * 2 + 28 + n * row_h;
+    int card_w = ui_s(92);
+    int card_h = ui_s(90);
+    int gap = ui_s(10);
+    int pad = ui_s(16);
+    int max_w = w - ui_s(32);
+    if (pad * 2 + n * card_w + (n - 1) * gap > max_w) {
+        card_w = (max_w - pad * 2 - (n - 1) * gap) / n;
+        if (card_w < ui_s(52)) card_w = ui_s(52);
+    }
+    int ow = pad * 2 + n * card_w + (n - 1) * gap;
+    int oh = pad * 2 + card_h;
     int ox = (w - ow) / 2;
     int oy = (h - oh) / 2;
 
-    soft_shadow(ox, oy, ow, oh);
-    draw_panel_shell(ox, oy, ow, oh, cyber_card_bg_top(st->theme_light), cyber_card_bg_bot(st->theme_light),
-                     cyber_border(st->theme_light), cyber_neon_cyan(st->theme_light));
-    text(ox + pad, oy + pad, "切换窗口  (F6 循环)", cyber_text(st->theme_light), 1);
-    rect(ox + pad, oy + pad + 22, ow - pad * 2, 1, cyber_neon_pink(st->theme_light));
+    /* 浮动半透明 Adwaita 深色胶囊卡片 */
+    uint32_t sw_bg = (0xE4u << 24) | (0x242424u & 0x00FFFFFFu);
+    fill_round_rect(ox, oy, ow, oh, ui_s(20), UI_LINE2, RR_ALL);
+    fill_round_rect(ox + 1, oy + 1, ow - 2, oh - 2, ui_s(19), sw_bg, RR_ALL);
 
-    int ry = oy + pad + 30;
     for (int i = 0; i < n; i++) {
         wm_window_t *win = wm_get_window(&st->wm, i);
         if (!win) continue;
         int active = (i == st->wm.active_window);
-        uint32_t accent = win->kind == WM_WIN_PANEL ? UI_OK : cyber_neon_cyan(st->theme_light);
+        int cx = ox + pad + i * (card_w + gap);
+        int cy = oy + pad;
+
         if (active) {
-            vgradient(ox + pad, ry, ow - pad * 2, row_h - 4,
-                      UI_SURFACE,
-                      UI_BG);
-            rect(ox + pad, ry, 3, row_h - 4, cyber_neon_pink(st->theme_light));
+            uint32_t sel_bg = (0x3Au << 24) | (UI_ACCENT & 0x00FFFFFFu);
+            fill_round_rect(cx, cy, card_w, card_h, ui_s(14), sel_bg, RR_ALL);
+            border(cx, cy, card_w, card_h, UI_ACCENT);
         }
-        rect(ox + pad + 12, ry + 9, 10, 10, accent);
+
+        int icon_id = (win->kind == WM_WIN_PANEL) ? panel_icon_id(win->mode)
+                                                  : app_icon_id(win->mode);
+        int isz = ui_s(40);
+        int ix = cx + (card_w - isz) / 2;
+        int iy = cy + ui_s(12);
+        blit_icon(ix, iy, isz, icon_id);
+
         const char *label = gui_window_title(win);
-        text_clipped(ox + pad + 32, ry + 7, ox + ow - pad - 60, label,
-                     active ? cyber_text(st->theme_light) : cyber_text_muted(st->theme_light), 1);
-        if (win->state == WM_STATE_MINIMIZED)
-            text(ox + ow - pad - 54, ry + 7, "最小化", cyber_text_muted(st->theme_light), 1);
-        ry += row_h;
+        int tw = text_width(label, 1);
+        int tx = cx + (card_w - tw) / 2;
+        if (tx < cx + 4) tx = cx + 4;
+        text_clipped(tx, cy + ui_s(62), cx + card_w - 4, label,
+                     active ? 0xFFFFFFFF : UI_FG, 1);
+        if (win->state == WM_STATE_MINIMIZED) {
+            text_clipped(cx + (card_w - text_width("•最小化", 1)) / 2, cy + ui_s(74),
+                         cx + card_w - 2, "•最小化", UI_DIM, 1);
+        }
     }
 }
 
@@ -5323,33 +6664,6 @@ static const hax_app_entry_t *gui_hax_at(int k) {
     return 0;
 }
 
-/* ── 磁盘 .hax 应用（hpt 安装到 /bin，GUI 类）───────────────
- * hpt install 的 HIVE 应用落在 /bin/<name>.hax，不在 hax 表里；
- * 开始菜单打开时扫描 /bin，把带 .haxmeta 且声明 GUI 类的应用列出来，
- * 启动时用 elf64_load_and_spawn 直接加载（应用自身 hax_win_open
- * 连接合成器）。 */
-#define GUI_DISK_APP_MAX 16
-static char disk_apps[GUI_DISK_APP_MAX][32];
-static int disk_app_count;
-static uint8_t disk_hax_buf[65536];
-
-static void gui_scan_disk_apps(void) {
-    disk_app_count = 0;
-    char full[256];
-    if (vfs_resolve_path("/", "/bin", full, sizeof(full)) < 0) return;
-    for (uint32_t i = 0; disk_app_count < GUI_DISK_APP_MAX; i++) {
-        char name[VFS_MAX_NAME];
-        uint32_t type;
-        if (vfs_readdir_at(full, i, name, &type) != 0) break;
-        if (name[0] == '.' || name[0] == 0) continue;
-        if (type != VFS_NODE_FILE && type != VFS_NODE_SYMLINK) continue;
-        size_t un = strlen(name);
-        if (un >= 32) un = 31;
-        memcpy(disk_apps[disk_app_count], name, un);
-        disk_apps[disk_app_count][un] = 0;
-        disk_app_count++;
-    }
-}
 
 /* 启动器动态总高度：内置 13 项 + 追加的 .hax 行 */
 /* ── 开始菜单：统一应用条目（内置 + .hax + 磁盘 hpt 应用）+ 搜索过滤 ─
@@ -5440,8 +6754,9 @@ static int sm_entry_tail_at(int k, sm_entry_t *out) {
     }
     int d = k - gui_hax_count();
     if (d >= 0 && d < disk_app_count) {
-        out->name = disk_apps[d]; out->kw = disk_apps[d];
-        out->kind = SM_K_DISK; out->mode = d; out->icon = ICON_APPS;
+        out->name = disk_apps[d].name;
+        out->kw = disk_apps[d].kw;
+        out->kind = SM_K_DISK; out->mode = d; out->icon = disk_apps[d].icon;
         return 1;
     }
     return 0;
@@ -5465,7 +6780,8 @@ static int sm_cat_match(const gui_state_t *st, const sm_entry_t *e) {
     if (g_sm_page != 0) return 1;   /* 子页里不再按 chips 过滤 */
     switch (st->sm_cat) {
     case 1: return e->kind == SM_K_PANEL;
-    case 2: return e->kind == SM_K_APP;
+    /* 「应用」分类包含内置应用、.hax 应用和 HPT 安装的应用 */
+    case 2: return e->kind == SM_K_APP || e->kind == SM_K_HAX || e->kind == SM_K_DISK;
     case 3: return e->kind == SM_K_HAX || e->kind == SM_K_DISK;
     default: return 1;
     }
@@ -5513,28 +6829,7 @@ static void sm_launch(gui_state_t *st, const sm_entry_t *e) {
     if (e->kind == SM_K_PANEL) gui_open_panel_window(st, e->mode);
     else if (e->kind == SM_K_APP) gui_open_window(st, WM_WIN_APP, e->mode, 0);
     else if (e->kind == SM_K_DISK) {
-        /* hpt 安装到 /bin 的 GUI 应用：从磁盘加载并异步启动（非阻塞，
-         * 应用自身 hax_win_open 连接合成器，与 SM_K_HAX 的并发窗口应用
-         * 同一套非阻塞语义）。 */
-        char path[96];
-        size_t dn = strlen(disk_apps[e->mode]);
-        if (dn > 90) dn = 90;
-        memcpy(path, "/bin/", 5);
-        memcpy(path + 5, disk_apps[e->mode], dn);
-        path[5 + dn] = 0;
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) return;
-        size_t total = 0;
-        long rn;
-        while (total < sizeof(disk_hax_buf) &&
-               (rn = read(fd, disk_hax_buf + total,
-                          sizeof(disk_hax_buf) - total)) > 0)
-            total += (size_t)rn;
-        close(fd);
-        if (total == 0) return;
-        char *av[1]; av[0] = disk_apps[e->mode];
-        if (elf64_load_and_spawn(disk_hax_buf, total, av, 0, av[0]) >= 0)
-            gui_toast(st, "已启动 ", av[0]);
+        (void)gui_launch_disk_app(st, e->mode);
         return;
     } else {
         const hax_app_entry_t *he = gui_hax_at(e->mode);
@@ -5593,11 +6888,18 @@ static int gui_start_menu_h(void) {
 
 /* ── 右键上下文菜单 ─────────────────────────────────────────── */
 #define CTX_ITEM_H ui_s(28)
-#define CTX_W     ui_s(176)
+#define CTX_W     ui_s(210)
 
-static const char *const ctx_desktop_items[] = { "刷新桌面", "切换主题", "打开开始菜单" };
+static const char *const ctx_desktop_items[] = {
+    "刷新桌面",
+    "切换主题 (深色/浅色)",
+    "切换桌面样式 (GNOME/Win)",
+    "切换 Dock 位置 (底部/左侧)",
+    "活动概览 (Tab)",
+    "切换显示分辨率 (自适应DPI)"
+};
 static const char *const ctx_window_items[]  = { "最小化", "最大化 / 还原", "关闭窗口" };
-#define CTX_DESKTOP_N 3
+#define CTX_DESKTOP_N 6
 #define CTX_WINDOW_N  3
 
 static int ctx_item_count(int kind) {
@@ -5628,7 +6930,7 @@ static void draw_context_menu(gui_state_t *st) {
     int ox = st->ctx_x, oy = st->ctx_y;
     soft_shadow(ox, oy, mw, mh);
     fill_round_rect(ox, oy, mw, mh, UI_RADIUS_SM, (0xF8u << 24) | (light ? 0xF4F6F8u : 0x222A33u), RR_ALL);
-    border(ox, oy, mw, mh, UI_SURFACE3);
+    border(ox, oy, mw, mh, light ? UI_LINE2 : UI_SURFACE3);
     for (int i = 0; i < n; i++) {
         int iy = oy + 4 + i * CTX_ITEM_H;
         text(ox + 14, iy + (CTX_ITEM_H - gui_font_line_height()) / 2,
@@ -5678,10 +6980,15 @@ static void cal_geometry(int w, int h, int *ox, int *oy, int *ow, int *oh,
     *ow = *pad * 2 + *cell * 7;
     /* 底部留一行"当前时间 + 时区"：issue #8 反馈弹窗里看不到具体时间 */
     *oh = *pad * 2 + *head_h + *wk_h + *cell * 6 + ui_s(28);
-    *ox = w - *ow - ui_s(12);
-    if (*ox < 8) *ox = 8;
-    *oy = h - TASKBAR_H - *oh - ui_s(8);
-    if (*oy < 8) *oy = 8;
+    if (g_gui_st && g_gui_st->desktop_style == DESKTOP_STYLE_GNOME) {
+        *ox = (w - *ow) / 2;
+        *oy = GNOME_TOPBAR_H + ui_s(8);
+    } else {
+        *ox = w - *ow - ui_s(12);
+        if (*ox < 8) *ox = 8;
+        *oy = h - TASKBAR_H - *oh - ui_s(8);
+        if (*oy < 8) *oy = 8;
+    }
 }
 
 static void draw_calendar_popup(int w, int h, gui_state_t *st) {
@@ -5832,9 +7139,19 @@ static void draw_start_menu(gui_state_t *st) {
     if (extra < 0) extra = 0;
 
     /* ── panel background ── */
-    uint32_t bg = (0xF6u << 24) | (light ? 0xF5F6F8u : 0x202428u);
+    /* 动态玻璃：先把面板身后糊掉，再用半透明底色盖上去。
+     * 两个不透明度是配对调出来的：底色 0xAA（约 2/3）+ 玻璃着色 130
+     * （约一半）。算下来背后糊好的画面能透出 25% 左右——再高文字会被
+     * 壁纸细节干扰，再低就看不见磨砂了（0xCC 时实测只有 5%）。 */
+    if (st->glass_enabled) {
+        glass_rect(ox, oy, SM_W, mh, 12, RR_ALL,
+                   (light ? 0xF5F6F8u : 0x202428u), 130, st->glass_strength);
+    }
+    uint32_t bg = st->glass_enabled
+                ? ((0xAAu << 24) | (light ? 0xF5F6F8u : 0x202428u))
+                : ((0xF6u << 24) | (light ? 0xF5F6F8u : 0x202428u));
     fill_round_rect(ox, oy, SM_W, mh, 12, bg, RR_ALL);
-    uint32_t bd = UI_SURFACE3;
+    uint32_t bd = light ? UI_LINE2 : UI_SURFACE3;
     /* top/bottom border lines for rounded rect */
     rect(ox + 12, oy, SM_W - 24, 1, bd);
     rect(ox + 12, oy + mh - 1, SM_W - 24, 1, bd);
@@ -5847,7 +7164,7 @@ static void draw_start_menu(gui_state_t *st) {
     vgradient(sx, sy, sw, SM_SEARCH_H,
               UI_SURFACE,
               UI_SURFACE);
-    border(sx, sy, sw, SM_SEARCH_H, UI_SURFACE3);
+    border(sx, sy, sw, SM_SEARCH_H, light ? UI_LINE2 : UI_SURFACE3);
     if (st->sm_search_len > 0) {
         text(sx + 12, sy + (SM_SEARCH_H - gui_font_line_height()) / 2,
              st->sm_search, UI_FG, 1);
@@ -6093,6 +7410,81 @@ static void draw_toast(int w, int h, gui_state_t *st) {
          UI_FG, 1);
 }
 
+static void gui_recompute_dpi(int w, int h, int override_pct) {
+    (void)w;
+    if (override_pct > 0) {
+        g_ui_scale = override_pct;
+    } else {
+        int base_scale = h * 100 / 1080;
+        int edid_dpi = fb_get_edid_dpi();
+        if (edid_dpi > 110) {
+            int dpi_scale = edid_dpi * 100 / 96;
+            if (dpi_scale > base_scale) base_scale = dpi_scale;
+        }
+        g_ui_scale = base_scale;
+    }
+    if (g_ui_scale < 75)  g_ui_scale = 75;    /* 下限：避免过小 */
+    if (g_ui_scale > 220) g_ui_scale = 220;   /* 上限：避免过大 */
+    int nb = gui_font_base_count();
+    if (nb > 1) {
+        int slot = (g_ui_scale >= 135) ? nb - 1 : 0;
+        gui_font_set_active(slot);
+    }
+}
+
+/* ── ~/.hiverc 节流保存 ──────────────────────────────────────
+ * 可持久化的字段打包成快照，每帧 memcmp；变了就推迟 30 帧（0.5s）
+ * 落盘，连拖滑杆也只会写一次。退出 GUI 时再兜底保存一次。 */
+typedef struct {
+    int theme_light, desktop_style, dock_pos, glass, glass_lv;
+    int topbar_ah, seconds, brightness, drag, drag3d, knock, fx, dpi;
+} hiv_snap_t;
+
+static hiv_snap_t g_hiv_last;
+static int g_hiv_have, g_hiv_pending;
+
+static void hiv_take(gui_state_t *st, hiv_snap_t *s) {
+    s->theme_light   = st->theme_light;
+    s->desktop_style = st->desktop_style;
+    s->dock_pos      = st->dock_pos;
+    s->glass         = st->glass_enabled;
+    s->glass_lv      = st->glass_strength;
+    s->topbar_ah     = st->topbar_autohide;
+    s->seconds       = st->taskbar_show_seconds;
+    s->brightness    = st->brightness;
+    s->drag          = st->drag_enabled;
+    s->drag3d        = st->drag3d_enabled;
+    s->knock         = st->knock_down_enabled;
+    s->fx            = st->effects_enabled;
+    s->dpi           = st->dpi_scale_override;
+}
+
+static void hiv_autosave_tick(gui_state_t *st) {
+    hiv_snap_t cur;
+    hiv_take(st, &cur);
+    if (!g_hiv_have || memcmp(&cur, &g_hiv_last, sizeof(cur)) != 0) {
+        g_hiv_last   = cur;
+        g_hiv_have   = 1;
+        g_hiv_pending = 30;      /* 停止变化 0.5s 后写盘 */
+    } else if (g_hiv_pending > 0 && --g_hiv_pending == 0) {
+        hiverc_save(st);
+    }
+}
+
+/* ── 顶栏可见性（waybar 式自动隐藏）────────────────────────── */
+static int topbar_visible(const gui_state_t *st) {
+    if (st->desktop_style != DESKTOP_STYLE_GNOME) return 0;
+    if (!st->topbar_autohide) return 1;
+    return st->topbar_revealed || st->overview ||
+           st->cal_open || st->quick_settings_open;
+}
+
+/* wm/窗口布局用的顶栏高度：autohide 开启时窗口可用区顶到 0 */
+static int hive_topbar_h(const gui_state_t *st) {
+    return (st->desktop_style == DESKTOP_STYLE_GNOME && !st->topbar_autohide)
+               ? GNOME_TOPBAR_H : 0;
+}
+
 static void cmd_gui(int argc, char **argv) {
     fb_info_t fb;
     if (fb_get_info(&fb) < 0) {
@@ -6115,21 +7507,8 @@ static void cmd_gui(int argc, char **argv) {
     int w = (int)fb.width;
     int h = (int)fb.height;
 
-    /* ── DPI 自适应：按屏幕高度计算全局缩放（基准 1080p = 100%）──────
-     * 所有经 ui_s() 的布局/图标常量随之缩放；字号也按分辨率选基号。
-     * 低分辨率（如 VMware 受限）下整体缩小，高分屏整体放大。 */
-    g_ui_scale = h * 100 / 1080;
-    if (g_ui_scale < 70)  g_ui_scale = 70;    /* 下限：避免过小 */
-    if (g_ui_scale > 220) g_ui_scale = 220;   /* 上限：避免过大 */
-    {
-        int nb = gui_font_base_count();
-        if (nb > 1) {
-            /* 默认字号固定为最小档（16px）；只有明显高分屏才自动放大，
-             * 避免常规分辨率下被自动挑成大字号。 */
-            int slot = (g_ui_scale >= 140) ? nb - 1 : 0;
-            gui_font_set_active(slot);
-        }
-    }
+    /* ── DPI 自适应：按屏幕分辨率与物理 EDID DPI 计算全局缩放（基准 1080p = 100%）── */
+    gui_recompute_dpi(w, h, 0);
 
     int mx = w / 2;
     int my = h / 2;
@@ -6154,6 +7533,8 @@ static void cmd_gui(int argc, char **argv) {
     int resize_orig_win_x = 0, resize_orig_win_y = 0;
     int cursor_edge = WM_EDGE_NONE;
     uint32_t frame_tick = 0;          // 自增帧计数，用于双击计时
+    /* 下一帧的目标时刻（PIT ticks）。0 表示尚未起算。见主循环末尾的帧节拍。 */
+    uint64_t frame_deadline = 0;
     uint32_t last_title_click = 0;    // 上次点击标题栏的帧
     uint8_t last_clock_sec = 0xFF;    // 任务栏时钟秒数，用于检测秒变化并触发重绘
     int last_title_idx = -1;          // 上次点击的窗口
@@ -6174,8 +7555,25 @@ static void cmd_gui(int argc, char **argv) {
     st.last_clicked_file = -1;
     st.delete_confirm_index = -1;
     st.taskbar_show_seconds = 1;
+    st.desktop_style = DESKTOP_STYLE_GNOME;
+    st.dock_pos = DOCK_POS_BOTTOM;
     st.effects_enabled = 1;
     gui_effects_set_enabled(1);
+    /* 手稿②：窗口可拖动化 + 拖动时的立体层级默认开启，降维打击默认开启。
+     * 默认值取"有感觉但不打扰"：立体层次只在拖动期间出现，松手即收敛。 */
+    st.drag_enabled = 1;
+    st.drag3d_enabled = 1;
+    st.knock_down_enabled = 1;
+    /* 动态玻璃：GNOME 风格的磨砂背景，默认开（可在 设置 → 桌面 →
+     * 动态玻璃 关掉）。它只在标题栏/状态栏/开始菜单/快捷设置这些"薄"
+     * 区域上跑，整屏正文不参与，因此软件合成下开销可控。 */
+    st.glass_enabled = 1;
+    st.glass_strength = 1;
+    /* ~/.hiverc 持久化：默认值填好后读用户配置覆盖（简单多用户，
+     * 路径 = /home/<cur-user>/.hiverc，用户名来自 /etc/cur-user）。 */
+    hiverc_load(&st);
+    gui_effects_set_enabled(st.effects_enabled);
+    gui_set_brightness(st.brightness);
     /* ① P3：surface 提交回调需要桌面状态与屏幕尺寸来换算屏幕坐标 */
     g_gui_st = &st;
     g_gui_w = w;
@@ -6187,8 +7585,10 @@ static void cmd_gui(int argc, char **argv) {
      * 浅色——"浅色桌面 + 深色应用窗口"的混搭（issue #2 视频里那扇
      * 盖满整屏的深色窗口就是这么来的）。 */
     (void)gui_service_theme_set(st.theme_light);
-    st.status = "就绪";
+    st.status = "GNOME 桌面已就绪";
     wm_init(&st.wm, w, h);
+    st.wm.top_bar_h = hive_topbar_h(&st);
+    st.topbar_anim = GNOME_TOPBAR_H;   /* 启动时顶栏完整显示 */
     st.console_input[0] = 0;
     st.console_input_len = 0;
     st.console_line_count = 0;
@@ -6233,6 +7633,15 @@ static void cmd_gui(int argc, char **argv) {
         wl_seat_set_pointer_focus(g_seat, 1);   /* root surface */
         wl_seat_set_keyboard_focus(g_seat, 1);
         (void)wl_seat_dispatch(g_seat, 8);
+        /* 指针位置必须以桌面光标的当前坐标（屏幕中心）为起点。
+         * g_seat_mx/my 是"位移累加"的基准：主循环里 tx = g_seat_mx + acc_dx，
+         * 再把结果的 g_seat_mx 回写成新的光标坐标。它们默认是 0，若不在这里
+         * 对齐，第一次鼠标移动就会把光标从屏幕中心瞬移到左上角附近，此后
+         * 所有位移都从这个错误原点累加——表现为"鼠标一跳就不受控、点不中
+         * 任何控件"。改分辨率的分支里已有同样的同步，这里补上启动时的。 */
+        g_seat_mx = mx;
+        g_seat_my = my;
+        g_seat_buttons = st.buttons;
     }
     if (mouse_init() < 0) st.status = "未检测到鼠标";
     else st.status = mouse_backend_name();
@@ -6245,6 +7654,7 @@ static void cmd_gui(int argc, char **argv) {
         gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
         gui_wl_init((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
         wbuf_init();   /* 缩略图池：一次性分配，避免运行期连续页失败 */
+        glass_init();  /* 动态玻璃的降采样缓冲；失败则效果自动降级为无 */
     } else {
         st.status = "图形缓冲分配失败";
     }
@@ -6265,6 +7675,85 @@ static void cmd_gui(int argc, char **argv) {
     gui_dirty_mark_full();
     draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
     while (1) {
+        /* ── 动态可变分辨率 & 宿主窗口大小自由拖拽自适应 (QEMU EDID / VMware SVGA / 手动切换) ── */
+        {
+            uint32_t target_w = 0, target_h = 0;
+            int do_resize = 0;
+            if (st.req_res_w > 0 && st.req_res_h > 0) {
+                target_w = (uint32_t)st.req_res_w;
+                target_h = (uint32_t)st.req_res_h;
+                st.req_res_w = 0;
+                st.req_res_h = 0;
+                do_resize = 1;
+            } else if ((frame_tick % 12) == 0 && fb_poll_host_resize(&target_w, &target_h)) {
+                do_resize = 1;
+            }
+            if (do_resize && (target_w != (uint32_t)w || target_h != (uint32_t)h)) {
+                if (fb_set_resolution(target_w, target_h) == 0 && fb_get_info(&fb) == 0) {
+                    int new_w = (int)fb.width;
+                    int new_h = (int)fb.height;
+                    uint64_t new_bytes = (uint64_t)new_w * (uint64_t)new_h * sizeof(uint32_t);
+                    size_t new_pages = (size_t)((new_bytes + GUI_PAGE_SIZE - 1) / GUI_PAGE_SIZE);
+                    uint64_t new_phys = pmm_alloc_blocks(new_pages);
+                    if (new_phys) {
+                        if (surface_phys) pmm_free_blocks(surface_phys, surface_pages);
+                        surface_phys = new_phys;
+                        surface_pages = new_pages;
+                        w = new_w;
+                        h = new_h;
+                        g_gui_w = w;
+                        g_gui_h = h;
+                        gui_recompute_dpi(w, h, st.dpi_scale_override);
+                        st.wm.desk_w = w;
+                        st.wm.desk_h = h;
+                        st.wm.top_bar_h = hive_topbar_h(&st);
+                        /* 同步调整所有打开窗口的位置与最大化/吸附尺寸 */
+                        for (int wi = 0; wi < st.wm.window_count; wi++) {
+                            wm_window_t *win = wm_get_window(&st.wm, wi);
+                            if (!win || !win->used) continue;
+                            if (win->state == WM_STATE_MAXIMIZED) {
+                                win->x = 0;
+                                win->y = st.wm.top_bar_h;
+                                win->w = w;
+                                win->h = h - (st.wm.top_bar_h > 0 ? st.wm.top_bar_h : WM_TASKBAR_H);
+                            } else if (win->snap_side == WM_SNAP_LEFT || win->snap_side == WM_SNAP_RIGHT) {
+                                int half = w / 2;
+                                win->y = st.wm.top_bar_h;
+                                win->h = h - (st.wm.top_bar_h > 0 ? st.wm.top_bar_h : WM_TASKBAR_H);
+                                win->w = half;
+                                win->x = (win->snap_side == WM_SNAP_LEFT) ? 0 : (w - half);
+                            } else {
+                                wm_move_window(&st.wm, wi, win->x, win->y);
+                            }
+                        }
+                        if (mx >= w) mx = w - 1;
+                        if (my >= h) my = h - 1;
+                        g_seat_mx = mx;
+                        g_seat_my = my;
+                        for (int wi = 0; wi < WM_MAX_WINDOWS; wi++) winbuf_release(wi);
+                        gui_set_surface((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
+                        gui_wl_init((uint32_t *)(uintptr_t)surface_phys, w, h, (uint32_t)w);
+                        gui_dirty_mark_full();
+                        draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                    }
+                } else {
+                    st.status = "当前显卡为固件固定帧缓冲，不支持运行期改分辨率";
+                    gui_dirty_mark_full();
+                }
+            }
+        }
+        /* 若用户在设置中修改了 DPI 缩放比例，实时刷新 */
+        {
+            static int last_dpi_override = 0;
+            if (st.dpi_scale_override != last_dpi_override) {
+                last_dpi_override = st.dpi_scale_override;
+                gui_recompute_dpi(w, h, st.dpi_scale_override);
+                st.wm.top_bar_h = hive_topbar_h(&st);
+                winbuf_invalidate_all();
+                gui_dirty_mark_full();
+            }
+        }
+
         /* 回收已退出应用留下的窗口 */
         if (winsrv_reap_dead() > 0) gui_dirty_mark_full();
 
@@ -6336,6 +7825,35 @@ static void cmd_gui(int argc, char **argv) {
         }
 
         int key = key_poll();
+        /* Super + ↑/↓（也接受 Alt + ↑/↓）：必须抢在 seat 派发**之前**处理。
+         * 方向键是客户端（设置页列表、文本框、浏览器滚动）的常用按键，
+         * 先把 key 发给 seat 再判断，客户端已经把方向键消费掉了，WM 这边
+         * 根本收不到（实测：Super+↑ 完全没反应）。修饰键组合属于窗口
+         * 管理器语义，和 Alt+F4 一样应该是模态拦截。 */
+        if ((kb_super_pressed() || kb_alt_pressed()) &&
+            (key == GUI_KEY_UP || key == GUI_KEY_DOWN)) {
+            int aw = st.wm.active_window;
+            wm_window_t *aw_win = wm_get_window(&st.wm, aw);
+            if (aw_win && aw_win->used) {
+                if (key == GUI_KEY_UP) {
+                    if (aw_win->state != WM_STATE_MAXIMIZED) {
+                        wm_maximize_window(&st.wm, aw);
+                        st.status = "窗口已最大化";
+                    }
+                } else if (aw_win->state == WM_STATE_MAXIMIZED) {
+                    wm_restore_window(&st.wm, aw);
+                    st.status = "窗口已还原";
+                } else {
+                    wm_minimize_window(&st.wm, aw);
+                    gui_sync_focus(&st);
+                    st.status = "窗口已最小化";
+                }
+                gui_sync_focus(&st);
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
+        }
         /* 键盘也走 seat：按下+松开各发一个事件，派发回来的键值继续给后面
          * 的处理逻辑用，行为与直读 key_poll 一致。 */
         if (key && g_seat) {
@@ -6345,18 +7863,95 @@ static void cmd_gui(int argc, char **argv) {
             key = g_seat_key_val;
             g_seat_key_val = 0;
         }
-        /* Tab：打开/关闭概览（多任务）。Esc 也能退出。 */
-        if (key == '\t') {
-            st.overview = !st.overview;
+        /* 纯键盘虚拟鼠标控制（Ctrl + Alt + 方向键移动指针，回车左键，空格右键） */
+        if (kb_ctrl_pressed() && kb_alt_pressed()) {
+            int step = 20;
+            int moved = 0;
+            int old_mx = mx, old_my = my;
+            /* 注意 key 已被 key_poll() 归一化成 GUI_KEY_*，这里必须比对
+             * GUI_KEY_* —— 之前写成 KB_KEY_LEFT/UP 等，值域（0x100 vs 1001）
+             * 完全不重叠，这一段等于永远不执行（Ctrl+Alt+方向键移不动指针）。 */
+            if (key == GUI_KEY_LEFT)  { mx -= step; if (mx < 0) mx = 0; moved = 1; }
+            if (key == GUI_KEY_RIGHT) { mx += step; if (mx >= w) mx = w - 1; moved = 1; }
+            if (key == GUI_KEY_UP)    { my -= step; if (my < 0) my = 0; moved = 1; }
+            if (key == GUI_KEY_DOWN)  { my += step; if (my >= h) my = h - 1; moved = 1; }
+            if (key == '\n') {
+                st.buttons |= 1;
+                moved = 1;
+            } else if (key == ' ') {
+                st.buttons |= 2;
+                moved = 1;
+            }
+            if (moved) {
+                gui_damage_cursor(old_mx, old_my, mx, my);
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
+        }
+
+        /* Super + Q 或 Alt + F4 关闭当前窗口 */
+        if ((kb_super_pressed() && (key == 'q' || key == 'w')) ||
+            (kb_alt_pressed() && key == KB_KEY_F4)) {
+            if (st.wm.active_window >= 0) {
+                gui_close_window(&st, st.wm.active_window);
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
+        }
+
+        /* Tab / Super(Win)：Alt+Tab 呼出应用切换器；单独 Tab 或 Win 键打开/关闭概览 */
+        if ((key == '\t' && !app_wants_tab(&st)) || key == KB_KEY_SUPER) {
+            if (key == '\t' && kb_alt_pressed()) {
+                gui_focus_next_window(&st, 1);
+                st.switcher_ticks = 50;
+            } else {
+                if (!st.overview) {
+                    gui_overview_capture(w, h, &st);
+                    st.overview = 1;
+                    st.ov_selected = 0;
+                } else {
+                    st.overview = 0;
+                }
+            }
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
-        if (key == 27 && st.overview) {
-            st.overview = 0;
-            gui_dirty_mark_full();
-            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
-            continue;
+
+        /* 概览导航：键盘方向键选卡片，回车激活，Esc 退出。
+         * 同上一处：key 已是 GUI_KEY_*，不是 KB_KEY_*。 */
+        if (st.overview) {
+            if (key == GUI_KEY_LEFT || key == GUI_KEY_UP) {
+                if (st.ov_selected > 0) st.ov_selected--;
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
+            if (key == GUI_KEY_RIGHT || key == GUI_KEY_DOWN) {
+                if (st.ov_selected + 1 < OV_MAX_WINDOWS && st.ov_selected + 1 < st.wm.window_count)
+                    st.ov_selected++;
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
+            if (key == '\n' || key == '\r') {
+                if (st.ov_selected >= 0 && st.ov_selected < OV_MAX_WINDOWS) {
+                    int widx = g_ov_win[st.ov_selected];
+                    wm_focus_window(&st.wm, widx);
+                    gui_sync_focus(&st);
+                }
+                st.overview = 0;
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
+            if (key == 27) {
+                st.overview = 0;
+                gui_dirty_mark_full();
+                draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+                continue;
+            }
         }
         /* F1: toggle the start menu (keyboard-only path to every app --
          * previously mouse-only via the taskbar logo / right-click menu;
@@ -6367,6 +7962,10 @@ static void cmd_gui(int argc, char **argv) {
                 gui_scan_disk_apps();
                 st.wm.menu_h = sm_clamp_h(gui_start_menu_h(), h);
                 sm_reposition(&st.wm.menu_y, st.wm.menu_h, h);
+                st.wm.menu_x = (w - SM_W) / 2;
+                if (st.wm.menu_x < 8) st.wm.menu_x = 8;
+                if (st.wm.menu_x + SM_W > w - 8) st.wm.menu_x = w - SM_W - 8;
+                if (st.wm.menu_x < 8) st.wm.menu_x = 8;
                 st.sm_search[0] = 0; st.sm_search_len = 0;
                 g_sm_page = 0;
                 st.status = "开始菜单";
@@ -6414,6 +8013,23 @@ static void cmd_gui(int argc, char **argv) {
                 sbuf[pos] = 0;
                 st.status = sbuf;
             }
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
+        /* F7: 切换 Dock 位置（底部 ⇄ 左侧） */
+        if (key == KB_KEY_F7) {
+            st.dock_pos = (st.dock_pos == DOCK_POS_BOTTOM) ? DOCK_POS_LEFT : DOCK_POS_BOTTOM;
+            st.status = (st.dock_pos == DOCK_POS_BOTTOM) ? "Dock 已置于底部" : "Dock 已置于左侧";
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
+        /* F8: 切换桌面样式（GNOME 40+ ⇄ Windows 11） */
+        if (key == KB_KEY_F8) {
+            st.desktop_style = (st.desktop_style == DESKTOP_STYLE_GNOME) ? DESKTOP_STYLE_WIN11 : DESKTOP_STYLE_GNOME;
+            st.wm.top_bar_h = hive_topbar_h(&st);
+            st.status = (st.desktop_style == DESKTOP_STYLE_GNOME) ? "已切换为 GNOME 样式" : "已切换为 Windows 任务栏";
             gui_dirty_mark_full();
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
@@ -6485,6 +8101,12 @@ static void cmd_gui(int argc, char **argv) {
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             continue;
         }
+        if (key == 27 && st.quick_settings_open) {
+            st.quick_settings_open = 0;
+            gui_dirty_mark_full();
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+            continue;
+        }
         if (key == 27 && st.cal_open) {
             st.cal_open = 0;
             gui_dirty_mark_full();
@@ -6547,6 +8169,15 @@ static void cmd_gui(int argc, char **argv) {
                 g_seat_dz = 0;
                 int tx = g_seat_mx + acc_dx;
                 int ty = g_seat_my + acc_dy;
+                /* 席位里的坐标是绝对屏幕坐标，必须**在写回之前**钳制到屏幕内。
+                 * 只钳制绘制用的 mx/my 是不够的：g_seat_mx 是下一帧位移的
+                 * 累加基准，放任它越界会一路累加到屏幕外几千像素，之后往回
+                 * 移动时指针在屏幕上纹丝不动（要先把越界量走回来），表现为
+                 * "鼠标贴边后卡死/失灵"。 */
+                if (tx < 0) tx = 0;
+                if (ty < 0) ty = 0;
+                if (tx > w - 1) tx = w - 1;
+                if (ty > h - 1) ty = h - 1;
                 (void)wl_seat_pointer_motion(g_seat, tx, ty);
                 if (st.buttons != g_seat_buttons) {
                     for (int b = 1; b <= 3; b++) {
@@ -6569,6 +8200,29 @@ static void cmd_gui(int argc, char **argv) {
             if (my < 0) my = 0;
             if (mx > w - 1) mx = w - 1;
             if (my > h - 1) my = h - 1;
+            /* 把钳制后的指针位置发布给外部（`mouse` 命令读它）。
+             * mx/my 是主循环的局部变量，不发布出来的话，自动化测试和
+             * 调试命令都无法验证"鼠标真的移动了"。 */
+            gui_pointer_publish(mx, my);
+
+            /* 顶栏自动隐藏：鼠标顶到上缘滑出；离开后停留 5s 才收回；
+             * 弹出面板（日历/快捷设置/概览）开着时保持显示。滑动动画
+             * 在帧循环里做（topbar_anim ease-out）。 */
+            if (st.topbar_autohide) {
+                int panels = st.cal_open || st.quick_settings_open || st.overview;
+                if (my <= 2) {                       /* 顶到上缘：立即滑出 */
+                    if (!st.topbar_revealed) st.topbar_revealed = 1;
+                    st.topbar_hide_at = 0;
+                } else if (my <= GNOME_TOPBAR_H &&
+                           (st.topbar_revealed || st.topbar_anim > 2)) {
+                    st.topbar_revealed = 1;          /* 栏内/半滑出时压上去：滑出 */
+                    st.topbar_hide_at = 0;
+                } else if (panels) {
+                    st.topbar_hide_at = 0;           /* 面板开着：保持显示 */
+                } else if (st.topbar_revealed && !st.topbar_hide_at) {
+                    st.topbar_hide_at = frame_tick + 300;   /* 5s 停留 */
+                }
+            }
 
             /* ① P2：指针焦点跟着命中窗口走，不再固定挂在 root surface 上。
              * 焦点一变 wl_seat 就产生 LEAVE/ENTER，控件据此清掉 hover 态；
@@ -6751,8 +8405,22 @@ static void cmd_gui(int argc, char **argv) {
             }
 
             if (dragging_window >= 0 && left_down && resizing_window < 0) {
+                /* 设置里的「可拖动化」关掉后，标题栏只负责聚焦，不再跟着
+                 * 指针跑（手稿②「增加设置，增加可拖动化」）。 */
+                if (!st.drag_enabled) {
+                    dragging_window = -1;
+                    drag_pending = 0;
+                    st.drag3d = 0;
+                    st.drag3d_dx = st.drag3d_dy = 0;
+                    st.status = "窗口拖动已在设置中关闭";
+                }
+            }
+            if (dragging_window >= 0 && left_down && resizing_window < 0) {
                 int win_x, win_y, win_w, win_h;
-                gui_focus_window(&st, dragging_window);
+                /* 曾经这里每帧调 gui_focus_window()。焦点在按下标题栏时
+                 * 就已经给过了，再每帧调一次只会让层级号每帧 +1（设置页
+                 * 的"当前最高层"几百几百地涨），而且让被拖窗口永远严格
+                 * 高于全场——"撞到更高一层的窗口"这个前提就永远不成立。 */
                 gui_window_metrics(&st, w, h, NULL, dragging_window, &win_x, &win_y, &win_w, &win_h);
                 gui_set_active_window_pos(&st, mx - drag_off_x, my - drag_off_y);
                 clamp_window(&st, w, h, win_w, win_h);
@@ -6765,6 +8433,61 @@ static void cmd_gui(int argc, char **argv) {
                 else if (mx >= w - 5) snap_hint = WM_SNAP_RIGHT;
                 else snap_hint = WM_SNAP_NONE;
                 st.snap_preview = snap_hint;
+
+                /* ── 手稿②：立体层次 + 降维打击 ─────────────────────
+                 * 1) 记录平滑后的拖动速度，绘制层按"层级差 × 速度"算视差，
+                 *    被拖窗口越靠前一帧、后面的窗口退得越多，像 3D 堆叠。
+                 * 2) 被拖窗口与别的窗口相交时，把对方降一层（降维打击）；
+                 *    层级号全局唯一，所以"下一层无法被上一级撞到下下层"
+                 *    天然成立——撞它的永远是当前这一层的窗口。 */
+                st.drag3d = st.drag3d_enabled;
+                {
+                    int fdx = mx - drag_last_draw_x;
+                    int fdy = my - drag_last_draw_y;
+                    st.drag3d_dx = st.drag3d_dx * 3 / 4 + fdx * 3;
+                    st.drag3d_dy = st.drag3d_dy * 3 / 4 + fdy * 3;
+                    int lim = ui_s(40);
+                    if (st.drag3d_dx > lim) st.drag3d_dx = lim;
+                    if (st.drag3d_dx < -lim) st.drag3d_dx = -lim;
+                    if (st.drag3d_dy > lim) st.drag3d_dy = lim;
+                    if (st.drag3d_dy < -lim) st.drag3d_dy = -lim;
+                }
+                if (st.drag3d) {
+                    /* 立体层次要改的是**别的窗口**的像素，而增量重绘只画
+                     * 被拖窗口的脏区——不主动把其它窗口标脏，后面的窗口
+                     * 就还是平面老样子（实测：拖动时只有被拖窗口在动，
+                     * 层次感完全看不到）。这里直接整帧重绘：层次效果要求
+                     * 所有窗口在同一帧的同一套视差下画出来，分块重绘反而
+                     * 会出现"半暗半亮"的接缝。 */
+                    gui_dirty_mark_full();
+                }
+                if (st.knock_down_enabled) {
+                    /* 「降维打击」：被拖窗口撞到谁，谁就往下沉一层。
+                     *
+                     * 旧版的判据是 `对方层级 >= 撞击者层级`——可撞击者刚被
+                     * 聚焦过，层级是全场最大，这个条件一次都不会成立；
+                     * 而且就算成立，wm_knock_down 算出的是"撞击者-1"的空位，
+                     * 等于把对方**抬**到次高层。两个错误叠在一起，表现为
+                     * 这个开关无论怎么点都没有任何反应。
+                     *
+                     * 现在：对方层级更低 → 与紧邻的下层交换（真正的"沉一层"）；
+                     * 同一窗口有冷却，避免一次拖拽把它一路打到最底。 */
+                    uint32_t top_layer = wm_window_layer(&st.wm, dragging_window);
+                    for (int k = 0; k < st.wm.window_count; k++) {
+                        if (k == dragging_window) continue;
+                        wm_window_t *victim = wm_get_window(&st.wm, k);
+                        if (!victim || !victim->used) continue;
+                        if (victim->state == WM_STATE_MINIMIZED) continue;
+                        if (victim->knock_cd > 0) continue;
+                        if (!wm_windows_collide(&st.wm, dragging_window, k)) continue;
+                        if (wm_window_layer(&st.wm, k) >= top_layer) continue;
+                        if (!wm_sink_one(&st.wm, k)) continue;   /* 已在最底层 */
+                        victim->knock_cd = 60;      /* 约 0.6s 内不再被撞 */
+                        victim->knock_flash = 14;
+                        st.status = "降维打击：被撞窗口下沉一层";
+                        gui_dirty_mark_full();
+                    }
+                }
                 st.status = snap_hint == WM_SNAP_TOP    ? "松开最大化" :
                             snap_hint == WM_SNAP_BOTTOM ? "松开最小化" :
                             snap_hint != WM_SNAP_NONE   ? "松开吸附窗口" : "窗口已移动";
@@ -6798,6 +8521,9 @@ static void cmd_gui(int argc, char **argv) {
                 dragging_window = -1;
                 drag_pending = 0;
                 drag_bounds_valid = 0;
+                /* 松手：立体层次收敛回平面，视差归零（避免窗口停在错位处） */
+                st.drag3d = 0;
+                st.drag3d_dx = st.drag3d_dy = 0;
             }
 
             int edge = WM_EDGE_NONE;
@@ -6886,7 +8612,7 @@ static void cmd_gui(int argc, char **argv) {
                  * 样留在原地；之后光标附近的每次点击都在拿球——误触
                  * "切换主题"/"最大化" 就是 issue #2 的主题闪烁。 */
                 int popup_open = st.ctx_open || st.brightness_popup_open ||
-                                 st.cal_open || st.wm.start_menu_open;
+                                 st.cal_open || st.quick_settings_open || st.wm.start_menu_open;
                 int appwin_hit = 0;
                 for (int i = WINSRV_MAX - 1; i >= 0 && !appwin_hit && !popup_open; i--) {
                     winsrv_window_t *win = winsrv_get(i);
@@ -6925,6 +8651,9 @@ static void cmd_gui(int argc, char **argv) {
                 }
                 if (appwin_hit) {
                     redraw = 1;
+                } else if (st.quick_settings_open) {
+                    quick_settings_handle_click(w, h, &st, mx, my);
+                    redraw = 1;
                 } else if (st.brightness_popup_open) {
                     /* 亮度弹窗打开时：命中滑杆轨道附近就开始拖动并跳到点击位置，
                      * 点在弹窗外（含再次点亮度图标）一律关闭，跟开始菜单一致。 */
@@ -6949,22 +8678,48 @@ static void cmd_gui(int argc, char **argv) {
                     int ci = ctx_hit(&st, mx, my);
                     if (ci >= 0) {
                         if (st.ctx_open == 1) {           /* 桌面菜单 */
-                            if (ci == 0) gui_dirty_mark_full();
-                            else if (ci == 1) {
+                            if (ci == 0) {
+                                gui_dirty_mark_full();
+                                st.status = "桌面已刷新";
+                            } else if (ci == 1) {
                                 st.theme_light = !st.theme_light;
+                                gui_apply_theme(st.theme_light);
                                 (void)gui_service_theme_set(st.theme_light);
-                            }
-                            else if (ci == 2) {
-                                wm_toggle_start_menu(&st.wm);
-                                if (st.wm.start_menu_open) {
-                                    int mh = sm_clamp_h(gui_start_menu_h(), h);
-                                    st.wm.menu_h = mh;
-                                    sm_reposition(&st.wm.menu_y, mh, h);
-                                    st.wm.menu_x = (w - SM_W) / 2;
-                                    if (st.wm.menu_x < 8) st.wm.menu_x = 8;
-                                    st.wm.menu_y = h - TASKBAR_H - mh - 8;
-                                    if (st.wm.menu_y < 8) st.wm.menu_y = 8;
+                                st.status = st.theme_light ? "已切换为浅色主题" : "已切换为深色主题";
+                            } else if (ci == 2) {
+                                st.desktop_style = (st.desktop_style == DESKTOP_STYLE_GNOME) ? DESKTOP_STYLE_WIN11 : DESKTOP_STYLE_GNOME;
+                                st.wm.top_bar_h = hive_topbar_h(&st);
+                                st.status = (st.desktop_style == DESKTOP_STYLE_GNOME) ? "已切换为 GNOME 样式" : "已切换为 Windows 任务栏";
+                            } else if (ci == 3) {
+                                st.dock_pos = (st.dock_pos == DOCK_POS_BOTTOM) ? DOCK_POS_LEFT : DOCK_POS_BOTTOM;
+                                st.status = (st.dock_pos == DOCK_POS_BOTTOM) ? "Dock 已置于底部" : "Dock 已置于左侧";
+                            } else if (ci == 4) {
+                                if (!st.overview) {
+                                    gui_overview_capture(w, h, &st);
+                                    st.overview = 1;
+                                    st.ov_selected = 0;
+                                } else {
+                                    st.overview = 0;
                                 }
+                                st.status = st.overview ? "活动概览" : "退出概览";
+                            } else if (ci == 5) {
+                                static const struct { int w, h; const char *lbl; } rcycle[5] = {
+                                    { 1920, 1080, "已切换分辨率 1920x1080" },
+                                    { 1600,  900, "已切换分辨率 1600x900"  },
+                                    { 1280,  800, "已切换分辨率 1280x800"  },
+                                    { 1024,  768, "已切换分辨率 1024x768"  },
+                                    { 2560, 1440, "已切换分辨率 2560x1440" },
+                                };
+                                int next_idx = 0;
+                                for (int k = 0; k < 5; k++) {
+                                    if (w == rcycle[k].w && h == rcycle[k].h) {
+                                        next_idx = (k + 1) % 5;
+                                        break;
+                                    }
+                                }
+                                st.req_res_w = rcycle[next_idx].w;
+                                st.req_res_h = rcycle[next_idx].h;
+                                st.status = rcycle[next_idx].lbl;
                             }
                         } else {                          /* 窗口菜单 */
                             int t = st.ctx_target;
@@ -7077,32 +8832,75 @@ static void cmd_gui(int argc, char **argv) {
                             }
                         }
                     } else {
-                        int tb = taskbar_hit(w, h, &st, mx, my);
+                        int tb = desktop_bar_hit(w, h, &st, mx, my);
                         if (tb == TBHIT_START) {
                             wm_toggle_start_menu(&st.wm);
                             st.sm_search[0] = 0; st.sm_search_len = 0;  /* 每次打开清空搜索 */
                             if (st.wm.start_menu_open) {
                                 gui_scan_disk_apps();
-                                /* Win11 style: center horizontally above taskbar.
-                                 * 面板高度按 .hax GUI 应用数动态增长。 */
                                 int mh = sm_clamp_h(gui_start_menu_h(), h);
                                 st.wm.menu_h = mh;
                                 sm_reposition(&st.wm.menu_y, mh, h);
-                                st.wm.menu_x = (w - SM_W) / 2;
+                                if (st.desktop_style == DESKTOP_STYLE_GNOME && st.dock_pos == DOCK_POS_LEFT) {
+                                    st.wm.menu_x = ui_s(70);
+                                    st.wm.menu_y = (h - mh) / 2;
+                                } else {
+                                    st.wm.menu_x = (w - SM_W) / 2;
+                                    st.wm.menu_y = (st.desktop_style == DESKTOP_STYLE_GNOME) ?
+                                                   (h - ui_s(64) - mh - 8) : (h - TASKBAR_H - mh - 8);
+                                }
                                 if (st.wm.menu_x < 8) st.wm.menu_x = 8;
-                                st.wm.menu_y = h - TASKBAR_H - mh - 8;
+                                if (st.wm.menu_y < 8) st.wm.menu_y = 8;
+                                /* 右侧/底部越界保护：菜单曾被设置窗口切掉右边一截，
+                                 * 一部分原因是 x 只做了左边界钳制，屏幕窄（或 DPI
+                                 * 放大到 150%）时 SM_W 会顶出右边缘，超出屏幕的
+                                 * 部分自然画不出来。这里补上右下双向钳制。 */
+                                if (st.wm.menu_x + SM_W > w - 8)
+                                    st.wm.menu_x = w - SM_W - 8;
+                                if (st.wm.menu_x < 8) st.wm.menu_x = 8;
+                                if (st.wm.menu_y + mh > h - 8)
+                                    st.wm.menu_y = h - mh - 8;
                                 if (st.wm.menu_y < 8) st.wm.menu_y = 8;
                             }
-                            st.status = "开始菜单";
+                            st.status = (st.desktop_style == DESKTOP_STYLE_GNOME) ? "应用抽屉" : "开始菜单";
+                        } else if (tb == TBHIT_ACTIVITIES) {
+                            if (!st.overview) {
+                                gui_overview_capture(w, h, &st);
+                                st.overview = 1;
+                                st.ov_selected = 0;
+                            } else {
+                                st.overview = 0;
+                            }
+                            st.status = st.overview ? "活动概览" : "退出概览";
+                        } else if (tb == TBHIT_QUICK_SETTINGS) {
+                            st.quick_settings_open = !st.quick_settings_open;
+                            st.cal_open = 0;
+                            st.brightness_popup_open = 0;
+                            st.status = st.quick_settings_open ? "快捷控制中心" : "";
+                        } else if (tb == TBHIT_THEME) {
+                            st.theme_light = !st.theme_light;
+                            gui_apply_theme(st.theme_light);
+                            (void)gui_service_theme_set(st.theme_light);
+                            st.status = st.theme_light ? "已切换为浅色主题" : "已切换为深色主题";
+                        } else if (tb == TBHIT_STYLE) {
+                            st.desktop_style = (st.desktop_style == DESKTOP_STYLE_GNOME) ? DESKTOP_STYLE_WIN11 : DESKTOP_STYLE_GNOME;
+                            st.wm.top_bar_h = hive_topbar_h(&st);
+                            st.status = (st.desktop_style == DESKTOP_STYLE_GNOME) ? "已切换为 GNOME 样式" : "已切换为 Windows 任务栏";
+                        } else if (tb == TBHIT_DOCK_POS) {
+                            st.dock_pos = (st.dock_pos == DOCK_POS_BOTTOM) ? DOCK_POS_LEFT : DOCK_POS_BOTTOM;
+                            st.status = (st.dock_pos == DOCK_POS_BOTTOM) ? "Dock 已置于底部" : "Dock 已置于左侧";
+                        } else if (tb == TBHIT_POWER) {
+                            acpi_poweroff();
+                            st.status = "关机中...";
                         } else if (tb == TBHIT_BRIGHTNESS) {
-                            st.brightness_popup_open = 1;
+                            st.brightness_popup_open = !st.brightness_popup_open;
                             st.cal_open = 0;   /* 两个弹窗共用右上角位置，互斥显示 */
                             st.status = "屏幕亮度";
                         } else if (tb == TBHIT_CLOCK) {
                             /* 点时钟：开/关日历弹窗 */
                             if (st.cal_open) st.cal_open = 0;
                             else { cal_open_now(&st); st.brightness_popup_open = 0; }
-                            st.status = "日历";
+                            st.status = "日历与时间";
                         } else if (tb == TBHIT_SHOWDESK) {
                             /* 显示桌面：最小化全部可见窗口；再点恢复 */
                             int any = 0;
@@ -7174,9 +8972,25 @@ static void cmd_gui(int argc, char **argv) {
                                     wm_window_t *dw = wm_get_window(&st.wm, title_idx);
                                     int win_x, win_y, win_w, win_h;
                                     if (dw && dw->state == WM_STATE_MAXIMIZED) {
+                                        /* 先问"还原后会是什么矩形"，再真还原。
+                                         * 旧代码是"先还原、再读 wm_get_window_rect"，
+                                         * 但还原是异步过渡（anim_type=RESTORE），
+                                         * 那一刻读到的还是全屏，于是锚点算成
+                                         * "窗口中心"，窗口会猛地跳到指针下面。
+                                         * 顺滑的做法：按还原后的尺寸算锚点，
+                                         * 让指针仍落在标题栏的同一相对位置。 */
+                                        if (dw->snap_side != WM_SNAP_NONE)
+                                            wm_unsnap_window(&st.wm, title_idx);
+                                        wm_restore_target(&st.wm, title_idx,
+                                                          &win_x, &win_y, &win_w, &win_h);
                                         wm_restore_window(&st.wm, title_idx);
-                                        gui_window_metrics(&st, w, h, NULL, title_idx, &win_x, &win_y, &win_w, &win_h);
-                                        drag_off_x = win_w / 2;
+                                        /* 水平锚点按指针在全屏中的位置等比映射，
+                                         * 垂直锚点固定标题栏中部——跟 GNOME / Windows
+                                         * 一致：从上沿往下拖，标题栏就贴在指针那儿。 */
+                                        int rel = (w > 0) ? (mx * 100 / w) : 50;
+                                        drag_off_x = (win_w * rel) / 100;
+                                        if (drag_off_x < 0) drag_off_x = 0;
+                                        if (drag_off_x > win_w - 1) drag_off_x = win_w - 1;
                                         drag_off_y = WM_TITLE_H / 2;
                                         gui_set_active_window_pos(&st, mx - drag_off_x, my - drag_off_y);
                                     } else if (wm_unsnap_window(&st.wm, title_idx)) {
@@ -7411,7 +9225,15 @@ static void cmd_gui(int argc, char **argv) {
                 : (cur_sec == 0 && last_clock_sec != 0);
             last_clock_sec = cur_sec;
             if (need_redraw) {
-                gui_damage_region(0, h - TASKBAR_H, w, TASKBAR_H, w, h);
+                if (st.desktop_style == DESKTOP_STYLE_GNOME) {
+                    gui_damage_region(0, 0, w, GNOME_TOPBAR_H, w, h);
+                    if (st.dock_pos == DOCK_POS_BOTTOM)
+                        gui_damage_region(0, h - ui_s(76), w, ui_s(76), w, h);
+                    else
+                        gui_damage_region(0, 0, ui_s(76), h, w, h);
+                } else {
+                    gui_damage_region(0, h - TASKBAR_H, w, TASKBAR_H, w, h);
+                }
                 draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             }
         }
@@ -7439,7 +9261,80 @@ static void cmd_gui(int argc, char **argv) {
             }
             draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
         }
+        /* Dock 伸缩动画：只标 dock 所在的那一条，不整屏重画。
+         * 胶囊只会沿一个方向伸缩，脏区 = 旧几何 ∪ 新几何 就够了；
+         * 整屏重画在这里代价太高（dock 每帧都要动 300ms）。 */
+        if (dock_anim_active() && st.desktop_style == DESKTOP_STYLE_GNOME) {
+            int band_h = st.dock_pos == DOCK_POS_LEFT ? h : ui_s(90);
+            int band_y = st.dock_pos == DOCK_POS_LEFT ? GNOME_TOPBAR_H : h - band_h;
+            gui_damage_region(0, band_y, w, band_h, w, h);
+            if (st.dock_pos == DOCK_POS_LEFT)
+                gui_damage_region(0, 0, ui_s(90), h, w, h);
+            draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
+        }
         frame_tick++;
+        /* 顶栏：5s 停留到期 → 收回；随后做 ease-out 滑动动画 */
+        if (st.topbar_autohide && st.topbar_revealed && st.topbar_hide_at &&
+            (int32_t)(frame_tick - st.topbar_hide_at) >= 0) {
+            st.topbar_revealed = 0;
+            st.topbar_hide_at = 0;
+        }
+        {
+            int panels = st.cal_open || st.quick_settings_open || st.overview;
+            int target = GNOME_TOPBAR_H;
+            if (st.topbar_autohide &&
+                !(st.topbar_revealed || panels))
+                target = 0;
+            int cur = st.topbar_anim;
+            if (cur < 0) cur = 0;
+            if (cur > GNOME_TOPBAR_H) cur = GNOME_TOPBAR_H;
+
+            if (cur != target && st.topbar_to != target) {
+                /* 新的动画段开始：快照起点，落到时间轴上。
+                 *
+                 * 隐藏和显示用不同曲线——这不是审美问题，是物理直觉：
+                 *   收起 = ease-in（慢慢启动再加速抽走，像抽屉被推回去）
+                 *   展开 = ease-out（立刻响应手指，末段减速停稳）
+                 * 如果两边都用 ease-out，收回时会"啪"一下缩没，看起来
+                 * 像卡帧而不是动画。 */
+                uint64_t now_ms = gui_effects_now_ms();
+                st.topbar_from = cur;
+                st.topbar_to = target;
+                st.topbar_t0 = now_ms;
+                st.topbar_ms = target > cur ? 220 : 180;
+                if (!gui_effects_enabled()) st.topbar_ms = 0;
+            }
+
+            if (cur != target) {
+                int eased;
+                int curve = (st.topbar_to > st.topbar_from) ? GUI_EASE_OUT_CUBIC
+                                                            : GUI_EASE_IN_QUAD;
+                if (st.topbar_ms <= 0) {
+                    eased = 512;
+                } else {
+                    eased = gui_effects_ease_curve(st.topbar_t0,
+                                                   (uint32_t)st.topbar_ms, curve);
+                }
+                int span = st.topbar_to - st.topbar_from;
+                int v = st.topbar_from + (span * eased) / 512;
+                if (eased >= 512) v = st.topbar_to;
+                /* 按 1px 量化：值没变就不重画，静止在中间位置时不空转 */
+                if (v != cur) {
+                    st.topbar_anim = v;
+                    gui_dirty_mark_full();   /* 动画帧整屏重画，避免撕裂 */
+                }
+            } else if (st.topbar_to != target) {
+                st.topbar_to = target;       /* 已完成：让下一段能重新触发 */
+            }
+        }
+        /* ~/.hiverc 节流自动保存：配置变了停 0.5s 才写盘 */
+        hiv_autosave_tick(&st);
+        /* 玻璃在增量帧上会采样到旧模糊输出（残影根源）：任何一次增量
+         * 帧里碰过玻璃，就安排下一帧整屏重画（从干净背景重采样）。 */
+        if (glass_full_requested()) {
+            glass_clear_full_request();
+            gui_dirty_mark_full();
+        }
         /* 后台浏览器加载：任务结束后触发一帧重绘（让新内容显示出来） */
         if (bs()->loading) {
             const task_t *bt = task_get_by_id(bs()->load_tid);
@@ -7453,8 +9348,54 @@ static void cmd_gui(int argc, char **argv) {
                 draw_gui_frame(&fb, w, h, &st, mx, my, cursor_edge);
             }
         }
-        task_yield();
+        /* ── 帧节拍：锁定 60fps（目标 16.67ms/帧）──
+         *
+         * 早期这里是裸的 task_yield()：有动画时主循环会以 CPU 能达到的最快
+         * 速度空转（每帧都整屏重画，帧率随负载在 20~300fps 之间乱跳），既
+         * 浪费 CPU，又因为帧间隔不均匀而让动画看起来一顿一顿。参考视频是
+         * 稳定 60fps，这里按 PIT 时钟把帧均匀摊开：
+         *   - 还没到下一帧时刻：只让出 CPU，不重绘（省下来的时间给应用）；
+         *   - 已经过点：不再补帧，直接从现在开始算下一帧（避免追帧雪崩）。
+         * 没有任何脏区时允许一直等，直到有事件唤醒（鼠标/键盘/动画），
+         * 所以静止桌面依然是零重绘。 */
+        frame_tick++;
+        /* ── 帧节拍：锁定 60fps（目标 16.67ms/帧）──
+         *
+         * 早期这里是裸的 task_yield()：有动画时主循环会以 CPU 能达到的最快
+         * 速度空转（每帧都整屏重画，帧率随负载在 20~300fps 之间乱跳），既
+         * 浪费 CPU，又因为帧间隔不均匀而让动画看起来一顿一顿。参考视频是
+         * 稳定 60fps，这里按 PIT 时钟把帧均匀摊开：
+         *   - 还没到下一帧时刻：只让出 CPU，不重绘（省下的时间给应用）；
+         *   - 已经落后超过一帧：从现在重新起算，绝不"追帧"雪崩。
+         * 无脏区时循环本身不重绘，所以静止桌面依然是零重绘。 */
+        {
+            uint32_t hz = pit_get_frequency_hz();
+            if (hz > 0) {
+                uint64_t now = pit_get_ticks();
+                uint64_t step = (uint64_t)hz / 60u;
+                if (step < 1) step = 1;
+                if (frame_deadline == 0 || now + step < frame_deadline) {
+                    /* 首次启动，或时刻被重置过：从现在起算下一拍 */
+                    frame_deadline = now + step;
+                }
+                if (now < frame_deadline) {
+                    /* 这一拍还没到：让出 CPU，不重绘 */
+                    task_yield();
+                    continue;
+                }
+                /* 到点了：排下一拍。落后超过一帧就不补帧，从当前时刻重排，
+                 * 否则一次卡顿会触发连续补帧、越补越卡。 */
+                frame_deadline = (now > frame_deadline + step)
+                                     ? now + step
+                                     : frame_deadline + step;
+            } else {
+                task_yield();
+            }
+        }
     }
+
+    /* 退出前把最后的配置落盘（主循环里的节流保存可能还有没写的） */
+    hiverc_save(&st);
 
     gui_set_surface(0, 0, 0, 0);
     if (surface_phys) pmm_free_blocks(surface_phys, surface_pages);
@@ -7505,6 +9446,71 @@ void gui_blit_rgb888(int x, int y, const uint8_t *rgbdata, int img_w, int img_h,
         for (int px = x0; px < x1; px++) {
             const uint8_t *p = srow + (px - x) * 3;
             drow[px] = 0xFF000000u | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+        }
+    }
+}
+
+/* Wayland 的 wl_shm 位图是 DRM 的 ARGB8888/XRGB8888，位序上等于内存里的
+ * 0xAARRGGBB，和 HBOS 的 surface 像素格式一致 —— 所以整行 memcpy 就够，
+ * 只有真正带 alpha 的像素才需要混合。这条路径是窗口重绘的主循环，
+ * 能少一次逐像素解包就少一次。 */
+void gui_blit_argb8888(int x, int y, const uint8_t *argbsrc, int img_w, int img_h,
+                       int src_stride, int clip_x, int clip_y, int clip_w,
+                       int clip_h) {
+    if (!gd_surface_ptr() || !argbsrc || img_w <= 0 || img_h <= 0 ||
+        clip_w <= 0 || clip_h <= 0)
+        return;
+    int tox = 0, toy = 0;
+    gd_target_origin(&tox, &toy);
+    if (tox || toy) {
+        x -= tox; y -= toy;
+        clip_x -= tox; clip_y -= toy;
+    }
+    int x0 = x, y0 = y, x1 = x + img_w, y1 = y + img_h;
+    if (x0 < clip_x) x0 = clip_x;
+    if (y0 < clip_y) y0 = clip_y;
+    if (x1 > clip_x + clip_w) x1 = clip_x + clip_w;
+    if (y1 > clip_y + clip_h) y1 = clip_y + clip_h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > gd_surface_w()) x1 = gd_surface_w();
+    if (y1 > gd_surface_h()) y1 = gd_surface_h();
+    if (x1 <= x0 || y1 <= y0) return;
+
+    for (int py = y0; py < y1; py++) {
+        int src_y = py - y;
+        uint32_t *drow = gd_surface_ptr() + (uint32_t)py * gd_surface_pitch();
+        const uint32_t *srow = (const uint32_t *)(const void *)
+            (argbsrc + (size_t)src_y * (size_t)src_stride);
+        /* 整行都不透明（alpha 全 0xFF）时直接拷一条线，这是绝大多数
+         * 浏览器/终端窗口的实际情况。 */
+        int opaque = 1;
+        for (int px = x0; px < x1; px++) {
+            if ((srow[px - x] >> 24) != 0xFF) { opaque = 0; break; }
+        }
+        if (opaque) {
+            memcpy(drow + x0, srow + (x0 - x),
+                   (size_t)(x1 - x0) * sizeof(uint32_t));
+            continue;
+        }
+        for (int px = x0; px < x1; px++) {
+            uint32_t src = srow[px - x];
+            uint32_t alpha = src >> 24;
+            if (alpha == 0xFF) {
+                drow[px] = src;
+            } else if (alpha == 0) {
+                /* 全透明：不动目标 */
+            } else {
+                uint32_t dst = drow[px];
+                uint32_t inv = 255 - alpha;
+                uint32_t r = (((src >> 16) & 0xFF) * alpha +
+                              ((dst >> 16) & 0xFF) * inv) / 255;
+                uint32_t g = (((src >> 8) & 0xFF) * alpha +
+                              ((dst >> 8) & 0xFF) * inv) / 255;
+                uint32_t b = ((src & 0xFF) * alpha +
+                              (dst & 0xFF) * inv) / 255;
+                drow[px] = 0xFF000000u | (r << 16) | (g << 8) | b;
+            }
         }
     }
 }

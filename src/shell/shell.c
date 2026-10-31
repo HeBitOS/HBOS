@@ -110,6 +110,8 @@ void task_yield(void);
 #define KEY_SHIFT_LEFT  0x112
 #define KEY_SHIFT_RIGHT 0x113
 #define KEY_F9          0x114
+#define KEY_F7          0x115
+#define KEY_F8          0x116
 static int shift_pressed = 0, caps_lock = 0, num_lock = 1;
 
 static inline uint8_t inb(uint16_t port) {
@@ -281,17 +283,27 @@ static const char scancode_map[128] = {0,0,'1','2','3','4','5','6','7','8','9','
 static const char shift_map[128] = {0,0,'!','@','#','$','%','^','&','*','(',')','_','+','\b',0,'Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A','S','D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C','V','B','N','M','<','>','?',0,'*',0,' '};
 static int ctrl_pressed = 0; /**< Ctrl键状态 */
 static int alt_pressed = 0;  /**< Alt键状态（左/右） */
+static int super_pressed = 0;/**< Super/Win 键状态 */
 static int ext_scancode = 0;
 
 void kb_clear_modifiers(void) {
     ctrl_pressed = 0;
     alt_pressed = 0;
+    super_pressed = 0;
     shift_pressed = 0;
     ext_scancode = 0;
 }
 
 int kb_alt_pressed(void) {
     return alt_pressed;
+}
+
+int kb_super_pressed(void) {
+    return super_pressed;
+}
+
+int kb_ctrl_pressed(void) {
+    return ctrl_pressed;
 }
 
 int kb_poll_key(void) {
@@ -330,8 +342,11 @@ int kb_poll_key(void) {
     }
     if (ext_scancode) {
         ext_scancode = 0;
+        if (sc == 0xDB || sc == 0xDC) { super_pressed = 0; return 0; }
+        if (sc == 0xB8) { alt_pressed = 0; return 0; }
         if (sc & 0x80) return 0;
         if (sc == 0x38) { alt_pressed = 1; return 0; }  /* 右 Alt（E0 38） */
+        if (sc == 0x5B || sc == 0x5C) { super_pressed = 1; return KB_KEY_SUPER; } /* Win / Super */
         if (sc == 0x47) return KEY_HOME;
         if (sc == 0x48) return shift_pressed ? KEY_SHIFT_UP    : KEY_UP;
         if (sc == 0x4F) return KEY_END;
@@ -391,6 +406,8 @@ int kb_poll_key(void) {
     if (sc == 0x3E) return KEY_F4;
     if (sc == 0x3F) return KEY_F5;
     if (sc == 0x40) return KEY_F6;
+    if (sc == 0x41) return KEY_F7;
+    if (sc == 0x42) return KEY_F8;
     if (sc == 0x43) return KEY_F9;
     if (sc < 128) {
         char c = scancode_map[sc];
@@ -1083,7 +1100,7 @@ void cmd_exit(int argc, char **argv) {
 // 存成磁盘上的一个小文件；只有挂载了持久化后端（HBFS/ext2/FAT32，见
 // fs_mount_disk）时才能跨重启保留 —— 纯 ramfs 场景下（没有可用磁盘）
 // 这个偏好每次开机都会丢失，退化为"每次都问"，属于预期行为。
-#define STARTUP_PREF_FILE "/startup.cfg"
+#define STARTUP_PREF_FILE "/config/startup.cfg"
 
 int shell_get_startup_pref(void) {
     file_t *f = fs_find_file(STARTUP_PREF_FILE);
@@ -1096,6 +1113,7 @@ int shell_get_startup_pref(void) {
 
 int shell_set_startup_pref(int mode) {
     if (mode != 'g' && mode != 't') return -1;
+    if (!fs_find_file("/config") && vfs_mkdir("/config") != 0) return -1;
     file_t *f = fs_create_file(STARTUP_PREF_FILE);
     if (!f) return -1;
     char buf[2];
@@ -1121,17 +1139,19 @@ void shell_run(void) {
      * 初始化，不是单次探测本身慢）。 */
     kb_init();
 
+    /* 开机横幅：与 neofetch 共用同一套方块字 HBOS 大字与渐变配色。
+     * H 带真正的中横杠（旧 ANSI Shadow figlet 把 H 底部封口，被认成
+     * "UBOS"）；块字符合成字形见 tools/genhzk.py synth_glyph_rows。 */
     console_puts(
-        "\x1b[34m"
-        "  _   _ ____   ___  ____\r\n"
-        " | | | | __ ) / _ \\/ ___|\r\n"
-        " | |_| |  _ \\| | | \\___ \\\r\n"
-        " |  _  | |_) | |_| |___) |\r\n"
-        " |_| |_|____/ \\___/|____/\r\n"
+        "\x1b[38;2;86;220;255m ██   ██  █████    ████    ████ \r\n"
+        "\x1b[38;2;90;190;255m ██   ██  ██  ██  ██  ██  ██    \r\n"
+        "\x1b[38;2;96;160;255m ███████  █████   ██  ██   ████ \r\n"
+        "\x1b[38;2;104;136;255m ██   ██  ██  ██  ██  ██      ██\r\n"
+        "\x1b[38;2;112;116;255m ██   ██  █████    ████    ████ \r\n"
         "\x1b[0m"
-        "\x1b[1m\x1b[36m  " HBOS_VERSION_TAG "\x1b[0m"
-        "  \x1b[90m64-bit x86_64  "
-        "输入 \x1b[0mhelp\x1b[90m 查看命令\x1b[0m\r\n\r\n"
+        "\x1b[1m\x1b[38;2;255;138;76m  HBOS\x1b[0m"
+        "\x1b[38;2;150;155;170m  " HBOS_VERSION_TAG "  ·  64-bit x86_64\x1b[0m\r\n"
+        "\x1b[38;2;110;115;130m  输入 \x1b[0mhelp\x1b[38;2;110;115;130m 查看命令\x1b[0m\r\n\r\n"
     );
 
     // Boot selector: choose the graphical desktop or the text shell. Only

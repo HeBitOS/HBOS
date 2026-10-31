@@ -83,6 +83,8 @@ void          cmd_clear_history(void);
 int kb_get_key(void);
 int kb_poll_key(void);
 int kb_alt_pressed(void);   /* 当前 Alt（左/右）是否被按住 */
+int kb_super_pressed(void); /* 当前 Super/Win 键是否被按住 */
+int kb_ctrl_pressed(void);  /* 当前 Ctrl 是否被按住 */
 
 // 特殊键码定义（kb_get_key 的返回值）
 #define KB_KEY_UP      0x100
@@ -106,6 +108,9 @@ int kb_alt_pressed(void);   /* 当前 Alt（左/右）是否被按住 */
 #define KB_KEY_SHIFT_LEFT  0x112
 #define KB_KEY_SHIFT_RIGHT 0x113
 #define KB_KEY_F9          0x114
+#define KB_KEY_F7          0x115
+#define KB_KEY_F8          0x116
+#define KB_KEY_SUPER       0x117
 
 // NumLock 状态查询
 bool kb_is_numlock(void);

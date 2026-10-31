@@ -395,6 +395,52 @@ static void cpu_brand_string(char *out, size_t cap) {
     out[cap - 1] = 0;
 }
 
+/* ── neofetch 字标 ─────────────────────────────────────────────────
+ * 6 行 × 39 列，纯品方块（U+2588）拼写，H 带真正的中横杠 —— 旧的 ANSI
+ * Shadow figlet 把 H 底部封口，渲染出来被认成 "UBOS"。
+ * 每行按行号取渐变前景色（青 → 蓝紫），形成字标上浅下深的立体感；
+ * 渐变用 RGB 真彩，flanterm 的 SGR 支持 38;2;r;g;b。 */
+static const char *const g_hbos_logo_art[6] = {
+    " ██   ██  █████    ████    ████ ",
+    " ██   ██  ██  ██  ██  ██  ██    ",
+    " ███████  █████   ██  ██   ████ ",
+    " ██   ██  ██  ██  ██  ██      ██",
+    " ██   ██  █████    ████    ████ ",
+    "                                ",
+};
+/* 字标每行的前景色：青 → 亮蓝 → 靛，模拟品牌渐变 */
+static const char *const g_hbos_logo_fg[6] = {
+    "\x1b[38;2;86;220;255m",   /* #56DCFF */
+    "\x1b[38;2;90;190;255m",
+    "\x1b[38;2;96;160;255m",
+    "\x1b[38;2;104;136;255m",
+    "\x1b[38;2;112;116;255m",  /* #7074FF */
+    "\x1b[38;2;112;116;255m",
+};
+#define HBOS_LOGO_W 33   /* 字标占用的列宽 + 左空格，信息列从这里开始 */
+
+/* 输出一行：左侧补足字标列宽，右侧写 label + value。
+ * value 为 NULL 时不换行，便于调用方紧接着 print_uint 拼数值。 */
+static void neofetch_row(int row, const char *label, const char *value) {
+    if (row < 6) {
+        console_puts(" ");
+        console_puts(g_hbos_logo_fg[row]);
+        console_puts(g_hbos_logo_art[row]);
+        console_puts("\x1b[0m ");
+    } else {
+        for (int i = 0; i < HBOS_LOGO_W; i++) console_putchar(' ');
+    }
+    if (label) {
+        console_puts("\x1b[1m\x1b[38;2;120;200;255m");
+        console_puts(label);
+        console_puts("\x1b[0m ");
+    }
+    if (value) {
+        console_puts(value);
+        console_putchar('\n');
+    }
+}
+
 static void cmd_neofetch(int argc, char **argv) {
     (void)argc; (void)argv;
     char brand[64];
@@ -411,30 +457,88 @@ static void cmd_neofetch(int argc, char **argv) {
     uint32_t up_m = (uint32_t)((up_sec / 60) % 60);
     uint32_t up_s = (uint32_t)(up_sec % 60);
 
-    console_puts("   \x1b[36m/\\_/\\\x1b[0m      \x1b[1m\x1b[35mHBOS (HeBitOS) " HBOS_VERSION_NAME "\x1b[0m\n");
-    console_puts("  \x1b[36m( o.o )\x1b[0m     \x1b[32mKernel:\x1b[0m  Coop-Multitasking, PIT ");
+    console_putchar('\n');
+    /* 行 0：标题（版本号紧贴字标） */
+    console_puts(" ");
+    console_puts(g_hbos_logo_fg[0]);
+    console_puts(g_hbos_logo_art[0]);
+    console_puts("\x1b[0m \x1b[1m\x1b[38;2;255;138;76mHBOS\x1b[0m "
+                 "\x1b[38;2;150;155;170mHeBitOS\x1b[0m");
+    console_putchar('\n');
+
+    /* 行 1：Kernel */
+    console_puts(" ");
+    console_puts(g_hbos_logo_fg[1]);
+    console_puts(g_hbos_logo_art[1]);
+    console_puts("\x1b[0m \x1b[1m\x1b[38;2;120;200;255mKernel\x1b[0m  ");
+    console_puts("Coop-Multitasking \x1b[38;2;110;115;130m·\x1b[0m PIT ");
     print_uint(pit_hz);
     console_puts("Hz\n");
-    console_puts("   \x1b[36m> ^ <\x1b[0m      \x1b[32mArch:\x1b[0m    x86_64\n");
-    console_puts("  \x1b[36m/     \\\x1b[0m     \x1b[32mCPU:\x1b[0m     ");
+
+    /* 行 2：Arch */
+    console_puts(" ");
+    console_puts(g_hbos_logo_fg[2]);
+    console_puts(g_hbos_logo_art[2]);
+    console_puts("\x1b[0m \x1b[1m\x1b[38;2;120;200;255mArch\x1b[0m    x86_64\n");
+
+    /* 行 3：CPU */
+    console_puts(" ");
+    console_puts(g_hbos_logo_fg[3]);
+    console_puts(g_hbos_logo_art[3]);
+    console_puts("\x1b[0m \x1b[1m\x1b[38;2;120;200;255mCPU\x1b[0m     ");
     console_puts(brand);
-    console_puts(" ("); print_uint((uint32_t)smp_cpu_count()); console_puts(" core)\n");
-    console_puts(" \x1b[36m|       |\x1b[0m    \x1b[32mMemory:\x1b[0m  ");
-    print_uint64(used_kb); console_puts(" KiB / "); print_uint64(total_kb); console_puts(" KiB\n");
-    console_puts(" \x1b[36m\\       /\x1b[0m    \x1b[32mUptime:\x1b[0m  ");
+    console_puts(" \x1b[38;2;110;115;130m("); print_uint((uint32_t)smp_cpu_count());
+    console_puts(" core)\x1b[0m\n");
+
+    /* 行 4：Memory + 用量条 */
+    console_puts(" ");
+    console_puts(g_hbos_logo_fg[4]);
+    console_puts(g_hbos_logo_art[4]);
+    console_puts("\x1b[0m \x1b[1m\x1b[38;2;120;200;255mMemory\x1b[0m  ");
+    print_uint64(used_kb);
+    console_puts(" KiB \x1b[38;2;110;115;130m/\x1b[0m ");
+    print_uint64(total_kb);
+    console_puts(" KiB");
+    {
+        /* 8 格用量条：填充比例按整数算，避免浮点 */
+        int filled = total_kb ? (int)((used_kb * 8) / total_kb) : 0;
+        if (filled > 8) filled = 8;
+        console_puts("  ");
+        for (int i = 0; i < 8; i++) {
+            /* 用 U+2588 全块/加淡色的全块表示进度：▰ 之类的码点字体里
+             * 没有合成字形，会渲染成空白。 */
+            console_puts(i < filled ? "\x1b[38;2;86;220;255m\xe2\x96\x88"
+                                    : "\x1b[38;2;60;68;84m\xe2\x96\x88");
+        }
+        console_puts("\x1b[0m");
+    }
+    console_putchar('\n');
+
+    /* 行 5：Uptime */
+    console_puts(" ");
+    console_puts(g_hbos_logo_fg[5]);
+    console_puts(g_hbos_logo_art[5]);
+    console_puts("\x1b[0m \x1b[1m\x1b[38;2;120;200;255mUptime\x1b[0m  ");
     print_uint((uint32_t)up_h); console_putchar(':');
     print_uint_pad2(up_m); console_putchar(':');
-    print_uint_pad2(up_s); console_putchar('\n');
-    console_puts("              \x1b[32mTasks:\x1b[0m   ");
-    print_uint((uint32_t)task_get_count()); console_puts(" active\n\n");
-
-    console_puts("              ");
-    static const char *bg[8] = {"40","41","42","43","44","45","46","47"};
-    for (int i = 0; i < 8; i++) { console_puts("\x1b["); console_puts(bg[i]); console_puts("m  \x1b[0m"); }
-    console_puts("\n              ");
-    static const char *bgbright[8] = {"100","101","102","103","104","105","106","107"};
-    for (int i = 0; i < 8; i++) { console_puts("\x1b["); console_puts(bgbright[i]); console_puts("m  \x1b[0m"); }
+    print_uint_pad2(up_s);
     console_putchar('\n');
+
+    /* 补充行：Tasks / Shell。neofetch_row 末尾不换行，数值才能和标签同行。 */
+    neofetch_row(6, "Tasks", NULL);
+    print_uint((uint32_t)task_get_count()); console_puts(" active\n");
+    neofetch_row(7, "Shell", "hbos-sh (HIVE)");
+    console_putchar('\n');
+
+    /* 调色板：两行 8 色，用背景色块拼（\u2588 前景色版会把行高撑高） */
+    for (int i = 0; i < HBOS_LOGO_W; i++) console_putchar(' ');
+    static const char *bg[8] = {"40","41","42","43","44","45","46","47"};
+    static const char *bgb[8] = {"100","101","102","103","104","105","106","107"};
+    for (int i = 0; i < 8; i++) { console_puts("\x1b["); console_puts(bg[i]); console_puts("m   \x1b[0m"); }
+    console_putchar('\n');
+    for (int i = 0; i < HBOS_LOGO_W; i++) console_putchar(' ');
+    for (int i = 0; i < 8; i++) { console_puts("\x1b["); console_puts(bgb[i]); console_puts("m   \x1b[0m"); }
+    console_puts("\n\n");
 }
 
 static void cmd_status(int argc, char **argv) {

@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "devfs.h"
+#include "tty.h"
 #include "core/task.h"
 #include "core/pmm.h"
 #include "core/vmm.h"
@@ -121,7 +122,45 @@ static const task_t *proc_task_from_path(const char *path,
     if (!pid || *cursor != '/') return NULL;
     if (leaf) *leaf = cursor + 1;
     const task_t *task = task_get_by_id(pid);
-    return task && task->state != TASK_TERMINATED ? task : NULL;
+    if (!task || task->state == TASK_TERMINATED) return NULL;
+
+    /* /proc/<pid>/task/<tid>[/<leaf>]
+     *
+     * Chromium 的 thread_helpers 靠 open("/proc/self/task") + 遍历来数线程，
+     * 缺了这个目录它会直接 FATAL。语义上这是"线程组视图"：<pid> 是 tgid，
+     * <tid> 是组内某个线程的 id。HBOS 里每个线程本来就是独立的 task_t，
+     * 用 thread_group_id 判断归属即可。 */
+    if (strncmp(cursor + 1, "task/", 5) == 0) {
+        const char *thread_cursor = cursor + 6;
+        uint32_t tid = 0;
+        while (*thread_cursor >= '0' && *thread_cursor <= '9') {
+            tid = tid * 10U + (uint32_t)(*thread_cursor - '0');
+            thread_cursor++;
+        }
+        if (!tid) return NULL;
+        if (*thread_cursor != '\0' && *thread_cursor != '/') return NULL;
+        const task_t *thread = task_get_by_id(tid);
+        if (!thread || thread->state == TASK_TERMINATED) return NULL;
+        /* 只有同属一个线程组的 tid 才能通过这个路径访问。 */
+        if (thread->thread_group_id != task->thread_group_id) return NULL;
+        if (leaf) *leaf = (*thread_cursor == '/') ? thread_cursor + 1 : "";
+        return thread;
+    }
+    return task;
+}
+
+/* 统计同线程组里的活任务数（= 该进程的线程数）。
+ * /proc/<pid>/status 的 Threads 和 /proc/<pid>/stat 的第 20 个字段都用它。 */
+static uint32_t proc_thread_count(const task_t *task) {
+    uint32_t threads = 0;
+    for (uint32_t index = 0;; index++) {
+        const task_t *candidate = task_get_active(index);
+        if (!candidate) break;
+        if (candidate->thread_group_id == task->thread_group_id &&
+            candidate->state != TASK_TERMINATED)
+            threads++;
+    }
+    return threads;
 }
 
 static void proc_append_status(char *buf, int *position,
@@ -136,12 +175,7 @@ static void proc_append_status(char *buf, int *position,
             virtual_kb += (task->mm->user_brk - task->mm->user_heap_start) /
                           1024;
     }
-    uint32_t threads = 0;
-    for (uint32_t index = 0;; index++) {
-        const task_t *candidate = task_get_active(index);
-        if (!candidate) break;
-        if (candidate->thread_group_id == task->thread_group_id) threads++;
-    }
+    uint32_t threads = proc_thread_count(task);
     proc_append(buf, position, "Name:\t");
     proc_append(buf, position, task->name);
     proc_append(buf, position, "\nState:\t");
@@ -288,6 +322,29 @@ static void proc_update(vfs_node_t *node) {
             proc_append_status(buf, &pos, task);
         } else if (strcmp(leaf, "maps") == 0) {
             proc_append_maps(buf, &pos, task);
+        } else if (strcmp(leaf, "comm") == 0) {
+            proc_append(buf, &pos, task->name);
+            proc_append(buf, &pos, "\n");
+        } else if (strcmp(leaf, "stat") == 0) {
+            /* /proc/<pid>/stat 的 52 个字段。这里按位给出真实值，不认识的
+             * 一律 0 —— 解析器都按位置取，字段数必须够。 */
+            proc_append_u64(buf, &pos, task->id);
+            proc_append(buf, &pos, " (");
+            proc_append(buf, &pos, task->name);
+            proc_append(buf, &pos, ") ");
+            proc_append(buf, &pos,
+                        task->state == TASK_RUNNING ? "R" :
+                        task->state == TASK_BLOCKED ? "S" :
+                        task->state == TASK_READY ? "R" : "Z");
+            proc_append(buf, &pos, " ");
+            proc_append_u64(buf, &pos, task->parent_id);      /* ppid */
+            proc_append(buf, &pos, " ");
+            proc_append_u64(buf, &pos, task->pgid);           /* pgrp */
+            proc_append(buf, &pos, " ");
+            proc_append_u64(buf, &pos, task->sid);            /* session */
+            proc_append(buf, &pos, " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 20 0 ");
+            proc_append_u64(buf, &pos, proc_thread_count(task));
+            proc_append(buf, &pos, " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
         }
         node->size = (uint32_t)pos;
     }
@@ -513,6 +570,18 @@ void devfs_init(void) {
     n->mode = S_IFCHR | 0666;
     n->ops = &devfs_zero_ops;
 
+    // /dev/tty、/dev/ptmx、/dev/pts
+    tty_init();
+    n = devfs_alloc_node();
+    set_name(n, "/dev/tty");
+    n->mode = S_IFCHR | 0666;
+    tty_register_vfs(0, n);
+    n = devfs_alloc_node();
+    set_name(n, "/dev/ptmx");
+    n->type = VFS_NODE_CHARDEV;
+    n->mode = S_IFCHR | 0666;
+    devfs_register_sysfs_dir("/dev/pts");
+
     // /dev/console
     n = devfs_alloc_node();
     set_name(n, "/dev/console");
@@ -671,9 +740,51 @@ vfs_node_t *devfs_lookup(const char *path) {
             n->mode = S_IFDIR | 0555;
             return n;
         }
+        /* /proc/<pid>/task 与 /proc/<pid>/task/<tid>
+         *
+         * Chromium 的 thread_helpers.cc 一启动就 open("/proc/self/task") 数
+         * 线程，路径不存在直接 FATAL。这里既要把 task 本身当目录，也要把
+         * 每个 tid 当目录（tid 下面才有 status/stat/comm）。 */
+        if (leaf && (strcmp(leaf, "task") == 0 ||
+                     (strncmp(leaf, "task/", 5) == 0 && leaf[5]))) {
+            const task_t *owner = task_get_by_id((uint32_t)pid);
+            if (!owner || owner->state == TASK_TERMINATED) return NULL;
+            int is_thread_dir = 0;
+            if (strncmp(leaf, "task/", 5) == 0) {
+                uint32_t tid = 0;
+                const char *tc = leaf + 5;
+                while (*tc >= '0' && *tc <= '9') {
+                    tid = tid * 10U + (uint32_t)(*tc - '0');
+                    tc++;
+                }
+                /* 只有 "<pid>/task/<tid>" 这一层是目录；再深就是文件了。 */
+                if (*tc == '\0' && tid) {
+                    const task_t *thread = task_get_by_id(tid);
+                    if (!thread || thread->state == TASK_TERMINATED)
+                        return NULL;
+                    if (thread->thread_group_id != owner->thread_group_id)
+                        return NULL;
+                    is_thread_dir = 1;
+                } else if (*tc != '/') {
+                    return NULL;
+                }
+            }
+            if (is_thread_dir || strcmp(leaf, "task") == 0) {
+                vfs_node_t *n = devfs_alloc_node();
+                if (!n) return NULL;
+                set_name(n, path);
+                n->type = VFS_NODE_DIR;
+                n->mode = S_IFDIR | 0555;
+                return n;
+            }
+        }
         if (leaf && (strcmp(leaf, "cmdline") == 0 ||
                      strcmp(leaf, "status") == 0 ||
-                     strcmp(leaf, "maps") == 0)) {
+                     strcmp(leaf, "maps") == 0 ||
+                     strcmp(leaf, "comm") == 0 ||
+                     strcmp(leaf, "stat") == 0 ||
+                     (strncmp(leaf, "task/", 5) == 0 &&
+                      strchr(leaf + 5, '/') != NULL))) {
             vfs_node_t *n = devfs_alloc_node();
             if (!n) return NULL;
             set_name(n, path);
@@ -778,14 +889,44 @@ int devfs_readdir(const char *path, uint32_t index, char *name, uint32_t *type) 
             }
             return -1;
         }
+        /* /proc/<pid>/task：线程组视图，逐个列出 tid。 */
+        if (strcmp(rest, "/task") == 0) {
+            uint32_t seen = 0;
+            for (uint32_t i = 0;; i++) {
+                const task_t *thread = task_get_active(i);
+                if (!thread) return -1;
+                if (thread->state == TASK_TERMINATED) continue;
+                if (thread->thread_group_id != task->thread_group_id) continue;
+                if (seen++ == index) {
+                    u32_to_name(thread->id, name);
+                    *type = VFS_NODE_DIR;
+                    return 0;
+                }
+            }
+        }
+        /* /proc/<pid>/task/<tid>：单个线程的视图文件。 */
+        if (strncmp(rest, "/task/", 6) == 0 && rest[6]) {
+            const char *tid_cursor = rest + 6;
+            while (*tid_cursor >= '0' && *tid_cursor <= '9') tid_cursor++;
+            if (*tid_cursor != '\0') return -1;
+            if (!proc_task_from_path(path, NULL)) return -1;
+            static const char *thread_entries[] = {
+                "status", "stat", "comm", "maps"
+            };
+            if (index >= sizeof(thread_entries) / sizeof(thread_entries[0]))
+                return -1;
+            set_short_name(name, thread_entries[index]);
+            *type = VFS_NODE_FILE;
+            return 0;
+        }
         if (*rest != 0) return -1;
 
         static const char *entries[] = {
-            "cmdline", "status", "maps", "exe", "fd"
+            "cmdline", "status", "maps", "exe", "fd", "task"
         };
         if (index >= sizeof(entries) / sizeof(entries[0])) return -1;
         set_short_name(name, entries[index]);
-        *type = index == 4 ? VFS_NODE_DIR : VFS_NODE_FILE;
+        *type = (index == 4 || index == 5) ? VFS_NODE_DIR : VFS_NODE_FILE;
         return 0;
     }
 

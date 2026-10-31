@@ -238,6 +238,7 @@ int ui_theme_init(void) {
 }
 
 int ui_theme_set(const char *name) {
+    if (!g_inited) ui_theme_init();
     int idx = slot_find(name);
     if (idx < 0) return -1;
     g_current = idx;
@@ -245,12 +246,14 @@ int ui_theme_set(const char *name) {
 }
 
 int ui_theme_set_index(int index) {
+    if (!g_inited) ui_theme_init();
     if (index < 0 || index >= g_count || !g_slots[index].used) return -1;
     g_current = index;
     return 0;
 }
 
 int ui_theme_current_index(void) {
+    if (!g_inited) ui_theme_init();
     if (g_current < 0 || g_current >= g_count || !g_slots[g_current].used) return -1;
     return g_current;
 }
@@ -397,11 +400,12 @@ int ui_theme_apply_json(const void *docp,
 /* 复用已验证的磁盘链路。主题选择存独立文件，不与 shell 的启动偏好
  * (/startup.cfg，首位是 'g'/'t') 混在一起，避免两套格式互相干扰；
  * 无持久化后端时写失败属预期（仅本次开机生效）。 */
-#define THEME_CHOICE_FILE "/theme.cfg"
+#define THEME_CHOICE_FILE "/config/theme.cfg"
 
 int ui_theme_save_choice(const char *name) {
     if (!name || !name[0]) return -1;
     /* 用 VFS 创建/写入：无持久化后端时写失败属预期（仅本次开机生效） */
+    if (!vfs_lookup("/config")) vfs_mkdir("/config");
     vfs_node_t *n = vfs_lookup(THEME_CHOICE_FILE);
     if (!n) n = vfs_create(THEME_CHOICE_FILE);
     if (!n) return -1;
@@ -414,7 +418,7 @@ int ui_theme_save_choice(const char *name) {
 static bool ui_theme_load_choice(char *out, uint32_t cap) {
     if (!out || cap == 0) return false;
     out[0] = '\0';
-    vfs_node_t *n = vfs_lookup("/theme.cfg");
+    vfs_node_t *n = vfs_lookup("/config/theme.cfg");
     if (!n || n->size == 0) return false;
     uint32_t len = n->size;
     if (len > cap - 1) len = cap - 1;

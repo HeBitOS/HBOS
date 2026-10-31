@@ -215,19 +215,37 @@ static inline hax_ui_rect_t hax_ui_layout_row(hax_ui_layout_t *layout,
 
 static inline hax_ui_theme_t hax_ui_dark_theme(void) {
     hax_ui_theme_t t;
-    t.window_bg   = 0x121820;
-    t.panel_bg    = 0x1E2A38;
-    t.panel_alt   = 0x263545;
-    t.border      = 0x526579;
-    t.text        = 0xEAF2F8;
-    t.text_dim    = 0x91A4B6;
-    t.accent      = 0x14A6E0;
+    t.window_bg   = 0x242424;
+    t.panel_bg    = 0x303030;
+    t.panel_alt   = 0x383838;
+    t.border      = 0x484848;
+    t.text        = 0xFFFFFF;
+    t.text_dim    = 0x9A9996;
+    t.accent      = 0x3584E4;
     t.accent_text = 0xFFFFFF;
-    t.disabled    = 0x46515C;
-    t.selection   = 0x245D78;
-    t.hover       = 0x2388B5;
-    t.pressed     = 0x0D6F98;
-    t.focus_ring  = 0x7DDCFF;
+    t.disabled    = 0x5E5C64;
+    t.selection   = 0x1C71D8;
+    t.hover       = 0x4A90E8;
+    t.pressed     = 0x1C71D8;
+    t.focus_ring  = 0x62A0EA;
+    return t;
+}
+
+static inline hax_ui_theme_t hax_ui_light_theme(void) {
+    hax_ui_theme_t t;
+    t.window_bg   = 0xFAFAFA;
+    t.panel_bg    = 0xFFFFFF;
+    t.panel_alt   = 0xF6F5F4;
+    t.border      = 0xD5D5D5;
+    t.text        = 0x2E3436;
+    t.text_dim    = 0x9A9996;
+    t.accent      = 0x3584E4;
+    t.accent_text = 0xFFFFFF;
+    t.disabled    = 0xC0BFBC;
+    t.selection   = 0x3584E4;
+    t.hover       = 0x4A90E8;
+    t.pressed     = 0x1C71D8;
+    t.focus_ring  = 0x62A0EA;
     return t;
 }
 

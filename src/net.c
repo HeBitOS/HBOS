@@ -2256,7 +2256,7 @@ int net_ntp_sync(const char *server) {
  * 各自的 rx_buf，不再互相丢弃（Chromium/Linux AF_INET socket 需要
  * 并发连接）。
  */
-#define NET_TCP_CONNS 8
+#define NET_TCP_CONNS 64
 
 typedef struct {
     bool used;                     /**< 槽是否被占用 */
@@ -2550,8 +2550,11 @@ static void tcp_send_window_update(tcp_conn_t *c) {
 static int net_tcp_connect_prepare(uint32_t ip, uint16_t port,
                                    net_tcp_conn_t *conn) {
     memset(conn, 0, sizeof(*conn));
-    if (!primary.dhcp_ok && net_dhcp() < 0) return -1;
     int loopback = (ip == primary.ip) || (ip == NET_LOOPBACK_V4);
+    /* 回环目标不依赖网卡/DHCP：127.0.0.1 的 SYN 直接注入本机接收路径。
+     * 之前无条件先 DHCP，没插网卡时 connect 127.0.0.1 报 "link down"，
+     * Chromium 的 --remote-debugging-port 回环探活就被这里挡死。 */
+    if (!loopback && !primary.dhcp_ok && net_dhcp() < 0) return -1;
     uint32_t next_hop;
     if (!loopback) {
         if (net_route_next_hop(ip, &next_hop) < 0) return -1;

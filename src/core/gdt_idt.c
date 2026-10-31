@@ -44,7 +44,7 @@ static void print_hex16(uint16_t v) {
  * 内核没开 SMAP/SMEP，用户页可直接读；但仍逐页用 vmm_get_phys() 校验，
  * 避免把野指针当成栈帧读崩内核。 */
 static void print_dec(int value) {
-    char buf[8];
+    char buf[16];
     int n = 0;
     if (value < 0) { console_putchar('-'); value = -value; }
     do { buf[n++] = (char)('0' + value % 10); value /= 10; } while (value);
@@ -63,7 +63,176 @@ static int user_va_range_mapped(uint64_t address, uint64_t length) {
     return 1;
 }
 
-static void dump_user_backtrace(uint64_t rip, uint64_t rbp) {
+/* 故障现场寄存器快照。地址 0x0 的 SIGSEGV 几乎总是"某个指针是 NULL"，
+ * 只看 rip 无法区分是哪一个——把这几个 gpr 打出来，配合反汇编就能直接
+ * 认出 [reg+off] 里哪个 reg 是空。 */
+static void dump_user_trap_regs(const isr_regs_t *regs) {
+    static const char *const names[8] = {"rax", "rbx", "rcx", "rdx",
+                                         "rsi", "rdi", "rbp", "rsp"};
+    const uint64_t values[8] = {regs->rax, regs->rbx, regs->rcx, regs->rdx,
+                                regs->rsi, regs->rdi, regs->rbp, regs->rsp};
+    /* 谁崩的：pid/tid 与它是不是进程主线程。共享库里 NULL 解引用时，
+     * 单看地址分不清是主进程还是 clone 出来的兄弟线程——而两者的排查
+     * 方向完全不同（线程要查 clone 参数，进程要查 exec 参数）。 */
+    {
+        /* 注意：崩溃处理器运行在**中断上下文**（开中断之后 current_task 可能
+         * 已经被抢走），所以先存快照再做 print_dec 这类会写串口的慢操作，
+         * 别在中途去问"当前任务是谁"。 */
+        task_t *faulted = task_current();
+        int fault_tid = faulted ? (int)faulted->id : -1;
+        int fault_pid = faulted ? (int)task_get_process_id() : -1;
+        console_puts("  fault pid=");
+        print_dec(fault_pid);
+        console_puts(" tid=");
+        print_dec(fault_tid);
+        console_puts(fault_pid == fault_tid ? " (main)\n" : " (thread)\n");
+        /* print_hex64 自带 "0x" 前缀，这里不要再手写一个。 */
+        console_puts("  err=");
+        print_hex64(regs->err_code);
+        console_puts(" cs=");
+        print_hex64(regs->cs);
+        console_putchar('\n');
+    }
+    for (int i = 0; i < 8; i++) {
+        console_puts(i == 0 ? "  regs: " : " ");
+        console_puts(names[i]);
+        console_puts("=0x");
+        print_hex64(values[i]);
+        if (i == 7) console_putchar('\n');
+    }
+    console_puts("        r8=0x");
+    print_hex64(regs->r8);
+    console_puts(" r9=0x");
+    print_hex64(regs->r9);
+    console_puts(" r10=0x");
+    print_hex64(regs->r10);
+    console_puts(" r12=0x");
+    print_hex64(regs->r12);
+    console_puts(" r13=0x");
+    print_hex64(regs->r13);
+    console_puts(" r14=0x");
+    print_hex64(regs->r14);
+    console_puts(" r15=0x");
+    print_hex64(regs->r15);
+    console_putchar('\n');
+}
+
+/* 原始栈窗口。Chromium/libc 这类发行版二进制都是 -O2 编译、默认省掉
+ * 帧指针（-fomit-frame-pointer），RBP 链往往一个有效帧都没有。真正的
+ * 救命手段是把崩溃点附近的栈原样打出来：宿主侧拿同一份 ELF 反汇编
+ * （objdump -d）就能把里面"长得像返回地址"的那几个字对回调用点。 */
+#define USER_STACK_DUMP_WORDS 32
+static void dump_user_stack_window(uint64_t rsp) {
+    if (!user_va_range_mapped(rsp, 8)) return;
+    console_puts("  stack @0x");
+    print_hex64(rsp);
+    console_putchar('\n');
+    for (int i = 0; i < USER_STACK_DUMP_WORDS; i++) {
+        uint64_t address = rsp + (uint64_t)i * 8;
+        if (!user_va_range_mapped(address, 8)) break;
+        uint64_t value = *(volatile uint64_t *)(uintptr_t)address;
+        if ((i % 4) == 0) {
+            console_puts("    +");
+            print_hex64((uint64_t)i * 8);
+            console_puts(": ");
+        }
+        print_hex64(value);
+        console_putchar(((i % 4) == 3) ? '\n' : ' ');
+    }
+    if ((USER_STACK_DUMP_WORDS % 4) != 0) console_putchar('\n');
+}
+
+/* 把故障 rip 落到它所属的 VMA 里。只打印 rip 和它前后最近的几个区间，
+ * 就能区分三种情况：
+ *   1. rip 落在某个 .so 的 PT_LOAD 区间 → 用 映射起点 - 文件最小 vaddr
+ *      就能换算成文件偏移；
+ *   2. rip 落在堆/栈/匿名映射 → 说明跳转目标本身是野指针；
+ *   3. rip 根本没被映射、或掉在区间外 → 加载器把库映射少了。 */
+static void dump_user_vma_for(uint64_t rip) {
+    task_t *faulted = task_current();
+    /* current 在崩溃路径上可能已经被换掉（比如进程刚被 mark_dead），
+     * 那样 task->mm 就是别人的地址空间，rip 自然"落在任何映射外"。
+     * 遍历所有活动任务，挑出真正包含这个 rip 的那个地址空间。 */
+    if (!faulted || !faulted->mm) return;
+    task_mm_t *mm = faulted->mm;
+    int contains = 0;
+    for (vm_area_t *area = mm->areas; area; area = area->next)
+        if (rip >= area->start && rip < area->end) { contains = 1; break; }
+    if (!contains) {
+        int active = task_get_count();
+        for (int i = 0; i < active; i++) {
+            const task_t *candidate = task_get_active((uint32_t)i);
+            if (!candidate || !candidate->mm) continue;
+            for (vm_area_t *area = candidate->mm->areas; area;
+                 area = area->next) {
+                if (rip >= area->start && rip < area->end) {
+                    mm = candidate->mm;
+                    contains = 1;
+                    break;
+                }
+            }
+            if (contains) break;
+        }
+    }
+    if (!mm || !mm->areas) return;
+    int printed = 0;
+    for (vm_area_t *area = mm->areas; area; area = area->next) {
+        if (printed >= 6) break;
+        /* 只看 rip 附近的：完全在 rip 之下的跳过（最多保留最近一个）。 */
+        if (area->end < rip) continue;
+        if (area->start > rip + 0x10) break;
+        console_puts(printed == 0 ? "  vma: " : "       ");
+        print_hex64(area->start);
+        console_puts("-");
+        print_hex64(area->end);
+        console_puts(" back=");
+        print_dec((int)area->backing_type);
+        console_puts(" off=0x");
+        print_hex64(area->backing_offset);
+        if (rip >= area->start && rip < area->end) {
+            console_puts("  <- rip  (+0x");
+            print_hex64(rip - area->start);
+            console_puts(")");
+        }
+        console_putchar('\n');
+        printed++;
+    }
+    if (printed == 0) console_puts("  vma: (rip 不在任何映射区间内)\n");
+
+    /* 只看 VMA 链表是不够的：库/mmap 有些路径只建页表不登 VMA。直接把
+     * rip 所在页的页表项翻出来，P/W/U/NX 一看就知道 rip 这一页到底存在
+     * 不存在、能不能执行。 */
+    uint64_t page = rip & ~(uint64_t)(PAGE_SIZE - 1);
+    console_puts("  rip page pa=");
+    print_hex64(vmm_get_phys(page));
+    console_puts(" flags=");
+    print_hex64(vmm_get_page_flags(page));
+    /* 向上/向下各探 16 MB，找出这段连续映射的真正起止——库的映射基址
+     * 用肉眼算不准，直接问页表最可靠。 */
+    uint64_t lo = page;
+    for (int i = 0; i < 4096 && lo; i++) {
+        uint64_t prev = lo - PAGE_SIZE;
+        if (!vmm_get_phys(prev)) break;
+        if (vmm_get_page_flags(prev) != vmm_get_page_flags(page)) break;
+        lo = prev;
+    }
+    uint64_t hi = page + PAGE_SIZE;
+    for (int i = 0; i < 4096; i++) {
+        if (!vmm_get_phys(hi)) break;
+        if (vmm_get_page_flags(hi) != vmm_get_page_flags(page)) break;
+        hi += PAGE_SIZE;
+    }
+    console_puts("  same-perm span=");
+    print_hex64(lo);
+    console_puts("-");
+    print_hex64(hi);
+    console_puts(" (rip at +0x");
+    print_hex64(rip - lo);
+    console_puts(")\n");
+}
+
+static void dump_user_backtrace(uint64_t rip, uint64_t rbp)
+{
     console_puts("  bt[0] rip=0x");
     print_hex64(rip);
     console_putchar('\n');
@@ -211,6 +380,8 @@ static idt_entry_t idt_entries[256];
 
 // Stub address tables defined in interrupt_asm.asm
 extern uint64_t isr_stub_table[32];
+/* 单步探针开关，定义在 src/core/task_switch.asm。 */
+extern int task_debug_single_step;
 extern uint64_t irq_stub_table[16];
 extern void syscall_int80_stub(void);
 extern void linux_syscall_entry(void);
@@ -294,12 +465,61 @@ void isr_handler(isr_regs_t *regs) {
     const char *name = (vec < 32) ? exc_names[vec] : "Unknown";
     uint64_t cr2_val = (vec == EXC_PF) ? read_cr2() : 0;
 
+    /* 单步探针（排错用，见 task_switch.asm 的 task_debug_single_step）。
+     * clone 出来的子进程打了 TF 之后，执行完第一条用户指令就会到这里，
+     * regs->rip 正是"刚执行完的那条"的下一条 —— 由此可以确认子进程到底
+     * 有没有真正进用户态，以及卡在哪条指令之后。
+     *
+     * 这里清掉 TF 放行，不当成信号处理（否则子进程会收到 SIGTRAP 直接
+     * 退出，反而看不出问题）。 */
+    if (vec == EXC_DB && (regs->cs & 3) == 3 &&
+        task_debug_single_step) {
+        /* 连续单步：把 TF 留着继续追，直到步数用完或撞上 syscall。
+         * 只打前若干条（trace 上限），避免把串口打爆。 */
+        static int step_trace_left = 24;
+        if (step_trace_left > 0) {
+            console_puts("[STEP] rip=0x");
+            print_hex64(regs->rip);
+            console_puts(" rax=0x");
+            print_hex64(regs->rax);
+            console_puts(" rdi=0x");
+            print_hex64(regs->rdi);
+            console_puts(" rbx=0x");
+            print_hex64(regs->rbx);
+            console_putchar('\n');
+            step_trace_left--;
+            return;
+        }
+        regs->rflags &= ~0x100ULL;
+        task_debug_single_step = 0;
+        step_trace_left = 24;
+        console_puts("[STEP] trace limit reached, stop\n");
+        return;
+    }
+
     /* A present user write fault on a writable-before-fork COW mapping is
      * resolved in-kernel.  This stays allocation-free when the page has
      * become uniquely owned; otherwise only one 4 KiB page is copied. */
     if (vec == EXC_PF && (regs->cs & 3) == 3 &&
         (regs->err_code & (PF_P | PF_W | PF_U)) == (PF_P | PF_W | PF_U)) {
         int cow_result = vmm_handle_cow_fault(cr2_val);
+        /* fork 出来的子进程如果"进了用户态却一条 syscall 都不发"，最常见
+         * 的原因就是它一落地先写 COW 页，而这条故障没被解析成功。这条
+         * 日志把每一次用户态写故障的裁决结果打出来：>0 已解析、0 不是
+         * COW 页、<0 解析失败。只在真正出错时才有一行，量很小。 */
+        if (cow_result <= 0) {
+            console_puts("[PF] user write addr=0x");
+            print_hex64(cr2_val);
+            console_puts(" rip=0x");
+            print_hex64(regs->rip);
+            console_puts(" err=0x");
+            print_hex64(regs->err_code);
+            console_puts(" cow=");
+            print_hex64((uint64_t)(int64_t)cow_result);
+            console_puts(" pte=0x");
+            print_hex64(vmm_get_page_flags(cr2_val & ~0xfffULL));
+            console_putchar('\n');
+        }
         if (cow_result > 0) return;
     }
 
@@ -320,7 +540,14 @@ void isr_handler(isr_regs_t *regs) {
         console_puts(" rip=0x");
         print_hex64(regs->rip);
         console_putchar('\n');
+        /* SIGSEGV 往往发生在 -O2 编译的库里，调用者没建帧指针——只靠
+         * rbp 链会只打出 bt[0] 就断尾。这里补上"故障现场寄存器"（能直接
+         * 定位 load/store 的源/目的）和最近系统调用轨迹，和 #BP 路径对齐。 */
+        dump_user_trap_regs(regs);
+        dump_user_vma_for(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
+        dump_user_stack_window(regs->rsp);
+        linux_syscall_trace_dump();
         task_exit();
     }
 
@@ -340,7 +567,7 @@ void isr_handler(isr_regs_t *regs) {
         console_puts(name);
         console_puts(" rip=0x");
         print_hex64(regs->rip);
-        console_puts(" err=0x");
+        console_puts(" err=");
         print_hex64(regs->err_code);
         console_puts(" -> task terminated\n");
         {
@@ -351,7 +578,10 @@ void isr_handler(isr_regs_t *regs) {
             print_hex64((uint64_t)current);
             console_putchar('\n');
         }
+        dump_user_trap_regs(regs);
+        dump_user_vma_for(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
+        dump_user_stack_window(regs->rsp);
         linux_syscall_trace_dump();
         if (linux_signal_prepare_exception(regs, signal_number, regs->rip,
                                            regs->err_code) > 0)

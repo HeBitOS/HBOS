@@ -153,9 +153,18 @@ static void app_clock_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h
     }
 }
 
+static int8_t g_clock_last_tz = 0;
+static bool g_clock_tz_inited = false;
+
 static int app_clock_tick(gui_state_t *st) {
     uint8_t sec = cmos_second();
-    if (sec == g_clock_last_sec) return 0;
+    bool tz_changed = false;
+    if (!g_clock_tz_inited || g_clock_last_tz != g_rtc_tz_offset_hours) {
+        g_clock_tz_inited = true;
+        g_clock_last_tz = g_rtc_tz_offset_hours;
+        tz_changed = true;
+    }
+    if (sec == g_clock_last_sec && !tz_changed) return 0;
     g_clock_last_sec = sec;
     return clock_visible(st);
 }

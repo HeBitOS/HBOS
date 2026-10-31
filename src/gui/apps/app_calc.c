@@ -401,7 +401,7 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
     /* display box */
     gui_soft_shadow(tx, ty, L.disp_w, L.disp_h);
     gui_draw_panel_shell(tx, ty, L.disp_w, L.disp_h,
-                         UI_BG, UI_BG,
+                         UI_SURFACE2, UI_SURFACE2,
                          UI_ACCENT, UI_ACCENT);
 
     /* result number */
@@ -450,11 +450,12 @@ static void app_calc_draw(gui_state_t *st, int tx, int ty, int win_w, int win_h)
                           bc);
             gui_border(bx, by, L.bw, L.bh,
                        action == '=' ? UI_ACCENT
-                                     : UI_ACCENT);
+                                     : UI_LINE2);
             int tw = gui_text_width(BTNS[row][col].label, 1);
             int lx = bx + (L.bw - tw) / 2;
             int ly = by + (L.bh - 10) / 2;
-            gui_text(lx, ly, BTNS[row][col].label, UI_FG, 1);
+            gui_text(lx, ly, BTNS[row][col].label,
+                     (action == '=' || action == 'C') ? UI_ACCENT_FG : UI_FG, 1);
         }
     }
 

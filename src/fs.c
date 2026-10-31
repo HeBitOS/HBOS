@@ -1896,6 +1896,10 @@ uint32_t fs_disk_total_sectors(void) {
 
 /** 获取文件系统总容量（字节） */
 uint32_t fs_capacity_bytes(void) {
+    if (fs_backend == FS_BACKEND_EXT2) {
+        uint64_t bytes = (uint64_t)ext2_fs.sb.s_blocks_count * ext2_fs.block_size;
+        return bytes > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)bytes;
+    }
     /* FAT32 后端的容量是分区实际大小，不是 ramfs 的 128×128KiB 模型上限
      * ——之前 diskmgr 在 63MiB 的 FAT32 分区上照样显示 16MiB。返回值是
      * uint32_t，超过 4GiB 的分区饱和到 0xFFFFFFFF。 */
@@ -1912,6 +1916,12 @@ uint32_t fs_capacity_bytes(void) {
 
 /** 获取已使用字节数 */
 uint32_t fs_used_bytes(void) {
+    if (fs_backend == FS_BACKEND_EXT2) {
+        uint64_t total = (uint64_t)ext2_fs.sb.s_blocks_count * ext2_fs.block_size;
+        uint64_t free_b = (uint64_t)ext2_fs.sb.s_free_blocks_count * ext2_fs.block_size;
+        uint64_t used = total > free_b ? total - free_b : 0;
+        return used > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)used;
+    }
     uint32_t used = 0;
     for (uint32_t i = 0; i < MAX_FILES; i++) {
         if (fs.files[i].used) used += fs.files[i].size;

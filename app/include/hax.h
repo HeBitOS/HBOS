@@ -574,4 +574,8 @@ static inline int hax_window_close(hax_window_t window) {
 /* HIVE 标准窗口控件（按钮、文本框、复选框、列表、滑杆等）。 */
 #include "hax_widgets.h"
 
+/* CSS 风格的过渡动画（hax_anim_t / hax_anim_to / hax_anim_tick）。
+ * 单独一个头文件，不写在这里，是因为它也允许被非 HAX 的用户态程序直接用。 */
+#include "hax_anim.h"
+
 #endif /* HBOS_HAX_H */

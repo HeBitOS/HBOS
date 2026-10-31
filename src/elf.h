@@ -141,9 +141,15 @@ int elf64_load_and_spawn(const uint8_t *data, size_t size,
 int elf64_load_and_exec(const uint8_t *data, size_t size,
                         char *const argv[], char *const envp[]);
 
-/** Stream an ELF image directly from a VFS node and replace this task. */
+/** Stream an ELF image directly from a VFS node and replace this task.
+ *
+ *  execve 的调用方应当先 elf_set_exec_path(path) 把绝对路径告诉 loader，
+ *  否则 /proc/<pid>/exe 只能拿到 basename，dirname() 的结果不可用。 */
 int elf64_load_vfs_and_exec(struct vfs_node *node,
                             char *const argv[], char *const envp[]);
+
+/** 记录下一次 exec 的绝对路径（仅对紧随其后的 execve 生效）。 */
+void elf_set_exec_path(const char *path);
 
 /** Stream an ELF image directly from a VFS node into a new task (no replace). */
 int elf64_load_vfs_and_spawn(struct vfs_node *node,

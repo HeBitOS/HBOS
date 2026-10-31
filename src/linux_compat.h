@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 struct task;
+#include "fd.h"
 
 #define LINUX_POLLIN   0x001
 #define LINUX_POLLOUT  0x004
@@ -72,6 +73,11 @@ long linux_compat_read(int fd, void *buffer, size_t count);
 long linux_compat_write(int fd, const void *buffer, size_t count);
 int linux_compat_close(int fd);
 void linux_compat_retain(int fd);
+/* 按 fd 条目直接调整 pipe 引用计数（fork 复制 fd 表时用，见 task.c）。 */
+void linux_compat_retain_entry(fd_entry_t *entry);
+void linux_compat_release_entry(fd_entry_t *entry);
+/* 读端阻塞判断用：除自己以外是否还有写端（见 posix.c 的 read()）。 */
+int posix_pipe_write_end_open(void *pipe);
 void linux_compat_retain_task(struct task *task);
 void linux_compat_release_task(struct task *task);
 

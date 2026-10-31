@@ -48,5 +48,6 @@ int gui_app_draw(gui_state_t *st, int mode, int tx, int ty, int win_w, int win_h
 int gui_app_handle_key(gui_state_t *st, int key);
 int gui_app_tick(gui_state_t *st);
 int gui_app_on_click(gui_state_t *st, int mx, int my, int tx, int ty, int win_w, int win_h);
+void app_settings_wheel(gui_state_t *st, int steps);
 
 #endif

@@ -71,6 +71,7 @@ typedef hax_rect_t hive_window_rect_t;
 #define hive_layout_begin         hax_ui_layout_begin
 #define hive_layout_row           hax_ui_layout_row
 #define hive_dark_theme           hax_ui_dark_theme
+#define hive_light_theme          hax_ui_light_theme
 #define hive_ui_init              hax_ui_init
 #define hive_ui_clear             hax_ui_clear_widgets
 #define hive_ui_widget            hax_ui_widget

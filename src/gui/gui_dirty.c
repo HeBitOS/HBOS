@@ -26,12 +26,20 @@ static int rect_intersect(int ax, int ay, int aw, int ah,
     return *ow > 0 && *oh > 0;
 }
 
-/* 相交或**相邻**都合并：相邻矩形拼起来能少一次重绘，且不会露缝。 */
-static int rect_touch(int ax, int ay, int aw, int ah,
-                      int bx, int by, int bw, int bh) {
+/* 只有**真正重叠**才合并。
+ *
+ * 这里曾经用 `>= 0` 把「相邻但不重叠」也算作可合并，结果是两个对角矩形
+ * 合并后的外接矩形把中间的空隙一起纳进了重绘区 —— 那块空隙被重新画成
+ * 当前桌面状态，正好抹掉本该留在那里的窗口/桌面内容，视觉上就是一块
+ * 突兀的"残留方块"（用户反馈"重绘有时会有残留方块，很难看"）。
+ *
+ * 相邻合并省下的那点重绘次数，远不值得付出画面正确性的代价；脏区数量
+ * 上限也从 12 提到 32，避免矩形一多就退化整屏重绘。 */
+static int rect_overlap(int ax, int ay, int aw, int ah,
+                        int bx, int by, int bw, int bh) {
     int ox = (ax + aw < bx + bw ? ax + aw : bx + bw) - (ax > bx ? ax : bx);
     int oy = (ay + ah < by + bh ? ay + ah : by + bh) - (ay > by ? ay : by);
-    return ox >= 0 && oy >= 0;
+    return ox > 0 && oy > 0;
 }
 
 void gui_dirty_reset(void) {
@@ -59,7 +67,7 @@ void gui_dirty_add(int x, int y, int w, int h) {
     while (merged) {
         merged = 0;
         for (int i = 0; i < g_dirty_n; i++) {
-            if (!rect_touch(x, y, w, h, g_dx[i], g_dy[i], g_dw[i], g_dh[i]))
+            if (!rect_overlap(x, y, w, h, g_dx[i], g_dy[i], g_dw[i], g_dh[i]))
                 continue;
             int x1 = x < g_dx[i] ? x : g_dx[i];
             int y1 = y < g_dy[i] ? y : g_dy[i];

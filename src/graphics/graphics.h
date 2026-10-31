@@ -108,4 +108,14 @@ typedef struct {
 
 int fb_get_info(fb_info_t *info);
 
+// 动态切换分辨率（Bochs/QEMU BGA 驱动支持，并同步更新帧缓冲与终端）
+int fb_set_resolution(uint32_t width, uint32_t height);
+
+// 轮询 QEMU/Bochs VGA EDID 首选分辨率（当宿主自由调整窗口大小时返回 1 并写入新宽高）
+int fb_poll_host_resize(uint32_t *out_w, uint32_t *out_h);
+
+// 获取当前显示物理尺寸计算出的推荐 DPI（基准 96 DPI）
+int fb_get_edid_dpi(void);
+
 #endif /* GRAPHICS_H */
+

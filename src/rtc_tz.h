@@ -95,7 +95,12 @@ static inline int64_t rtc_tz_cmos_epoch_now(void) {
         if (pm && h < 12) h += 12;
         if (!pm && h == 12) h = 0;
     }
-    int64_t year = (int64_t)cent * 100 + yr;
+    int64_t year;
+    if (cent >= 19 && cent <= 22) {
+        year = (int64_t)cent * 100 + yr;
+    } else {
+        year = (yr < 70) ? (2000 + yr) : (1900 + yr);
+    }
     int64_t days = rtc_tz_days_from_civil(year, mon, day);
     return days * 86400 + (int64_t)h * 3600 + (int64_t)mi * 60 + s;
 }

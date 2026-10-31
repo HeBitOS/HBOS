@@ -57,6 +57,16 @@
 //socket 类型、非阻塞、CLOEXEC 等标志
 
 #define LINUX_MSG_DONTWAIT 0x40
+#define LINUX_MSG_NOSIGNAL 0x4000
+/* MSG_NOSIGNAL 是 Linux 上**最常用**的 socket 标志之一：往已关闭的
+ * socket 写时不要顺带发 SIGPIPE，改由返回值报告 EPIPE。Chromium/IPC
+ * 层的每一条 send/sendmsg 都带着它。HBOS 本来就没有 SIGPIPE 的隐式
+ * 触发路径（写失败直接返回 EPIPE），所以把这一位当成无害标志接受即可。
+ * 以前这里用 `flags & ~LINUX_MSG_DONTWAIT` 做白名单，MSG_NOSIGNAL 一进来
+ * 就返回 EOPNOTSUPP —— 表现是 zygote 启动消息根本发不出去，父进程随即
+ * 报 "Cannot communicate with zygote"。 */
+#define LINUX_MSG_IGNORED (LINUX_MSG_NOSIGNAL)
+/* 其它"语义上无副作用"的标志：DONTWAIT 必须识别（非阻塞），其余忽略。 */
 
 #define UNIX_SOCKET_SLOTS 16
 #define UNIX_SOCKET_BUFFER 4096
@@ -852,12 +862,14 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
     }
 
     if (entry->type == FD_PIPE && entry->pipe) {
+        /* 写端全关（本进程里已无写端 fd）时，读端应当立刻报 "可读 + HUP"
+         * （read 会返回 0=EOF），而不是挂着不动。判断逻辑见
+         * posix_pipe_write_end_open() 上面那段注释。 */
+        int writers = posix_pipe_write_end_open(entry->pipe);
         uint32_t ready = 0;
-        if (entry->pipe->count || entry->pipe->ref_count < 2)
-            ready |= LINUX_POLLIN;
-        if (entry->pipe->count < PIPE_BUF_SIZE)
-            ready |= LINUX_POLLOUT;
-        if (entry->pipe->ref_count < 2) ready |= LINUX_POLLHUP;
+        if (entry->pipe->count || !writers) ready |= LINUX_POLLIN;
+        if (entry->pipe->count < PIPE_BUF_SIZE) ready |= LINUX_POLLOUT;
+        if (!writers) ready |= LINUX_POLLHUP;
         return ready;
     }
 
@@ -1107,6 +1119,51 @@ int linux_compat_close(int fd) {
     return 0;
 }
 
+/* 读端拿不到数据时该不该返回 0（EOF）。
+ *
+ * 判据：**本进程里还有没有打开的写端 fd？**
+ * 注意不能用 "ref_count / 写者进程数" 来判断：`pipe()` 一返回，同一个
+ * 进程就同时握着读端和写端两个 fd，ref_count 恒为 2，跟"对端还活着吗"
+ * 完全无关；而 fork 之后子进程复制了 fd 表，ref_count 会变成 3/4…，
+ * 于是原来的 `ref_count < 2` 判据既会在 `cmd | grep` 里提前 EOF，也会在
+ * 子进程退出后永远等不到 EOF。
+ *
+ * 直接扫本进程的 fd 表：没有写端 fd → EOF；有写端 fd 但没数据 →
+ * 继续等（非阻塞则 EAGAIN）。跨进程的写端存活由 fd 表的复制/释放
+ * （linux_compat_retain_entry / release_entry）体现在各自的表里，
+ * 每个进程只对自己看得见的写端负责，这正是 Linux 的语义。 */
+int posix_pipe_write_end_open(void *opaque) {
+    pipe_t *pipe = (pipe_t *)opaque;
+    if (!pipe) return 0;
+    task_t *self = task_current();
+    if (!self || !self->fd_table) return 1;
+    /* 同一进程的多个线程共享 fd 表，扫一次就够；这里按 thread_group
+     * 只处理当前任务自己的表即可（HBOS 的线程共享同一张 fd_table）。 */
+    for (int i = 0; i < POSIX_MAX_FDS; i++) {
+        const fd_entry_t *entry = &self->fd_table->entries[i];
+        if (entry->used && entry->type == FD_PIPE && entry->pipe == pipe &&
+            (entry->flags & O_ACCMODE) != O_RDONLY)
+            return 1;
+    }
+    return 0;
+}
+
+/* 按 fd_entry 直接调整引用计数。fork 复制出来的子进程 fd 表**不和父进程
+ * 共享**，所以每一条 pipe fd 都要单独 retain 一份，否则子进程 close 掉
+ * 自己那份就会把父进程还在用的 pipe_t 提前 kfree 掉（UAF）。 */
+void linux_compat_retain_entry(fd_entry_t *entry) {
+    if (!entry || !entry->used) return;
+    if (entry->type == FD_PIPE && entry->pipe) entry->pipe->ref_count++;
+}
+
+void linux_compat_release_entry(fd_entry_t *entry) {
+    if (!entry || !entry->used) return;
+    if (entry->type == FD_PIPE && entry->pipe) {
+        if (--entry->pipe->ref_count <= 0) kfree(entry->pipe);
+        entry->pipe = NULL;
+    }
+}
+
 void linux_compat_retain(int fd) {
     task_t *task = compat_task();
     fd_entry_t *entry = compat_fd(task, fd);
@@ -1130,6 +1187,10 @@ void linux_compat_retain(int fd) {
         inotify_slot_t *slot = &inotify_slots[entry->compat_id];
         if (slot->used && slot->refs < UINT32_MAX)
             __sync_fetch_and_add(&slot->refs, 1);
+    } else if (entry->type == FD_PIPE && entry->pipe) {
+        /* dup(2)/dup2(2)/F_DUPFD：新 fd 与旧 fd 共享同一个 pipe_t，
+         * 必须再记一笔，否则任意一端 close 就把整个管道拆了。 */
+        entry->pipe->ref_count++;
     }
 }
 
@@ -1890,7 +1951,8 @@ long linux_compat_unix_send(int fd, const void *buffer, size_t count,
     if (!slot) return -EBADF;
     if (slot->listening) return -ENOTCONN;
     if (slot->write_shutdown) return -EPIPE;
-    if (flags & ~LINUX_MSG_DONTWAIT) return -EOPNOTSUPP;
+    if (flags & ~(LINUX_MSG_DONTWAIT | LINUX_MSG_IGNORED))
+        return -EOPNOTSUPP;
     if (!count) return 0;
 
     size_t written = 0;
@@ -1925,7 +1987,8 @@ long linux_compat_unix_recv(int fd, void *buffer, size_t count, int flags) {
     if (!slot) return -EBADF;
     if (slot->listening) return -ENOTCONN;
     if (slot->read_shutdown) return 0;
-    if (flags & ~LINUX_MSG_DONTWAIT) return -EOPNOTSUPP;
+    if (flags & ~(LINUX_MSG_DONTWAIT | LINUX_MSG_IGNORED))
+        return -EOPNOTSUPP;
     if (!count) return 0;
 
     while (!slot->receive_count) {

@@ -140,6 +140,11 @@ void kmain(void *mbi) {
     net_init();
     selftest_run();
 
+    // 内置 HPT 软件仓库（/packages）：镜像自带的 HAX 应用，供 hpt 装卸
+    extern void hpt_repo_seed_init(void);
+    serial_print("[KERN] seed: hpt repo\n");
+    hpt_repo_seed_init();
+    serial_print("[KERN] seed: hpt repo done\n");
     extern void tcc_runtime_seed_init(void);
     serial_print("[KERN] seed: tcc headers\n");
     tcc_runtime_seed_init();
@@ -203,11 +208,6 @@ void kmain(void *mbi) {
     (void)hax_seed_embedded_file(
         "linux_dlopen_dep_root", "/lib/liblinux_dep_root.so");
 
-    // 内置 HPT 软件仓库（/packages）：镜像自带的 HAX 应用，供 hpt 装卸
-    extern void hpt_repo_seed_init(void);
-    serial_print("[KERN] seed: hpt repo\n");
-    hpt_repo_seed_init();
-    serial_print("[KERN] seed: hpt repo done\n");
 
     // 内置 web vendor 包（/system/vue.global.prod.js）：浏览器 js.hax 管线
     // 的 Vue 运行时兜底，见 tools/genwebblob.py + web_vendor_seed.c
@@ -222,6 +222,13 @@ void kmain(void *mbi) {
     serial_print("[KERN] seed: themes\n");
     theme_seed_init();
     serial_print("[KERN] seed: themes done\n");
+
+    /* 发行版身份文件（/etc/os-release 等）。原本镜像里一个都没有，
+     * fastfetch 之类的程序只能显示 unknown。详见 docs/DISTRO-IDENTITY.md */
+    extern void distro_seed_init(void);
+    serial_print("[KERN] seed: distro identity\n");
+    distro_seed_init();
+    serial_print("[KERN] seed: distro identity done\n");
 
     // ---- Phase 6: Shell ----
     // 注册所有内置命令（help, ls, cat, echo 等）

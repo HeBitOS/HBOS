@@ -371,7 +371,9 @@ static inline void cjk_hline(struct flanterm_fb_context *fc, uint64_t x, uint64_
     while (n--) *p++ = color;
 }
 
-static void cjk_render_at_cursor(uint32_t codepoint) {
+/* wide: 1 = 占两列（CJK 全角）；0 = 占一列（Box Drawing / Block Elements 等
+ * 歧义宽度字符 —— neofetch/htop 之类的 TUI 都按单列排版它们）。 */
+static void cjk_render_at_cursor(uint32_t codepoint, int wide) {
     if (!g_term) return;
 
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
@@ -384,7 +386,7 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
     uint64_t rows     = g_term->rows;
 
     // ---- edge wrap ----
-    if (cursor_x >= cols - 1) {
+    if (cursor_x >= cols - (wide ? 1 : 0)) {
         cursor_x = 0;
         cursor_y++;
         if (cursor_y >= rows) {
@@ -405,11 +407,11 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
     uint64_t cell_w = fc->glyph_width;
     uint64_t cell_h = fc->glyph_height;
 
-    // ---- background fill: erase old ASCII pixels ----
+    // ---- background fill: erase old pixels ----
     // 逐行成段写（见 cjk_hline）：一个 16×32 的字形单元格原来是 1024 次
     // fb_put_pixel，现在是 32 次行填充。裁剪语义与逐像素时完全一致。
     for (uint64_t rr = 0; rr < cell_h; rr++)
-        cjk_hline(fc, px, py + rr, cell_w * 2, bg);
+        cjk_hline(fc, px, py + rr, cell_w * (wide ? 2 : 1), bg);
 
     // ---- paint CJK 16×16 glyph pixels (upscaled) ----
     // 字形位图是 16×16 单色点阵，每个置位点要放大成 scale_x × scale_y 的实心块。
@@ -437,7 +439,7 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
         }
     }
 
-    // ---- write CJK codepoint into grid[] for both cells ----
+    // ---- write codepoint into grid[] for the cell(s) ----
     // Storing the actual codepoint (>= 0x100) lets plot_char guard
     // against font_bool out-of-bounds and preserves CJK pixels
     // during terminal scroll via framebuffer-level pixel scroll.
@@ -448,10 +450,10 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
     uint64_t i0 = cursor_y * cols + cursor_x;
     uint64_t i1 = cursor_y * cols + cursor_x + 1;
     if (i0 < cols * rows) fc->grid[i0] = empty;
-    if (i1 < cols * rows) fc->grid[i1] = empty;
+    if (wide && i1 < cols * rows) fc->grid[i1] = empty;
 
     // ---- advance cursor ----
-    fc->cursor_x = cursor_x + 2;
+    fc->cursor_x = cursor_x + (wide ? 2 : 1);
     if (fc->cursor_x >= cols) {
         fc->cursor_x -= cols;
         fc->cursor_y = cursor_y + 1;
@@ -464,9 +466,9 @@ static void cjk_render_at_cursor(uint32_t codepoint) {
     // ---- sync old_cursor AND zap queue ----
     fc->old_cursor_x = fc->cursor_x;
     fc->old_cursor_y = fc->cursor_y;
-    // Clear any stale map entries at our CJK cell positions
+    // Clear any stale map entries at our cell positions
     if (i0 < cols * rows) fc->map[i0] = NULL;
-    if (i1 < cols * rows) fc->map[i1] = NULL;
+    if (wide && i1 < cols * rows) fc->map[i1] = NULL;
     // Force queue_i to 0 — discards any orphaned slots.
     // This is SAFE because:
     //   - grid[] is already up-to-date (we wrote spaces above)
@@ -754,10 +756,12 @@ void console_putchar(char c) {
             flanterm_putchar(g_term, (uint8_t)codepoint);
             flanterm_flush(g_term);
         } else {
-            // Non-ASCII (CJK or any Unicode) — always advance by 2 columns
-            // via cjk_render_at_cursor, which writes 2 spaces then optionally
-            // overpaints the glyph bitmap if available in the font table.
-            cjk_render_at_cursor(codepoint);
+            // Box Drawing (U+2500-U+257F) and Block Elements (U+2580-U+259F)
+            // are single-column "ambiguous width" chars — TUI layouts such as
+            // neofetch assume 1 column per glyph. Everything else non-ASCII
+            // (CJK etc.) advances by 2 columns as before.
+            int narrow = (codepoint >= 0x2500 && codepoint <= 0x259F);
+            cjk_render_at_cursor(codepoint, !narrow);
         }
         console_present_after_char(old_cx, old_cy, fc->cursor_x,
                                    fc->cursor_y, old_scroll_gen);
@@ -900,8 +904,8 @@ void fb_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t color
 }
 
 int fb_get_info(fb_info_t *info) {
-    if (!g_term) return -1;
-    if (g_backbuf_active) {
+    if (!g_term && !g_real_fb) return -1;
+    if (g_real_fb) {
         // Consumers of fb_get_info() (the GUI compositor) expect the
         // REAL hardware target, not the TUI's private back-buffer.
         info->addr = g_real_fb;
@@ -915,3 +919,301 @@ int fb_get_info(fb_info_t *info) {
     info->pitch = fc->pitch; info->bpp = 32;
     return 0;
 }
+
+/* ============================================================
+ * Bochs/QEMU BGA + VMware SVGA II 动态可变分辨率 & EDID 窗口状态自动感知
+ * 支持：
+ *   1. QEMU / Bochs (BGA 0x1234:0x1111 + BAR2 EDID 实时窗口拖拽检测)
+ *   2. VMware Workstation / Fusion / ESXi (SVGA II 0x15AD:0x0405 动态切分辨率与窗口自适应)
+ *   3. 实机 / UEFI GOP / VBE 多分辨率帧缓冲与物理 EDID DPI 感知
+ * ============================================================ */
+#include "../pci.h"
+#include "../core/vmm.h"
+
+#define BGA_IOPORT_INDEX       0x01CE
+#define BGA_IOPORT_DATA        0x01CF
+#define BGA_INDEX_ID           0
+#define BGA_INDEX_XRES         1
+#define BGA_INDEX_YRES         2
+#define BGA_INDEX_BPP          3
+#define BGA_INDEX_ENABLE       4
+#define BGA_INDEX_VIRT_WIDTH   6
+#define BGA_INDEX_VIRT_HEIGHT  7
+#define BGA_INDEX_X_OFFSET     8
+#define BGA_INDEX_Y_OFFSET     9
+#define BGA_DISABLED           0x00
+#define BGA_ENABLED            0x01
+#define BGA_LFB_ENABLED        0x40
+
+/* VMware SVGA II (PCI 0x15AD:0x0405) 寄存器与常量 */
+#define PCI_VENDOR_VMWARE      0x15AD
+#define PCI_DEVICE_VMWARE_SVGA2 0x0405
+
+#define SVGA_INDEX_PORT        0x0
+#define SVGA_VALUE_PORT        0x1
+
+#define SVGA_REG_ID            0
+#define SVGA_REG_ENABLE        1
+#define SVGA_REG_WIDTH         2
+#define SVGA_REG_HEIGHT        3
+#define SVGA_REG_MAX_WIDTH     4
+#define SVGA_REG_MAX_HEIGHT    5
+#define SVGA_REG_DEPTH         6
+#define SVGA_REG_BITS_PER_PIXEL 7
+#define SVGA_REG_BYTES_PER_LINE 12
+#define SVGA_REG_FB_START      13
+#define SVGA_REG_FB_OFFSET     14
+#define SVGA_REG_VRAM_SIZE     15
+#define SVGA_REG_FB_SIZE       16
+#define SVGA_REG_CAPABILITIES  17
+#define SVGA_REG_MEM_START     18
+#define SVGA_REG_MEM_SIZE      19
+#define SVGA_REG_CONFIG_DONE   20
+#define SVGA_REG_SYNC          21
+#define SVGA_REG_BUSY          22
+
+#define SVGA_ID_2              0x90000002UL
+#define SVGA_ID_1              0x90000001UL
+#define SVGA_ID_0              0x90000000UL
+
+static inline void bga_outw(uint16_t port, uint16_t val) {
+    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint16_t bga_inw(uint16_t port) {
+    uint16_t ret;
+    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+static inline void io_outl(uint16_t port, uint32_t val) {
+    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint32_t io_inl(uint16_t port) {
+    uint32_t ret;
+    __asm__ volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+static void bga_write_reg(uint16_t idx, uint16_t val) {
+    bga_outw(BGA_IOPORT_INDEX, idx);
+    bga_outw(BGA_IOPORT_DATA, val);
+}
+static uint16_t bga_read_reg(uint16_t idx) {
+    bga_outw(BGA_IOPORT_INDEX, idx);
+    return bga_inw(BGA_IOPORT_DATA);
+}
+
+static volatile uint8_t *g_vga_mmio = NULL;
+static uint16_t g_vmware_iobase = 0;
+static volatile uint32_t *g_vmware_fifo = NULL;
+static int g_vga_probed = 0;
+static uint32_t g_last_edid_w = 0;
+static uint32_t g_last_edid_h = 0;
+static int g_edid_dpi = 96;
+
+static void vmware_write_reg(uint32_t idx, uint32_t val) {
+    io_outl(g_vmware_iobase + SVGA_INDEX_PORT, idx);
+    io_outl(g_vmware_iobase + SVGA_VALUE_PORT, val);
+}
+static uint32_t vmware_read_reg(uint32_t idx) {
+    io_outl(g_vmware_iobase + SVGA_INDEX_PORT, idx);
+    return io_inl(g_vmware_iobase + SVGA_VALUE_PORT);
+}
+
+static void vga_probe_devices(void) {
+    if (g_vga_probed) return;
+    g_vga_probed = 1;
+    pci_device_t dev;
+    if (pci_find_class(0x03, 0x00, 0xFF, &dev) == 0 ||
+        pci_find_class(0x03, 0x80, 0xFF, &dev) == 0) {
+        /* 1. QEMU std vga / Bochs (1234:1111) */
+        if (dev.vendor_id == 0x1234 && dev.device_id == 0x1111) {
+            int is_io = 0;
+            uint64_t bar2 = pci_bar_address(dev.bus, dev.slot, dev.func, 2, &is_io);
+            if (bar2 && !is_io) {
+                pci_enable_bus_master_mmio(&dev);
+                g_vga_mmio = (volatile uint8_t *)(uintptr_t)bar2;
+                if (!g_real_fb) {
+                    uint64_t bar0 = pci_bar_address(dev.bus, dev.slot, dev.func, 0, &is_io);
+                    if (bar0 && !is_io) g_real_fb = (uint32_t *)(uintptr_t)bar0;
+                }
+            }
+        }
+        /* 2. VMware SVGA II (15AD:0405) */
+        else if (dev.vendor_id == PCI_VENDOR_VMWARE &&
+                 dev.device_id == PCI_DEVICE_VMWARE_SVGA2) {
+            int is_io = 0;
+            uint64_t bar0 = pci_bar_address(dev.bus, dev.slot, dev.func, 0, &is_io);
+            if (bar0 && is_io) {
+                pci_enable_bus_master_mmio(&dev);
+                g_vmware_iobase = (uint16_t)bar0;
+                vmware_write_reg(SVGA_REG_ID, SVGA_ID_2);
+                if (vmware_read_reg(SVGA_REG_ID) != SVGA_ID_2) {
+                    vmware_write_reg(SVGA_REG_ID, SVGA_ID_1);
+                    if (vmware_read_reg(SVGA_REG_ID) != SVGA_ID_1) {
+                        vmware_write_reg(SVGA_REG_ID, SVGA_ID_0);
+                    }
+                }
+                uint64_t bar1 = pci_bar_address(dev.bus, dev.slot, dev.func, 1, &is_io);
+                if (bar1 && !is_io && !g_real_fb) {
+                    g_real_fb = (uint32_t *)(uintptr_t)bar1;
+                }
+                uint64_t bar2 = pci_bar_address(dev.bus, dev.slot, dev.func, 2, &is_io);
+                if (bar2 && !is_io) {
+                    g_vmware_fifo = (volatile uint32_t *)(uintptr_t)bar2;
+                }
+            }
+        }
+    }
+}
+
+static void vmware_set_mode(uint32_t width, uint32_t height, uint32_t *out_w, uint32_t *out_h, uint64_t *out_pitch) {
+    uint32_t max_w = vmware_read_reg(SVGA_REG_MAX_WIDTH);
+    uint32_t max_h = vmware_read_reg(SVGA_REG_MAX_HEIGHT);
+    if (max_w >= 640 && width > max_w) width = max_w;
+    if (max_h >= 400 && height > max_h) height = max_h;
+
+    /* 保持 CONFIG_DONE = 0 让 VMware 自动周期性脏页扫描 LFB，无需每次绘制写 FIFO */
+    vmware_write_reg(SVGA_REG_CONFIG_DONE, 0);
+    vmware_write_reg(SVGA_REG_ENABLE, 0);
+    vmware_write_reg(SVGA_REG_WIDTH, width);
+    vmware_write_reg(SVGA_REG_HEIGHT, height);
+    vmware_write_reg(SVGA_REG_BITS_PER_PIXEL, 32);
+    vmware_write_reg(SVGA_REG_ENABLE, 1);
+
+    uint32_t fb_start = vmware_read_reg(SVGA_REG_FB_START);
+    uint32_t fb_off   = vmware_read_reg(SVGA_REG_FB_OFFSET);
+    uint32_t bpl      = vmware_read_reg(SVGA_REG_BYTES_PER_LINE);
+    uint32_t act_w    = vmware_read_reg(SVGA_REG_WIDTH);
+    uint32_t act_h    = vmware_read_reg(SVGA_REG_HEIGHT);
+
+    if (fb_start) {
+        g_real_fb = (uint32_t *)(uintptr_t)(fb_start + fb_off);
+    }
+    if (out_w) *out_w = act_w ? act_w : width;
+    if (out_h) *out_h = act_h ? act_h : height;
+    if (out_pitch) *out_pitch = bpl ? bpl : (uint64_t)(*out_w) * 4;
+}
+
+int fb_get_edid_dpi(void) {
+    return g_edid_dpi;
+}
+
+int fb_poll_host_resize(uint32_t *out_w, uint32_t *out_h) {
+    vga_probe_devices();
+    if (!g_vga_mmio) return 0;
+
+    /* QEMU std vga BAR2 偏移 0x000..0x3FF 为 EDID 区域。
+     * 检查 8 字节 EDID Header: 00 FF FF FF FF FF FF 00 */
+    const volatile uint8_t *edid = g_vga_mmio;
+    if (edid[0] != 0x00 || edid[1] != 0xFF || edid[2] != 0xFF ||
+        edid[3] != 0xFF || edid[4] != 0xFF || edid[5] != 0xFF ||
+        edid[6] != 0xFF || edid[7] != 0x00) {
+        return 0;
+    }
+
+    /* 解析 Preferred Detailed Timing Descriptor (偏移 54..71) */
+    uint16_t pclk = (uint16_t)edid[54] | ((uint16_t)edid[55] << 8);
+    if (pclk == 0) return 0;
+
+    uint32_t hactive = (uint32_t)edid[56] | (((uint32_t)(edid[58] >> 4) & 0x0Fu) << 8);
+    uint32_t vactive = (uint32_t)edid[59] | (((uint32_t)(edid[61] >> 4) & 0x0Fu) << 8);
+
+    /* 解析物理尺寸 (mm) 计算真实 DPI */
+    uint32_t hmm = (uint32_t)edid[66] | (((uint32_t)(edid[68] >> 4) & 0x0Fu) << 8);
+    if (hmm >= 50 && hactive >= 640) {
+        int dpi = (int)((hactive * 254 + hmm * 5) / (hmm * 10));
+        if (dpi >= 72 && dpi <= 300) g_edid_dpi = dpi;
+    }
+
+    if (hactive < 640 || vactive < 400 || hactive > 3840 || vactive > 2160)
+        return 0;
+
+    /* 首次记录：同步当前窗口 EDID 基准，之后用户一旦拖拽 QEMU 窗口立即响应 */
+    if (g_last_edid_w == 0 && g_last_edid_h == 0) {
+        g_last_edid_w = hactive;
+        g_last_edid_h = vactive;
+        return 0;
+    }
+
+    if (hactive != g_last_edid_w || vactive != g_last_edid_h) {
+        g_last_edid_w = hactive;
+        g_last_edid_h = vactive;
+        if (hactive != g_real_fb_width || vactive != g_real_fb_height) {
+            if (out_w) *out_w = hactive;
+            if (out_h) *out_h = vactive;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int fb_set_resolution(uint32_t width, uint32_t height) {
+    vga_probe_devices();
+
+    /* 对齐到 8 像素并限制安全范围（最高支持 2560x1600 / 2K，兼顾显存与 PMM 页分配） */
+    width = (width + 7u) & ~7u;
+    if (width < 640) width = 640;
+    if (height < 400) height = 400;
+    if (width > 2560) width = 2560;
+    if (height > 1600) height = 1600;
+
+    uint32_t actual_w = 0, actual_h = 0;
+    uint64_t actual_pitch = 0;
+
+    /* 路径 1: VMware SVGA II */
+    if (g_vmware_iobase) {
+        vmware_set_mode(width, height, &actual_w, &actual_h, &actual_pitch);
+    } else {
+        /* 路径 2: Bochs / QEMU / VirtualBox BGA */
+        uint16_t id = bga_read_reg(BGA_INDEX_ID);
+        if (id < 0xB0C0 || id > 0xB0CF) {
+            return -1; /* 实机纯固件 GOP/VBE 固定帧缓冲不支持运行期端口切模式 */
+        }
+
+        bga_write_reg(BGA_INDEX_ENABLE, BGA_DISABLED);
+        bga_write_reg(BGA_INDEX_XRES, (uint16_t)width);
+        bga_write_reg(BGA_INDEX_YRES, (uint16_t)height);
+        bga_write_reg(BGA_INDEX_BPP, 32);
+        bga_write_reg(BGA_INDEX_VIRT_WIDTH, (uint16_t)width);
+        bga_write_reg(BGA_INDEX_VIRT_HEIGHT, (uint16_t)height);
+        bga_write_reg(BGA_INDEX_X_OFFSET, 0);
+        bga_write_reg(BGA_INDEX_Y_OFFSET, 0);
+        bga_write_reg(BGA_INDEX_ENABLE, BGA_ENABLED | BGA_LFB_ENABLED);
+
+        actual_w = bga_read_reg(BGA_INDEX_XRES);
+        actual_h = bga_read_reg(BGA_INDEX_YRES);
+        actual_pitch = (uint64_t)actual_w * 4;
+    }
+
+    if (actual_w == 0 || actual_h == 0) return -1;
+
+    g_real_fb_width  = actual_w;
+    g_real_fb_height = actual_h;
+    g_real_fb_pitch  = actual_pitch;
+    g_last_edid_w    = actual_w;
+    g_last_edid_h    = actual_h;
+
+    if (g_real_fb) {
+        vmm_set_range_wc((uint64_t)(uintptr_t)g_real_fb,
+                         g_real_fb_pitch * g_real_fb_height);
+    }
+
+    /* 更新 TUI 后备缓冲激活状态（若超过静态缓冲上限则直写硬件 FB） */
+    if (actual_w <= TUI_BACKBUF_MAX_W && actual_h <= TUI_BACKBUF_MAX_H) {
+        g_backbuf_active = true;
+    } else {
+        g_backbuf_active = false;
+    }
+
+    if (g_term) {
+        struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
+        fc->width = actual_w;
+        fc->height = actual_h;
+        fc->pitch = g_backbuf_active ? (uint64_t)actual_w * 4 : g_real_fb_pitch;
+        fc->framebuffer = g_backbuf_active ? g_back_buffer : g_real_fb;
+    }
+
+    return 0;
+}
+
+

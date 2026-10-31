@@ -34,6 +34,7 @@
 #include "heap.h"
 #include "../smp.h"
 #include "../linux_compat.h"
+#include "../fcntl.h"
 #include "../user/ldso.h"
 
 static void task_sig_deliver(task_t *task);
@@ -353,6 +354,13 @@ static void task_release_fd_table(task_t *task) {
         task->fd_table = NULL;
         return;
     }
+    /* 最后一份引用：先把每条 pipe fd 的引用还回去。以前这里直接清 refs，
+     * pipe_t 就永远漏了（fork 出来的子进程退出后父进程的管道再也等不到
+     * EOF，或者反过来子进程早已释放、父进程还在读）。 */
+    for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
+        if (task->fd_table->entries[fd].used)
+            linux_compat_release_entry(&task->fd_table->entries[fd]);
+    }
     linux_compat_release_task(task);
     task->fd_table->refs = 0;
     task->fd_table = NULL;
@@ -543,6 +551,7 @@ void task_init(void) {
     main_task->arg = NULL;
     main_task->exit_status = 0;
     main_task->parent_id = 0;
+    main_task->pgid = main_task->sid = main_task->id;
     main_task->child_id = 0;
     main_task->next = main_task;  // 循环链表（单元素）
     main_task->stack_base = (uint64_t)task_stacks[0];
@@ -726,6 +735,9 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->arg = arg;
     tcb->exit_status = 0;
     tcb->parent_id = current_task ? current_task->id : 0;
+    tcb->pgid = current_task ? current_task->pgid : tcb->id;
+    tcb->sid = current_task ? current_task->sid : tcb->id;
+    tcb->stopped = false;
     tcb->child_id = 0;
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
@@ -823,8 +835,7 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
  */
 int task_create_ring3_full(const char *name, uint64_t user_entry,
                            uint64_t user_stack, uint64_t user_argc,
-                           uint64_t user_argv, uint64_t pml4_phys) {
-    if (!user_entry || !user_stack) {
+                           uint64_t user_argv, uint64_t pml4_phys) {    if (!user_entry || !user_stack) {
         if (pml4_phys) vmm_destroy_address_space(pml4_phys);
         return -1;
     }
@@ -858,6 +869,9 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     tcb->arg = NULL;
     tcb->exit_status = 0;
     tcb->parent_id = current_task ? current_task->id : 0;
+    tcb->pgid = current_task ? current_task->pgid : tcb->id;
+    tcb->sid = current_task ? current_task->sid : tcb->id;
+    tcb->stopped = false;
     tcb->child_id = 0;
     tcb->stack_base = (uint64_t)task_stacks[idx];
     tcb->stack_size = TASK_STACK_SIZE;
@@ -1006,6 +1020,75 @@ static task_t *sched_pick_valid(void) {
         console_putchar('\n');
         next->state = TASK_TERMINATED;
     }
+}
+
+/* 由 task_resume_linux_syscall（汇编）在恢复子进程用户态现场之前调用。
+ * 只要看到这一行，就说明 fork/clone 出来的子进程确实被调度起来过一次；
+ * 反过来说，日志里没有它而父进程又在等管道 —— 那就是子进程根本没进调度。 */
+static void task_debug_put_dec(int value);
+static void task_debug_put_hex(uint64_t value);
+
+/* 在当前 CR3 下按虚拟地址读用户内存（逐页查表 + 物理页直读）。
+ * 只给诊断用：读失败返回 0，不抛异常、不改页表。 */
+static int task_debug_peek_user(uint64_t address, void *dst, size_t length);
+
+void task_debug_report_resume(uint64_t target_rip, uint64_t target_rsp) {
+    task_t *self = current_task;
+    console_puts("[RESUME] pid=");
+    task_debug_put_dec(self ? (int)self->id : -1);
+    console_puts(" tid=");
+    task_debug_put_dec(self ? (int)self->thread_group_id : -1);
+    /* 这条是判断"子进程到底进没进用户态"的关键：把内核即将 iret 过去的
+     * rip/rsp 打出来，和父进程 fork 那一刻的现场一比就清楚了。 */
+    console_puts(" rip=");
+    task_debug_put_hex(target_rip);
+    console_puts(" rsp=");
+    task_debug_put_hex(target_rsp);
+    uint64_t fs_base = rdmsr(MSR_FS_BASE);
+    console_puts(" fs=");
+    task_debug_put_hex(fs_base);
+    /* 即将执行的那条指令的原始字节。子进程"跑起来了但一条 syscall 都不发"
+     * 时，光看 rip 只能猜；把目标地址处 8 个字节读出来对照反汇编，就能
+     * 判断究竟是停在 syscall 的下一条（正常），还是 rip 已经被改坏了。 */
+    uint64_t code = 0;
+    if (task_debug_peek_user(target_rip, &code, sizeof(code))) {
+        console_puts(" code=");
+        task_debug_put_hex(code);
+    } else {
+        console_puts(" code=UNMAPPED");
+    }
+    /* 子进程的 TLS 里 fs:0x10 是 TCB 自指针，glibc 的 _Fork 返回点第一件事
+     * 就是 `mov %fs:0x10,%rax`。读不出来说明 fs_base 或该页在子进程地址
+     * 空间里不存在 —— 那 iret 之后立刻就是 #PF。 */
+    uint64_t tcb = 0;
+    if (task_debug_peek_user(fs_base + 0x10, &tcb, sizeof(tcb))) {
+        console_puts(" tcb=");
+        task_debug_put_hex(tcb);
+    } else {
+        console_puts(" tcb=UNMAPPED");
+    }
+    /* 用户栈顶的那个 8 字节。_Fork 返回前会 `leave; ret`，ret 弹出的目标
+     * 就是 __clone 的调用者；打出它能确认用户栈在 clone 之后内容完好。 */
+    uint64_t top = 0;
+    if (task_debug_peek_user(target_rsp, &top, sizeof(top))) {
+        console_puts(" top=");
+        task_debug_put_hex(top);
+    } else {
+        console_puts(" top=UNMAPPED");
+    }
+    if (tcb) {
+        uint64_t pages[2] = { (tcb + 0x2d8) & ~0xfffULL,
+                              (tcb + 0x2e0) & ~0xfffULL };
+        for (int i = 0; i < 2; i++) {
+            console_puts(i ? " e2e0=" : " e2d8=");
+            task_debug_put_hex(vmm_get_phys(pages[i]));
+            console_puts("/");
+            task_debug_put_hex(vmm_get_page_flags(pages[i]));
+        }
+        console_puts(" cr3=");
+        task_debug_put_hex(vmm_get_pml4());
+    }
+    console_putchar('\n');
 }
 
 void task_yield(void) {
@@ -1343,6 +1426,33 @@ int task_kill(uint32_t id, int sig) {
         return 0;
     }
 
+    if (sig == SIGCONT) {
+        if (target->stopped) {
+            target->stopped = false;
+            target->stop_reported = false;
+            if (target != current_task && target->state == TASK_BLOCKED)
+                sched_mark_ready(target);
+        }
+        return 0;
+    }
+    if (sig == SIGSTOP ||
+        ((sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) &&
+         (target->sig_handler[sig] == SIG_DFL || target->sig_handler[sig] == NULL))) {
+        target->stopped = true;
+        target->stop_sig = sig;
+        target->stop_reported = false;
+        if (target == current_task) {
+            while (target->stopped) task_yield();
+        } else if (target->state != TASK_TERMINATED) {
+            if (target->snode.queued) {
+                if (target->cpu >= MAX_CPUS) target->cpu = 0;
+                (void)schedq_remove(&cpu_ready[target->cpu], &target->snode);
+            }
+            target->state = TASK_BLOCKED;
+        }
+        return 0;
+    }
+
     if (target->sig_handler[sig] == SIG_IGN) return 0;
 
     if (current_task)
@@ -1388,6 +1498,9 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     child->arg = linux_context ? NULL : current_task->arg;
     child->exit_status = 0;
     child->parent_id = current_task->id;
+    child->pgid = current_task->pgid;
+    child->sid = current_task->sid;
+    child->stopped = false;
     child->child_id = 0;
     child->stack_base = (uint64_t)task_stacks[idx];
     child->stack_size = TASK_STACK_SIZE;
@@ -1430,9 +1543,34 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     if (child->group_count > TASK_NGROUPS_MAX) child->group_count = 0;
     for (uint32_t gi = 0; gi < child->group_count; gi++)
         child->groups[gi] = current_task->groups[gi];
-    child->clear_child_tid = NULL;
+    /* clear_child_tid 必须**继承**父进程值，不能清零。
+     *
+     * glibc 的 fork 是 clone(SIGCHLD|CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID)，
+     * __clone 把 CLONE_CHILD_CLEARTID 的目标算成 fs:0x10 + tid_offset 直接
+     * 传给内核（r10），和父进程 set_tid_address 登记的地址是同一个。Linux
+     * 里 fork 出的子进程继承这个字段：子进程退出时内核往那儿写 0 并唤醒
+     * futex，pthread_join / 进程回收才走得通。这里清零的话，子进程退出
+     * 时没有任何人唤醒等待者，父进程就永远卡在 wait 上。
+     *
+     * robust_list 则**不**继承（Linux 语义）：fork 子进程的 robust list 是
+     * 空的，要由 libc 在子进程里重新 set_robust_list。 */
+    child->clear_child_tid = current_task->clear_child_tid;
     child->robust_list_head = NULL;
     child->robust_list_length = 0;
+    /* CLONE_CHILD_SETTID："把子进程的 tid 写进这个用户地址"。
+     *
+     * Linux 保证 fork 返回到用户态**之前**那个槽里就已经是子进程的 pid，
+     * 因为 glibc 的 __clone 返回后立刻 `mov %eax, (%rbx)` 之外也会读它
+     * 判"我在父还是子"。内核这边只有分配完 task id 才知道 pid，所以
+     * linux_clone_args 把目标地址塞进 context 让这里代写。
+     *
+     * 注意：这里调用时 vmm 已经切到子进程或父进程都可能，两个地址空间
+     * 里这块内存在 fork 那一刻内容相同、映射也相同（深拷贝），所以直接
+     * 写当前 CR3 也是对的；两边都会看到 tid。 */
+    if (linux_context && linux_context->child_tid_written) {
+        __atomic_store_n((uint32_t *)(uintptr_t)linux_context->child_tid_slot,
+                         (uint32_t)child->id, __ATOMIC_RELEASE);
+    }
     memcpy(child->dynamic_tls, current_task->dynamic_tls,
            sizeof(child->dynamic_tls));
 
@@ -1443,6 +1581,15 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
         return -1;
     }
     memcpy(child->fd_table->entries, current_task->fd_table->entries, sizeof(child->fd_table->entries));
+    /* fd 表是**逐进程复制**的（不是共享指针），所以每一条 pipe fd 都要单独
+     * 记一次引用。漏了这一步，子进程 exec/close 掉自己那份 fd 时就会把父
+     * 进程还在用的 pipe_t 提前释放 —— zygote fork 之后父进程立刻在读管道，
+     * 拿到的就是已释放内存（读到 EOF / 野数据），表现正是
+     * "Cannot communicate with zygote"。 */
+    for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
+        if (child->fd_table->entries[fd].used)
+            linux_compat_retain_entry(&child->fd_table->entries[fd]);
+    }
     linux_compat_retain_task(child);
     memcpy(child->sig_handler, current_task->sig_handler, sizeof(child->sig_handler));
     memcpy(child->sig_action_flags, current_task->sig_action_flags,
@@ -1468,6 +1615,19 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     child->host_symtab = current_task->host_symtab;
     child->host_strtab = current_task->host_strtab;
     child->host_symtab_count = current_task->host_symtab_count;
+    /* /proc/<pid>/exe 也要继承：fork 出来的子进程和父进程跑的是同一个
+     * 可执行文件（Linux 语义），而 Chromium 的 zygote host 在 fork 之后就
+     * 靠 readlink("/proc/self/exe") 找自己的路径去把 zygote 重新 exec 起来。
+     * 原来这里 memset 清零后一直没补，子进程看到的 exe 是空串。 */
+    {
+        size_t exe_len = 0;
+        while (exe_len < sizeof(child->exe_path) - 1 &&
+               current_task->exe_path[exe_len]) {
+            child->exe_path[exe_len] = current_task->exe_path[exe_len];
+            exe_len++;
+        }
+        child->exe_path[exe_len] = '\0';
+    }
 
     uint64_t *sp = (uint64_t *)(child->stack_base + child->stack_size);
     void *launch_context;
@@ -1486,6 +1646,14 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     *--sp = launch_entry;
     *--sp = (uint64_t)launch_context;
     *--sp = (uint64_t)task_entry_trampoline;
+    /* 这 7 个槽位的顺序必须与 task_switch 的恢复序列**镜像**：
+     *   task_switch 在保存时依次 pushfq / rbp / rbx / r12 / r13 / r14 / r15，
+     *   rsp 因此递减；恢复时按 pop r15 / r14 / r13 / r12 / rbx / rbp / popfq
+     *   弹回。所以新任务栈上低地址→高地址必须是
+     *   R15, R14, R13, R12, RBX, RBP, RFLAGS。
+     * 这里用 *--sp 从高往低写，写入顺序就是 RFLAGS, RBP, RBX, R12, R13,
+     * R14, R15 —— 与上面完全一致。写反了 r12/r13/r14 和 rbx/rbp 就会串台
+     * （实测 fork 子进程 r13 拿到 r12 的值）。 */
     *--sp = 0x2;           // RFLAGS (IF enabled by trampoline)
     *--sp = 0;  // RBP
     *--sp = 0;  // RBX
@@ -1591,6 +1759,9 @@ static int task_clone_thread_common(
     thread->name[TASK_NAME_MAX - 1] = '\0';
     sched_mark_ready(thread);
     thread->parent_id = current_task->id;
+    thread->pgid = current_task->pgid;
+    thread->sid = current_task->sid;
+    thread->stopped = false;
     thread->stack_base = (uint64_t)task_stacks[idx];
     thread->stack_size = TASK_STACK_SIZE;
     thread->fpu_state = task_fpu_state[idx];
@@ -1690,13 +1861,74 @@ int task_clone_user_thread(const hbos_clone_request_t *request) {
     return task_clone_thread_common(request, NULL);
 }
 
+static void task_debug_put_dec(int value) {
+    char buf[16];
+    int n = 0;
+    if (value < 0) { console_putchar('-'); value = -value; }
+    do { buf[n++] = (char)('0' + value % 10); value /= 10; } while (value);
+    while (n--) console_putchar(buf[n]);
+}
+
+static void task_debug_put_hex(uint64_t value) {
+    static const char digits[] = "0123456789abcdef";
+    for (int shift = 60; shift >= 0; shift -= 4)
+        console_putchar(digits[(value >> shift) & 0xf]);
+}
+
+/* 在当前 CR3 下按虚拟地址读用户内存。
+ *
+ * 只在诊断路径上用，所以不做 COW/换入，纯粹"页表里有就拷"。HBOS 的内核
+ * 高半区对物理内存是恒等映射（vmm_get_phys 的实现直接拿 PTE 里的物理地址
+ * 当指针解引用就是证据），所以拿到物理地址后再加上页内偏移就能直接读。 */
+static int task_debug_peek_user(uint64_t address, void *dst, size_t length) {
+    uint8_t *out = (uint8_t *)dst;
+    while (length) {
+        uint64_t page = address & ~0xfffULL;
+        uint64_t offset = address - page;
+        uint64_t chunk = 0x1000ULL - offset;
+        if (chunk > length) chunk = length;
+        uint64_t phys = vmm_get_phys(page);
+        if (!phys) return 0;
+        const uint8_t *in = (const uint8_t *)(uintptr_t)(phys + offset);
+        for (uint64_t i = 0; i < chunk; i++) out[i] = in[i];
+        out += chunk;
+        address += chunk;
+        length -= chunk;
+    }
+    return 1;
+}
+
+/* 排错开关，见 src/syscall.c 的 linux_debug_set_flag()。 */
+int task_debug_trace_clone = 0;
+
 int task_clone_linux_thread(const hbos_clone_request_t *request,
                             const hbos_linux_clone_context_t *context) {
     if (!context || context->rip != request->entry ||
-        context->rsp != request->stack)
+        context->rsp != request->stack) {
+        if (task_debug_trace_clone)
+            console_puts("[CLONE-THREAD] context mismatch\n");
         return -1;
-    return task_clone_thread_common(request, context);
+    }
+    int tid = task_clone_thread_common(request, context);
+    if (task_debug_trace_clone) {
+        /* 子线程"零 syscall 就崩"时，最需要知道的就是它到底有没有被
+         * 建出来、入口和栈顶是什么。这三行足够判断是不是 clone 参数
+         * 本身的问题。 */
+        console_puts("[CLONE-THREAD] tid=");
+        task_debug_put_dec(tid);
+        console_puts(" entry=0x");
+        task_debug_put_hex(request->entry);
+        console_puts(" stack=0x");
+        task_debug_put_hex(request->stack);
+        console_puts(" tls=0x");
+        task_debug_put_hex(request->tls);
+        console_puts(" flags=0x");
+        task_debug_put_hex(request->flags);
+        console_putchar('\n');
+    }
+    return tid;
 }
+
 
 /** 获取活跃任务数（不含 TERMINATED） */
 int task_get_count(void) {
@@ -1891,4 +2123,137 @@ void task_sig_deliver(task_t *task) {
             return;
         }
     }
+}
+
+/* ---- 进程组 / 会话 / 作业控制 ---- */
+int task_kill_pgrp(uint32_t pgid, int sig) {
+    int n = 0;
+    if (!pgid) return 0;
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &task_pool[i];
+        if (t->state == TASK_TERMINATED || t->pgid != pgid) continue;
+        if (t->thread_group_id && t->thread_group_id != t->id) continue;
+        if (task_kill(t->id, sig) == 0) n++;
+    }
+    return n;
+}
+
+int task_getpgid(uint32_t pid) {
+    if (pid == 0) return current_task ? (int)current_task->pgid : 0;
+    const task_t *t = task_get_by_id(pid);
+    return (t && t->state != TASK_TERMINATED) ? (int)t->pgid : -3;
+}
+
+int task_getsid(uint32_t pid) {
+    if (pid == 0) return current_task ? (int)current_task->sid : 0;
+    const task_t *t = task_get_by_id(pid);
+    return (t && t->state != TASK_TERMINATED) ? (int)t->sid : -3;
+}
+
+/* execve 的"原地替换"语义移植。
+ *
+ * HBOS 的 exec 是"加载新镜像 → 建一个新任务 → 让当前任务退出"，所以
+ * 语义上必须手工把 exec 应当保留的东西从老任务搬到新任务身上。少了这一步，
+ * 新进程就是一张白纸：
+ *   - fd 表是空的 —— fork 时继承的管道/socketpair 全丢。zygote 靠它跟浏览器
+ *     进程通信，丢 fd 的直接后果就是父进程报 "Cannot communicate with zygote"；
+ *   - parent_id 指向那个马上要退出的老任务，waitpid/进程树立刻断掉；
+ *   - 进程组/会话全乱。
+ *
+ * 保留的东西（Linux 语义）：
+ *   - 非 FD_CLOEXEC 的 fd；
+ *   - 进程组、会话、父进程、umask 对齐到老任务；
+ *   - 信号掩码保留、处理器已由 spawn 路径清零成 SIG_DFL；
+ *   - clear_child_tid / robust_list 清空（exec 后由 libc 重新注册）。 */
+void task_exec_inherit(int new_id) {
+    task_t *old = current_task;
+    task_t *fresh = task_get_by_id((uint32_t)new_id);
+    if (!old || !fresh || fresh == old) return;
+
+    /* 父进程与进程组：新任务继承老任务的"位置"，而不是认老任务当爹。 */
+    fresh->parent_id = old->parent_id;
+    fresh->pgid = old->pgid;
+    fresh->sid = old->sid;
+
+    /* fd 表：exec 保留所有非 FD_CLOEXEC 的条目。
+     *
+     * fd 表本身是引用计数的（fork 时 refs++），所以这里让新任务**共享**
+     * 老任务这张表即可 —— 老任务随后 task_exit() 只会把 refs 减一，表本身
+     * 还活着，新进程照样能用那些管道。比起整表搬移，这条路不需要关心
+     * pipe_t 的 retain/release 记账，也不会漏引用。
+     *
+     * 先把 cloexec 的条目关掉（这是 exec 的语义），再转移所有权。
+     *
+     * 注意 fd_entry.flags 里存的是 open(2) 的 O_* 标志，不是 fcntl(F_SETFD)
+     * 的那个 1 位 FD_CLOEXEC 值；HBOS 把两者都折进同一个 flags 字段，
+     * 所以这里按 O_CLOEXEC(0x80000) 判断。 */
+    if (old->fd_table && fresh->fd_table) {
+        for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
+            fd_entry_t *entry = &old->fd_table->entries[fd];
+            if (!entry->used) continue;
+            if (!(entry->flags & O_CLOEXEC)) continue;
+            entry->used = 0;
+            linux_compat_release_entry(entry);
+        }
+        task_release_fd_table(fresh);   /* 还掉刚分配的空表 */
+        old->fd_table->refs++;
+        fresh->fd_table = old->fd_table;
+    }
+
+    /* exec 之后没有"子线程退出要清 tid"这回事，libc 会重新 set_tid_address。
+     * 老任务也不能再往父进程的 tid 槽里写 0 —— 那个 futex 属于父进程自己的
+     * 线程管理，被 exec 出来的子进程碰一下就乱套。 */
+    fresh->clear_child_tid = NULL;
+    fresh->robust_list_head = NULL;
+    fresh->robust_list_length = 0;
+    old->clear_child_tid = NULL;
+
+    /* 信号状态。
+     *
+     * Linux 的 execve 规则：
+     *   - 被屏蔽（blocked）的信号集合**保留** —— 这是 POSIX 明确要求的，
+     *     于是"先屏蔽再 exec"是安全的原子序列（chromium 的 zygote 就靠它）；
+     *   - 已设置自定义处理函数的信号复位成 SIG_DFL；
+     *   - **SIG_IGN 保留** —— 这条经常被忽略，但 Chromium 的 crashpad 和
+     *     不少 daemon 都靠 "signal(SIGPIPE, SIG_IGN)" 传给子进程；
+     *   - 挂起的信号保留（同一进程号，信号不能凭 exec 逃掉）。
+     *
+     * spawn 出来的新任务信号状态是一张白纸，这里按上述规则补齐。 */
+    for (int sig = 1; sig < _NSIG; sig++) {
+        if (old->sig_handler[sig] == SIG_IGN) {
+            fresh->sig_handler[sig] = SIG_IGN;
+            fresh->sig_action_flags[sig] = old->sig_action_flags[sig];
+        }
+    }
+    fresh->sig_blocked = old->sig_blocked;
+    fresh->sig_pending = old->sig_pending;
+
+    /* /proc/self/exe、符号表、可执行路径：新镜像自己已经设好，不覆盖。 */
+}
+
+int task_setpgid(uint32_t pid, uint32_t pgid) {
+    task_t *t = pid ? task_lookup(pid) : current_task;
+    if (!t || t->state == TASK_TERMINATED) return -3;      /* ESRCH */
+    if (t != current_task && t->parent_id != current_task->id) return -3;
+    if (t->sid != current_task->sid) return -1;            /* EPERM */
+    if (t->sid == t->id) return -1;                        /* 会话首进程 */
+    if (pgid == 0) pgid = t->id;
+    if (pgid != t->id) {                                   /* 只能加入同会话已有组 */
+        int ok = 0;
+        for (int i = 0; i < task_count; i++)
+            if (task_pool[i].state != TASK_TERMINATED && task_pool[i].pgid == pgid &&
+                task_pool[i].sid == t->sid) { ok = 1; break; }
+        if (!ok) return -1;
+    }
+    t->pgid = pgid;
+    return 0;
+}
+
+int task_setsid(void) {
+    if (!current_task) return -1;
+    for (int i = 0; i < task_count; i++)                   /* 已是组长 → EPERM */
+        if (task_pool[i].state != TASK_TERMINATED && task_pool[i].id != current_task->id &&
+            task_pool[i].pgid == current_task->id) return -1;
+    current_task->sid = current_task->pgid = current_task->id;
+    return (int)current_task->id;
 }
