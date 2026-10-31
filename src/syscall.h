@@ -290,6 +290,15 @@ void linux_debug_set_flag(int which, int value);
  *  pid 传 0 关闭。fork 出的子进程"跑几步就停住"且无异常可 dump 时用。 */
 void linux_debug_set_trace_pid(int pid);
 
+/** 按 nr 聚合的 syscall 计数 + 累计耗时统计（`setenv sysprof 1`）。
+ *  和 tracepid 的区别：tracepid 逐条打印（既拖慢程序又要事后自己数），
+ *  这个是聚合的，直接用来出热点排行。默认关闭。 */
+void linux_syscall_prof_set(int on);
+int  linux_syscall_prof_enabled(void);
+void linux_syscall_prof_reset(void);
+/** 打印累计耗时最高的 top 个 nr（含次数与占比）。 */
+void linux_syscall_prof_dump(uint32_t top);
+
 /** Rewrite a ring3 exception return frame for synchronous signal delivery.
  *  cr2/err_code describe the faulting access (CR2 and page-fault error code);
  *  they are reported in siginfo.si_addr / ucontext REG_CR2 and REG_ERR. */

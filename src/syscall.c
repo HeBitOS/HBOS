@@ -5023,6 +5023,138 @@ void linux_syscall_trace_dump(void) {
     }
 }
 
+/* ── 按 nr 聚合的 syscall 计数 + 累计耗时（`setenv sysprof 1`）──────────
+ *
+ * 为什么要有它：原来想定位热点只能开 `setenv tracepid <pid>` 逐条打印，
+ * 那既拖慢被观测的程序（串口是逐字符模拟的），又得事后自己数。热点排行
+ * 要的是"每个 nr 调了多少次、一共花了多久"，聚合在产生数据的地方做，
+ * 串口上只留一份汇总表。
+ *
+ * 计时用 rdtsc 而不是 PIT tick：PIT 是 100 Hz，单条调用几乎总是 0 tick，
+ * 累加出来全是 0。rdtsc 的绝对频率随宿主而变，所以这里只把它当**相对**
+ * 量用：输出的是"该 nr 占总耗时的百分比"和原始 tick 数，跨机器比较看
+ * 百分比，同一台机器前后对比看 tick。
+ *
+ * 默认关闭。关闭时每次调用只多一条 `if (!g_linux_prof_on)`，热路径不受影响；
+ * 打开后每条调用多两次 rdtsc + 两次累加，在 TCG 下这个开销本身也会被计入
+ * （所有 nr 一起变慢，占比仍然可信，绝对值不可信——文档里已注明）。 */
+#define LINUX_PROF_NR_MAX 512
+typedef struct {
+    uint64_t count;
+    uint64_t ticks;
+} linux_prof_slot_t;
+
+static linux_prof_slot_t g_linux_prof[LINUX_PROF_NR_MAX];
+/* nr >= LINUX_PROF_NR_MAX 的调用合并成一个桶：真实程序里极少见，
+ * 但不合并的话这些调用会从统计里凭空消失，总占比就对不上了。 */
+static linux_prof_slot_t g_linux_prof_high;
+static uint64_t g_linux_prof_total_ticks;
+static uint64_t g_linux_prof_total_count;
+static int g_linux_prof_on;
+
+static inline uint64_t linux_prof_tsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void linux_syscall_prof_set(int on) { g_linux_prof_on = on ? 1 : 0; }
+int linux_syscall_prof_enabled(void) { return g_linux_prof_on; }
+
+void linux_syscall_prof_reset(void) {
+    for (uint32_t i = 0; i < LINUX_PROF_NR_MAX; i++) {
+        g_linux_prof[i].count = 0;
+        g_linux_prof[i].ticks = 0;
+    }
+    g_linux_prof_high.count = 0;
+    g_linux_prof_high.ticks = 0;
+    g_linux_prof_total_ticks = 0;
+    g_linux_prof_total_count = 0;
+}
+
+/* 记录一次已完成的调用。t0 是进入分发前读到的 tsc。 */
+static void linux_prof_record(uint64_t number, uint64_t t0) {
+    uint64_t delta = linux_prof_tsc() - t0;
+    linux_prof_slot_t *slot =
+        number < LINUX_PROF_NR_MAX ? &g_linux_prof[number] : &g_linux_prof_high;
+    slot->count++;
+    slot->ticks += delta;
+    g_linux_prof_total_count++;
+    g_linux_prof_total_ticks += delta;
+}
+
+/* 一行：`   nr      count     tsc     pct`。pct 保留两位小数（整数运算），
+ * 因为单个 nr 的占比常常只有零点几个百分点，只打整数会把它们全抹成 0。 */
+static void linux_prof_put_row(uint64_t number, const linux_prof_slot_t *slot,
+                               uint64_t total_ticks) {
+    char pad[6];
+    int digits = 0;
+    for (uint64_t v = number; v; v /= 10) digits++;
+    if (number == 0) digits = 1;
+    for (int i = 0; i < 6 - digits; i++) pad[i] = ' ';
+    for (int i = 0; i < 6 - digits; i++) console_putchar(pad[i]);
+    if (number >= LINUX_PROF_NR_MAX) {
+        /* 合并桶：打 `>=512` 而不是编一个假的 nr。 */
+        console_puts(">=512");
+    } else {
+        trace_put_udec(number);
+    }
+    console_puts("  ");
+    trace_put_udec(slot->count);
+    console_puts("  ");
+    trace_put_udec(slot->ticks);
+    console_puts("  ");
+    if (total_ticks) {
+        /* pct*100 用整数算，避免内核里引入浮点（-mno-80387）。 */
+        uint64_t hundredths = slot->ticks * 10000ULL / total_ticks;
+        trace_put_udec(hundredths / 100);
+        console_putchar('.');
+        uint64_t frac = hundredths % 100;
+        if (frac < 10) console_putchar('0');
+        trace_put_udec(frac);
+    } else {
+        console_puts("0.00");
+    }
+    console_puts("%\n");
+}
+
+/* 打印前 top 条（按累计耗时降序）。用选择排序逐名挑出，不做全表排序：
+ * 表是 512 项定长数组，选 top 15 只要扫 15 遍，省掉一份排序代码和栈空间。 */
+void linux_syscall_prof_dump(uint32_t top) {
+    console_puts("--- syscall profile (by cumulative tsc) ---\n");
+    if (!g_linux_prof_on) {
+        console_puts("  (profiler off: `setenv sysprof 1` to enable)\n");
+        return;
+    }
+    console_puts("  total calls=");
+    trace_put_udec(g_linux_prof_total_count);
+    console_puts(" tsc=");
+    trace_put_udec(g_linux_prof_total_ticks);
+    console_putchar('\n');
+    console_puts("   nr      count     tsc     pct\n");
+    if (top > 64) top = 64;
+    uint64_t total = g_linux_prof_total_ticks;
+    /* 已输出的槽位置位，避免同一个 nr 被重复挑中。512 位用 8 个 u64。 */
+    uint64_t done[LINUX_PROF_NR_MAX / 64] = {0};
+    for (uint32_t picked = 0; picked < top; picked++) {
+        int best = -1;
+        uint64_t best_ticks = 0;
+        for (uint32_t i = 0; i < LINUX_PROF_NR_MAX; i++) {
+            if (done[i >> 6] & (1ULL << (i & 63))) continue;
+            if (g_linux_prof[i].count == 0) continue;
+            if (best < 0 || g_linux_prof[i].ticks > best_ticks) {
+                best = (int)i;
+                best_ticks = g_linux_prof[i].ticks;
+            }
+        }
+        if (best < 0) break;
+        done[best >> 6] |= 1ULL << (best & 63);
+        linux_prof_put_row((uint64_t)best, &g_linux_prof[best], total);
+    }
+    if (g_linux_prof_high.count)
+        linux_prof_put_row(LINUX_PROF_NR_MAX, &g_linux_prof_high, total);
+}
+
 /* 文件类调用失败时把"哪个 fd / 哪个文件 / 什么 errno"直接打出来。
  * sqlite 之类的库只会把底层失败折成 "disk I/O error"，看不到根因；
  * 这条日志就是用来把 errno 和路径对上的。EAGAIN/EINTR 是正常控制流，跳过。 */
@@ -5068,7 +5200,10 @@ static void linux_trace_fd_error(uint64_t number,
 uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
     if (!linux_frame) return (uint64_t)(-EFAULT);
     uint64_t number = linux_frame->nr;
+    /* 关闭时这里只是两次加载 + 一次跳转，热路径不受影响。 */
+    uint64_t prof_t0 = g_linux_prof_on ? linux_prof_tsc() : 0;
     uint64_t result = linux_dispatch_body(linux_frame);
+    if (g_linux_prof_on) linux_prof_record(number, prof_t0);
     linux_trace_fd_error(number, linux_frame, (int64_t)result);
     linux_trace_push(number, linux_frame->a0, linux_frame->a1,
                      (int64_t)result);

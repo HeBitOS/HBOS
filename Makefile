@@ -956,6 +956,23 @@ fx-test: | $(BUILD_DIR)
 		$(SRC_DIR)/gui/gui_effects.c -o $(BUILD_DIR)/test_gui_effects
 	$(BUILD_DIR)/test_gui_effects
 
+# GUI 侧宿主基准：gui_blit_argb8888 的单帧成本（并单独量出"每行扫 alpha"
+# 那一遍的净开销）+ PNG 解码吞吐。确定性输入，重复跑稳定，不需要 QEMU。
+#   make gui-bench
+#   make gui-bench FRAMES=500
+gui-bench: | $(BUILD_DIR)
+	FRAMES=$(or $(FRAMES),200) bash scripts/bench_gui.sh
+
+# 性能基线的统计口径回归（失败样本不得进统计、n 要如实、计时段要对）。
+# 纯宿主；--with-qemu 那条才需要独占 QEMU，默认跳过。
+perf-selftest: | $(BUILD_DIR)
+	python3 tests/host/test_perf_baseline.py
+
+# syscall 热点排行：从已有串口日志聚合，不跑 QEMU。
+#   make sysprof-log LOG=build/tmp/r32-chromium2.log TOP=20
+sysprof-log:
+	python3 scripts/syscall_profile.py $(or $(LOG),build/tmp/*.log) --top $(or $(TOP),15)
+
 # 最大化/还原几何语义：往返保真、重复最大化不污染快照、
 # 最大化后标题栏按钮仍可点、吸附→最大化→还原、无快照回落。
 wm-geo-test: | $(BUILD_DIR)

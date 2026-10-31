@@ -25,6 +25,9 @@ ap.add_argument("--timeout", type=float, default=30.0, help="per-command seconds
 ap.add_argument("--boot-timeout", type=float, default=90.0)
 ap.add_argument("--log", help="also write the serial transcript here")
 ap.add_argument("--smp", default="1")
+ap.add_argument("--timings", action="store_true",
+                help="emit per-command wall time on stderr (opt-in; the "
+                     "default output stays byte-identical for existing callers)")
 ap.add_argument("cmds", nargs="*")
 args = ap.parse_args()
 
@@ -95,8 +98,14 @@ if ok:
 for cmd in args.cmds:
     if not ok:
         break
+    t0 = time.monotonic()
     p.stdin.write(cmd.encode() + b"\n")
     ok = pump(b"# ", args.timeout)
+    # 只有显式要 --timings 才打：默认 stderr 保持原样，现有调用方
+    # （perf_baseline.py 之外的脚本）不受影响。
+    if args.timings:
+        print(f"[qemu_session] cmd {time.monotonic() - t0:.3f}s: {cmd}",
+              file=sys.stderr)
 if not ok:
     print("\n[qemu_session] TIMEOUT or early exit", file=sys.stderr)
 p.terminate()

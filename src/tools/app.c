@@ -638,6 +638,17 @@ static void cmd_setenv(int argc, char **argv) {
             console_putchar('\n');
         }
         console_puts("  tracepid <n>   (0 = off)\n");
+        console_puts("  sysprof 0|1    (aggregate syscall counts+tsc)\n");
+        return;
+    }
+    /* sysprof 是聚合统计的开关（按 nr 累计次数与 tsc），和 tracepid 的
+     * 逐条打印互补：要排行用这个，要看清某一条的前因后果用 tracepid。 */
+    if (strcmp(argv[1], "sysprof") == 0) {
+        int on = 1;
+        if (argc >= 3) on = (argv[2][0] == '1');
+        linux_syscall_prof_set(on);
+        if (on) linux_syscall_prof_reset();
+        console_puts(on ? "sysprof = 1 (counters reset)\n" : "sysprof = 0\n");
         return;
     }
     /* tracepid 不是开关而是"盯住哪个 pid"，单独处理：值可以是任意整数，
@@ -666,6 +677,18 @@ static void cmd_setenv(int argc, char **argv) {
     console_puts("setenv: unknown switch '");
     console_puts(argv[1]);
     console_puts("'\n");
+}
+
+/* `sysprof [reset]`：打印/清空按 nr 聚合的 syscall 统计。
+ * 开关在 `setenv sysprof 1`，这里只负责出表——采集和出表分开，
+ * 才能"跑一段负载，停下，再看数"，不用重跑。 */
+static void cmd_sysprof(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "reset") == 0) {
+        linux_syscall_prof_reset();
+        console_puts("sysprof: counters reset\n");
+        return;
+    }
+    linux_syscall_prof_dump(15);
 }
 
 /* 透传环境变量给之后启动的 Linux 程序：
@@ -811,6 +834,8 @@ void tool_app_init(void) {
         {"wait", CMD_GROUP_USER, "Wait for task", "wait <pid>", cmd_wait},
         {"setenv", CMD_GROUP_USER, "Set debug switches",
          "setenv [name] [0|1]", cmd_setenv},
+        {"sysprof", CMD_GROUP_USER, "Show syscall hot spots (by nr)",
+         "sysprof [reset]", cmd_sysprof},
         {"export", CMD_GROUP_USER, "Pass env vars to Linux programs",
          "export NAME=value | export | export -c", cmd_export},
         {"wayland", CMD_GROUP_USER, "Start the Wayland compositor socket",
