@@ -39,10 +39,10 @@ HBOS_VER_PRE   ?= 4
 HIVE_GUI_REV   ?= 4
 
 # 派生的各种格式
-HBOS_VERSION     = v$(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)
-HBOS_VERSION_REL = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)
-HBOS_VERSION_STR = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR) beta$(HBOS_VER_BETA) pre$(HBOS_VER_PRE)
-HIVE_VERSION_REL = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-gui.$(HIVE_GUI_REV)
+HBOS_VERSION     = v$(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)-gui.$(HIVE_GUI_REV)
+HBOS_VERSION_REL = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)-gui.$(HIVE_GUI_REV)
+HBOS_VERSION_STR = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR) beta$(HBOS_VER_BETA) pre$(HBOS_VER_PRE) gui$(HIVE_GUI_REV)
+HIVE_VERSION_REL = $(HBOS_VER_MAJOR).$(HBOS_VER_MINOR)-beta$(HBOS_VER_BETA)-pre$(HBOS_VER_PRE)-gui.$(HIVE_GUI_REV)
 HIVE_VERSION_TAG = HIVE $(HIVE_VERSION_REL)
 
 # 默认目标仍为 all（下面的 version.h 规则在前，避免它抢占默认目标）
@@ -281,6 +281,7 @@ C_SRCS = \
 	$(SRC_DIR)/tools/cppe.c \
 	$(SRC_DIR)/tools/tcc_runtime_seed.c \
 	$(SRC_DIR)/tools/theme_seed.c \
+	$(SRC_DIR)/tools/distro_seed.c \
 	$(SRC_DIR)/tools/hpt_repo_seed.c \
 	$(SRC_DIR)/tools/web_vendor_seed.c \
 	$(SRC_DIR)/tools/audio.c \
@@ -309,8 +310,21 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/gui/wl/wl_surface.c \
 	$(SRC_DIR)/gui/wl/wl_compositor.c \
 	$(SRC_DIR)/gui/wl/wl_seat.c \
+	$(SRC_DIR)/gui/wayland/core/wl_wire.c \
+	$(SRC_DIR)/gui/wayland/core/wl_server.c \
+	$(SRC_DIR)/gui/wayland/iface/wl_iface_state.c \
+	$(SRC_DIR)/gui/wayland/iface/wl_iface_display.c \
+	$(SRC_DIR)/gui/wayland/iface/wl_iface_compositor.c \
+	$(SRC_DIR)/gui/wayland/iface/wl_iface_shm.c \
+	$(SRC_DIR)/gui/wayland/iface/wl_iface_seat.c \
+	$(SRC_DIR)/gui/wayland/iface/wl_iface_xdg.c \
+	$(SRC_DIR)/gui/wayland/backend/wl_backend_hive.c \
 	$(SRC_DIR)/gui/browser_backend.c \
 	$(SRC_DIR)/gui/browser_layout.c \
+	$(SRC_DIR)/gui/desktop_entry.c \
+	$(SRC_DIR)/gui/app_registry.c \
+	$(SRC_DIR)/gui/glass.c \
+	$(SRC_DIR)/gui/hiverc.c \
 	$(SRC_DIR)/gui/gui_apps.c \
 	$(SRC_DIR)/gui/apps/app_uigallery.c \
 	$(SRC_DIR)/gui/apps/app_browser.c \
@@ -382,7 +396,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps test
+.PHONY: all clean run vm mouse-test test-all run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps test
 
 # 全新 clone 的第一站：递归拉子模块（含 mbedtls 嵌套）+ 检查宿主机工具。
 # 幂等，不发 sudo、不装包，缺包时只打印安装命令。
@@ -603,7 +617,7 @@ $(KERNEL_BIOS): $(ALL_OBJS) linker_bios.ld
 # 变量会让下面的 ISO/镜像规则自然重跑（依赖文件换了名字），不必 make clean。
 $(GRUB_CFG): Makefile
 	@mkdir -p $(dir $@)
-	@printf 'set timeout=$(BOOT_MENU_TIMEOUT)\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1920x1080x32,1680x1050x32,1600x900x32,1440x900x32,1366x768x32,1280x800x32,1024x768x32,auto\n' > $@
+	@printf 'set timeout=$(BOOT_MENU_TIMEOUT)\nset default=0\ninsmod all_video\ninsmod gfxterm\nset gfxmode=auto,2560x1600x32,2560x1440x32,1920x1200x32,1920x1080x32,1680x1050x32,1600x900x32,1440x900x32,1366x768x32,1280x800x32,1024x768x32\n' > $@
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (graphics auto)" {\n  terminal_output gfxterm\n  set gfxpayload=keep\n  multiboot2 /boot/hbos.bin\n  module2 /boot/hbos.bin hbos-kernel\n}\n' >> $@
 	@printf 'menuentry "HBOS $(HBOS_VERSION) (text fallback)" {\n  terminal_output console\n  set gfxpayload=text\n  multiboot2 /boot/hbos.bin\n  module2 /boot/hbos.bin hbos-kernel\n}\n' >> $@
 
@@ -662,7 +676,43 @@ img-get:
 img-put:
 	@python3 scripts/install_app.py --img "$(APP_IMG)" --img-put "$(F)" --img-dest "$(D)"
 
+# 桌面镜像 vs 无桌面镜像：
+#
+# 带 HIVE 桌面的镜像需要 HIVE/ 仓库在位（hive-sync 会往里导出运行时与 SDK）。
+# 没有那个目录时，`make run` 自动退化成 `make run-nogui` —— no-GUI 构建
+# 不引用 HIVE/ 下任何文件，所以只拿这一份源码也能直接跑起来。
+ifeq ($(wildcard $(HIVE_REPO)/.),)
+HBOS_NO_HIVE := 1
+run:
+	@echo "· 未找到 $(HIVE_REPO)/ —— 按 no-GUI 模式启动（等同 make run-nogui）"
+	@$(MAKE) --no-print-directory run-nogui
+else
 run: run-hdd-bios
+endif
+
+# Wayland **协议层**回归：编译 → 装进镜像 → QEMU 里跑两个用例。
+# （宿主侧 surface/seat 单测是上面的 wl-test，不要混淆。）
+#
+# 合成一条命令是有原因的：测试程序的源文件名带 linux_ 前缀，客机里
+# 装的却是 /bin/wayland_*，两边靠人工对应时错过一次 —— 结果连着跑了几
+# 轮的都是旧二进制，还把锅甩给了栈对齐和文件系统。现在编译输出名和
+# 安装目标名都由 build_wl_tests.sh 的映射表统一给出。
+WL_TEST_CASES = wayland_client wayland_surface
+wl-proto-test: $(ISO_BIOS)
+	@sh scripts/build_wl_tests.sh
+	@for t in $(WL_TEST_CASES); do \
+		echo "  install /bin/$$t"; \
+		python3 scripts/install_app.py --img-put build/tests/$$t \
+			--img-dest /bin/$$t >/dev/null; \
+	done
+	TMPDIR=$(BUILD_DIR)/tmp python3 scripts/qemu_session.py \
+		$(ISO_BIOS) --disk $(APP_IMG) --mem 2048 \
+		--boot-timeout 60 --timeout 50 \
+		--log $(BUILD_DIR)/tmp/wl-proto-test.log \
+		-- "wayland --probe-input" \
+		   "run /bin/wayland_client" \
+		   "run /bin/wayland_surface"
+	@grep -E "wayland-test:|wl-surface:" $(BUILD_DIR)/tmp/wl-proto-test.log || true
 
 vm: run
 
@@ -773,6 +823,13 @@ inflate-bench: | $(BUILD_DIR)
 # 主题层与 JSON 解析器的宿主单测，外加"禁止硬编码颜色"的静态断言。
 # 为什么放宿主：主题文件必须能安全降级（损坏/缺键/非法色都不能让系统起不来），
 # 这类负例在 QEMU 里难以构造和观察。这里穷举畸形输入，秒级回归，不必启动虚拟机。
+# .desktop 解析/生成：安装器与启动器的共同契约，纯字符串逻辑，宿主直编
+de-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Werror -Isrc \
+		src/gui/desktop_entry.c tests/host/test_desktop_entry.c \
+		-o $(BUILD_DIR)/test_desktop_entry
+	$(BUILD_DIR)/test_desktop_entry
+
 ui-test: | $(BUILD_DIR)
 	@bash scripts/check_no_hardcoded_colors.sh
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
@@ -814,6 +871,15 @@ ui-test: | $(BUILD_DIR)
 		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_html
 	$(BUILD_DIR)/test_html
+
+# HAX 动画运行时（app/include/hax_anim.c）宿主机单测。
+# 该文件同时被编进用户态 libc（见 USER_LIBC_SRCS），所以单测直接编同一份
+# 源码，保证"测试过的就是跑起来的"。
+hax-anim-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Iapp/include \
+		tests/host/test_hax_anim.c app/include/hax_anim.c \
+		-o $(BUILD_DIR)/test_hax_anim
+	$(BUILD_DIR)/test_hax_anim
 
 browser-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc/gui \
@@ -874,11 +940,29 @@ wl-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/test_wl
 	$(BUILD_DIR)/test_wl
 
+# registry 事件流对真 libwayland 的可解析性：用服务端真实的 wl_wire.c 生成
+# 252 字节，经 socketpair 喂给真 libwayland 客户端，数 global 回调次数。
+# 纯宿主机，不需要 QEMU。
+wl-libwayland-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra tests/host/wl_libwayland_replay.c \
+		$(SRC_DIR)/gui/wayland/core/wl_wire.c \
+		$(shell pkg-config --cflags --libs wayland-client) \
+		-o $(BUILD_DIR)/wl_libwayland_replay
+	WAYLAND_DEBUG=1 $(BUILD_DIR)/wl_libwayland_replay
+
 # 动效策略：总开关 / 两级权限 / 帧数上限。
 fx-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_gui_effects.c \
 		$(SRC_DIR)/gui/gui_effects.c -o $(BUILD_DIR)/test_gui_effects
 	$(BUILD_DIR)/test_gui_effects
+
+# 最大化/还原几何语义：往返保真、重复最大化不污染快照、
+# 最大化后标题栏按钮仍可点、吸附→最大化→还原、无快照回落。
+wm-geo-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_wm_geometry.c \
+		$(SRC_DIR)/gui/wm.c $(SRC_DIR)/gui/gui_effects.c \
+		-o $(BUILD_DIR)/test_wm_geometry
+	$(BUILD_DIR)/test_wm_geometry
 
 # 多级优先级就绪队列：优先级/FIFO/摘除/老化/计数一致性。
 sched-test: | $(BUILD_DIR)
@@ -907,8 +991,19 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wl-test ov-test dirty-test
+test: ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test
 	@echo "✓ 宿主机测试全部通过"
+
+# 真实鼠标移动：QEMU monitor 注入 mouse_move，验证 QEMU → PS/2 → 内核
+# 解析 → HIVE 指针 → 重绘 这条链路真的通了，而不是只看协议层过没过。
+mouse-test: $(ISO_BIOS)
+	TMPDIR=$(BUILD_DIR)/tmp python3 scripts/mouse_move_test.py --iso $(ISO_BIOS)
+
+# 完整回归：宿主机单测 + 两个需要 QEMU 的集成用例。
+# `test` 刻意保持快（CI 第一道门，20 秒量级）；`test-all` 是发布前
+# 或本地全量验证，要跑 QEMU，几分钟。
+test-all: test wl-proto-test mouse-test
+	@echo "✓ 全部测试通过（宿主机单测 + QEMU 集成）"
 
 hive-sync:
 	@test -x "$(HIVE_REPO)/tools/sync-from-hbos.sh" || \
@@ -951,10 +1046,12 @@ core-only:
 
 run-hdd: run-hdd-bios
 
-# Display backend. SDL grabs the relative PS/2 pointer reliably (the GTK default
-# drops continuous motion under Wayland, which made the mouse look "dead").
-# Override on the command line if needed, e.g.  make run DISPLAY_OPT='-display gtk'
+# Display backend. GTK with zoom-to-fit=off allows free window resizing that
+# updates the QEMU EDID block in real time so HBOS automatically adapts its
+# resolution and DPI when the user drags the QEMU window border.
 DISPLAY_OPT ?= -display sdl
+VGA_OPT ?= -device VGA,vgamem_mb=32,edid=on,xres=1920,yres=1080
+TABLET_OPT ?= -usb -device usb-tablet
 
 run-nogui: run-nogui-bios
 
@@ -962,7 +1059,7 @@ run-nogui-bios: nogui-bios
 	$(QEMU_ENV) $(QEMU) -m 512M \
 		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(NOGUI_BUILD_DIR)/hbos-bios.iso -boot d \
-		-serial stdio -vga std -monitor none $(DISPLAY_OPT)
+		-serial stdio $(VGA_OPT) -monitor none $(DISPLAY_OPT)
 
 run-nogui-uefi: nogui-uefi
 	@cp $(OVMF_VARS) $(NOGUI_BUILD_DIR)/OVMF_VARS_NOGUI.fd
@@ -971,7 +1068,7 @@ run-nogui-uefi: nogui-uefi
 		-drive if=pflash,format=raw,file=$(NOGUI_BUILD_DIR)/OVMF_VARS_NOGUI.fd \
 		-netdev user,id=net0 -device e1000,netdev=net0 \
 		-cdrom $(NOGUI_BUILD_DIR)/hbos-uefi.iso -boot d \
-		-serial stdio -vga std -monitor none $(DISPLAY_OPT) -no-reboot
+		-serial stdio $(VGA_OPT) -monitor none $(DISPLAY_OPT) -no-reboot
 
 run-hdd-bios: $(INSTALL_IMG_BIOS)
 	$(QEMU_ENV) $(QEMU) -m 512M \
@@ -979,7 +1076,7 @@ run-hdd-bios: $(INSTALL_IMG_BIOS)
 		-drive file=$(INSTALL_IMG_BIOS),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
 		-netdev user,id=net0 -device e1000,netdev=net0 \
-		-boot c -serial stdio -vga std -monitor none $(DISPLAY_OPT)
+		-boot c -serial stdio $(VGA_OPT) $(TABLET_OPT) -monitor none $(DISPLAY_OPT)
 
 run-hdd-uefi: $(INSTALL_IMG_UEFI)
 	@cp $(OVMF_VARS) $(BUILD_DIR)/OVMF_VARS_HDD.fd
@@ -990,7 +1087,7 @@ run-hdd-uefi: $(INSTALL_IMG_UEFI)
 		-drive file=$(INSTALL_IMG_UEFI),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
 		-netdev user,id=net0 -device e1000,netdev=net0 \
-		-boot c -serial stdio -monitor none -vga std -no-reboot
+		-boot c -serial stdio -monitor none $(VGA_OPT) $(TABLET_OPT) $(DISPLAY_OPT) -no-reboot
 
 run-bios-disk: $(ISO_BIOS) $(DISK_IMG)
 	$(QEMU_ENV) $(QEMU) -m 512M \
@@ -1125,6 +1222,16 @@ USER_LIBC_SRCS = \
 	$(USER_LIBC_DIR)/signalfd.c
 
 USER_LIBC_OBJS = $(USER_LIBC_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o) $(BUILD_DIR)/user/libc/setjmp.o
+
+# HAX 动画运行时（app/include/hax_anim.c）属于"用户态 libc"的一部分：
+# 它被所有 .hax 应用链接，同时不依赖内核头。单独列一份并给显式编译规则，
+# 因为它不在 $(SRC_DIR) 下，套不进上面的模式替换。
+HAX_ANIM_SRC  = app/include/hax_anim.c
+HAX_ANIM_OBJ  = $(BUILD_DIR)/app/include/hax_anim.o
+USER_LIBC_OBJS += $(HAX_ANIM_OBJ)
+$(HAX_ANIM_OBJ): $(HAX_ANIM_SRC) app/include/hax_anim.h | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) $(HAX_ANIM_SRC) -o $@
 # ── HAX 应用：多结构模式自动编译并打包进内核 ─────────────────────────
 # 编译规则已模块化迁移到 HAX-Compile 仓库（mk/hax-apps.mk，含 .hax 内嵌
 # 图标支持），这里负责：启用时 include 该模块、汇总 HAX_ALL_BINS、
@@ -1194,6 +1301,43 @@ HAX_ALL_BINS =
 endif
 # （HAX_BLOB/HAX_MANIFEST/HAX_MODE_STAMP/HAX_OBJS 定义见上方 mk/secure_net.mk
 #   include 之后——必须先于 $(KERNEL_BIOS) 链接规则出现。）
+# ── 商店演示应用（只在 HPT 仓库里，不内置进镜像）────────────────────
+# 「软件商店」要能演示"装一个真正的 GUI 程序"，镜像里就得有一个**未安装**
+# 的图形应用到。它走和内置应用一样的 HAX 编译流程，但产物不进
+# HAX_ALL_BINS，只作为 HPT 仓库的一个包存在：用户在商店里装完，开始菜单
+# 和桌面才会出现「画板」。
+STORE_DEMO_DIR = $(BUILD_DIR)/store-demo
+STORE_DEMO_HAX = $(STORE_DEMO_DIR)/hivepaint.hax $(STORE_DEMO_DIR)/ninvaders.hax
+
+$(STORE_DEMO_DIR)/hivepaint.hax: store-demo/paint.c app/include/hax.h | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(USER_CFLAGS) -Iapp/include store-demo/paint.c -o $(STORE_DEMO_DIR)/paint.o
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(STORE_DEMO_DIR)/paint.o -o $@
+	@echo "✓ hax app (store demo): $@"
+
+# nInvaders：Debian 源码包 ninvaders 0.1.1 的原版游戏逻辑 + 我们的
+# ncurses→HAX 兼容层（store-demo/compat、store-demo/haxnc.c）。
+NINVADERS_SRC = store-demo/vendor/ninvaders-0.1.1
+NINVADERS_OBJS = $(STORE_DEMO_DIR)/ni_main.o $(STORE_DEMO_DIR)/ni_globals.o \
+	$(STORE_DEMO_DIR)/ni_view.o $(STORE_DEMO_DIR)/ni_player.o \
+	$(STORE_DEMO_DIR)/ni_aliens.o $(STORE_DEMO_DIR)/ni_ufo.o \
+	$(STORE_DEMO_DIR)/ni_haxnc.o
+NINVADERS_CFLAGS = $(USER_CFLAGS) -fcommon -DHAX_PORT -Wno-unused-parameter \
+	-Istore-demo/compat -I$(NINVADERS_SRC) -Iapp/include
+
+$(STORE_DEMO_DIR)/ni_main.o: $(NINVADERS_SRC)/nInvaders.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(NINVADERS_CFLAGS) $< -o $@
+$(STORE_DEMO_DIR)/ni_%.o: $(NINVADERS_SRC)/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(NINVADERS_CFLAGS) $< -o $@
+$(STORE_DEMO_DIR)/ni_haxnc.o: store-demo/haxnc.c store-demo/hax_font8x16.h | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(NINVADERS_CFLAGS) store-demo/haxnc.c -o $@
+$(STORE_DEMO_DIR)/ninvaders.hax: $(NINVADERS_OBJS)
+	$(LD) $(USER_LDFLAGS) $(USER_LIBC_OBJS) $(NINVADERS_OBJS) -o $@
+	@echo "✓ hax game (Debian nInvaders port): $@"
+
 # ── 内置 HPT 软件仓库 ─────────────────────────────────────────────────
 # 把打包在镜像里的 HAX 应用生成一份 HPT 仓库（Packages + pool/），打成 blob
 # 经 hpt_repo_blob.asm incbin 嵌入内核，开机由 src/tools/hpt_repo_seed.c
@@ -1206,9 +1350,9 @@ HPT_REPO_BIN       = $(BUILD_DIR)/hpt-repo.bin
 $(BUILD_DIR)/hpt-repo:
 	mkdir -p $@
 
-$(HPT_REPO_PACKAGES): tools/genhpt_repo.py $(HAX_ALL_BINS) | $(BUILD_DIR)/hpt-repo
+$(HPT_REPO_PACKAGES): tools/genhpt_repo.py $(HAX_ALL_BINS) $(STORE_DEMO_HAX) | $(BUILD_DIR)/hpt-repo
 	rm -f $(HPT_REPO_DIR)/*.hax
-	python3 tools/genhpt_repo.py $(BUILD_DIR)/app $(HPT_REPO_DIR)
+	python3 tools/genhpt_repo.py $(BUILD_DIR)/app $(HPT_REPO_DIR) $(STORE_DEMO_DIR)
 
 $(HPT_REPO_BIN): tools/genhptblob.py $(HPT_REPO_PACKAGES)
 	python3 tools/genhptblob.py $(HPT_REPO_DIR) $@
@@ -1216,7 +1360,7 @@ $(HPT_REPO_BIN): tools/genhptblob.py $(HPT_REPO_PACKAGES)
 # hpt-repo.bin 未压缩时 1.1 MB，压到约 40%。运行时由 hpt_repo_seed.c 解压。
 HPT_REPO_PACKED = $(BUILD_DIR)/hpt-repo.pack
 $(HPT_REPO_PACKED): $(HPT_REPO_BIN) tools/pack_blob.py
-	@python3 tools/pack_blob.py $(HPT_REPO_BIN) $@
+	@python3 tools/pack_blob.py $(HPT_REPO_BIN) $@ --raw 
 
 $(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_PACKED) | $(BUILD_DIR)
 	@mkdir -p $(@D)

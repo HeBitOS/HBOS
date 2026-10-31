@@ -1,4 +1,7 @@
+#include "tty.h"
+#include "signal.h"
 #include "../errno.h"
+#include "../syscall.h"
 #include "../elf.h"
 #include "../fcntl.h"
 #include "../core/task.h"
@@ -10,6 +13,38 @@
 #include "../user/app.h"
 #include "../user/hax_app.h"
 #include "../vfs.h"
+#include "../gui/wayland/core/wl_server.h"
+#include "../gui/wayland/backend/wl_backend.h"
+/* 发行版身份切换命令（实现在 tools/distro_seed.c） */
+extern void cmd_distro(int argc, char **argv);
+
+/* 指针位置（实现在 tools/gui.c）。HIVE 主循环每帧发布，供调试和
+ * `make mouse-test` 验证"注入的鼠标移动真的走完了整条链路"。 */
+extern int gui_pointer_x(void);
+extern int gui_pointer_y(void);
+extern unsigned gui_pointer_move_count(void);
+
+static void cmd_mouse(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    /* 不用 print_uint：它是本文件后部定义的 static 函数，这里在它之前。
+     * 手写一个十进制输出，避免把函数顺序搅乱。 */
+    char digits[12];
+    console_puts("pointer: ");
+    int values[3];
+    values[0] = gui_pointer_x();
+    values[1] = gui_pointer_y();
+    values[2] = (int)gui_pointer_move_count();
+    for (int v = 0; v < 3; v++) {
+        int value = values[v];
+        if (value < 0) { console_puts("-"); value = -value; }
+        int n = 0;
+        if (!value) digits[n++] = '0';
+        while (value) { digits[n++] = (char)('0' + value % 10); value /= 10; }
+        while (n) console_putchar(digits[--n]);
+        console_puts(v == 0 ? "," : (v == 1 ? " moves=" : "\n"));
+    }
+}
 #include "tool.h"
 
 #define APP_ELF_MAX_SIZE 131072
@@ -133,7 +168,13 @@ static void cmd_apps(int argc, char **argv) {
 #define APP_LIB_PATH_MAX 1024
 static char app_lib_path[APP_LIB_PATH_MAX];
 static char app_env_ld_path[APP_LIB_PATH_MAX + 32];
-static char *app_envp[8];
+static char *app_envp[16];
+/* 透传给 Linux 子进程的额外环境变量（"NAME=value" 字符串，指向静态区）。 */
+#define APP_ENV_EXTRA_MAX 8
+#define APP_ENV_EXTRA_LEN 192
+static char app_env_extra_buf[APP_ENV_EXTRA_MAX][APP_ENV_EXTRA_LEN];
+static char *app_env_extra[APP_ENV_EXTRA_MAX];
+static int app_env_extra_count;
 
 static void lib_path_append(char **cursor, const char *path) {
     size_t len = strlen(path);
@@ -196,12 +237,31 @@ static char **build_linux_env(void) {
     static char env_home[] = "HOME=/root";
     static char env_tmp[] = "TMPDIR=/tmp";
     static char env_lang[] = "LANG=C.UTF-8";
+    /* Wayland 客户端靠这两个变量找 socket：
+     *   wl_display_connect(NULL) → $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY
+     * WAYLAND_DISPLAY 不设时默认 wayland-0，和 `wayland` 命令的默认
+     * 监听路径 /tmp/wayland-0 正好对上。
+     *
+     * 没有 XDG_RUNTIME_DIR 时 libwayland 直接连不上，Chromium 会退回
+     * X11 然后报 "Missing X server" —— 看起来像"没编 wayland 后端"，
+     * 其实是环境变量缺了。 */
+    static char env_xdg_runtime[] = "XDG_RUNTIME_DIR=/tmp";
+    static char env_wayland_display[] = "WAYLAND_DISPLAY=wayland-0";
     app_envp[0] = app_env_ld_path;
     app_envp[1] = env_path;
     app_envp[2] = env_home;
     app_envp[3] = env_tmp;
     app_envp[4] = env_lang;
-    app_envp[5] = NULL;
+    app_envp[5] = env_xdg_runtime;
+    app_envp[6] = env_wayland_display;
+    int slot = 7;
+    /* 追加透传变量。此前这里是写死的 7 项 + NULL，用户 `export`/命令行前缀
+     * 设的变量根本进不了子进程 —— 表现是 `WAYLAND_DEBUG=1 chromium` 无效，
+     * 容易误判成"Chromium 把环境清掉了"。要调试 libwayland 必须能透传。 */
+    for (int i = 0; i < app_env_extra_count && slot < (int)(sizeof(app_envp) /
+             sizeof(app_envp[0])) - 1; i++)
+        app_envp[slot++] = app_env_extra[i];
+    app_envp[slot] = NULL;
     return app_envp;
 }
 
@@ -343,6 +403,64 @@ static int parse_u32(const char *s, uint32_t *out) {
     return 0;
 }
 
+
+/* ── 作业控制：jobs / fg / bg / stop（对象为本 shell 的子任务） ── */
+static void job_line(const task_t *t) {
+    console_puts("  [");
+    print_uint(t->id);
+    console_puts("] ");
+    console_puts(t->stopped ? "Stopped  " : "Running  ");
+    console_puts(t->name);
+    console_putchar('\n');
+}
+
+static void cmd_jobs(int argc, char **argv) {
+    (void)argc; (void)argv;
+    uint32_t me = task_get_id();
+    int n = 0;
+    for (uint32_t i = 1; i < 256; i++) {
+        const task_t *t = task_get_by_id(i);
+        if (t && t->state != TASK_TERMINATED && t->parent_id == me) { job_line(t); n++; }
+    }
+    if (!n) console_puts("no jobs\n");
+}
+
+static task_t *job_arg(int argc, char **argv, const char *cmd) {
+    uint32_t id = 0;
+    if (argc < 2 || parse_u32(argv[1], &id) < 0) {
+        console_puts("usage: "); console_puts(cmd); console_puts(" <pid>\n");
+        return NULL;
+    }
+    task_t *t = task_lookup(id);
+    if (!t || t->state == TASK_TERMINATED || t->parent_id != task_get_id()) {
+        console_puts(cmd); console_puts(": no such job\n");
+        return NULL;
+    }
+    return t;
+}
+
+static void cmd_stop(int argc, char **argv) {
+    task_t *t = job_arg(argc, argv, "stop");
+    if (t) task_kill(t->id, SIGSTOP);
+}
+
+static void cmd_bg(int argc, char **argv) {
+    task_t *t = job_arg(argc, argv, "bg");
+    if (t) { task_kill(t->id, SIGCONT); job_line(t); }
+}
+
+static void cmd_fg(int argc, char **argv) {
+    task_t *t = job_arg(argc, argv, "fg");
+    if (!t) return;
+    uint32_t id = t->id;
+    task_setpgid(id, id);                 /* 独立进程组，^C/^Z 只作用于它 */
+    tty_set_foreground(id);
+    task_kill(id, SIGCONT);
+    while (t->state != TASK_TERMINATED && !t->stopped) task_yield();
+    tty_set_foreground(0);
+    if (t->state != TASK_TERMINATED) { console_puts("\n[stopped] "); console_puts(t->name); console_putchar('\n'); }
+}
+
 static void cmd_spawn(int argc, char **argv) {
     if (argc < 2) {
         console_puts("Usage: spawn <app> [args...]\n");
@@ -466,6 +584,149 @@ static void cmd_ps(int argc, char **argv) {
     }
 }
 
+/* 内核排错开关。QEMU 上"A/B 对比"比读代码快得多：同一个 ISO 里用
+ * `setenv clone3 1` 开日志、`setenv clone3 0` 关掉，再跑一次就能确认
+ * 某个崩溃是否与特定系统调用参数相关。 */
+static void cmd_wayland(int argc, char **argv) {
+    /* 默认路径要和客户端约定的一致：libwayland 会拼
+     * $XDG_RUNTIME_DIR/wayland-0，HBOS 里把 XDG_RUNTIME_DIR 设成 /tmp，
+     * 所以默认就是 /tmp/wayland-0。
+     *
+     * --probe-input：打开输入自检（窗口首次上屏后自动注入一次 pointer /
+     * keyboard 事件）。没有真实鼠标键盘的自动化环境里靠它验证回传通路。 */
+    const char *path = "/tmp/wayland-0";
+    int probe_input = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i]) continue;
+        if (strcmp(argv[i], "--probe-input") == 0) {
+            probe_input = 1;
+            continue;
+        }
+        if (argv[i][0] == '/') path = argv[i];
+    }
+    int result = wl_server_start(path);
+    if (result < 0) {
+        console_puts("wayland: failed to start (");
+        print_uint((uint32_t)(-result));
+        console_puts(")\n");
+        return;
+    }
+    if (probe_input) {
+        wl_backend_set_input_probe(1);
+        console_puts("wayland: input probe enabled\n");
+    }
+    console_puts("wayland: listening on ");
+    console_puts(path);
+    console_puts("\n");
+}
+
+static void cmd_setenv(int argc, char **argv) {
+    static const struct {
+        const char *name;
+        int which;
+    } table[] = {
+        {"clone3", LINUX_DEBUG_TRACE_CLONE3},
+        {"forktid", LINUX_DEBUG_FORK_CLEARTID},
+        {"stepchild", LINUX_DEBUG_STEP_CHILD},
+        {"resume", LINUX_DEBUG_TRACE_RESUME},
+    };
+    if (argc < 2) {
+        console_puts("usage: setenv <name> [0|1]\n");
+        for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+            console_puts("  ");
+            console_puts(table[i].name);
+            console_putchar('\n');
+        }
+        console_puts("  tracepid <n>   (0 = off)\n");
+        return;
+    }
+    /* tracepid 不是开关而是"盯住哪个 pid"，单独处理：值可以是任意整数，
+     * 传 0 关闭。fork 出来的子进程停住时没有异常可 dump，只能靠它。 */
+    if (strcmp(argv[1], "tracepid") == 0) {
+        int pid = 0;
+        if (argc >= 3) {
+            for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++)
+                pid = pid * 10 + (*p - '0');
+        }
+        linux_debug_set_trace_pid(pid);
+        console_puts("tracepid = ");
+        print_uint((uint32_t)pid);
+        console_putchar('\n');
+        return;
+    }
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (strcmp(argv[1], table[i].name) != 0) continue;
+        int on = 1;
+        if (argc >= 3) on = (argv[2][0] == '1');
+        linux_debug_set_flag(table[i].which, on);
+        console_puts(argv[1]);
+        console_puts(on ? " = 1\n" : " = 0\n");
+        return;
+    }
+    console_puts("setenv: unknown switch '");
+    console_puts(argv[1]);
+    console_puts("'\n");
+}
+
+/* 透传环境变量给之后启动的 Linux 程序：
+ *   export WAYLAND_DEBUG=1
+ *   export              (列出已设的)
+ *   export -c           (清空)
+ * 为什么需要：build_linux_env() 原来是写死的固定列表，用户设的变量进不了
+ * 子进程，`WAYLAND_DEBUG=1 chromium` 等于没设。 */
+static void cmd_export(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "-c") == 0) {
+        app_env_extra_count = 0;
+        console_puts("export: cleared\n");
+        return;
+    }
+    if (argc < 2) {
+        if (!app_env_extra_count) {
+            console_puts("export: (none)\n");
+            return;
+        }
+        for (int i = 0; i < app_env_extra_count; i++) {
+            console_puts(app_env_extra[i]);
+            console_putchar('\n');
+        }
+        return;
+    }
+    const char *assignment = argv[1];
+    if (!strchr(assignment, '=')) {
+        console_puts("export: expected NAME=value\n");
+        return;
+    }
+    size_t length = strlen(assignment);
+    if (length >= APP_ENV_EXTRA_LEN) {
+        console_puts("export: value too long\n");
+        return;
+    }
+    /* 同名覆盖，避免重复项撑满表。 */
+    const char *eq = strchr(assignment, '=');
+    size_t name_length = (size_t)(eq - assignment);
+    for (int i = 0; i < app_env_extra_count; i++) {
+        if (strncmp(app_env_extra[i], assignment, name_length) == 0 &&
+            app_env_extra[i][name_length] == '=') {
+            memcpy(app_env_extra_buf[i], assignment, length + 1);
+            app_env_extra[i] = app_env_extra_buf[i];
+            console_puts("export: ");
+            console_puts(assignment);
+            console_putchar('\n');
+            return;
+        }
+    }
+    if (app_env_extra_count >= APP_ENV_EXTRA_MAX) {
+        console_puts("export: table full\n");
+        return;
+    }
+    int slot = app_env_extra_count++;
+    memcpy(app_env_extra_buf[slot], assignment, length + 1);
+    app_env_extra[slot] = app_env_extra_buf[slot];
+    console_puts("export: ");
+    console_puts(assignment);
+    console_putchar('\n');
+}
+
 static void cmd_wait(int argc, char **argv) {
     if (argc < 2) {
         console_puts("Usage: wait <pid>\n");
@@ -539,11 +800,25 @@ static void cmd_jspage(int argc, char **argv) {
 void tool_app_init(void) {
     static const command_t cmds[] = {
         {"apps", CMD_GROUP_USER, "List user apps", "apps", cmd_apps},
+        {"jobs", CMD_GROUP_USER, "List shell jobs", "jobs", cmd_jobs},
+        {"fg",   CMD_GROUP_USER, "Foreground a job (^C/^Z aware)", "fg <pid>", cmd_fg},
+        {"bg",   CMD_GROUP_USER, "Resume a stopped job", "bg <pid>", cmd_bg},
+        {"stop", CMD_GROUP_USER, "Stop a job (SIGSTOP)", "stop <pid>", cmd_stop},
         {"run",  CMD_GROUP_USER, "Run a user app", "run <app> [args...]", cmd_run},
         {"spawn",CMD_GROUP_USER, "Spawn app as task", "spawn <app> [args...]", cmd_spawn},
         {"elfinfo", CMD_GROUP_USER, "Show ELF binary info", "elfinfo <file.elf>", cmd_elfinfo},
         {"ps",   CMD_GROUP_USER, "List tasks", "ps", cmd_ps},
         {"wait", CMD_GROUP_USER, "Wait for task", "wait <pid>", cmd_wait},
+        {"setenv", CMD_GROUP_USER, "Set debug switches",
+         "setenv [name] [0|1]", cmd_setenv},
+        {"export", CMD_GROUP_USER, "Pass env vars to Linux programs",
+         "export NAME=value | export | export -c", cmd_export},
+        {"wayland", CMD_GROUP_USER, "Start the Wayland compositor socket",
+         "wayland [path]", cmd_wayland},
+        {"distro", CMD_GROUP_USER, "Show or switch distribution identity",
+         "distro [status|use ID|add ID [VER]|reset]", cmd_distro},
+        {"mouse", CMD_GROUP_USER, "Show pointer position and move count",
+         "mouse", cmd_mouse},
 #if HBOS_ENABLE_GUI
         {"jspage", CMD_GROUP_USER, "Run inline <script> of an HTML file",
          "jspage <file.html>", cmd_jspage},
