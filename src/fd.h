@@ -5,6 +5,13 @@
 #include <stdint.h>
 #include "vfs.h"
 
+/* 每个进程的 fd 表容量。
+ *
+ * 保持 128：fd_entry_t 带 path[256]，单表约 37KB，×64 任务是 2.3MB 静态
+ * BSS；提到 512 会变成 9.2MB，对内核不可接受。
+ * Chromium 子进程会 F_DUPFD_CLOEXEC(fd, 512) 想要一个高位 fd —— 那个 512
+ * 只是"希望不小于"的偏好，不是容量要求。解法是在 fcntl 里回退到任意可用
+ * fd（见 src/syscall.c 的 case 1030），而不是把表撑大。 */
 #define POSIX_MAX_FDS 128
 
 #define FD_FILE    1

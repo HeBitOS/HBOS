@@ -2237,6 +2237,20 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
                     return (uint64_t)i;
                 }
             }
+            /* 请求的下限超出本进程 fd 表容量时的回退。
+             * Linux 里 arg 只是"希望不小于这个号"，Chromium 子进程启动时
+             * 会 F_DUPFD_CLOEXEC(fd, 512)，而 HBOS 的 POSIX_MAX_FDS 远小于
+             * 512 —— 原来直接 -EMFILE，它就把 IPC 通道判为建立失败、
+             * 放弃整个子进程（GPU process launch failed: error_code=1002）。
+             * 返回一个可用 fd 比返回错误安全得多：调用方要的是"一条可用的
+             * 通道"，具体号码它并不关心。 */
+            for (int i = 3; i < lowest && i < POSIX_MAX_FDS; i++) {
+                if (!cur->fd_table->entries[i].used) {
+                    cur->fd_table->entries[i] = *entry;
+                    linux_compat_retain(i);
+                    return (uint64_t)i;
+                }
+            }
             return (uint64_t)(-EMFILE);
         }
         case 1:                                       /* F_GETFD */
@@ -2272,6 +2286,16 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
                 !linux_user_range_mapped((uint64_t)(uintptr_t)argument, 32))
                 return (uint64_t)(-EFAULT);
             return 0;
+        /* 管道容量查询/设置（fcntl cmd 1032/1033）。
+         * Chromium 的 IPC 通道建好后会 F_GETPIPE_SZ 来决定读缓冲大小，
+         * 原来落到 default 返回 EINVAL，它就把这条通道判为不可用 ——
+         * 表现为 GPU 子进程 exec 成功后立刻被判 "launch failed"，
+         * 日志里只有一行 [FDERR] nr=72 cmd=1033 ret=-22，极难联想。
+         * HBOS 的管道没有容量概念，报一个固定值并接受设置请求即可。 */
+        case 1032:                                    /* F_GETPIPE_SZ */
+            return 65536;
+        case 1033:                                    /* F_SETPIPE_SZ */
+            return argument > 0 ? (uint64_t)argument : 65536;
         default:
             return (uint64_t)(-EINVAL);
     }
@@ -3592,7 +3616,18 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
              * *.pak 全部 ENOENT。 */
             elf_set_exec_path(exec_target);
             int ret = elf64_load_vfs_and_exec(node, argv, envp);
-            if (ret < 0) return (uint64_t)(-ENOEXEC);
+            if (ret < 0) {
+                /* 走到这里说明文件找到了、但加载失败（缺段/缺解释器/栈布局
+                 * 放不下…）。不打印的话子进程就"静默消失"，父进程只看到
+                 * "GPU process launch failed"，根本不知道是加载失败。 */
+                console_puts("  [EXEC] load failed ret=");
+                trace_put_udec((uint64_t)(int64_t)ret);
+                console_puts(" path=");
+                for (int i = 0; exec_target[i] && i < 96; i++)
+                    console_putchar(exec_target[i]);
+                console_putchar('\n');
+                return (uint64_t)(-ENOEXEC);
+            }
             return 0;
         }
 
@@ -5294,6 +5329,14 @@ static void linux_trace_fd_error(uint64_t number,
     trace_put_udec(number);
     console_puts(" fd=");
     trace_put_udec((uint64_t)fd);
+    /* fcntl 只打 fd 是没用的：失败原因取决于 cmd（F_GETPIPE_SZ 与
+     * F_DUPFD 完全不是一回事）。把 cmd 与参数一并打出来。 */
+    if (number == 72) {
+        console_puts(" cmd=");
+        trace_put_udec((uint64_t)frame->a1);
+        console_puts(" arg=");
+        trace_put_udec((uint64_t)frame->a2);
+    }
     console_puts(" ret=-");
     trace_put_udec((uint64_t)(-result));
     task_t *cur = task_current();
