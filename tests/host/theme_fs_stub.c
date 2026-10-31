@@ -216,3 +216,17 @@ int vfs_write(vfs_node_t *node, uint32_t offset, const void *buffer, uint32_t co
 
 vfs_node_t *vfs_create(const char *path);
 vfs_node_t *vfs_create(const char *path) { (void)path; return NULL; }
+
+/* 主题保存路径会在目录不存在时先建目录（ui_theme_save_choice）。
+ * stub 里 "/themes" 用 g_themes_exists 表示"目录存在"，所以 mkdir
+ * 就是把它置真；其它路径一律假装成功 —— 测试关心的是主题层的降级
+ * 行为，不是目录树本身。 */
+int vfs_mkdir(const char *path);
+int vfs_mkdir(const char *path) {
+    if (!path) return -1;
+    if (strcmp(path, "/themes") == 0) {
+        g_themes_exists = true;
+        return 0;
+    }
+    return 0;
+}

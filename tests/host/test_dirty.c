@@ -23,10 +23,16 @@ int main(void) {
     CHECK(gui_dirty_count() == 2);
 
     printf("[DIRTY] 并集再触发合并\n");
+    /* 注意：新块必须**真正重叠**两块，不能只靠"相邻"。
+     * gui_dirty_add 刻意不合并仅相邻的矩形 —— 相邻合并得到的外接矩形
+     * 会把中间的空隙也纳入重绘，那块空隙被重画成当前桌面状态，正好抹掉
+     * 本该保留的窗口内容（表现为随机"残留方块"）。所以这里用一个同时
+     * 压住左右两块的矩形来触发级联合并。 */
     gui_dirty_reset();
     gui_dirty_add(0, 0, 10, 10);
     gui_dirty_add(20, 0, 10, 10);
-    gui_dirty_add(10, 0, 10, 10);       /* 把前两块连起来 */
+    CHECK(gui_dirty_count() == 2);
+    gui_dirty_add(8, 0, 15, 10);        /* 8..23，同时重叠前两块 */
     CHECK(gui_dirty_count() == 1);
     CHECK(gui_dirty_get(0, &x, &y, &w, &h) == 0);
     CHECK(x == 0 && w == 30 && h == 10);
