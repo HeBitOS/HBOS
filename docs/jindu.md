@@ -582,3 +582,51 @@ libwayland **完全不校验 `global.version`**，`0xdeadbeef` 原样透传、N 
 **本轮结论**：Wayland 服务端这条线**已经从嫌疑名单上划掉**。下一轮要查的是
 **fork 之后子进程为什么在 libc 里解引用 0**——那才是挡住 Chromium 的地方。
 
+
+### R33（找到 headless shell：`--dump-dom` 的路是通的）
+
+**关键突破：缺的确实是"一个壳"，而且这个壳是独立包。**
+
+之前 R11/R31 的结论「Debian 这份 chromium 没编 headless shell，命令处理器没有入口」
+只说对了一半：**普通 `chromium` 包里确实没有**，但 Debian 把它拆成了**独立的
+`chromium-headless-shell` 包**。装上之后 `--dump-dom` 就有了入口。
+
+```
+chromium_156.0.8078.73-1~deb12u1_amd64.deb              296 MB  普通浏览器
+chromium-headless-shell_156.0.8078.73-1_amd64.deb       230 MB  ← 就是这个"壳"
+  └ usr/lib/chromium/chromium-headless-shell            229 MB
+  └ headless_command_resources.pak / headless_lib_data.pak / headless_lib_strings.pak
+```
+
+**版本从 151 升到 156 后，崩溃地址完全没变**：
+
+```
+[TRAP] user SIGSEGV addr=0x0 rip=0x1000017F95A5   ← 与 R11、R32 一字不差
+```
+
+这排除了"版本问题"，确认是 HBOS 侧与 Chromium 交互的固有缺陷。
+
+**但 headless shell 走的路径不同，它不崩。** 直接运行得到：
+
+```
+run: exit 127
+```
+
+`exit 127` = 动态链接器找不到共享库。日志里它在找 `libopenh264.so.8`，一路失败。
+**这是纯粹的依赖缺失，不是移植问题**——比之前的 SIGSEGV 好办得多。
+
+镜像里已有的是**旧版**，headless shell 要**新版**（都是 Debian trixie 的 t64 系列）：
+
+| 镜像里已有 | headless shell 需要 |
+|---|---|
+| `libopenh264-7` | `libopenh264-8` |
+| `libdav1d6` | `libdav1d.so.7` |
+| `libflac12` | `libFLAC.so.14` |
+| `libminizip1` | `libminizip.so.1`（t64） |
+
+依赖版本不是问题：headless shell 要求 `libc6 >= 2.43`，宿主 glibc 是 **2.44**，
+而 `Makefile:1262` 的 `HBOS_GLIBC_LIBDIR` 正是从宿主 `/lib/x86_64-linux-gnu/` 拷，
+所以 glibc 侧满足。
+
+**下一步**：补齐上面那张表的库，直到 `exit 127` 消失。这是纯打包工作，
+不需要动内核。
