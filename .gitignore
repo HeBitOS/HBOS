@@ -3,7 +3,6 @@
 build/
 build-nogui/
 build-core/
-docs/
 .claude/
 .roo/
 .claudecode.md
@@ -28,3 +27,10 @@ tests/host/vectors/
 .tmp/
 .build-check.log
 .tmp-test.log
+
+# HPT 包转换输出（pkg2hax 的 -o out/，见 docs/HANDOFF-PROMPTS.md）
+/out/
+# 从宿主 glibc 目录拷到仓库根的 .hax 共享库（构建中间产物，不是源码）
+/*.hax
+# 手改图片前的备份
+*.bak
