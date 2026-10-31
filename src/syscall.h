@@ -283,6 +283,10 @@ enum {
      *  Chromium 连上 Wayland、收完 registry 事件后不再发请求，怀疑它卡在
      *  ppoll 上等一个永远不会就绪的 fd。默认关闭。 */
     LINUX_DEBUG_PPOLL_TRACE = 5,
+    /** 把用户程序写到 stderr 的内容转发到控制台。
+     *  动态链接器报 "找不到共享库" 时以 127 退出，原因只写在 stderr 里，
+     *  没有这个开关就只能靠猜缺哪个库。默认关闭。 */
+    LINUX_DEBUG_STDERR_ECHO = 6,
 };
 void linux_debug_set_flag(int which, int value);
 

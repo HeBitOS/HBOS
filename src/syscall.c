@@ -967,6 +967,9 @@ static int hbos_trace_clone3;
 static int hbos_debug_fork_cleartid;
 static int hbos_debug_step_child;
 static int hbos_debug_trace_resume;
+/* 把用户程序写到 stderr 的内容转发到控制台（`setenv stderr 1`）。
+ * 动态链接器以 127 退出时，缺库的具体原因只写在这里。 */
+static int linux_debug_stderr_echo;
 /* 按 pid 实时追踪 syscall（`setenv tracepid <pid>`），0 = 关闭。 */
 static int hbos_trace_pid;
 
@@ -995,6 +998,8 @@ void linux_debug_set_flag(int which, int value) {    if (which == LINUX_DEBUG_TR
         extern int task_debug_trace_resume;
         hbos_debug_trace_resume = !!value;
         task_debug_trace_resume = !!value;
+    } else if (which == LINUX_DEBUG_STDERR_ECHO) {
+        linux_debug_stderr_echo = !!value;
     }
 }
 
@@ -1743,6 +1748,24 @@ static uint64_t linux_vector_io(int fd, const linux_x86_iovec_t *vectors,
                                 uint64_t count, int write_operation) {
     if ((!vectors && count) || count > 1024)
         return (uint64_t)(count > 1024 ? -EINVAL : -EFAULT);
+    /* 用户程序以 127 退出（动态链接器找不到库）时，真正的原因只写在它输出到
+     * stderr 的那几行里。内核此前只打印 syscall 参数、看不到内容，排查只能靠
+     * 猜"缺哪个库"。这里把 stderr 内容原样转发到控制台。
+     * 默认关闭，`setenv stderr 1` 打开。 */
+    if (write_operation && fd == 2 && linux_debug_stderr_echo) {
+        for (uint64_t i = 0; i < count && i < 8; i++) {
+            if (!vectors[i].base || !vectors[i].length) continue;
+            uint64_t n = vectors[i].length;
+            if (n > 1024) n = 1024;
+            console_puts("[STDERR] ");
+            const char *text = (const char *)(uintptr_t)vectors[i].base;
+            for (uint64_t k = 0; k < n; k++) {
+                char ch = text[k];
+                console_putchar(ch == '\n' ? '|' : ch);
+            }
+            console_putchar('\n');
+        }
+    }
     int64_t total = 0;
     for (uint64_t i = 0; i < count; i++) {
         if (!vectors[i].base && vectors[i].length)

@@ -165,7 +165,7 @@ static void cmd_apps(int argc, char **argv) {
  * 固定的 Debian 默认目录在前，/opt/<pkg>/... 追加在后——系统库优先，
  * 避免包内旧副本盖掉运行时真正在用的 glibc。
  */
-#define APP_LIB_PATH_MAX 1024
+#define APP_LIB_PATH_MAX 16384
 static char app_lib_path[APP_LIB_PATH_MAX];
 static char app_env_ld_path[APP_LIB_PATH_MAX + 32];
 static char *app_envp[16];
@@ -175,15 +175,24 @@ static char *app_envp[16];
 static char app_env_extra_buf[APP_ENV_EXTRA_MAX][APP_ENV_EXTRA_LEN];
 static char *app_env_extra[APP_ENV_EXTRA_MAX];
 static int app_env_extra_count;
+/* LD_LIBRARY_PATH 装不下而丢掉的目录数。非 0 说明库搜索路径不完整，
+ * 表现为"明明装了库却 exit 127"，很容易被误判成缺依赖。 */
+static int app_lib_path_dropped;
 
 static void lib_path_append(char **cursor, const char *path) {
     size_t len = strlen(path);
     char *p = *cursor;
     if (p != app_lib_path) {
-        if (p + 1 >= app_lib_path + sizeof(app_lib_path) - 1) return;
+        if (p + 1 >= app_lib_path + sizeof(app_lib_path) - 1) {
+            app_lib_path_dropped++;
+            return;
+        }
         *p++ = ':';
     }
-    if (p + len + 1 > app_lib_path + sizeof(app_lib_path)) return;
+    if (p + len + 1 > app_lib_path + sizeof(app_lib_path)) {
+        app_lib_path_dropped++;
+        return;
+    }
     memcpy(p, path, len + 1);
     *cursor = p + len;
 }
@@ -226,9 +235,19 @@ static char **build_linux_env(void) {
     };
     char *cursor = app_lib_path;
     app_lib_path[0] = 0;
+    app_lib_path_dropped = 0;
     for (size_t i = 0; i < sizeof(system_dirs) / sizeof(system_dirs[0]); i++)
         lib_path_append(&cursor, system_dirs[i]);
     lib_path_scan_opt(&cursor);
+    /* 静默截断是最难查的一类问题：库装好了、路径也在扫，但就是找不到。
+     * 只在真的丢东西时打一行，正常运行不刷屏。 */
+    if (app_lib_path_dropped) {
+        console_puts("[APP] LD_LIBRARY_PATH 溢出，丢弃 ");
+        print_uint((uint32_t)app_lib_path_dropped);
+        console_puts(" 个目录（已用 ");
+        print_uint((uint32_t)strlen(app_lib_path));
+        console_puts(" 字节）\n");
+    }
 
     static const char ld_prefix[] = "LD_LIBRARY_PATH=";
     strcpy(app_env_ld_path, ld_prefix);
@@ -629,6 +648,7 @@ static void cmd_setenv(int argc, char **argv) {
         {"forktid", LINUX_DEBUG_FORK_CLEARTID},
         {"stepchild", LINUX_DEBUG_STEP_CHILD},
         {"resume", LINUX_DEBUG_TRACE_RESUME},
+        {"stderr", LINUX_DEBUG_STDERR_ECHO},
     };
     if (argc < 2) {
         console_puts("usage: setenv <name> [0|1]\n");
