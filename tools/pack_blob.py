@@ -38,10 +38,16 @@ def main() -> int:
 
     if raw_mode:
         payload = data
+        magic = b"ZBL0"          # 未压缩变体，供解压方直通
     else:
-        payload = zlib.compress(data, 9)
+        magic = MAGIC
+        level = 9
+        for a in sys.argv[3:]:
+            if a.startswith("--level="):
+                level = int(a.split("=", 1)[1])
+        payload = zlib.compress(data, level)
 
-    out = MAGIC + struct.pack("<I", len(data)) + payload
+    out = magic + struct.pack("<I", len(data)) + payload
     with open(dst, "wb") as f:
         f.write(out)
 

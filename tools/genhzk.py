@@ -51,6 +51,97 @@ def render_glyph(font, cp, size=16):
     return data
 
 
+def synth_glyph_rows(cp):
+    """Programmatically synthesize Box Drawing / Block Element glyphs.
+
+    TrueType outline fonts render these at arbitrary sizes, which breaks
+    seamless tiling in a 16x16 bitmap cell. Drawing them by hand guarantees
+    lines meet cell edges exactly, so neofetch/htop style art joins up.
+
+    Returns 16 rows of 16-bit ints (MSB = leftmost pixel), or None if the
+    codepoint is not one of the synthesized ranges.
+    """
+    LIGHT = (7, 8)          # light single line: rows/cols 7-8 (2px thick)
+    DOUBLE = (5, 6, 9, 10)  # double lines: two 2px strokes with a 2px gap
+
+    # connection table: codepoint -> (up, down, left, right), each 0/1/2
+    # (0=none, 1=single, 2=double)
+    BOX = {
+        0x2500: (0, 0, 1, 1),  # ─
+        0x2502: (1, 1, 0, 0),  # │
+        0x250C: (0, 1, 0, 1),  # ┌
+        0x2510: (0, 1, 1, 0),  # ┐
+        0x2514: (1, 0, 0, 1),  # └
+        0x2518: (1, 0, 1, 0),  # ┘
+        0x251C: (1, 1, 0, 1),  # ├
+        0x2524: (1, 1, 1, 0),  # ┤
+        0x252C: (0, 1, 1, 1),  # ┬
+        0x2534: (1, 0, 1, 1),  # ┴
+        0x253C: (1, 1, 1, 1),  # ┼
+        0x2550: (0, 0, 2, 2),  # ═
+        0x2551: (2, 2, 0, 0),  # ║
+        0x2554: (0, 2, 0, 2),  # ╔
+        0x2557: (0, 2, 2, 0),  # ╗
+        0x255A: (2, 0, 0, 2),  # ╚
+        0x255D: (2, 0, 2, 0),  # ╝
+        0x2560: (2, 2, 0, 2),  # ╠
+        0x2563: (2, 2, 2, 0),  # ╣
+        0x2566: (0, 2, 2, 2),  # ╦
+        0x2569: (2, 0, 2, 2),  # ╩
+        0x256C: (2, 2, 2, 2),  # ╬
+    }
+
+    def stroke_rows(dirs):
+        rows = [0] * 16
+        up, down, left, right = dirs
+        vpos = DOUBLE if (up == 2 or down == 2) else LIGHT
+        hpos = DOUBLE if (left == 2 or right == 2) else LIGHT
+        if up or down:
+            for c in vpos:
+                bit = 0x8000 >> c
+                for r in range(16):
+                    rows[r] |= bit
+        if left or right:
+            bits = 0
+            for c in range(16):
+                if c in hpos:
+                    bits |= (0x8000 >> c)
+            for r in hpos:
+                rows[r] |= bits
+        return rows
+
+    if cp in BOX:
+        return stroke_rows(BOX[cp])
+
+    BLOCKS = {
+        0x2580: lambda x, y: y < 8,                      # ▀ upper half
+        0x2584: lambda x, y: y >= 8,                     # ▄ lower half
+        0x2588: lambda x, y: True,                       # █ full block
+        0x258C: lambda x, y: x < 8,                      # ▌ left half
+        0x2590: lambda x, y: x >= 8,                     # ▐ right half
+        0x2591: lambda x, y: (x % 2 == 0) and (y % 2 == 0),   # ░ 25%
+        0x2592: lambda x, y: (x + y) % 2 == 0,                # ▒ 50%
+        0x2593: lambda x, y: not ((x % 2 == 0) and (y % 2 == 0)),  # ▓ 75%
+        0x2581: lambda x, y: y >= 14,                    # ▁ lower 1/8
+        0x2582: lambda x, y: y >= 12,                    # ▂ lower 2/8
+        0x2583: lambda x, y: y >= 10,                    # ▃ lower 3/8
+        0x2585: lambda x, y: y >= 6,                     # ▅ lower 5/8
+        0x2586: lambda x, y: y >= 4,                     # ▆ lower 6/8
+        0x2587: lambda x, y: y >= 2,                     # ▇ lower 7/8
+    }
+    fn = BLOCKS.get(cp)
+    if fn is None:
+        return None
+    rows = []
+    for r in range(16):
+        bits = 0
+        for x in range(16):
+            if fn(x, r):
+                bits |= 0x8000 >> x
+        rows.append(bits)
+    return rows
+
+
 def main():
     font_path = sys.argv[1] if len(sys.argv) > 1 else 'fonts/ZhengGeDianHei-16.ttf'
     out_path = sys.argv[2] if len(sys.argv) > 2 else 'build/font_cjk.bin'
@@ -80,10 +171,28 @@ def main():
     for cp in range(0xFE30, 0xFE50):
         codepoints.append(cp)
 
-    # Filter to only codepoints the font actually supports
+    # Box Drawing / Block Elements — synthesized programmatically (see
+    # synth_glyph_rows). Terminal art (neofetch logo, htop borders, progress
+    # bars) needs these; most CJK TTFs don't cover them.
+    SYNTH_CPS = [
+        0x2500, 0x2502, 0x250C, 0x2510, 0x2514, 0x2518,
+        0x251C, 0x2524, 0x252C, 0x2534, 0x253C,
+        0x2550, 0x2551, 0x2554, 0x2557, 0x255A, 0x255D,
+        0x2560, 0x2563, 0x2566, 0x2569, 0x256C,
+        0x2581, 0x2582, 0x2583, 0x2584, 0x2585, 0x2586, 0x2587,
+        0x2588, 0x258C, 0x2590,
+        0x2591, 0x2592, 0x2593,
+    ]
+    codepoints.extend(SYNTH_CPS)
+
+    # Filter to only codepoints the font actually supports.
+    # Synthesized glyphs don't come from the font — never drop them.
     print(f"[genhzk] Checking font support...")
     supporting = []
     for cp in codepoints:
+        if synth_glyph_rows(cp) is not None:
+            supporting.append(cp)
+            continue
         try:
             mask = font.getmask(chr(cp))
             if mask.size[0] > 0 and mask.size[1] > 0:
@@ -106,7 +215,16 @@ def main():
     for i, cp in enumerate(codepoints):
         if i > 0 and i % 1000 == 0:
             print(f"[genhzk]   {i}/{len(codepoints)}...")
-        bitmaps.extend(render_glyph(font, cp, font_size))
+        synth = synth_glyph_rows(cp)
+        if synth is not None:
+            # Synthesized Box Drawing / Block Element: rows of 16-bit ints
+            data = bytearray(32)
+            for row in range(16):
+                data[row * 2]     = (synth[row] >> 8) & 0xFF
+                data[row * 2 + 1] = synth[row] & 0xFF
+            bitmaps.extend(data)
+        else:
+            bitmaps.extend(render_glyph(font, cp, font_size))
 
     # Build output binary
     os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
