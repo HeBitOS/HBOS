@@ -34,3 +34,5 @@ tests/host/vectors/
 /*.hax
 # 手改图片前的备份
 *.bak
+# 全仓库无任何引用的散图（非文档配图，别随手放这里）
+/docs/image.png
