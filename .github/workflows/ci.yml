@@ -15,7 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 宿主机测试：不需要 QEMU、不需要 root，几分钟内跑完，PR 的第一道门。
+  # 宿主机测试：不需要 QEMU、不需要 root，几十秒跑完，PR 的第一道门。
+  # 这里失败通常意味着某个纯逻辑模块改坏了，先修这个再谈其它。
   host-tests:
     name: Host tests
     runs-on: ubuntu-24.04
@@ -58,3 +59,58 @@ jobs:
           name: hbos-bios-iso
           path: build/hbos-bios*.iso
           if-no-files-found: error
+
+  # QEMU 集成：Wayland 协议层 + 真实鼠标移动。
+  #
+  # 这层跑得慢（TCG 无 KVM，启动就要 30s），所以和 host-tests 分开：
+  # 逻辑错误在 host-tests 里就拦住了，不必等到这里才发现。
+  #
+  # 两个坑（踩过）：
+  #   - CI 里 TMPDIR 必须指到仓库内，宿主 /tmp 可能是小容量 tmpfs，
+  #     grub-mkrescue 中途会报"设备上没有空间"。
+  #   - 必须先装 ISO 再跑测试；qemu-session 的 boot-timeout 要给够，
+  #     TCG 下 4 核启动比本地慢一倍。
+  qemu-tests:
+    name: QEMU integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: build-bios
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential nasm grub-pc-bin grub-efi-amd64-bin grub-common \
+            xorriso mtools dosfstools python3 python3-pil \
+            qemu-system-x86
+
+      - name: Build ISO
+        run: make -j"$(nproc)" bios-iso
+        env:
+          TMPDIR: ${{ github.workspace }}/build/tmp
+
+      - name: Wayland protocol layer
+        run: |
+          make wl-proto-test
+        env:
+          TMPDIR: ${{ github.workspace }}/build/tmp
+
+      - name: Real mouse movement
+        run: |
+          make mouse-test
+        env:
+          TMPDIR: ${{ github.workspace }}/build/tmp
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-test-logs
+          path: |
+            build/tmp/*.log
+            build/tmp/*.ppm
+          if-no-files-found: ignore

@@ -19,5 +19,9 @@ use_pulseaudio = false
 rtc_use_pipewire = false
 enable_remoting = false
 enable_widevine = false
-proprietary_codecs = false
-ffmpeg_branding = "Chromium"
+# H.264/AAC 必须打开：B 站主码流是 H.264，关掉 propriptary_codecs 之后
+# MediaSource.isTypeSupported('avc1...') 直接返回 false，G4 验收无从谈起。
+# args.host.gn 一直是开的，两边保持一致，避免"参考壳能播、目标壳不能"的
+# 诡异现象。
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
