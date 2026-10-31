@@ -107,7 +107,28 @@ def install(deb: Path, img: Path):
     debugfs(img, ["rm /etc/hpt/last-install.txt",
                   f"write {note} /etc/hpt/last-install.txt",
                   "sif /etc/hpt/last-install.txt mode 0100644"])
+    post_install_chromium(meta, img)
     return meta, prefix, entry
+
+
+def post_install_chromium(meta, img: Path):
+    """装完 chromium* 包之后,自动固化资源布局 + 跑完备性校验。
+
+    chromium-headless-shell 的资源(icudtl.dat / snapshot_blob.bin / *.pak / locales)
+    其实在别的包里,必须补成 shell 自己目录里的链接;漏一个都要等 QEMU 里报一个看不懂
+    的错再回头查。这两步都是幂等的,失败只提示、不中断安装。
+    """
+    name = str(meta.get("name", ""))
+    if not name.startswith("chromium"):
+        return
+    steps = [("fix_headless_layout.py", ["--img", str(img)]),
+             ("check_headless_deps.py", ["--img", str(img)])]
+    print(f"[install-app] {name}:固化资源布局 + 完备性校验")
+    for script, extra in steps:
+        proc = subprocess.run([sys.executable, str(ROOT / "scripts" / script)] + extra)
+        if proc.returncode != 0:
+            print(f"[install-app] 注意:{script} 退出码 {proc.returncode}"
+                  f" —— 先别开 QEMU,按它的输出补齐再装")
 
 
 def main():

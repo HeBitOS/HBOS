@@ -1,0 +1,161 @@
+{
+  "_comment": [
+    "chromium-headless-shell 在 HBOS 镜像里的完备性期望清单。",
+    "读取者:scripts/check_headless_deps.py(校验)、scripts/fix_headless_layout.py(幂等修复)。",
+    "这份清单就是'手工踩坑'的固化:改动它、或者把 --expect 指向一份被篡改的副本,",
+    "工具必须报 FAIL —— 这就是它的检出能力的自测方式。"
+  ],
+  "image": "build/c3-chromium.img",
+  "offset": 1048576,
+
+  "shell": "/opt/chromium-headless-shell/usr/lib/chromium/chromium-headless-shell",
+  "resource_dir": "/opt/chromium-headless-shell/usr/lib/chromium",
+  "resource_source_dir": "/opt/chromium-common/usr/lib/chromium",
+
+  "_hbos_provided_comment": [
+    "由 HBOS 自己提供(仓库根的 *.hax + 内核/用户态 libc),镜像里不需要出现,也不算缺失。",
+    "查找顺序是'先镜像后自带':镜像里确实有的话以镜像为准,避免包被删掉时被误判成自带。"
+  ],
+  "hbos_provided_sonames": [
+    "ld-linux-x86-64.so.2",
+    "libc.so.6",
+    "libm.so.6",
+    "libpthread.so.0",
+    "librt.so.1",
+    "libdl.so.2",
+    "libutil.so.1",
+    "libresolv.so.2"
+  ],
+
+  "_required_sonames_comment": "钉死的依赖清单 = headless shell 的直接 NEEDED(见 docs/HEADLESS-DEPS.md 的包名/版本表)",
+  "required_sonames": [
+    "ld-linux-x86-64.so.2",
+    "libFLAC.so.14",
+    "libX11.so.6",
+    "libXNVCtrl.so.0",
+    "libXcomposite.so.1",
+    "libXdamage.so.1",
+    "libXext.so.6",
+    "libXfixes.so.3",
+    "libXrandr.so.2",
+    "libasound.so.2",
+    "libatk-1.0.so.0",
+    "libatspi.so.0",
+    "libc.so.6",
+    "libdav1d.so.7",
+    "libdbus-1.so.3",
+    "libdouble-conversion.so.3",
+    "libexpat.so.1",
+    "libfontconfig.so.1",
+    "libfreetype.so.6",
+    "libgbm.so.1",
+    "libgcc_s.so.1",
+    "libgio-2.0.so.0",
+    "libglib-2.0.so.0",
+    "libgobject-2.0.so.0",
+    "libharfbuzz-subset.so.0",
+    "libharfbuzz.so.0",
+    "libjpeg.so.62",
+    "liblcms2.so.2",
+    "libm.so.6",
+    "libminizip.so.1",
+    "libnspr4.so",
+    "libnss3.so",
+    "libnssutil3.so",
+    "libopenh264.so.8",
+    "libopenjp2.so.7",
+    "libopus.so.0",
+    "libpulse.so.0",
+    "libudev.so.1",
+    "libxcb.so.1",
+    "libxkbcommon.so.0",
+    "libz.so.1",
+    "libzstd.so.1"
+  ],
+
+  "required_resources": [
+    "chromium-headless-shell",
+    "icudtl.dat",
+    "snapshot_blob.bin",
+    "v8_context_snapshot.bin",
+    "headless_command_resources.pak",
+    "headless_lib_data.pak",
+    "headless_lib_strings.pak",
+    "resources.pak",
+    "chrome_100_percent.pak",
+    "chrome_200_percent.pak",
+    "locales/en-US.pak"
+  ],
+
+  "_optional_resources_comment": [
+    "不是 DT_NEEDED,而是 Chromium 自己按 dirname(/proc/self/exe) 去 dlopen/exec 的东西",
+    "(GPU 进程的 ANGLE/SwiftShader、crashpad handler)。headless --dump-dom 不一定用得上,",
+    "所以只报 WARN 不报 FAIL;要补齐用 scripts/fix_headless_layout.sh --include-optional。"
+  ],
+  "optional_resources": [
+    "libEGL.so",
+    "libGLESv2.so",
+    "libvk_swiftshader.so",
+    "libvulkan.so.1",
+    "vk_swiftshader_icd.json",
+    "chrome_crashpad_handler"
+  ],
+  "helper_search_dirs": [
+    "/opt/chromium-common/usr/lib/chromium",
+    "/opt/chromium/usr/lib/chromium"
+  ],
+
+  "_required_symbols_comment": [
+    "版本敏感符号:这些符号在旧版库里不存在,只查'库在不在'是查不出来的。",
+    "libharfbuzz.so.0 这两项由实测得出:镜像里的 6.0.0(libharfbuzz.so.0.60000.0)",
+    "恰好缺 hb_face_set_get_table_tags_func,命中过 exit 127。"
+  ],
+  "required_symbols": {
+    "libharfbuzz.so.0": [
+      "hb_face_set_get_table_tags_func"
+    ]
+  },
+
+  "_symbol_families_comment": [
+    "符号族:从 shell 的未定义动态符号里按前缀取出'这个库该提供什么',",
+    "再要求该族的库真的导出它们 —— 直接对应 'undefined symbol → exit 127' 那类坑。",
+    "libs 是联合检查(glib/gobject/gio 这种拆包;libX11 系;nss 系)。"
+  ],
+  "symbol_families": [
+    {"owner": "libharfbuzz.so.0", "prefixes": ["hb_"], "exclude_prefixes": ["hb_subset_"]},
+    {"owner": "libharfbuzz-subset.so.0", "prefixes": ["hb_subset_"]},
+    {"owner": "libopenh264.so.8", "prefixes": ["Wels"]},
+    {"owner": "libdav1d.so.7", "prefixes": ["dav1d_"]},
+    {"owner": "libFLAC.so.14", "prefixes": ["FLAC__"]},
+    {"owner": "libminizip.so.1", "prefixes": ["unz", "zip"]},
+    {"owner": "libzstd.so.1", "prefixes": ["ZSTD_"]},
+    {"owner": "libz.so.1", "prefixes": ["adler32", "compress", "crc32", "deflate", "gz", "inflate", "uncompress", "zlib"]},
+    {"owner": "libjpeg.so.62", "prefixes": ["jpeg_"]},
+    {"owner": "libopenjp2.so.7", "prefixes": ["opj_"]},
+    {"owner": "liblcms2.so.2", "prefixes": ["cms"]},
+    {"owner": "libexpat.so.1", "prefixes": ["XML_"]},
+    {"owner": "libfontconfig.so.1", "prefixes": ["Fc"]},
+    {"owner": "libfreetype.so.6", "prefixes": ["FT_"]},
+    {"owner": "libxkbcommon.so.0", "prefixes": ["xkb_"]},
+    {"owner": "libasound.so.2", "prefixes": ["snd_"]},
+    {"owner": "libpulse.so.0", "prefixes": ["pa_"]},
+    {"owner": "libudev.so.1", "prefixes": ["udev_"]},
+    {"owner": "libgbm.so.1", "prefixes": ["gbm_"]},
+    {"owner": "libxcb.so.1", "prefixes": ["xcb_"]},
+    {"owner": "libatk-1.0.so.0", "prefixes": ["atk_"]},
+    {"owner": "libatspi.so.0", "prefixes": ["atspi_"]},
+    {"owner": "libdbus-1.so.3", "prefixes": ["dbus_"]},
+    {"owner": "libopus.so.0", "prefixes": ["opus_"]},
+    {"owner": "libglib-2.0.so.0",
+     "libs": ["libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0", "libgmodule-2.0.so.0"],
+     "prefixes": ["g_"]},
+    {"owner": "libX11.so.6",
+     "libs": ["libX11.so.6", "libXext.so.6", "libXfixes.so.3", "libXrandr.so.2",
+              "libXcomposite.so.1", "libXdamage.so.1", "libXNVCtrl.so.0"],
+     "prefixes": ["X"], "exclude_prefixes": ["XML_"]},
+    {"owner": "libnss3.so",
+     "libs": ["libnss3.so", "libnssutil3.so", "libnspr4.so"],
+     "prefixes": ["PR_", "PL_", "NSS_", "SEC_", "PK11_", "SSL_", "CERT_", "VFY_",
+                  "SGN_", "PKCS11_", "HASH_", "PORT_"]}
+  ]
+}
