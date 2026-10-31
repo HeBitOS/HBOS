@@ -167,6 +167,19 @@ void vmm_init(uint64_t p4_phys) {
  * @return 0 成功, -1 失败
  */
 int vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
+    /* 物理地址 0 是非法映射目标：PMM 的空闲页链表不会把 0 当有效页返回，
+     * 任何映射到物理 0 的页表项都是 bug。这里直接拒绝并留一行日志。
+     *
+     * 注意（更正一条曾经的误判）：曾据 `[PF] ... pte=0x8000000000000267`
+     * 判定"页表项物理地址=0"，那是**错的** —— vmm_get_page_flags() 只把
+     * 低 12 位与 NX 返回给调用者，物理地址位被它自己屏蔽掉了，打印出来的
+     * 那个值本来就不含物理页号。真正的用户态写故障原因在别处（见
+     * mmap 的 memfd/共享内存路径）。这条守卫保留，但不要拿它当那次故障
+     * 的解释。 */
+    if (!phys_addr) {
+        console_puts("[VMM] map_page: phys=0 (bad mapping rejected)\n");
+        return -1;
+    }
     pte_t *pte = vmm_get_pte(virt_addr, true, flags);
     if (!pte) return -1;
     uint64_t permitted = flags & 0xFFFULL;

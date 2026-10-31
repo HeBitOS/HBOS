@@ -2283,7 +2283,24 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
 
     switch (linux_frame->nr) {
         case 0:   native.nr = HBOS_SYS_READ; break;
-        case 1:   native.nr = HBOS_SYS_WRITE; break;
+        case 1:
+            /* write(2, ...) 是动态链接器和 Chromium 报错的主要通道，
+             * 而 writev 走的是 linux_vector_io，两条路都要能看见内容，
+             * 否则 stderr 回显会漏掉最关键的那几行。 */
+            if (linux_frame->a0 == 2 && linux_debug_stderr_echo &&
+                linux_frame->a2) {
+                const char *text = (const char *)(uintptr_t)linux_frame->a1;
+                uint64_t n = linux_frame->a2;
+                if (n > 1024) n = 1024;
+                console_puts("[STDERR] ");
+                for (uint64_t k = 0; k < n; k++) {
+                    char ch = text[k];
+                    console_putchar(ch == '\n' ? '|' : ch);
+                }
+                console_putchar('\n');
+            }
+            native.nr = HBOS_SYS_WRITE;
+            break;
         case 2:   native.nr = HBOS_SYS_OPEN; break;
         case 3:   native.nr = HBOS_SYS_CLOSE; break;
         case 4:
@@ -3085,6 +3102,65 @@ static uint64_t user_brk(uint64_t new_brk) {
     return new_brk;
 }
 
+/* /proc/<pid>/exe 是 Linux 的魔术符号链接:它指向该进程可执行文件的真实路径。
+ *
+ * HBOS 只在 readlink 里实现了它(src/lib/posix.c),VFS 侧并没有这个节点 ——
+ * devfs_readdir 会把 "exe" 列出来(src/devfs.c),devfs_lookup 的文件分支却
+ * 不含它,于是 vfs_lookup("/proc/<pid>/exe") 返回 NULL。后果是
+ * execve("/proc/self/exe") 直接 ENOENT,而 Chromium 的 zygote / GPU 子进程
+ * 正是靠 re-exec /proc/self/exe 起来的:base/process/launch_posix.cc 的子进程
+ * 分支打 "LaunchProcess: failed to execvp:" 之后 _exit(127),父进程随即报
+ * "GPU process launch failed"。
+ *
+ * 这里在 execve 入口按 Linux 语义把魔术链接展开成 task->exe_path。
+ * 返回 1=已展开,0=不是 /proc/<pid>/exe,-1=是但它当前不可解析。
+ */
+static int proc_exe_resolve(const char *path, char *out, size_t out_size) {
+    if (!path || !out || out_size < 2) return 0;
+    if (strncmp(path, "/proc/", 6) != 0) return 0;
+    const char *cursor = path + 6;
+    const task_t *task;
+    if (strncmp(cursor, "self/", 5) == 0) {
+        task = task_current();
+        cursor += 5;
+    } else {
+        uint32_t pid = 0;
+        while (*cursor >= '0' && *cursor <= '9') {
+            if (pid > 0xfffffU) return 0;
+            pid = pid * 10U + (uint32_t)(*cursor - '0');
+            cursor++;
+        }
+        if (!pid || *cursor != '/') return 0;
+        task = task_get_by_id(pid);
+        cursor++;
+    }
+    if (strcmp(cursor, "exe") != 0) return 0;
+    if (!task) {
+        console_puts("  [EXEC] /proc exe: no task\n");
+        return -1;
+    }
+    if (task->state == TASK_TERMINATED) {
+        console_puts("  [EXEC] /proc exe: task terminated\n");
+        return -1;
+    }
+    if (task->exe_path[0] != '/') {
+        console_puts("  [EXEC] /proc exe: exe_path invalid, id=");
+        trace_put_udec((uint64_t)task->id);
+        console_puts(" path='");
+        for (int i = 0; i < 64 && task->exe_path[i]; i++)
+            console_putchar(task->exe_path[i]);
+        console_puts("'\n");
+        return -1;
+    }
+    size_t used = 0;
+    while (task->exe_path[used] && used + 1 < out_size) {
+        out[used] = task->exe_path[used];
+        used++;
+    }
+    out[used] = '\0';
+    return used ? 1 : -1;
+}
+
 /**
  * 系统调用主分发函数
  * 由 interrupt_asm.asm 中的 syscall_int80_stub 调用
@@ -3491,12 +3567,30 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 }
             }
             console_putchar('\n');
-            vfs_node_t *node = vfs_lookup(path);
+            /* /proc/<pid>/exe 是魔术符号链接:Linux 的 execve 会跟着它走到
+             * 真实文件。HBOS 的 VFS 里没有这个节点(见 proc_exe_resolve),
+             * 不展开就是 ENOENT —— Chromium 的 zygote / GPU 子进程正是靠
+             * re-exec /proc/self/exe 起来的。 */
+            char resolved_exe[128];
+            const char *exec_target = path;
+            if (proc_exe_resolve(path, resolved_exe,
+                                 sizeof(resolved_exe)) > 0) {
+                exec_target = resolved_exe;
+                console_puts("  [EXEC] /proc exe -> ");
+                for (int i = 0; resolved_exe[i] && i < 120; i++)
+                    console_putchar(resolved_exe[i]);
+                console_putchar('\n');
+            }
+            vfs_node_t *node = vfs_lookup(exec_target);
             if (!node) return (uint64_t)(-ENOENT);
             if (node->type != VFS_NODE_FILE) return (uint64_t)(-EACCES);
             /* 把绝对路径交给 loader：/proc/<pid>/exe 需要它，Chromium
              * 靠 dirname(readlink(...)) 找 icudtl.dat / *.pak。 */
-            elf_set_exec_path(path);
+            /* 必须传**展开后**的路径:传字面量 "/proc/self/exe" 会让新进程的
+             * exe_path 记成那个字符串,它自己再 readlink 拿到的还是
+             * "/proc/self/exe",dirname 得到 /proc/self,icudtl.dat 与
+             * *.pak 全部 ENOENT。 */
+            elf_set_exec_path(exec_target);
             int ret = elf64_load_vfs_and_exec(node, argv, envp);
             if (ret < 0) return (uint64_t)(-ENOEXEC);
             return 0;

@@ -1627,6 +1627,18 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
             exe_len++;
         }
         child->exe_path[exe_len] = '\0';
+        /* 只在"父进程自己就没有 exe_path"时报一行。Chromium 的 GPU/zygote
+         * 子进程靠 execve("/proc/self/exe") 复刻自己，父进程 exe_path 一空，
+         * 子进程就复刻不了、以 127 退出。正常情况下这行不打印。 */
+        if (current_task->exe_path[0] != '/') {
+            console_puts("\n[FORK] parent exe_path empty! parent=0x");
+            sched_print_hex(current_task->id);
+            console_puts(" child=0x");
+            sched_print_hex(child->id);
+            console_puts(" name=");
+            console_puts(current_task->name);
+            console_putchar('\n');
+        }
     }
 
     uint64_t *sp = (uint64_t *)(child->stack_base + child->stack_size);
@@ -1757,6 +1769,21 @@ static int task_clone_thread_common(
     thread->id = next_id++;
     strncpy(thread->name, current_task->name, TASK_NAME_MAX);
     thread->name[TASK_NAME_MAX - 1] = '\0';
+    /* 线程与创建者属于同一个进程，/proc/<tid>/exe 必须指向同一个可执行文件。
+     * 这里原来只 memset 后复制 name，exe_path 一直是空串 —— 后果是
+     * Chromium 从"某个线程"里 fork 出 GPU/zygote 子进程时（日志里
+     * parent name=ThreadPoolSingleThread...），子进程继承到空 exe_path，
+     * 随后 execve("/proc/self/exe") 无法展开、以 127 退出，父进程报
+     * "GPU process launch failed"。task_fork_common 早就复制了它，这里漏了。 */
+    {
+        size_t exe_len = 0;
+        while (exe_len < sizeof(thread->exe_path) - 1 &&
+               current_task->exe_path[exe_len]) {
+            thread->exe_path[exe_len] = current_task->exe_path[exe_len];
+            exe_len++;
+        }
+        thread->exe_path[exe_len] = '\0';
+    }
     sched_mark_ready(thread);
     thread->parent_id = current_task->id;
     thread->pgid = current_task->pgid;
