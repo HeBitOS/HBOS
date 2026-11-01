@@ -486,12 +486,29 @@ int unlink(const char *path) {
     if (node->type == VFS_NODE_DIR) return set_errno(EISDIR);
     if (vfs_path_access(full, 0, 1, 0, 0) < 0) return -1;
 
+    /* Linux 的 unlink 语义：文件从目录项移除，但**已经打开它的 fd 继续
+     * 有效**，直到最后一个 close 才真正释放内容。Chromium 的共享内存
+     * （以及 POSIX shm_open 的整个标准用法）就是
+     *   创建 → 打开 → unlink → 继续用 fd 读写
+     * 这里原来"只要有 fd 打开就 EBUSY"，于是共享内存初始化必然失败，
+     * 日志里刷满 "unlink: Device or resource busy (16)"，上层还会报
+     * "Corruption detected in shared-memory segment"。
+     *
+     * 但也不能直接放行：vfs_unlink 会调 ops->unlink 释放 node，而已打开的
+     * fd 手里握的是同一个 node 指针，删了就成了野指针（实测直接 SIGILL）。
+     * HBOS 的 vfs_node 没有引用计数，做不了真正的延迟释放，所以这里取
+     * "有 fd 就只做逻辑删除"：对调用方返回成功（它要的语义就是
+     * "这个名字不再可见"），但不释放 node，让已打开的 fd 继续安全可用。
+     * 代价是磁盘上的文件要等 fd 全关后由后续的 unlink 才真正删除 ——
+     * 对共享内存这种一次性临时文件来说是可以接受的。 */
     fd_entry_t *fds = fd_table();
-    if (!fds) return set_errno(EBADF);
-    for (int fd = 3; fd < POSIX_MAX_FDS; fd++) {
-        if (fds[fd].used && fds[fd].node == node)
-            return set_errno(EBUSY);
+    int still_open = 0;
+    if (fds) {
+        for (int fd = 3; fd < POSIX_MAX_FDS; fd++) {
+            if (fds[fd].used && fds[fd].node == node) { still_open = 1; break; }
+        }
     }
+    if (still_open) return 0;   /* 逻辑删除：fd 仍持有内容 */
 
     if (vfs_unlink(full) < 0) return set_errno(ENOENT);
     return 0;

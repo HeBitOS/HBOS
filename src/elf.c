@@ -473,6 +473,23 @@ static int map_interpreter_segments(elf_interpreter_t *interpreter) {
         if (ph->p_memsz > ph->p_filesz)
             memset((void *)(uintptr_t)(segment_vaddr + ph->p_filesz), 0,
                    (size_t)(ph->p_memsz - ph->p_filesz));
+        /* 把 p_memsz 之后到页边界的那一截也清零。
+         *
+         * Linux 的 PT_LOAD 是按页 mmap 的，页内 p_memsz 之后的尾部属于
+         * 匿名页、必然是 0。HBOS 用 vmm_alloc_page_at() 拿页，拿到的是
+         * 上一个使用者留下的内容 —— 于是这块"ELF 没声明、但确实可读"的
+         * 内存里是垃圾。
+         *
+         * 实测后果：ld.so 的 .bss 结束于 0x403C0，而它的启动代码会读
+         * 0x40418（超出 p_memsz 88 字节）—— 那块内存页映射了但没清零，
+         * 读出来是残留的代码字节，被当成指针用，下一条指令立刻
+         * General Protection Fault（err=0，指令本身合法）。 */
+        {
+            uint64_t seg_end = segment_vaddr + ph->p_memsz;
+            uint64_t tail = ((seg_end + PAGE_SIZE - 1) & PAGE_MASK) - seg_end;
+            if (tail && tail < PAGE_SIZE)
+                memset((void *)(uintptr_t)seg_end, 0, (size_t)tail);
+        }
     }
     /* ld.so 自己是 PIE，必须做 R_X86_64_RELATIVE 重定位才能用。
      *
@@ -724,6 +741,15 @@ static int elf64_load_source_and_spawn_snapshot(
         if (ph->p_memsz > ph->p_filesz)
             memset((void *)(uintptr_t)(segment_vaddr + ph->p_filesz),
                    0, ph->p_memsz - ph->p_filesz);
+        /* p_memsz 之后到页边界的尾部也要清零 —— 见 map_interpreter_segments
+         * 里同一处注释：Linux 的 PT_LOAD 按页映射，页内尾部必然是 0；
+         * HBOS 复用了未清零的页，尾部会是上一个使用者的残留内容。 */
+        {
+            uint64_t seg_end = segment_vaddr + ph->p_memsz;
+            uint64_t tail = ((seg_end + PAGE_SIZE - 1) & PAGE_MASK) - seg_end;
+            if (tail && tail < PAGE_SIZE)
+                memset((void *)(uintptr_t)seg_end, 0, (size_t)tail);
+        }
     }
 
     if (ehdr->e_type == ET_DYN && !has_interp) {
