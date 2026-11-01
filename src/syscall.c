@@ -3027,8 +3027,15 @@ static int commit_and_protect_user_range(task_mm_t *mm, uint64_t address,
                 break;
             }
         }
-        if (!area || area->backing_type == VM_BACKING_MEMFD)
-            return -ENOMEM;
+        if (!area) return -ENOMEM;
+        /* memfd（共享内存）区域的页在 mmap 那一刻就由
+         * linux_compat_memfd_map() 直接映射好了，这里不该再"提交"一次 ——
+         * 原来一律返回 -ENOMEM，导致对共享内存段做 mprotect 必然失败，
+         * Chromium 的 IPC 共享内存初始化随即报
+         * "Corruption detected in shared-memory segment"。
+         * 真出现空洞（不该发生）就跳过，让 mprotect 的权限变更照常生效，
+         * 而不是把整段判死。 */
+        if (area->backing_type == VM_BACKING_MEMFD) continue;
         if (!vmm_alloc_page_at(page, VMM_P | VMM_U | VMM_W))
             return -ENOMEM;
         memset((void *)(uintptr_t)page, 0, PAGE_SIZE);
@@ -4856,10 +4863,23 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                     trace_put_hex(f->a1);
                     console_putchar('\n');
                 }
+                /* 设置失败必须报出来：失败后 fs_base 仍是 0，动态链接器
+                 * 一访问 TLS 就 General Protection Fault（rip 落在
+                 * 0x1200_xxxx_xxxx = ELF_INTERP_BASE），而现场只看到
+                 * "user General Protection Fault err=0"，看不出根因。 */
+                int fs_result = task_set_fs_base(f->a1);
+                if (fs_result != 0) {
+                    console_puts("[TLSC] ARCH_SET_FS FAILED pid=");
+                    trace_put_udec(task_get_id());
+                    console_puts(" want=0x");
+                    trace_put_hex(f->a1);
+                    console_puts(" ret=");
+                    trace_put_udec((uint64_t)(int64_t)fs_result);
+                    console_putchar('\n');
+                    return (uint64_t)(-EINVAL);
+                }
+                return 0;
             }
-            if (operation == ARCH_SET_FS)
-                return task_set_fs_base(f->a1) == 0 ? 0 :
-                       (uint64_t)(-EINVAL);
             if (operation == ARCH_GET_FS) {
                 uint64_t *output = (uint64_t *)f->a1;
                 if (!output) return (uint64_t)(-EFAULT);

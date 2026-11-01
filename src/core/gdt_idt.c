@@ -579,6 +579,27 @@ void isr_handler(isr_regs_t *regs) {
             console_putchar('\n');
         }
         dump_user_trap_regs(regs);
+        /* 打印 rip 处的指令字节：GP/UD 只看 rip 查不出原因 —— 得知道到底是
+         * 哪条指令非法（rdmsr？特权指令？SIMD？还是取指越界）。Chromium
+         * 每次 exec 子进程都在 ld.so 同一个地址上 GP Fault，没有这条只能猜。 */
+        if (vec == EXC_GP || vec == EXC_UD) {
+            uint64_t rip_page = regs->rip & ~(uint64_t)(PAGE_SIZE - 1);
+            uint64_t phys = vmm_get_phys(rip_page);
+            if (phys) {
+                const uint8_t *code =
+                    (const uint8_t *)(uintptr_t)
+                    (phys + (regs->rip - rip_page));
+                console_puts("  insn:");
+                for (int i = 0; i < 16; i++) {
+                    uint8_t b = code[i];
+                    const char *hex = "0123456789ABCDEF";
+                    console_putchar(' ');
+                    console_putchar(hex[(b >> 4) & 0xF]);
+                    console_putchar(hex[b & 0xF]);
+                }
+                console_putchar('\n');
+            }
+        }
         dump_user_vma_for(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);

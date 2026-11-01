@@ -21,6 +21,7 @@
 #include "errno.h"
 #include "fcntl.h"
 #include "fd.h"
+#include "graphics/graphics.h"   /* console_puts/console_putchar：IPC 诊断日志 */
 #include "smp.h"
 #include "string.h"
 #include "unistd.h"
@@ -68,16 +69,24 @@
 #define LINUX_MSG_IGNORED (LINUX_MSG_NOSIGNAL)
 /* 其它"语义上无副作用"的标志：DONTWAIT 必须识别（非阻塞），其余忽略。 */
 
-#define UNIX_SOCKET_SLOTS 16
+/* 每个 socketpair 占 2 个 slot。Chromium 的进程模型同时开着：
+ * browser↔GPU、browser↔renderer、browser↔zygote、zygote↔子进程、
+ * crashpad handler，以及 Mojo 的各种内部通道 —— 16 个 slot（=8 对）不够用，
+ * 耗尽后 socketpair 返回 ENFILE，子进程的 IPC 通道直接建不起来，现象是
+ * "Terminating current process after 15 seconds with no connection"。
+ * 每个 slot 约 4.5KB（主要是 receive[4096]），64 个约 276KB。 */
+#define UNIX_SOCKET_SLOTS 64
 #define UNIX_SOCKET_BUFFER 4096
 #define UNIX_SOCKET_BACKLOG 8
 //HBOS 这套 Unix socket 实现自己的资源上限
 
 #define UNIX_PATH_MAX 108
 #define UNIX_RIGHTS_QUEUE 4
-#define UNIX_RIGHTS_MAX_FDS 4
+/* Chromium 的 IPC 会用 SCM_RIGHTS 一次传多个 fd（共享内存 + 管道）。
+ * 上限 4 容易在传 fd 数组时被截断，放宽到 16。 */
+#define UNIX_RIGHTS_MAX_FDS 16
 
-#define LINUX_MEMFD_SLOTS 8
+#define LINUX_MEMFD_SLOTS 16
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
 #define LINUX_MFD_CLOEXEC 0x0001
 #define LINUX_MFD_ALLOW_SEALING 0x0002
@@ -738,6 +747,152 @@ static void compat_entry_release(const fd_entry_t *entry) {
     } else if (entry->type == FD_PIPE && entry->pipe) {
         if (--entry->pipe->ref_count <= 0) kfree(entry->pipe);
     }
+}
+
+static int unix_slot_index(unix_socket_slot_t *slot);
+
+/* ── IPC 诊断（`setenv ipc 1`）────────────────────────────────────────
+ *
+ * 为什么要有它：Chromium 的 GPU/zygote 子进程 exec 成功后报
+ *   "Terminating current process after 15 seconds with no connection"
+ * 然后被父进程记成 error_code=1002。这句话背后的三种可能
+ *   ① socketpair 的 fd 没熬过 exec；
+ *   ② 父子两端拿到的不是同一个连接对象（peer 指针没对上）；
+ *   ③ 子进程卡在某个 syscall 上根本没去读写那条通道
+ * 在串口里长得一模一样，光看日志分不出来。这里给 AF_UNIX 生命周期的
+ * 每个关键点各打一行带 pid 的短日志，让下一次 QEMU 运行直接把卡点指出来。
+ *
+ * 开销控制（串口是逐字符模拟的，热路径上白打日志足以把握手拖超时）：
+ *   - 默认关闭，关闭时每次调用只多一个 `if (!linux_ipc_trace) return;`
+ *   - 每类日志各自有预算（见 linux_ipc_budget），打满即静音
+ *   - 只在 socket 生命周期的少数几个点上打，不在每字节收发上打 */
+static int linux_ipc_trace;
+
+/* 日志分类预算：每类各留 N 条，打满即静音，避免串口被刷屏拖慢握手。 */
+#define LINUX_IPC_BUDGET_KINDS 11
+#define LINUX_IPC_BUDGET_EACH  24
+
+/* 每种日志剩余的条数。索引见 linux_ipc_budget_kind 的枚举注释。 */
+static int linux_ipc_budget[LINUX_IPC_BUDGET_KINDS] = {
+    LINUX_IPC_BUDGET_EACH, LINUX_IPC_BUDGET_EACH, LINUX_IPC_BUDGET_EACH,
+    LINUX_IPC_BUDGET_EACH, LINUX_IPC_BUDGET_EACH, LINUX_IPC_BUDGET_EACH,
+    LINUX_IPC_BUDGET_EACH, LINUX_IPC_BUDGET_EACH, LINUX_IPC_BUDGET_EACH,
+    LINUX_IPC_BUDGET_EACH, LINUX_IPC_BUDGET_EACH
+};
+
+int linux_ipc_trace_enabled(void) {
+    return linux_ipc_trace;
+}
+
+void linux_ipc_trace_set(int on) {
+    linux_ipc_trace = !!on;
+    if (on) {
+        /* 重新打开时把预算全部复位，方便"A/B 一次"再跑一遍。 */
+        for (uint32_t i = 0; i < LINUX_IPC_BUDGET_KINDS; i++)
+            linux_ipc_budget[i] = LINUX_IPC_BUDGET_EACH;
+    }
+}
+
+int linux_ipc_trace_begin(int kind) {
+    if (!linux_ipc_trace) return 0;
+    if (kind < 0 || kind >= (int)LINUX_IPC_BUDGET_KINDS) return 0;
+    if (linux_ipc_budget[kind] <= 0) return 0;
+    linux_ipc_budget[kind]--;
+    return 1;
+}
+
+void linux_ipc_put_udec(uint64_t value) {
+    char digits[24];
+    int n = 0;
+    do {
+        digits[n++] = (char)('0' + (int)(value % 10));
+        value /= 10;
+    } while (value);
+    while (n--) console_putchar(digits[n]);
+}
+
+void linux_ipc_put_hex(uint64_t value) {
+    static const char digits[] = "0123456789abcdef";
+    console_puts("0x");
+    int started = 0;
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        int nibble = (int)((value >> shift) & 0xf);
+        if (!nibble && !started && shift) continue;
+        started = 1;
+        console_putchar(digits[nibble]);
+    }
+}
+
+/* 每条 IPC 日志的公共前缀：`[IPC <tag> pid=<pid>] `。
+ * 带 pid 是硬要求 —— 父子进程的日志混在同一个串口里，没有 pid 就分不清
+ * "谁在什么时候建了这条通道"。 */
+void linux_ipc_prefix(const char *tag) {
+    console_puts("[IPC ");
+    console_puts(tag);
+    console_puts(" pid=");
+    linux_ipc_put_udec((uint64_t)task_get_process_id());
+    console_puts("] ");
+}
+
+/* 把 socket type 翻成人能读的名字，并把 SEQPACKET 的"被降级成 STREAM"
+ * 这件事显式说出来 —— 这是 HBOS 与 Linux 的一处语义差异，排查 IPC 时
+ * 必须先确认这一点没有被误解。 */
+const char *linux_ipc_sock_type_name(int type, char *scratch, size_t size) {
+    int base = type & LINUX_SOCK_TYPE_MASK;
+    const char *name = base == LINUX_SOCK_STREAM ? "STREAM" :
+                       (base == LINUX_SOCK_SEQPACKET ? "SEQPACKET" :
+                        (base == 2 ? "DGRAM" : "?"));
+    size_t n = strlen(name);
+    if (n + 24 > size) n = size > 24 ? size - 24 : 0;
+    memcpy(scratch, name, n);
+    scratch[n] = 0;
+    if (base == LINUX_SOCK_SEQPACKET) {
+        memcpy(scratch + n, "->STREAM", 10);
+        n += 9;
+        scratch[n] = 0;
+    }
+    if (type & LINUX_SOCK_NONBLOCK) {
+        memcpy(scratch + n, "|NONBLOCK", 10);
+        n += 9;
+        scratch[n] = 0;
+    }
+    if (type & LINUX_SOCK_CLOEXEC) {
+        memcpy(scratch + n, "|CLOEXEC", 9);
+        n += 8;
+        scratch[n] = 0;
+    }
+    return scratch;
+}
+
+/* 回答"两个 fd 是不是同一个连接对象"：打印各自的 slot 下标与 peer 下标。
+ * slot 就是 HBOS 的 unix socket 对象本体（unix_socket_slots 数组元素），
+ * 所以 "a_peer==b 且 b_peer==a" 就是"两端配对成功"的直接证据。 */
+void linux_ipc_trace_pair(const char *tag, int fd_a, int fd_b) {
+    task_t *task = compat_task();
+    unix_socket_slot_t *a = unix_for_fd(task, fd_a);
+    unix_socket_slot_t *b = unix_for_fd(task, fd_b);
+    linux_ipc_prefix(tag);
+    console_puts("fd");
+    linux_ipc_put_udec((uint64_t)(uint32_t)fd_a);
+    console_puts("=slot");
+    linux_ipc_put_udec((uint64_t)(a ? (uint64_t)unix_slot_index(a) : 0));
+    console_puts("(peer=");
+    linux_ipc_put_udec((uint64_t)(a && a->peer >= 0 ? (uint32_t)a->peer : 0));
+    console_puts(a && a->peer < 0 ? "<none>" : "");
+    console_puts(") fd");
+    linux_ipc_put_udec((uint64_t)(uint32_t)fd_b);
+    console_puts("=slot");
+    linux_ipc_put_udec((uint64_t)(b ? (uint64_t)unix_slot_index(b) : 0));
+    console_puts("(peer=");
+    linux_ipc_put_udec((uint64_t)(b && b->peer >= 0 ? (uint32_t)b->peer : 0));
+    console_puts(b && b->peer < 0 ? "<none>" : "");
+    console_puts(") ");
+    int paired = a && b && a != b && a->peer >= 0 && b->peer >= 0 &&
+                 unix_socket_slots[a->peer].used &&
+                 unix_socket_slots[b->peer].used &&
+                 unix_socket_slots[a->peer].peer == unix_slot_index(b) &&
+                 unix_socket_slots[b->peer].peer == unix_slot_index(a);
+    console_puts(paired ? "paired=yes\n" : "paired=NO\n");
 }
 
 static int unix_slot_index(unix_socket_slot_t *slot) {

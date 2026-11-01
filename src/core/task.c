@@ -2202,6 +2202,22 @@ void task_exec_inherit(int new_id) {
     fresh->pgid = old->pgid;
     fresh->sid = old->sid;
 
+    /* fs_base（TLS）必须继承。
+     *
+     * execve 的新任务由 spawn 路径创建，那里把 fs_base 初始化成 0
+     * （task.c:753/892）。而 Linux 的 exec 语义是"地址空间被替换，但
+     * 线程状态（含 FS base）保留到程序自己重新设置为止"——动态链接器
+     * 在进入程序 _start 之前的启动代码就依赖 fs 段访问 TCB（栈 canary
+     * 在 fs:0x28）。若 fs_base 是 0，第一条访问 TLS 的指令就
+     * General Protection Fault，rip 落在 0x1200_xxxx_xxxx
+     * （ELF_INTERP_BASE），现场只看到 "user General Protection Fault
+     * err=0"，完全看不出根因 —— Chromium 每次 exec 子进程都会踩一次，
+     * 日志里同一条 GP Fault 重复 67 次。
+     *
+     * fork（task.c:1533）与线程创建（task.c:1799）都继承了这个字段，
+     * 只有 exec 这条路径漏了。 */
+    fresh->fs_base = old->fs_base;
+
     /* fd 表：exec 保留所有非 FD_CLOEXEC 的条目。
      *
      * fd 表本身是引用计数的（fork 时 refs++），所以这里让新任务**共享**
