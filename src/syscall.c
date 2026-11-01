@@ -3049,6 +3049,26 @@ static int commit_and_protect_user_range(task_mm_t *mm, uint64_t address,
                 return -EIO;
         }
     }
+    /* 针对已知的 SIGSEGV 现场做定点诊断：主进程写 0x110DB95100 时页是只读的。
+     * 若 mprotect 的区间覆盖这一页，把它前后权限打出来，判断是谁设成了只读。
+     * 只在覆盖该页时打印，正常路径零输出。 */
+    {
+        const uint64_t watch = 0x110DB95100ULL & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t rstart = address & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t rend = (address + length + PAGE_SIZE - 1) &
+                        ~(uint64_t)(PAGE_SIZE - 1);
+        if (watch >= rstart && watch < rend) {
+            console_puts("[MPROT] hit watch page addr=0x");
+            trace_put_hex(address);
+            console_puts(" len=0x");
+            trace_put_hex(length);
+            console_puts(" prot=");
+            trace_put_udec((uint64_t)(unsigned)protection);
+            console_puts(" before=0x");
+            trace_put_hex(vmm_get_page_flags(watch));
+            console_putchar('\n');
+        }
+    }
     return protect_user_range(address, length, protection);
 }
 
