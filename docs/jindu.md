@@ -816,3 +816,25 @@ boot 分页的改动，需要单独一轮做并验证。
 
 **结论**：截图只能走多进程，而多进程现在的阻塞是子进程（GPU/网络服务）
 的沙箱初始化 CHECK 与稳定性，不再是内存问题。
+
+#### R40：找到可用产图路径 —— Chromium 的 Skia 光栅是好的，坏的是合成器
+
+关键发现：**Chromium 的光栅化在 HBOS 上完全正常**，只有「合成器 → 拷贝输出」
+这一段坏。证明方式：让页面自己用 `<canvas>` 画、再 `toDataURL('image/png')`，
+把结果写进 DOM，用已经打通的 `--dump-dom` 取回来。
+
+- 纯形状页面（200×100）：解码后逐像素核对，背景 `(255,255,255)`、
+  红 `(255,0,0)`、蓝 `(0,0,255)`、绿 `(0,160,0)` —— **与绘制内容完全一致**。
+- 文字页面：初次是 **0 个字形像素**，原因是镜像里没有
+  `/etc/fonts/fonts.conf`（日志早有 `Fontconfig error: Cannot load default
+  config file`）。装上 fonts.conf + DejaVuSans.ttf 后变成 **3355 个字形像素**，
+  Fontconfig 错误归零。脚本见 `scripts/install_guest_fonts.sh`。
+
+产物与复现见 `docs/evidence/README.md`（480×120 PNG，白底 + 黑体文字 +
+红/蓝矩形，像素逐项核对过）。
+
+**仍然没解决的**：`--screenshot` 依旧全透明（装字体前后 md5 相同
+`1a1734b7…`），这条路走的是合成器拷贝输出，和光栅无关。
+
+结论修正：之前把空白帧归因为"光栅没工作"是**错的** —— 光栅没问题，
+问题单点在 compositor 的 `CopyOutputRequest`。
