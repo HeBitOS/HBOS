@@ -755,3 +755,30 @@ IPC。下一步应查 single-process 下 viz 的 `SharedImageInterface` 与
 **下一步**：查 `linux_va_find_free` 在 32 GiB 预留下的行为——它逐页
 `vmm_get_phys()` 扫描（32 GiB = 8M 页），在 TCG 下极慢，且可能让
 PartitionAlloc 误判为无法预留。
+
+#### R37：找到 Chromium 内存不足的真正原因 —— HBOS 只管理 4 GiB 以下物理内存
+
+`src/core/pmm.c:48` 有 `#define PMM_IDENTITY_LIMIT 0x100000000ULL`，初始化时
+`max_addr` 被钳到这个值 —— **4 GiB 以上的 RAM 完全不纳入管理**。
+
+后果（实测）：
+
+- QEMU `-m 4096M` 时，PCI 洞（3–4 GiB）吃掉的区间不可用，实际可分配只有
+  约 3 GiB 减内核占用；
+- 阶梯分配测试（`malloc` 256 MiB 一步、逐页 `memset`）在 **2816 MiB**
+  停住并 SIGSEGV，正好对上这个上限；
+- 因此 **`-m 6144M` / `-m 8192M` 给再多内存都没用** —— 这解释了为什么之前
+  加大内存后 Chromium 仍然 `partition_alloc::OnNoMemoryInternal`。
+
+已排除的相关猜测（都有实测）：
+
+- PartitionAlloc 的启动模式在 HBOS 上正常：`mmap(NULL, 32GiB, PROT_NONE)` →
+  `mprotect` 64 MiB → 写入 → 8 GiB 偏移处再提交，全部 PASS；
+- brk 堆上限 64 MiB 偏小但不是本次瓶颈（调到 512 MiB 后上限没变）。
+
+**结论**：要让 Chromium 多进程（截图唯一可行的配置）跑起来，必须让内核
+管理 4 GiB 以上的物理内存，即扩展内核恒等映射/直接映射范围。这是跨
+boot 分页的改动，需要单独一轮做并验证。
+
+顺带修正：`TASK_USER_HEAP_SIZE` 64 MiB → 512 MiB（仅上限，按需提交，
+不与 mmap 窗口冲突）。实测不改变内存天花板，但对 Chromium 的主 arena 更合适。

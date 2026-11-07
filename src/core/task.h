@@ -91,7 +91,11 @@ typedef struct {
 #define MAX_TASKS 64
 #define PIT_DEFAULT_FREQUENCY_HZ 100U
 #define TASK_USER_HEAP_START 0x0000002000000000ULL
-#define TASK_USER_HEAP_SIZE  (64ULL * 1024 * 1024)
+/* 用户态 brk 堆上限。原来 64 MiB：Chromium 这类程序的主 arena 会超出，
+ * 之后 glibc 回退到 mmap 或直接写越界。这里只是**上限**，页仍然按需
+ * 提交，不会因为调大而多占内存。堆区从 0x2000000000 起，mmap 窗口从
+ * 0x100000000000 起，512 MiB 不会和 mmap 抢地址。 */
+#define TASK_USER_HEAP_SIZE  (512ULL * 1024 * 1024)
 #define TASK_DYNAMIC_TLS_MAX 64
 #define TASK_NGROUPS_MAX 8
 
