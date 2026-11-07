@@ -734,3 +734,24 @@ file pC.png -> PNG image data, 800 x 600, 8-bit/color RGBA
 IPC。下一步应查 single-process 下 viz 的 `SharedImageInterface` 与
 `CopyOutputRequest` 为何返回空位图；`--print-to-pdf` 作为旁路也崩在同一类
 问题（`PrintCompositeClient::CompositeDocument+0x3a`，解引用 null+0x60）。
+
+#### R36：单进程截图不可达，多进程是唯一正路
+
+新证据：`--window-size=1280,800 --hide-scrollbars` 让产物变成 1280×800
+（md5 `725a07cd…`，与 800×600 的 `1a1734b7…` 不同），但**内容仍是全透明**
+（采样只有 `(0,0,0,0)`）。说明窗口尺寸生效、`CopyFromSurface` 也返回了一张
+位图，只是这张位图里什么都没画 —— 单进程下没有真正可捕获的 surface。
+
+已排除的内核侧假设（本轮新增）：
+- `thread_group_id` 赋值错误 → 赋值点全部正确（main/fork/thread 各自正确）
+- HBOS 内存上限 → 2 GiB 连续 malloc+memset 全部可写
+- exec 未重建地址空间 → `src/elf.c:631` 确实 `vmm_create_address_space()`
+- mmap 地址窗口太小 → 起始 0x100000000000，上限 0x200000000000（16 TiB 窗口）
+
+**结论**：单进程这条路本质走不通，必须走多进程（Chromium 官方支持配置）。
+多进程当前的两个硬阻塞都在 GPU 子进程：`partition_alloc::OnNoMemoryInternal`
+与 `sandbox::policy::SandboxLinux::InitializeSandbox` 的 CHECK。
+
+**下一步**：查 `linux_va_find_free` 在 32 GiB 预留下的行为——它逐页
+`vmm_get_phys()` 扫描（32 GiB = 8M 页），在 TCG 下极慢，且可能让
+PartitionAlloc 误判为无法预留。
