@@ -4070,6 +4070,13 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                         fill_result = vm_fill_memfd_snapshot(
                             fd, (uint64_t)p, len, (uint64_t)off,
                             mapping_file_size);
+                    } else if (!mapping_entry->node ||
+                               mapping_entry->node->type != VFS_NODE_FILE) {
+                        /* 空文件 / 节点未物化 / 不是普通文件（如 /dev/null
+                         * 这类字符设备）：没有内容可填，页已经是清零的。
+                         * 直接跳过，不要让 vm_fill_vfs_snapshot 返回 -ENODEV
+                         * 把整次 mmap 判死。 */
+                        fill_result = 0;
                     } else {
                         fill_result = vm_fill_vfs_snapshot(
                             mapping_entry->node, (uint64_t)p, len,
