@@ -1,0 +1,11 @@
+<!DOCTYPE html><html><body>
+<canvas id="c" width="480" height="120"></canvas>
+<script>
+var c=document.getElementById('c'),x=c.getContext('2d');
+x.fillStyle='#ffffff';x.fillRect(0,0,480,120);
+x.fillStyle='#000000';x.font='bold 32px sans-serif';
+x.fillText('HBOS-CHROMIUM-OK',12,50);
+x.fillStyle='#c00000';x.fillRect(12,70,300,20);
+x.fillStyle='#0000c0';x.fillRect(12,95,200,12);
+document.body.setAttribute('data-png',c.toDataURL('image/png'));
+</script></body></html>
