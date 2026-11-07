@@ -27,7 +27,11 @@
 #include "unistd.h"
 
 #define LINUX_EVENT_SLOTS POSIX_MAX_FDS //最多同时管理多少个 eventfd 对象
-#define LINUX_EPOLL_SLOTS 8    //最多 8 个 epoll 实例
+/* 系统级槽位上限。这些表是**全局**的（不是每进程），Chromium 多进程 +
+ * 每线程一个 MessagePump 会同时开很多 epoll/timerfd；原值 8 太小，
+ * 实测多进程截图时 message_pump_epoll.cc:143 直接
+ * FATAL "Too many open files in system (23)"(ENFILE) 崩掉。 */
+#define LINUX_EPOLL_SLOTS 64   //最多同时存在多少个 epoll 实例(每槽约 3KB)
 #define LINUX_EPOLL_WATCHES POSIX_MAX_FDS  //一个 epoll 能管理多少个监听项
 
 #define LINUX_GRND_NONBLOCK 0x0001  
@@ -75,7 +79,7 @@
  * 耗尽后 socketpair 返回 ENFILE，子进程的 IPC 通道直接建不起来，现象是
  * "Terminating current process after 15 seconds with no connection"。
  * 每个 slot 约 4.5KB（主要是 receive[4096]），64 个约 276KB。 */
-#define UNIX_SOCKET_SLOTS 64
+#define UNIX_SOCKET_SLOTS 128
 #define UNIX_SOCKET_BUFFER 4096
 #define UNIX_SOCKET_BACKLOG 8
 //HBOS 这套 Unix socket 实现自己的资源上限
@@ -86,13 +90,13 @@
  * 上限 4 容易在传 fd 数组时被截断，放宽到 16。 */
 #define UNIX_RIGHTS_MAX_FDS 16
 
-#define LINUX_MEMFD_SLOTS 16
+#define LINUX_MEMFD_SLOTS 64
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
 #define LINUX_MFD_CLOEXEC 0x0001
 #define LINUX_MFD_ALLOW_SEALING 0x0002
 //Linux memfd_create() 兼容
 
-#define LINUX_INOTIFY_SLOTS 8
+#define LINUX_INOTIFY_SLOTS 32
 #define LINUX_INOTIFY_WATCHES 16
 #define LINUX_INOTIFY_EVENTS 32
 #define LINUX_INOTIFY_NAME_MAX 256
@@ -269,7 +273,7 @@ static int compat_fd_alloc(task_t *task, int type, uint32_t slot, int flags) {
 }
 
 /* ── timerfd：Chromium MessagePump 定时器依赖 ── */
-#define LINUX_TIMERFD_SLOTS 16
+#define LINUX_TIMERFD_SLOTS 64
 #define LINUX_TFD_NONBLOCK     0x800
 #define LINUX_TFD_CLOEXEC      0x80000
 #define LINUX_TFD_TIMER_ABSTIME 1
@@ -397,7 +401,7 @@ static int timerfd_ready(const timerfd_slot_t *slot) {
 }
 
 /* ── signalfd：Chromium 信号处理依赖（SIGCHLD/SIGTERM 等） ── */
-#define LINUX_SIGNALFD_SLOTS 8
+#define LINUX_SIGNALFD_SLOTS 32
 #define LINUX_SFD_NONBLOCK   0x800
 #define LINUX_SFD_CLOEXEC    0x80000
 #define LINUX_SIGNALFD_QUEUE 8

@@ -3924,10 +3924,17 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                                          0, -EBADF);
                         return (uint64_t)(-EBADF);
                     }
-                } else if (mapping_entry->type == FD_FILE &&
-                           mapping_entry->node &&
-                           mapping_entry->node->type == VFS_NODE_FILE) {
-                    mapping_file_size = mapping_entry->node->size;
+                } else if (mapping_entry->type == FD_FILE) {
+                    /* 普通文件：节点可能尚未物化（node==NULL）或不是普通文件，
+                     * 都按"大小为 0 的文件"处理 —— Linux 允许 mmap 一个空文件，
+                     * 访问时才 SIGBUS。Chromium 的共享内存是"先 mmap 再
+                     * ftruncate"，这里若返回 ENODEV 会把 ipcz/统一共享内存
+                     * 直接打断（实测 GPU 子进程随后在
+                     * ipcz::Router::MergeRoute 里写故障崩溃）。 */
+                    mapping_file_size = (mapping_entry->node &&
+                                         mapping_entry->node->type ==
+                                             VFS_NODE_FILE)
+                                            ? mapping_entry->node->size : 0;
                 } else {
                     mmap_log_failure(fd, len, prot, flags, (uint64_t)off, 0,
                                      -ENODEV);
@@ -3936,7 +3943,14 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                     console_puts(")\n");
                     return (uint64_t)(-ENODEV);
                 }
-                if ((uint64_t)off >= mapping_file_size) {
+                /* 空文件允许映射（off 必须为 0）；否则越界才算错。 */
+                if (mapping_file_size == 0) {
+                    if (off != 0) {
+                        mmap_log_failure(fd, len, prot, flags, (uint64_t)off,
+                                         0, -EINVAL);
+                        return (uint64_t)(-EINVAL);
+                    }
+                } else if ((uint64_t)off >= mapping_file_size) {
                     mmap_log_failure(fd, len, prot, flags, (uint64_t)off,
                                      mapping_file_size, -EINVAL);
                     return (uint64_t)(-EINVAL);
