@@ -838,3 +838,27 @@ boot 分页的改动，需要单独一轮做并验证。
 
 结论修正：之前把空白帧归因为"光栅没工作"是**错的** —— 光栅没问题，
 问题单点在 compositor 的 `CopyOutputRequest`。
+
+#### R41：合成器确实在画帧，空白出在拷贝输出
+
+用硬件断点同时盯着合成器和 DevTools 报文，拿到了**顺序证据**：
+
+```
+ORDER DrawLayers
+ORDER DrawAndSwap
+ORDER DrawLayers
+ORDER DrawAndSwap
+ORDER DrawLayers
+ORDER DrawAndSwap
+ORDER PROTO-OUT {"id":0,"result":{}}      <- 截图请求在后
+ORDER PROTO-OUT {"id":1,"result":{}}
+...
+```
+
+也就是说：`PrepareTiles` / `DrawLayers` / `DrawAndSwap` 全部命中（本次 9 次），
+**帧是在截图请求之前就画好的**，之后也还在继续画。所以空白帧既不是
+"没光栅化"，也不是"时序太早"，而是 `CopyOutputRequest` 取回了一张全零位图。
+
+至此本项的归因链已经完整且每一步都有实测：
+`--dump-dom` ✅ → 光栅 ✅（canvas 逐像素核对）→ 合成 ✅（DrawAndSwap 命中）
+→ **拷贝输出 ❌（全零位图）**。
