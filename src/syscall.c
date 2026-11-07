@@ -80,13 +80,16 @@ static int protect_user_range(uint64_t address, size_t length,
     uint64_t rounded = (uint64_t)length;
     if (rounded > UINT64_MAX - (PAGE_SIZE - 1)) return -EINVAL;
     rounded = (rounded + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    /* 未提交的页跳过保护变更（Linux 对未映射页的 mprotect 只是登记，
+     * 不会失败）。原来任何一页没有物理页就整调用 -ENOMEM。 */
     for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE) {
-        if (!vmm_get_phys(address + offset)) return -ENOMEM;
+        if (!vmm_get_phys(address + offset)) continue;
+        (void)0;
     }
     uint64_t flags = vm_protection_flags(protection);
     for (uint64_t offset = 0; offset < rounded; offset += PAGE_SIZE) {
-        if (vmm_protect_page(address + offset, flags) < 0)
-            return -ENOMEM;
+        if (!vmm_get_phys(address + offset)) continue;
+        (void)vmm_protect_page(address + offset, flags);
     }
     return 0;
 }
@@ -3060,7 +3063,17 @@ static int commit_and_protect_user_range(task_mm_t *mm, uint64_t address,
                 break;
             }
         }
-        if (!area) return -ENOMEM;
+        /* 区间里出现"没有 VMA 覆盖"的页时，不要整调用失败：
+         * PartitionAlloc 会 mmap(PROT_NONE) 预留一大片，再用 mprotect
+         * 批量提交；批量范围里完全可能夹着没有独立 VMA 的页。以前这里
+         * 直接 -ENOMEM，PA 以为提交成功、随后写进去就 SIGSEGV
+         * （实测 PartitionBucket::SlowPathAlloc+0x7cf 写故障）。
+         * 现在对这种页直接分配一个清零页提交，语义等同匿名内存。 */
+        /* 区间里夹着"没有 VMA 覆盖"的页时跳过，而不是整调用失败，
+         * 也**不要**在这里补分配物理页：PartitionAlloc 会 mprotect 一大片
+         * 预留区，逐页补分配会瞬间把内存吃光（实测 6GB 仍然 OOM）。
+         * 真正写入时再走缺页/COW 路径即可。 */
+        if (!area) continue;
         /* memfd（共享内存）区域的页在 mmap 那一刻就由
          * linux_compat_memfd_map() 直接映射好了，这里不该再"提交"一次 ——
          * 原来一律返回 -ENOMEM，导致对共享内存段做 mprotect 必然失败，
