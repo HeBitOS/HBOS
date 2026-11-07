@@ -803,3 +803,16 @@ boot 分页的改动，需要单独一轮做并验证。
 剩余：多进程截图从 `partition_alloc` OOM 变成
 `PartitionBucket::SlowPathAlloc+0x7cf` 写故障（err=7，页存在但只读），
 指向 fork 之后的 COW 解析路径，下一轮从这里继续。
+
+#### R39：多进程往前推了一格，单进程确认无解
+
+- `PartitionBucket::SlowPathAlloc` 的写故障是「PTE 已是 P|W|U 却被 CPU 拒绝」，
+  判为陈旧 TLB。加了有界自愈（刷该页 TLB + 重载 CR3 后重试，同址最多 16 次，
+  超过仍按 SIGSEGV 处理）。此后该故障不再出现，多进程的失败点前移到
+  `sandbox::policy::SandboxLinux::InitializeSandbox` 的 CHECK，
+  伴随 `Network service crashed or was terminated`。
+- 单进程+SwiftShader 在 8 GiB 下重测：与 3 GiB 时**逐字节相同**的空白帧
+  （md5 `1a1734b7…`），彻底确认单进程模式产不出可捕获的 surface。
+
+**结论**：截图只能走多进程，而多进程现在的阻塞是子进程（GPU/网络服务）
+的沙箱初始化 CHECK 与稳定性，不再是内存问题。

@@ -542,6 +542,40 @@ void isr_handler(isr_regs_t *regs) {
             console_putchar('\n');
         }
         if (cow_result > 0) return;
+
+        /* 页表本身已允许这次写（present + W + U），CPU 却仍报写故障——
+         * 只剩"陈旧 TLB 项"一种解释：某处把页从只读改成可写时没有刷新
+         * 该地址的转换。实测 Chromium 多进程里
+         * PartitionBucket::SlowPathAlloc+0x7cf 就撞这个（打印的 pte 是
+         * 0x...267，P/W/U 全在）。
+         *
+         * 这里做有界自愈：刷新该页 TLB 后重试，同一地址最多 16 次，
+         * 超过就照常按 SIGSEGV 处理（避免真正的权限问题变成死循环）。 */
+        uint64_t write_flags = vmm_get_page_flags(cr2_val & ~0xfffULL);
+        if ((write_flags & VMM_W) && (write_flags & VMM_U)) {
+            static uint64_t pf_retry_addr;
+            static uint32_t pf_retry_count;
+            uint64_t page_addr = cr2_val & ~0xfffULL;
+            if (page_addr == pf_retry_addr) {
+                pf_retry_count++;
+            } else {
+                pf_retry_addr = page_addr;
+                pf_retry_count = 1;
+            }
+            if (pf_retry_count <= 16) {
+                __asm__ volatile("invlpg (%0)" :: "r"((void *)(uintptr_t)cr2_val)
+                                 : "memory");
+                uint64_t retry_cr3;
+                __asm__ volatile("mov %%cr3, %0" : "=r"(retry_cr3));
+                __asm__ volatile("mov %0, %%cr3" :: "r"(retry_cr3) : "memory");
+                console_puts("[PF] stale-TLB retry #");
+                print_hex64(pf_retry_count);
+                console_puts(" addr=0x");
+                print_hex64(cr2_val);
+                console_putchar('\n');
+                return;
+            }
+        }
     }
 
     /* User protection/not-present faults are synchronous SIGSEGV, not
