@@ -19,6 +19,11 @@ uint64_t pmm_alloc_page(void);
 
 // Free a physical page previously returned by pmm_alloc_page
 void pmm_free_page(uint64_t phys_addr);
+/* 4 GiB：boot.asm 恒等映射的上界，也是高位内存的起点。 */
+#define PMM_LOW_LIMIT 0x100000000ULL
+
+uint64_t pmm_query_max_phys(void);
+void pmm_enable_high_memory(uint64_t limit);
 
 // Add/release/query references to a PMM page.  A page is returned to the
 // bitmap only when its last reference is released.

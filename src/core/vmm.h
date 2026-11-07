@@ -78,6 +78,10 @@ uint64_t vmm_get_page_flags(uint64_t virt_addr);
 /** Record whether EFER.NXE is active on this CPU. */
 void vmm_set_nx_enabled(bool enabled);
 
+/** 用 2 MiB 大页把 [start,end) 物理区间做成恒等映射（start 需 2 MiB 对齐）。
+ *  4 GiB 以上的 RAM 靠它才能被内核访问；中间的 PD/PDPT/PML4 表按需分配。 */
+int vmm_identity_map_2m(uint64_t start, uint64_t end, uint64_t flags);
+
 // Allocate a physical page and map it at the given virtual address
 // Returns virtual address on success, 0 on OOM
 uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags);

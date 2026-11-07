@@ -113,6 +113,24 @@ void kmain(void *mbi) {
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     vmm_init(cr3);
 
+    /* 把 4 GiB 以上的 RAM 也用起来。
+     *
+     * boot.asm 只建了 0-4 GiB 的 2 MiB 恒等映射，所以 PMM 原来把可管理
+     * 物理内存钳在 4 GiB；而 QEMU 的 PCI 洞又占掉 3-4 GiB，实际只剩
+     * 约 2.8 GiB 可用——给再多 -m 都没用（实测 malloc 在 2816 MiB 处
+     * 崩，Chromium 多进程报 partition_alloc OOM）。
+     *
+     * 这里先补恒等映射，再让 PMM 放开高位页。顺序不能反：PMM 交出的页
+     * 必须已经能被内核访问。 */
+    {
+        uint64_t phys_top = pmm_query_max_phys();
+        if (phys_top > PMM_LOW_LIMIT) {
+            if (vmm_identity_map_2m(PMM_LOW_LIMIT, phys_top,
+                                    VMM_P | VMM_W) == 0)
+                pmm_enable_high_memory(phys_top);
+        }
+    }
+
     // framebuffer 目前沿用 boot.asm 建立的纯 WB 恒等映射（graphics_init 在
     // vmm_init 之前就跑了，见上面 Phase 1）。真实硬件上这会导致画面更新
     // 依赖 CPU 缓存的不定期回写，出现数秒延迟；QEMU 等虚拟化环境通常不

@@ -189,6 +189,43 @@ int vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     return 0;
 }
 
+int vmm_identity_map_2m(uint64_t start, uint64_t end, uint64_t flags) {
+    const uint64_t HUGE = 2ULL * 1024 * 1024;
+    if (!g_pml4) return -1;
+    if (start & (HUGE - 1)) return -1;
+    end = (end + HUGE - 1) & ~(HUGE - 1);
+    if (end <= start) return 0;
+
+    uint64_t permitted = flags & 0xFFFULL;
+    for (uint64_t va = start; va < end; va += HUGE) {
+        pte_t *pml4e = &g_pml4[VMM_IDX(va, VMM_PML4)];
+        if (!(*pml4e & VMM_P)) {
+            uint64_t phys = pmm_alloc_page();
+            if (!phys) return -1;
+            memset((void *)(uintptr_t)phys, 0, PAGE_SIZE);
+            *pml4e = phys | VMM_P | VMM_W;
+        }
+        pte_t *pdpt = (pte_t *)(uintptr_t)(*pml4e & ~0xFFFULL);
+        pte_t *pdpte = &pdpt[VMM_IDX(va, VMM_PDPT)];
+        if (!(*pdpte & VMM_P)) {
+            uint64_t phys = pmm_alloc_page();
+            if (!phys) return -1;
+            memset((void *)(uintptr_t)phys, 0, PAGE_SIZE);
+            *pdpte = phys | VMM_P | VMM_W;
+        }
+        if (*pdpte & VMM_PS) continue;   /* 已被 1 GiB 大页覆盖 */
+        pte_t *pd = (pte_t *)(uintptr_t)(*pdpte & ~0xFFFULL);
+        pte_t *pde = &pd[VMM_IDX(va, VMM_PD)];
+        if (!(*pde & VMM_P))
+            *pde = (va & ~(HUGE - 1)) | permitted | VMM_PS | VMM_P;
+    }
+
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    return 0;
+}
+
 void vmm_set_nx_enabled(bool enabled) {
     g_nx_enabled = enabled;
 }

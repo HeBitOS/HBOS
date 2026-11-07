@@ -45,7 +45,12 @@
  * 表现为"内存越大越容易崩"。这里把可管理物理内存钳在恒等映射范围内，
  * 4 GiB 以上的 RAM 只是暂时不用，不是丢失。
  */
-#define PMM_IDENTITY_LIMIT 0x100000000ULL
+/* 位图覆盖的物理内存上限。boot.asm 只建了 0-4 GiB 的 2 MiB 恒等映射，
+ * 但 kernel.c 会在 vmm_init 之后用 vmm_identity_map_2m() 把 4 GiB 以上
+ * 那段补上，然后调用 pmm_enable_high_memory() 把这部分页交出来。
+ * 位图必须一开始就按这个上限开，否则后面没有空间标记高位页。
+ * 8 GiB 时代价：位图 256 KB + 引用计数 4 MB。 */
+#define PMM_MANAGED_LIMIT 0x200000000ULL
 
 // ============================================================
 // Multiboot2 内存映射结构（与 GRUB 规范一致）
@@ -82,6 +87,8 @@ struct mb2_tag_module {
 
 static uint8_t  *g_bitmap = NULL;       /**< 位图指针（直接映射到物理地址） */
 static uint64_t  g_total_pages = 0;     /**< 总页数 */
+static struct mb2_tag_mmap *g_mmap_tag = 0;  /**< 启动时的内存映射，供高位内存启用时重扫 */
+static uint64_t  g_high_enabled = 0;    /**< 已放开的物理内存上限 */
 static uint64_t  g_free_pages = 0;      /**< 空闲页数 */
 static uint64_t  g_total_mem = 0;       /**< 总内存（字节） */
 static bool      g_pmm_ready = false;   /**< PMM 是否已初始化 */
@@ -239,6 +246,7 @@ static uintptr_t mb2_find_tag(void *mbi, uint32_t type) {
 void pmm_init(void *mbi) {
     struct mb2_tag_mmap *mmap_tag = (struct mb2_tag_mmap *)mb2_find_tag(mbi, 6);
     if (!mmap_tag) return;  // 没有内存映射 → 无法初始化
+    g_mmap_tag = mmap_tag;
 
     // ---- 步骤 1: 找到最大物理地址 ----
     uint64_t max_addr = 0;
@@ -255,7 +263,7 @@ void pmm_init(void *mbi) {
     if (max_addr == 0) max_addr = 16 * 1024 * 1024;  // 回退: 16MB
     /* 见 PMM_IDENTITY_LIMIT：超过恒等映射的 RAM 一律不纳入管理，
      * 否则分配出去的页内核写不了。 */
-    if (max_addr > PMM_IDENTITY_LIMIT) max_addr = PMM_IDENTITY_LIMIT;
+    if (max_addr > PMM_MANAGED_LIMIT) max_addr = PMM_MANAGED_LIMIT;
     max_addr = (max_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);  // 页对齐
 
     g_total_pages = max_addr >> PAGE_SHIFT;
@@ -315,6 +323,9 @@ void pmm_init(void *mbi) {
 
         uint64_t base = e->base_addr;
         uint64_t end  = e->base_addr + e->length;
+        /* 4 GiB 以上先保持"已用"，等 vmm_identity_map_2m() 建好映射、
+         * pmm_enable_high_memory() 再统一放开。 */
+        if (base >= PMM_LOW_LIMIT) continue;
         if (base >= max_addr) continue;
         if (end > max_addr) end = max_addr;
 
@@ -494,4 +505,61 @@ uint64_t pmm_get_free_mem(void)  {
     uint64_t free_pages = g_free_pages;
     pmm_unlock();
     return free_pages << PAGE_SHIFT;
+}
+
+/**
+ * 查询 Multiboot2 报告的最大可用物理地址（不截断到 4 GiB，仅受位图上限约束）。
+ * 供 kernel.c 决定要给 4 GiB 以上补多少恒等映射。
+ */
+uint64_t pmm_query_max_phys(void) {
+    if (!g_mmap_tag) return 0;
+    uint64_t entry_count =
+        (g_mmap_tag->size - 8) / g_mmap_tag->entry_size;
+    uint64_t max_addr = 0;
+    for (uint64_t i = 0; i < entry_count; i++) {
+        struct mb2_mmap_entry *e = &g_mmap_tag->entries[i];
+        if (e->type != 1) continue;
+        uint64_t end = e->base_addr + e->length;
+        if (end > max_addr) max_addr = end;
+    }
+    if (max_addr > PMM_MANAGED_LIMIT) max_addr = PMM_MANAGED_LIMIT;
+    return max_addr & ~(uint64_t)(PAGE_SIZE - 1);
+}
+
+/**
+ * 放开 4 GiB 以上、limit 以下的可用物理内存。
+ *
+ * 前提：调用方已经用 vmm_identity_map_2m() 把这段物理地址做成恒等映射，
+ * 否则内核清零/拷贝这些页会分页异常（这正是当初 PMM_IDENTITY_LIMIT
+ * 存在的理由）。
+ */
+void pmm_enable_high_memory(uint64_t limit) {
+    if (!g_mmap_tag || !g_total_pages) return;
+    if (limit > g_total_mem) limit = g_total_mem;
+    if (limit <= PMM_LOW_LIMIT || limit <= g_high_enabled) return;
+
+    uint64_t entry_count =
+        (g_mmap_tag->size - 8) / g_mmap_tag->entry_size;
+    for (uint64_t i = 0; i < entry_count; i++) {
+        struct mb2_mmap_entry *e = &g_mmap_tag->entries[i];
+        if (e->type != 1) continue;
+        uint64_t base = e->base_addr;
+        uint64_t end  = e->base_addr + e->length;
+        if (end <= PMM_LOW_LIMIT) continue;
+        if (base < PMM_LOW_LIMIT) base = PMM_LOW_LIMIT;
+        if (base >= limit) continue;
+        if (end > limit) end = limit;
+
+        uint64_t start_page = (base + PAGE_SIZE - 1) >> PAGE_SHIFT;
+        uint64_t end_page   = end >> PAGE_SHIFT;
+        for (uint64_t page = start_page; page < end_page; page++) {
+            if (page >= g_total_pages) break;
+            if (bitmap_test(page)) {
+                bitmap_clear(page);
+                g_page_refs[page] = 0;
+                g_free_pages++;
+            }
+        }
+    }
+    g_high_enabled = limit;
 }

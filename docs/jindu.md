@@ -782,3 +782,24 @@ boot 分页的改动，需要单独一轮做并验证。
 
 顺带修正：`TASK_USER_HEAP_SIZE` 64 MiB → 512 MiB（仅上限，按需提交，
 不与 mmap 窗口冲突）。实测不改变内存天花板，但对 Chromium 的主 arena 更合适。
+
+#### R38：内核现在能用 4 GiB 以上的物理内存（实测 2816 MiB → 4096 MiB+）
+
+原因：`boot.asm` 只建了 0–4 GiB 的 2 MiB 恒等映射，PMM 于是把可管理物理
+内存钳在 4 GiB；QEMU 的 PCI 洞又占掉 3–4 GiB，实际只有约 2.8 GiB 可用，
+**`-m` 给再多都没用**。
+
+改动：
+- `vmm_identity_map_2m()`：用 2 MiB 大页给任意物理区间补恒等映射，
+  中间 PD/PDPT/PML4 表按需从 PMM 分配；
+- `pmm_query_max_phys()` / `pmm_enable_high_memory()`：位图按 8 GiB 开
+  （256 KB 位图 + 4 MB 引用计数），4 GiB 以上先保持"已用"，
+  等映射建好后再统一放开；
+- `kernel.c` 在 `vmm_init()` 之后按「先建映射、再放开页」的顺序调用。
+
+实测（`-m 8192M`，每步 256 MiB 逐页触碰）：**4096 MiB 才因测试自身上限停止**，
+此前固定死在 2816 MiB。`--dump-dom` 无回退。
+
+剩余：多进程截图从 `partition_alloc` OOM 变成
+`PartitionBucket::SlowPathAlloc+0x7cf` 写故障（err=7，页存在但只读），
+指向 fork 之后的 COW 解析路径，下一轮从这里继续。
