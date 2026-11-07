@@ -2446,6 +2446,35 @@ int linux_compat_memfd_map(int fd, uint64_t address, size_t length,
     return 0;
 }
 
+int linux_compat_memfd_write_at(int fd, uint64_t offset,
+                                const void *buffer, size_t count) {
+    task_t *task = compat_task();
+    memfd_slot_t *slot = memfd_for_fd(task, fd);
+    if (!slot) return compat_set_errno(EBADF);
+    if (!buffer && count) return compat_set_errno(EFAULT);
+    if (!count) return 0;
+
+    uint64_t end = offset + count;
+    if (end < offset) return compat_set_errno(EINVAL);
+    if (end > slot->size && linux_compat_memfd_truncate(fd, end) < 0)
+        return -1;
+
+    size_t done = 0;
+    while (done < count) {
+        uint64_t position = offset + done;
+        uint32_t page = (uint32_t)(position / PAGE_SIZE);
+        uint32_t within = (uint32_t)(position % PAGE_SIZE);
+        size_t take = PAGE_SIZE - within;
+        if (take > count - done) take = count - done;
+        if (page >= slot->page_count) break;
+        memcpy((uint8_t *)(uintptr_t)slot->pages[page] + within,
+               (const uint8_t *)buffer + done, take);
+        done += take;
+    }
+    if (end > slot->size) slot->size = end;
+    return (int)done;
+}
+
 void linux_compat_memfd_unmap(uint32_t backing_id) {
     if (backing_id >= LINUX_MEMFD_SLOTS) return;
     memfd_slot_t *slot = &memfd_slots[backing_id];

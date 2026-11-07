@@ -1829,7 +1829,14 @@ static uint64_t linux_pwrite64(int fd, const void *buffer, uint64_t count,
         return (uint64_t)(-EBADF);
     fd_entry_t *entry = &current->fd_table->entries[fd];
     if (!entry->used) return (uint64_t)(-EBADF);
-    if (entry->type == FD_MEMFD) return (uint64_t)(-EIO);
+    if (entry->type == FD_MEMFD) {
+        /* memfd 的 pwrite：软件光栅/共享位图用它写共享内存。
+         * 原来一律返回 -EIO，等于把共享内存写通道关死。 */
+        int written = linux_compat_memfd_write_at(fd, offset, buffer,
+                                                  (size_t)count);
+        return written < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO))
+                           : (uint64_t)written;
+    }
     if (entry->type != FD_FILE || !entry->node)
         return (uint64_t)(-ESPIPE);
     if (offset > UINT32_MAX || count > UINT32_MAX - offset)
@@ -2296,10 +2303,21 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
          * 表现为 GPU 子进程 exec 成功后立刻被判 "launch failed"，
          * 日志里只有一行 [FDERR] nr=72 cmd=1033 ret=-22，极难联想。
          * HBOS 的管道没有容量概念，报一个固定值并接受设置请求即可。 */
+        /* fcntl 的 Linux 专用命令（基址 F_LINUX_SPECIFIC_BASE=1024）：
+         *   1031 F_SETPIPE_SZ   1032 F_GETPIPE_SZ
+         *   1033 F_ADD_SEALS    1034 F_GET_SEALS
+         * 之前把 1033 当成 pipe size 返回了 65536 —— 它其实是 memfd 的
+         * F_ADD_SEALS，约定成功后返回 0。Chromium 建共享内存时用
+         * `fcntl(fd, F_ADD_SEALS, ...) != 0` 判成败，拿到 65536 就判定
+         * 失败，于是 SharedMemory / 截图回读这条链路直接不可用。 */
+        case 1031:                                    /* F_SETPIPE_SZ */
+            return argument > 0 ? (uint64_t)argument : 65536;
         case 1032:                                    /* F_GETPIPE_SZ */
             return 65536;
-        case 1033:                                    /* F_SETPIPE_SZ */
-            return argument > 0 ? (uint64_t)argument : 65536;
+        case 1033:                                    /* F_ADD_SEALS */
+            return 0;
+        case 1034:                                    /* F_GET_SEALS */
+            return 0;
         default:
             return (uint64_t)(-EINVAL);
     }
@@ -2613,6 +2631,13 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         case 273: native.nr = HBOS_SYS_SET_ROBUST_LIST; break;
         case 274: native.nr = HBOS_SYS_GET_ROBUST_LIST; break;
         case 281: native.nr = HBOS_SYS_EPOLL_WAIT; break;
+        /* timerfd：Chromium 的帧调度/延时任务全靠它。原来 283/286/287
+         * 根本没映射，直接落到 unimplemented 返回 ENOSYS —— 表现是
+         * --screenshot 永远等不到合成器产帧而挂死（进程停在 task_yield
+         * 空转），而 --dump-dom 不需要帧所以正常。 */
+        case 283: native.nr = HBOS_SYS_TIMERFD_CREATE; break;
+        case 286: native.nr = HBOS_SYS_TIMERFD_SETTIME; break;
+        case 287: native.nr = HBOS_SYS_TIMERFD_GETTIME; break;
         case 288: {
             int flags = (int)linux_frame->a3;
             if (flags & ~(0x800 | 0x80000))

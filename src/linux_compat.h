@@ -130,6 +130,10 @@ int linux_compat_memfd_truncate(int fd, uint64_t size);
 int linux_compat_memfd_size(int fd, uint64_t *size);
 int linux_compat_memfd_read_at(int fd, uint64_t offset,
                                void *buffer, size_t count);
+/* 往 memfd 指定偏移写。Linux 允许越过 EOF 写(空洞补零)，这里会把
+ * slot 扩容到 offset+count。软件光栅/共享位图正是用 pwrite 写共享内存。 */
+int linux_compat_memfd_write_at(int fd, uint64_t offset,
+                                const void *buffer, size_t count);
 int linux_compat_memfd_map(int fd, uint64_t address, size_t length,
                            uint64_t offset, int writable,
                            uint32_t *backing_id);
