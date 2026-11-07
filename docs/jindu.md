@@ -708,3 +708,29 @@ file pC.png -> PNG image data, 800 x 600, 8-bit/color RGBA
 所以空白帧的根因在 **Chromium 合成器/拷贝输出这条用户态链路**，不在
 内核 IPC。下一步应查 `CopyOutputRequest` 在软件合成下的位图来源，
 以及 renderer→viz 的 frame sink 是否真的提交了 `CompositorFrame`。
+
+#### R34 再补充：空白帧的五配置对照（已定性为空帧回退）
+
+同一页面、同一尺寸，五种渲染配置输出**逐字节相同**的 PNG
+（md5 `1a1734b7fcca883564d0e259f1f52c18`，3174 字节）：
+
+| 配置 | 结果 |
+|---|---|
+| `--disable-gpu` + `data:` 纯文本 | 空白帧 |
+| `--disable-gpu` + `--default-background-color=FFFFFFFF` | 逐字节相同 |
+| `--disable-gpu` + `file://` 红/蓝块页面 | 逐字节相同 |
+| `--disable-gpu --disable-gpu-compositing` | 逐字节相同 |
+| `--in-process-gpu --use-angle=swiftshader --enable-unsafe-swiftshader` | 逐字节相同 |
+
+内容、背景色、合成方式全部不影响输出 → 这不是"画错了"，而是**捕获到的是
+一张空位图**（`CopyOutputResult` 无像素），Chromium 走了空帧回退。
+`--vmodule=*raster*` 全程**没有任何光栅化日志**，进一步印证 cc 从未光栅化。
+
+已排除的内核侧因素（均有回归用例，PASS）：memfd 的 pwrite↔mmap 一致性、
+`SCM_RIGHTS` 传 fd、`MAP_SHARED` 文件共享、`epoll_wait` 超时语义（300ms
+实测 300ms 返回）、timerfd 触发。
+
+**结论**：空白帧是 Chromium 合成器/拷贝输出这条用户态链路的缺口，不是内核
+IPC。下一步应查 single-process 下 viz 的 `SharedImageInterface` 与
+`CopyOutputRequest` 为何返回空位图；`--print-to-pdf` 作为旁路也崩在同一类
+问题（`PrintCompositeClient::CompositeDocument+0x3a`，解引用 null+0x60）。
