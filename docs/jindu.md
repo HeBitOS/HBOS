@@ -689,3 +689,22 @@ file pC.png -> PNG image data, 800 x 600, 8-bit/color RGBA
 候选：`memfd` 的 `MAP_SHARED` 与 `ftruncate` 增长后的重映射、以及
 `mmap` 之后 `pwrite` 的可见性（当前 pwrite 写 slot 物理页、mmap 映射同一
 批页，理论上应一致，需要一次实测确认）。
+
+#### R34 补充：空白帧的排查（负结果同样有价值）
+
+截图产物恒为**全零 RGBA**（alpha=0），与页面内容、`--default-background-color`、
+`--disable-gpu-compositing` 全部无关（四次运行 md5 完全相同：
+`1a1734b7fcca883564d0e259f1f52c18`，含红/蓝块页面）。说明被捕获的位图
+**从未被写入**，而不是写错了颜色。
+
+已排除的三条内核侧假设（各有回归用例，均 PASS）：
+
+| 假设 | 用例 | 结果 |
+|---|---|---|
+| memfd 的 `pwrite` 与 `mmap` 不可见 | `tests/linux_memfd_coherence.c` | pwrite→mmap / mmap→pread / 扩容后可见，全 PASS |
+| `SCM_RIGHTS` 传 fd 静默失败 | `tests/linux_fdpass.c` | 收到 fd 且内容是原始数据，PASS |
+| `MAP_SHARED` 普通文件不共享 | `tests/linux_shared_alias.c` | 已修，PASS |
+
+所以空白帧的根因在 **Chromium 合成器/拷贝输出这条用户态链路**，不在
+内核 IPC。下一步应查 `CopyOutputRequest` 在软件合成下的位图来源，
+以及 renderer→viz 的 frame sink 是否真的提交了 `CompositorFrame`。
