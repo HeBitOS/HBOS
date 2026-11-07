@@ -16,6 +16,7 @@
 #include "string.h"
 #include "vfs.h"
 #include "user/ldso.h"
+#include "graphics/graphics.h"
 
 #define ELF_MAG0  0x7f
 #define ELF_MAG1  'E'
@@ -491,57 +492,7 @@ static int map_interpreter_segments(elf_interpreter_t *interpreter) {
                 memset((void *)(uintptr_t)seg_end, 0, (size_t)tail);
         }
     }
-    /* ld.so 自己是 PIE，必须做 R_X86_64_RELATIVE 重定位才能用。
-     *
-     * 这里以前只映射段、拷字节，一条重定位都不做 —— GOT 里留的还是文件中的
-     * 原始值（相对偏移而非绝对地址）。于是 ld.so 的启动代码
-     * `mov 0x58(%r15),%rdx` 从 GOT 读出垃圾值，下一条
-     * `add %rax,0x8(%rdx)` 用非规范地址访问内存，立刻 General Protection
-     * Fault（rip 落在 0x1200_xxxx_xxxx，err=0，指令本身完全合法）。
-     *
-     * 现象极具迷惑性：主程序能正常跑（它的 RELATIVE 重定位在下面那段做了），
-     * 只有 exec 出来的子进程在 ld.so 里崩，而且每次都崩在同一个地址。
-     *
-     * ld.so 的 RELATIVE 重定位只需要 base+addend，不涉及符号解析，
-     * 在内核里做是安全的。 */
-    {
-        const elf64_dyn_t *dyn = NULL;
-        uint64_t rela_va = 0, rela_size = 0, rela_ent = 0;
-        for (uint16_t i = 0; i < interpreter->ehdr->e_phnum; i++) {
-            const elf64_phdr_t *ph = (const elf64_phdr_t *)(
-                interpreter->headers + interpreter->ehdr->e_phoff +
-                i * interpreter->ehdr->e_phentsize);
-            if (ph->p_type != PT_DYNAMIC) continue;
-            dyn = (const elf64_dyn_t *)(uintptr_t)
-                  (interpreter->load_bias + ph->p_vaddr);
-            break;
-        }
-        if (dyn) {
-            for (uint64_t j = 0; dyn[j].d_tag != DT_NULL; j++) {
-                if (dyn[j].d_tag == DT_RELA)
-                    rela_va = dyn[j].d_un.d_ptr;
-                else if (dyn[j].d_tag == DT_RELASZ)
-                    rela_size = dyn[j].d_un.d_val;
-                else if (dyn[j].d_tag == DT_RELAENT)
-                    rela_ent = dyn[j].d_un.d_val;
-            }
-        }
-        if (rela_va && rela_size && rela_ent == sizeof(elf64_rela_t)) {
-            /* DT_RELA 在 PIE 里是"未重定位的虚拟地址"，要加 load_bias。 */
-            const elf64_rela_t *rela = (const elf64_rela_t *)(uintptr_t)
-                                       (interpreter->load_bias + rela_va);
-            uint64_t count = rela_size / rela_ent;
-            for (uint64_t i = 0; i < count; i++) {
-                uint32_t type = (uint32_t)ELF64_R_TYPE(rela[i].r_info);
-                if (type != R_X86_64_RELATIVE) continue;
-                uint64_t *location = (uint64_t *)(uintptr_t)
-                                     (interpreter->load_bias +
-                                      rela[i].r_offset);
-                *location = interpreter->load_bias +
-                            (uint64_t)rela[i].r_addend;
-            }
-        }
-    }
+    /* The ELF interpreter bootstraps its own relocations before loading dependencies. */
     for (uint16_t i = 0; i < interpreter->ehdr->e_phnum; i++) {
         const elf64_phdr_t *ph = (const elf64_phdr_t *)(
             interpreter->headers + interpreter->ehdr->e_phoff +
@@ -1036,6 +987,21 @@ int elf64_load_vfs_and_exec(struct vfs_node *node,
         return elf_fail("invalid or oversized arguments");
     }
 
+    {
+        static unsigned exec_arg_budget = 20;
+        if (exec_arg_budget) {
+            exec_arg_budget--;
+            console_puts("[EXEC-ARGV]");
+            for (int i = 0; snapshot->argv[i]; i++) {
+                console_puts(" [");
+                const char *arg = snapshot->argv[i];
+                for (int j = 0; arg[j] && j < 160; j++)
+                    console_putchar(arg[j]);
+                console_putchar(']');
+            }
+            console_putchar('\n');
+        }
+    }
     elf_image_source_t source;
     if (prepare_vfs_source((vfs_node_t *)node, &source) < 0) {
         kfree(snapshot);
@@ -1074,6 +1040,14 @@ int elf64_load_vfs_and_spawn(struct vfs_node *node,
         kfree(snapshot);
         return elf_fail("invalid or oversized arguments");
     }
+    console_puts("[SPAWN-ARGV]");
+    for (int i = 0; snapshot->argv[i]; i++) {
+        console_puts(" [");
+        const char *arg = snapshot->argv[i];
+        for (int j = 0; arg[j] && j < 160; j++) console_putchar(arg[j]);
+        console_putchar(']');
+    }
+    console_putchar('\n');
     elf_image_source_t source;
     if (prepare_vfs_source((vfs_node_t *)node, &source) < 0) {
         kfree(snapshot);

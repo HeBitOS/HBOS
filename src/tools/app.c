@@ -649,6 +649,7 @@ static void cmd_setenv(int argc, char **argv) {
         {"stepchild", LINUX_DEBUG_STEP_CHILD},
         {"resume", LINUX_DEBUG_TRACE_RESUME},
         {"stderr", LINUX_DEBUG_STDERR_ECHO},
+        {"syscdump", LINUX_DEBUG_SYSCALL_DUMP},
     };
     if (argc < 2) {
         console_puts("usage: setenv <name> [0|1]\n");

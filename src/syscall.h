@@ -287,6 +287,10 @@ enum {
      *  动态链接器报 "找不到共享库" 时以 127 退出，原因只写在 stderr 里，
      *  没有这个开关就只能靠猜缺哪个库。默认关闭。 */
     LINUX_DEBUG_STDERR_ECHO = 6,
+    /** 用户态 TRAP 时 dump 最近 syscall 环形缓冲。默认关闭：
+     *  每次崩溃重打几百行，而 QEMU 串口是逐字符模拟的，这块能占掉
+     *  一次运行一半以上的墙钟时间。内核 panic 那条路径始终打印。 */
+    LINUX_DEBUG_SYSCALL_DUMP = 7,
 };
 void linux_debug_set_flag(int which, int value);
 

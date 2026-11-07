@@ -5,6 +5,7 @@
 #include "cpu.h"
 #include "io.h"
 #include "vmm.h"
+extern int linux_debug_syscall_dump;
 #include "task.h"
 #include "../syscall.h"
 #include "../signal.h"
@@ -519,6 +520,26 @@ void isr_handler(isr_regs_t *regs) {
             console_puts(" pte=0x");
             print_hex64(vmm_get_page_flags(cr2_val & ~0xfffULL));
             console_putchar('\n');
+            uint64_t cr3;
+            __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+            task_t *fault_task = task_current();
+            console_puts("  [PF-WALK] hw="); print_hex64(cr3);
+            console_puts(" sw="); print_hex64(vmm_get_pml4());
+            console_puts(" task=");
+            print_hex64(fault_task && fault_task->mm ?
+                        fault_task->mm->pml4_phys : 0);
+            console_puts(" flags="); print_hex64(regs->rflags);
+            const uint64_t mask = 0x000FFFFFFFFFF000ULL;
+            uint64_t table = cr3 & mask;
+            for (int shift = 39; shift >= 12 && table; shift -= 9) {
+                uint64_t entry = ((const uint64_t *)(uintptr_t)table)
+                    [(cr2_val >> shift) & 511];
+                console_putchar(' '); print_hex64(entry);
+                if (!(entry & VMM_P) || (shift > 12 && (entry & VMM_PS)))
+                    break;
+                table = entry & mask;
+            }
+            console_putchar('\n');
         }
         if (cow_result > 0) return;
     }
@@ -547,7 +568,10 @@ void isr_handler(isr_regs_t *regs) {
         dump_user_vma_for(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);
-        linux_syscall_trace_dump();
+        /* syscall 环形 dump 每次崩溃都重打几百行。QEMU 的串口是逐字符
+         * 模拟的，这块能占掉整个运行一半以上的时间。默认关闭，
+         * `setenv syscdump 1` 打开。内核 panic 那处仍然无条件打印。 */
+        if (linux_debug_syscall_dump) linux_syscall_trace_dump();
         task_exit();
     }
 
@@ -603,7 +627,7 @@ void isr_handler(isr_regs_t *regs) {
         dump_user_vma_for(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);
-        linux_syscall_trace_dump();
+        if (linux_debug_syscall_dump) linux_syscall_trace_dump();
         if (linux_signal_prepare_exception(regs, signal_number, regs->rip,
                                            regs->err_code) > 0)
             return;
