@@ -630,3 +630,62 @@ run: exit 127
 
 **下一步**：补齐上面那张表的库，直到 `exit 127` 消失。这是纯打包工作，
 不需要动内核。
+
+### R34（Chromium headless 打通 DOM；截图出图但为空白帧）
+
+**`--dump-dom` 首次输出带内容 DOM**
+
+```
+$ run .../chromium-headless-shell --no-sandbox --no-zygote --single-process \
+      --disable-gpu --dump-dom "data:text/html,HBOS-CHROMIUM-OK"
+<html><head></head><body>HBOS-CHROMIUM-OK</body></html>
+run: exit 0
+```
+
+关键不是"少报了几个错"，而是把链路逐个证实：
+
+1. **用调试器确认浏览器、V8、DevTools 全程可用**。在 QEMU `-gdb` 下对
+   headless-shell 下硬件断点，`HeadlessShell::OnBrowserStart`、
+   `HeadlessCommandHandler::ProcessCommands`、`OnCommandsResult` 三个
+   入口全部命中 —— 之前"没进 dump-dom 路径"的推断是错的。
+
+2. **抓到真正的根因**：抓 DevTools 报文后看到
+   `ReferenceError: executeCommands is not defined`
+   —— 命令页 `chrome://headless/headless_command.html` 拿到的是空 HTML，
+   `headless_command.js` 没加载，于是什么也不做就干净退出。
+
+3. **根因是内核的 MAP_SHARED 普通文件不共享**。`src/syscall.c` 原先把
+   可写 `MAP_SHARED` 文件映射退化成"每张映射一份私有快照"；Chromium 用
+   `/dev/shm` 文件做 IPC 共享缓冲，写端与读端互不可见。新增
+   `linux_compat_shm_*`：按 (文件节点, 页号) 散列的共享物理页表 + 引用计数
+   （动态链表，4096 桶；最初用定长 4096 槽数组，20MB 的 `resources.pak`
+   直接挤爆导致 DataPack 加载 mmap ENOMEM）。
+
+   回归用例 `tests/linux_shared_alias.c`：同一文件多张映射（含只读、含
+   非零 offset）的双向可见性。修复前 `regular-file: FAIL`，修复后
+   `memfd PASS / regular-file PASS`。
+
+**另外两个硬缺口**
+
+- `timerfd` 系统调用号（283/286/287）**从未映射**，实现早就有但落到
+  unimplemented 返回 ENOSYS。Chromium 的帧调度依赖它。补上后定时器探针
+  `TIMERFD poll=1 expirations=1` 通过。
+- `fcntl` 命令号算错：把 `F_ADD_SEALS`(1033) 当成 `F_SETPIPE_SZ` 返回
+  65536，而封印约定成功返回 0 → Chromium 判共享内存创建失败。修正后
+  `--screenshot` 从**永久挂死**变成 18 秒正常退出。
+- `memfd` 的 `pwrite` 原来直接返回 `-EIO`（软件光栅用 pwrite 写共享位图）。
+
+**截图：能出文件，但内容是空白帧**
+
+```
+file pC.png -> PNG image data, 800 x 600, 8-bit/color RGBA
+三次运行 md5 完全一致，采样灰度只有 1 种 -> 空白帧
+```
+
+所以"生成可验证 PNG"只做到一半：**格式合法、尺寸正确、可复现，但光栅
+内容没有进入帧**。未达成，不当作完成。
+
+**下一步（按证据优先）**：帧为什么是空的 —— 光栅结果未进共享位图。
+候选：`memfd` 的 `MAP_SHARED` 与 `ftruncate` 增长后的重映射、以及
+`mmap` 之后 `pwrite` 的可见性（当前 pwrite 写 slot 物理页、mmap 映射同一
+批页，理论上应一致，需要一次实测确认）。
