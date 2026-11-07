@@ -2463,6 +2463,112 @@ int linux_compat_memfd_retain_map(uint32_t backing_id) {
     return 0;
 }
 
+/* ── MAP_SHARED 普通文件的共享页 ────────────────────────────────────
+ *
+ * Linux 里同一文件被 mmap(MAP_SHARED) 多次，所有映射看到同一份物理页，
+ * 一端写另一端立刻可见。HBOS 原先把它退化成"每张映射各自一份私有快照"，
+ * 于是 Chromium 用 /dev/shm 文件做 IPC 共享缓冲时写端与读端互不可见：
+ * 实测 headless 的命令页拿到空 HTML，脚本没加载，DevTools 报
+ * "executeCommands is not defined"，浏览器随即干净退出、不输出 DOM。
+ *
+ * 这里按 (文件节点, 文件内页号) 共享物理页，并做引用计数。物理页不设
+ * VMM_OWNED，卸载映射时由本表决定何时真正释放。
+ */
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#endif
+#define SHM_BUCKETS 4096
+
+typedef struct shm_page {
+    struct shm_page *next;
+    struct vfs_node *node;
+    uint64_t index;
+    uint64_t phys;
+    uint32_t refs;
+} shm_page_t;
+
+/* 按 (文件节点, 文件内页号) 散列。用动态链表而不是定长数组：一个 20MB 的
+ * resources.pak 就要近 5000 页，定长表会被挤爆（实测 mmap 直接 ENOMEM，
+ * DataPack 加载失败）。 */
+static shm_page_t *shm_buckets[SHM_BUCKETS];
+
+static unsigned shm_hash(struct vfs_node *node, uint64_t index) {
+    uint64_t key = ((uint64_t)(uintptr_t)node >> 4) ^ (index * 0x9e3779b97f4a7c15ULL);
+    return (unsigned)(key & (SHM_BUCKETS - 1));
+}
+
+static shm_page_t *shm_find(struct vfs_node *node, uint64_t index) {
+    if (!node) return NULL;
+    for (shm_page_t *entry = shm_buckets[shm_hash(node, index)]; entry;
+         entry = entry->next) {
+        if (entry->node == node && entry->index == index) return entry;
+    }
+    return NULL;
+}
+
+uint64_t linux_compat_shm_lookup(struct vfs_node *node, uint64_t page_index) {
+    shm_page_t *entry = shm_find(node, page_index);
+    return entry ? entry->phys : 0;
+}
+
+uint64_t linux_compat_shm_page(struct vfs_node *node, uint64_t page_index,
+                               void *private_data, int *created) {
+    (void)private_data;
+    if (created) *created = 0;
+    if (!node) return 0;
+
+    shm_page_t *entry = shm_find(node, page_index);
+    if (entry) {
+        if (entry->refs != UINT32_MAX) entry->refs++;
+        return entry->phys;
+    }
+
+    shm_page_t *fresh = (shm_page_t *)kmalloc(sizeof(*fresh));
+    if (!fresh) return 0;
+    uint64_t phys = pmm_alloc_page();
+    if (!phys) { kfree(fresh); return 0; }
+    memset((void *)(uintptr_t)phys, 0, PAGE_SIZE);
+    uint64_t offset = page_index * PAGE_SIZE;
+    if (node->size > offset) {
+        uint64_t available = node->size - offset;
+        uint32_t want = available > PAGE_SIZE ? PAGE_SIZE : (uint32_t)available;
+        (void)vfs_read(node, (uint32_t)offset, (void *)(uintptr_t)phys, want);
+    }
+
+    fresh->node = node;
+    fresh->index = page_index;
+    fresh->phys = phys;
+    fresh->refs = 1;
+    unsigned bucket = shm_hash(node, page_index);
+    fresh->next = shm_buckets[bucket];
+    shm_buckets[bucket] = fresh;
+    if (created) *created = 1;
+    return phys;
+}
+
+void linux_compat_shm_unmap(struct vfs_node *node, uint64_t backing_offset,
+                            uint64_t bytes) {
+    if (!node || !bytes) return;
+    uint64_t first = backing_offset / PAGE_SIZE;
+    uint64_t pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint64_t i = 0; i < pages; i++) {
+        unsigned bucket = shm_hash(node, first + i);
+        shm_page_t **link = &shm_buckets[bucket];
+        while (*link) {
+            shm_page_t *entry = *link;
+            if (entry->node != node || entry->index != first + i) {
+                link = &entry->next;
+                continue;
+            }
+            if (entry->refs > 1) { entry->refs--; break; }
+            *link = entry->next;
+            pmm_free_page(entry->phys);
+            kfree(entry);
+            break;
+        }
+    }
+}
+
 static futex_slot_t *futex_find(uint32_t *address, int create) {
     futex_slot_t *empty = NULL;
     for (int i = 0; i < LINUX_FUTEX_SLOTS; i++) {

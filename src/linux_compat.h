@@ -136,6 +136,21 @@ int linux_compat_memfd_map(int fd, uint64_t address, size_t length,
 void linux_compat_memfd_unmap(uint32_t backing_id);
 int linux_compat_memfd_retain_map(uint32_t backing_id);
 
+/* MAP_SHARED 普通文件映射的共享物理页登记表。
+ *
+ * Linux 语义：同一文件被 mmap(MAP_SHARED) 多次，所有映射看到同一份物理页，
+ * 一端写另一段立刻可见。HBOS 原来把它退化成"每张映射各一份私有快照"，
+ * 于是 Chromium 走 /dev/shm 文件的 IPC 共享缓冲时写端与读端互不可见 ——
+ * 实测 headless 的命令页因此拿到空 HTML，脚本没加载，
+ * DevTools 里报 executeCommands is not defined。
+ *
+ * 下面三个函数按 (文件节点, 文件内页号) 共享物理页并做引用计数。 */
+uint64_t linux_compat_shm_page(struct vfs_node *node, uint64_t page_index,
+                               void *private_data, int *created);
+uint64_t linux_compat_shm_lookup(struct vfs_node *node, uint64_t page_index);
+void linux_compat_shm_unmap(struct vfs_node *node, uint64_t backing_offset,
+                            uint64_t bytes);
+
 int linux_compat_timerfd_create(int clockid, int flags);
 int linux_compat_timerfd_settime(int fd, int flags,
                                  const void *new_value, void *old_value);

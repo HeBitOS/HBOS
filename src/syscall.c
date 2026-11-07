@@ -970,6 +970,8 @@ static int hbos_debug_trace_resume;
 /* 把用户程序写到 stderr 的内容转发到控制台（`setenv stderr 1`）。
  * 动态链接器以 127 退出时，缺库的具体原因只写在这里。 */
 static int linux_debug_stderr_echo;
+/* 用户态 TRAP 时是否 dump 最近 syscall 环形缓冲（`setenv syscdump 1`）。 */
+int linux_debug_syscall_dump;
 /* 按 pid 实时追踪 syscall（`setenv tracepid <pid>`），0 = 关闭。 */
 static int hbos_trace_pid;
 
@@ -1000,6 +1002,8 @@ void linux_debug_set_flag(int which, int value) {    if (which == LINUX_DEBUG_TR
         task_debug_trace_resume = !!value;
     } else if (which == LINUX_DEBUG_STDERR_ECHO) {
         linux_debug_stderr_echo = !!value;
+    } else if (which == LINUX_DEBUG_SYSCALL_DUMP) {
+        linux_debug_syscall_dump = !!value;
     }
 }
 
@@ -2449,7 +2453,7 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             console_putchar('\n');
             if (task_get_id() == task_get_process_id()) {
                 linux_user_backtrace(linux_frame, "EXIT");
-                linux_syscall_trace_dump();
+                if (linux_debug_syscall_dump) linux_syscall_trace_dump();
             }
             native.nr = HBOS_SYS_EXIT; break;
         case 61:  native.nr = HBOS_SYS_WAITPID; break;
@@ -2877,8 +2881,12 @@ static uint64_t align_page_up(uint64_t value) {
 }
 
 static void vm_area_drop_backing(vm_area_t *area) {
-    if (area && area->backing_type == VM_BACKING_MEMFD)
+    if (!area) return;
+    if (area->backing_type == VM_BACKING_MEMFD)
         linux_compat_memfd_unmap(area->backing_id);
+    else if (area->backing_type == VM_BACKING_VFS_SHARED && area->backing_node)
+        linux_compat_shm_unmap(area->backing_node, area->backing_offset,
+                               area->end - area->start);
 }
 
 /* Remove every VMA fragment intersecting [start,end), splitting a VMA when
@@ -3959,6 +3967,43 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 }
                 vma->backing_type = VM_BACKING_MEMFD;
                 vma->backing_id = backing_id;
+            } else if (!anonymous && mapping_kind == 0x01 &&
+                       mapping_entry->type == FD_FILE && mapping_entry->node &&
+                       mapping_entry->node->type == VFS_NODE_FILE) {
+                /* **可写** MAP_SHARED 普通文件：同一文件的多次映射共享物理页。
+                 * Chromium 的 IPC 共享缓冲走 /dev/shm 文件，两端各自 mmap
+                 * 同一文件；若各拿一份私有快照，写端的数据读端看不到
+                 * （实测 headless 命令页因此是空 HTML）。
+                 *
+                 * 只读映射（.pak/.dat 等数据包）刻意仍走下面的私有快照：
+                 * 它们不需要跨映射一致性，而一个 20MB 的 resources.pak
+                 * 就要近 5000 个共享槽位，会把共享页表挤爆、mmap 反而
+                 * ENOMEM（实测 DataPack 加载失败）。 */
+                uint64_t first_index = (uint64_t)off / PAGE_SIZE;
+                size_t mapped = 0;
+                for (; mapped < pages; mapped++) {
+                    int created = 0;
+                    uint64_t phys = linux_compat_shm_page(
+                        mapping_entry->node, first_index + mapped,
+                        mapping_entry->node->private_data, &created);
+                    if (!phys) break;
+                    if (vmm_map_page((uint64_t)p + mapped * PAGE_SIZE, phys,
+                                     VMM_P | VMM_U |
+                                     ((prot & 0x02) ? VMM_W : 0)) != 0)
+                        break;
+                }
+                if (mapped != pages) {
+                    if (mapped)
+                        linux_compat_shm_unmap(mapping_entry->node, (uint64_t)off,
+                                               (uint64_t)mapped * PAGE_SIZE);
+                    for (size_t i = 0; i < mapped; i++)
+                        vmm_unmap_page((uint64_t)p + i * PAGE_SIZE);
+                    kfree(vma);
+                    return (uint64_t)(-ENOMEM);
+                }
+                vma->backing_type = VM_BACKING_VFS_SHARED;
+                vma->backing_node = mapping_entry->node;
+                vma->backing_offset = (uint64_t)off;
             } else {
                 int map_result = vm_allocate_owned_pages((uint64_t)p, pages);
                 if (map_result < 0) {
