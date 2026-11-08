@@ -2421,7 +2421,12 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 (int)linux_frame->a0,
                 (const linux_x86_iovec_t *)linux_frame->a1,
                 linux_frame->a2, 1);
-        case 21:  native.nr = HBOS_SYS_ACCESS; break;
+        case 21: {                                    /* access：覆盖层文件当存在 */
+            const char *p = (const char *)(uintptr_t)linux_frame->a0;
+            if (p && linux_compat_shm_is_path(p)) return 0;
+            native.nr = HBOS_SYS_ACCESS;
+            break;
+        }
         case 22:  native.nr = HBOS_SYS_PIPE; break;
         case 24:  native.nr = HBOS_SYS_SCHED_YIELD; break;
         /* mremap(old, old_size, new_size, flags, new_addr)：Linux 原生参数
@@ -2488,18 +2493,43 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         case 77:  native.nr = HBOS_SYS_FTRUNCATE; break;
         case 79:  native.nr = HBOS_SYS_GETCWD; break;
         case 80:  native.nr = HBOS_SYS_CHDIR; break;
-        case 82:
+        case 82: {                                    /* rename：覆盖层内当成功 */
+            const char *a = (const char *)(uintptr_t)linux_frame->a0;
+            const char *b = (const char *)(uintptr_t)linux_frame->a1;
+            if ((a && linux_compat_shm_is_path(a)) ||
+                (b && linux_compat_shm_is_path(b))) return 0;
             native.nr = HBOS_SYS_RENAME;
             native.a2 = 0;
             break;
-        case 83:  native.nr = HBOS_SYS_MKDIR; break;
+        }
+        case 83: {                                    /* mkdir：覆盖层目录当已存在 */
+            const char *p = (const char *)(uintptr_t)linux_frame->a0;
+            if (p && linux_compat_shm_is_path(p)) return 0;
+            native.nr = HBOS_SYS_MKDIR;
+            break;
+        }
         case 84:  native.nr = HBOS_SYS_RMDIR; break;
         /* link(): VFS 没有硬链接。返回 EPERM（Linux 在文件系统不支持硬链接
          * 时的标准错误）比 ENOSYS 更安全——ENOSYS 会让调用方判定"内核太老"
          * 而走另一条兜底路径。 */
         case 86:  return (uint64_t)(-EPERM);
-        case 87:  native.nr = HBOS_SYS_UNLINK; break;
-        case 88:  native.nr = HBOS_SYS_SYMLINK; break;
+        case 87: {                                    /* unlink：/dev/shm 走内存后备 */
+            const char *p = (const char *)(uintptr_t)linux_frame->a0;
+            if (p && linux_compat_shm_is_path(p)) {
+                /* 覆盖层里的文件是虚拟的：解绑成不成功都当成功，
+                 * 否则只读 ext2 会返回 EPERM 把上层直接打死。 */
+                (void)linux_compat_shm_unlink(p);
+                return 0;
+            }
+            native.nr = HBOS_SYS_UNLINK;
+            break;
+        }
+        case 88: {                                    /* symlink：/tmp 下当 no-op 成功 */
+            const char *p = (const char *)(uintptr_t)linux_frame->a1;
+            if (p && linux_compat_shm_is_path(p)) return 0;
+            native.nr = HBOS_SYS_SYMLINK;
+            break;
+        }
         case 89:  native.nr = HBOS_SYS_READLINK; break;
         case 90:  native.nr = HBOS_SYS_CHMOD; break;
         case 91:                                       /* fchmod(fd, mode) */
@@ -2593,6 +2623,11 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             int resolved = linux_resolve_at_path(
                 (int)linux_frame->a0, (const char *)linux_frame->a1, path);
             if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            /* /dev/shm 下的文件走内存后备（memfd slot），不落到只读 ext2 上。
+             * 不这样做 Chromium 建共享内存会拿到 ENOSPC，进而交不出任何帧。 */
+            if (linux_compat_shm_is_path(path))
+                return (uint64_t)(int64_t)linux_compat_shm_open(
+                    path, (int)linux_frame->a2 | 0x40 /* 强制 O_CREAT */);
             return (uint64_t)linux_native_call(
                 HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a2,
                 linux_frame->a3, 0, 0, 0);
@@ -2896,6 +2931,10 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             uint64_t flags = linux_frame->a2;
             if (flags & ~(uint64_t)0x200)
                 return (uint64_t)(-EINVAL);
+            if (!(flags & 0x200) && linux_compat_shm_is_path(path)) {
+                (void)linux_compat_shm_unlink(path);
+                return 0;
+            }
             return (uint64_t)linux_native_call(
                 flags & 0x200 ? HBOS_SYS_RMDIR : HBOS_SYS_UNLINK,
                 (uint64_t)path, 0, 0, 0, 0, 0);

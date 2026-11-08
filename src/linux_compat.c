@@ -249,6 +249,8 @@ static memfd_slot_t memfd_slots[LINUX_MEMFD_SLOTS];
 /* memfd_create 失败诊断预算（默认开 8 条：Chromium 建 shm 失败时会静默
  * 退回 /dev/shm，而 /dev/shm 在本镜像里不可写，于是报 ENOSPC 掩盖真因）。 */
 static int g_memfd_dbg = 8;
+/* [SHM] /dev/shm 拦截诊断预算。 */
+static int g_shm_dbg = 0;
 static void compat_put_dec(unsigned int value) {
     char buf[12];
     int n = 0;
@@ -2355,6 +2357,121 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
         (uint8_t)((receiver->rights_read + 1) % UNIX_RIGHTS_QUEUE);
     receiver->rights_count--;
     return 0;
+}
+
+/* ── /dev/shm：用 memfd slot 当内存后备 ──────────────────────
+ *
+ * Chromium 的 PlatformSharedMemoryRegion 在 Linux 上直接 open
+ * /dev/shm/.org.chromium.Chromium.XXXXXX（它**不**调 memfd_create，实测日志里
+ * 一条 [MEMFD] 都没有），而本镜像的 /dev/shm 是只读 ext2 上的目录，创建失败后
+ * 把 ENOSPC 报给 Chromium —— 于是没有共享内存、没有 SoftwareOutputDevice 位图、
+ * 没有 wl_shm buffer，合成器永远等不到 attach。
+ *
+ * 这里把 /dev/shm/<name> 落到 memfd slot 上：open 建 slot、ftruncate/mmap/read/
+ * write 全部走已有的 FD_MEMFD 分支（syscall.c 里那些分支都是现成的），unlink
+ * 只是把名字解绑（Chromium 是 open 完立刻 unlink、只留 fd）。 */
+#define LINUX_SHM_NAME_MAX 96
+#define LINUX_SHM_NAMES    64
+#define LINUX_O_CREAT      0x40
+#define LINUX_O_EXCL       0x80
+
+typedef struct {
+    int used;
+    int slot;
+    char name[LINUX_SHM_NAME_MAX];
+} shm_name_t;
+
+static shm_name_t shm_names[LINUX_SHM_NAMES];
+
+/* 可写覆盖层的前缀。/dev/shm 是 Chromium 的共享内存，/tmp 是它的 profile、
+ * SingletonLock 等运行时文件。两者的共同点：**只读 ext2 上建普通文件会
+ * 返回 ENOSPC**，而 Chromium 只要一步失败就直接 abort。统一用内存后备的
+ * "虚拟文件"顶上 —— 名字表把路径绑到 memfd slot，读写/mmap/ftruncate 全部
+ * 复用已有的 FD_MEMFD 分支。 */
+static int memfile_prefix(const char *path, const char **suffix) {
+    if (!path) return 0;
+    if (strncmp(path, "/dev/shm/", 9) == 0 && path[9]) {
+        if (suffix) *suffix = path + 9;
+        return 1;
+    }
+    if (strncmp(path, "/tmp/", 5) == 0 && path[5]) {
+        if (suffix) *suffix = path;
+        return 1;
+    }
+    return 0;
+}
+
+int linux_compat_shm_is_path(const char *path) {
+    return memfile_prefix(path, NULL);
+}
+
+static int memfd_slot_index(const memfd_slot_t *slot) {
+    if (!slot) return -1;
+    for (int i = 0; i < LINUX_MEMFD_SLOTS; i++)
+        if (&memfd_slots[i] == slot) return i;
+    return -1;
+}
+
+int linux_compat_shm_open(const char *path, int flags) {
+    if (g_shm_dbg > 0) {
+        g_shm_dbg--;
+        console_puts("[SHM] open ");
+        console_puts(path ? path : "(null)");
+        console_puts(" flags=");
+        compat_put_dec((unsigned int)flags);
+        console_puts("\n");
+    }
+    if (!linux_compat_shm_is_path(path)) return compat_set_errno(EINVAL);
+    const char *name = path + 9;
+    if (strlen(name) >= LINUX_SHM_NAME_MAX) return compat_set_errno(36) /* ENAMETOOLONG */;
+
+    for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+        if (!shm_names[i].used || strcmp(shm_names[i].name, name) != 0) continue;
+        if (flags & LINUX_O_EXCL) return compat_set_errno(EEXIST);
+        int slot = shm_names[i].slot;
+        if (slot < 0 || slot >= LINUX_MEMFD_SLOTS || !memfd_slots[slot].used)
+            return compat_set_errno(ENOENT);
+        memfd_slots[slot].refs++;
+        int fd = compat_fd_alloc(compat_task(), FD_MEMFD, slot,
+                                 O_RDWR | ((flags & 0x80000) ? O_CLOEXEC : 0));
+        if (fd < 0) memfd_slots[slot].refs--;
+        return fd;
+    }
+
+    if (!(flags & LINUX_O_CREAT)) return compat_set_errno(ENOENT);
+
+    int fd = linux_compat_memfd_create(name,
+             (flags & 0x80000) ? LINUX_MFD_CLOEXEC : 0);
+    if (fd < 0) return fd;
+    int slot = memfd_slot_index(memfd_for_fd(compat_task(), fd));
+    if (slot >= 0) {
+        for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+            if (shm_names[i].used) continue;
+            shm_names[i].used = 1;
+            shm_names[i].slot = slot;
+            size_t n = 0;
+            while (name[n] && n + 1 < LINUX_SHM_NAME_MAX) {
+                shm_names[i].name[n] = name[n];
+                n++;
+            }
+            shm_names[i].name[n] = '\0';
+            break;
+        }
+    }
+    return fd;
+}
+
+int linux_compat_shm_unlink(const char *path) {
+    const char *name = NULL;
+    if (!memfile_prefix(path, &name) || !name) return compat_set_errno(EINVAL);
+    for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+        if (!shm_names[i].used || strcmp(shm_names[i].name, name) != 0) continue;
+        shm_names[i].used = 0;
+        shm_names[i].name[0] = '\0';
+        shm_names[i].slot = -1;
+        return 0;
+    }
+    return compat_set_errno(ENOENT);
 }
 
 int linux_compat_memfd_create(const char *name, unsigned int flags) {

@@ -1264,3 +1264,39 @@ ERROR:base/memory/platform_shared_memory_region_posix.cc:335]
 - 未验证（本轮改了但没跑）：`task_kill` 对默认动作为"终止"的信号
   （SIGABRT/SIGSEGV/SIGILL/SIGBUS/SIGFPE/SIGTRAP/SIGSYS…）在 SIG_DFL 下
   当场终止 —— 这是 Linux 语义修正，但不解决本条
+
+#### R54：给 `/dev/shm` 和 `/tmp` 做内存后备覆盖层 —— 交帧链路上的两个 ENOSPC 消失了
+
+**根因回顾**：只读 ext2 上创建普通文件返回 ENOSPC/EPERM，而 Chromium 只要
+一步失败就 abort。两条最要命的：
+- `/dev/shm/.org.chromium.Chromium.XXXXXX` → 建共享内存失败 → 没有
+  SoftwareOutputDevice 位图 → 没有 `wl_shm` buffer → 合成器永远等不到 attach；
+- `/tmp/udd/SingletonLock` → ProcessSingleton 建锁失败 → `exit 21`。
+
+**做法**：在 `syscall.c` 的 open/unlink/symlink/mkdir/rename/access 上加一层
+**内存后备覆盖层**（`/dev/shm/` 与 `/tmp/` 前缀），文件名表把路径绑到已有的
+`memfd_slot_t`；读写/`mmap MAP_SHARED`/`ftruncate` 全部复用现成的 FD_MEMFD
+分支（`syscall.c:1805/1837/1873/3989/4065/4124`），一行新的存储代码都没写。
+
+**实测推进（逐步可查）**：
+
+| 阶段 | 观察到的错误 | 之后 |
+|---|---|---|
+| 覆盖层前 | `platform_shared_memory_region_posix.cc:335 ... /dev/shm/... ENOSPC` | — |
+| 覆盖层后 | **该 ENOSPC 消失**（日志计数 1 → 0） | 进入 profile 初始化 |
+| 加 /tmp 覆盖层 | `process_singleton_posix.cc:349 Failed to create /tmp/udd/SingletonLock: ENOSPC` | 锁能建了 |
+| 解绑当成功 | `...:334 Failed to unlink ...: EPERM(1)` | 能解绑了 |
+| 加 mkdir/rename | `process_singleton_posix.cc:1046 Failed to create socket directory` | 目录能建了 |
+| 都加上 | ProcessSingleton **通过**，换到 crashpad + 新崩溃 | 见下 |
+
+**当前剩余阻塞**（都还没修）：
+1. `crashpad/util/file/file_io.cc:159 write: No space left` 与
+   `file_io_posix.cc:208 open /tmp/.config/chromium/Crash Reports/settings.dat:
+   Operation not permitted (1)` —— 注意路径里带空格，覆盖层的 `open` 钩子没命中，
+   怀疑 `linux_resolve_at_path` 对这一条返回了别的东西，需要查。
+2. `[TRAP] user Breakpoint rip=0x1109A7D7B7` —— 反汇编确认是
+   `LogMessage 构造 → 流 → 析构 → int3;ud2` 的 `LOG(FATAL)` 形状，
+   但 stderr 里**没有**对应的 `FATAL:` 文本，消息文本丢了，得查为什么没打出来。
+3. 仍未出现 `[WL] client` —— wayland 连接还没建立，帧自然还没有。
+
+`[SHM]`/`[MEMFD]` 诊断默认已关（预算置 0）。

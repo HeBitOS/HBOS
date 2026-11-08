@@ -125,6 +125,10 @@ int linux_compat_unix_send_rights(int fd, const int *fds, size_t count);
 int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
                                   size_t *received, int *truncated);
 
+/* /dev/shm 内存后备（见 linux_compat.c 的实现注释）。 */
+int linux_compat_shm_is_path(const char *path);
+int linux_compat_shm_open(const char *path, int flags);
+int linux_compat_shm_unlink(const char *path);
 int linux_compat_memfd_create(const char *name, unsigned int flags);
 int linux_compat_memfd_truncate(int fd, uint64_t size);
 int linux_compat_memfd_size(int fd, uint64_t *size);
