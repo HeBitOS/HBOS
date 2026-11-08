@@ -5,12 +5,14 @@
  * xdg_shell 是窗口语义所在：客户端先 get_xdg_surface 把 wl_surface 包装成
  * 「窗口」，再 get_toplevel 声明它是顶层窗。真正的显示要等一轮握手：
  *
- *   客户端 commit（无 buffer）
- *     → 服务端 xdg_toplevel.configure(w, h, states) + xdg_surface.configure(serial)
- *       → 客户端 ack_configure(serial)
- *         → 客户端 attach(buffer) + commit  ← 这时才真正出画面
+ *   get_toplevel → 服务端主动发 xdg_toplevel.configure(w,h,states)
+ *                 + xdg_surface.configure(serial)
+ *     → 客户端 ack_configure(serial)
+ *       → 客户端 attach(buffer) + commit  ← 这时才真正出画面
  *
- * 少了 configure 这一步，很多 toolkit 会一直停在"等窗口就绪"。
+ * configure 必须由服务端先发。反过来「等客户端先 commit 再发 configure」
+ * 会让 Chromium 这类 toolkit 与服务端互等：它拿不到 configure 就不
+ * commit，服务端等不到 commit 就不发 configure，窗口永远建不起来。
  */
 
 #include "wl_iface.h"
@@ -23,6 +25,12 @@ void wl_surface_send_configure(wl_client_t *client,
 
     uint32_t serial = client->serial++;
     surface->configured_serial = serial;
+    /* 「已发过 configure」这个状态只该有一个归属。原来由 commit 分支单独
+     * 置位，结果 get_toplevel 主动发 configure 时没置，客户端第一次 commit
+     * 又会收到第二份 configure —— 同一个 serial 被 ack 两次会让 toolkit
+     * 迷糊。统一在这里收口。 */
+    surface->configured = 1;
+    surface->pending_configure = 0;
 
     /* xdg_toplevel.configure(width, height, states)
      * states 是 array：uint32 字节数 + 内容（0 个元素就是 0）。 */
@@ -89,6 +97,22 @@ void wl_xdg_surface_request(wl_client_t *client, wl_object_t *object,
         uint32_t toplevel_id = wl_arg_u32(args);
         if (wl_args_failed(args) || !toplevel_id) return;
         wl_client_adopt_id(client, toplevel_id, WL_OBJ_XDG_TOPLEVEL, surface);
+        /* configure 不能拖到第一次 commit 才发。
+         *
+         * xdg-shell 的握手方向是「服务端 configure → 客户端 ack_configure
+         * → 客户端 attach(buffer) + commit」。旧实现把 configure 塞在
+         * WL_SURFACE_COMMIT 的 !configured 分支里，而 Chromium 在拿到
+         * configure 之前根本不会 commit —— 两边互等，实测表现就是
+         * create_surface 之后再无任何请求、永远没有 attach/commit。
+         *
+         * 尺寸给具体值而不是 0x0：协议里 0x0 表示「客户端自定」，
+         * Chromium 会先建一个无缓冲的初始 toplevel，首帧迟迟不出；
+         * 给 800x600 它直接按这个尺寸建 shm buffer 并 attach。 */
+        if (surface) {
+            if (surface->width <= 0)  surface->width  = 800;
+            if (surface->height <= 0) surface->height = 600;
+            wl_surface_send_configure(client, surface);
+        }
         break;
     }
     case XDG_SURFACE_GET_POPUP: {

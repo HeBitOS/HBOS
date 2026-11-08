@@ -7,6 +7,7 @@
 #include "vmm.h"
 extern int linux_debug_syscall_dump;
 #include "task.h"
+#include "../string.h"
 #include "../syscall.h"
 #include "../signal.h"
 #include "../smp.h"
@@ -50,6 +51,22 @@ static void print_dec(int value) {
     if (value < 0) { console_putchar('-'); value = -value; }
     do { buf[n++] = (char)('0' + value % 10); value /= 10; } while (value);
     while (n--) console_putchar(buf[n]);
+}
+
+/* 把一个 32 位十六进制数写成 "0x1234ABCD"（无前导零填充以外的装饰）。
+ * 内核没有 snprintf（见 src/tools/distro_seed.c 的同类注记），反汇编
+ * 助记符只能自己拼。返回写入长度。 */
+static int fmt_hex_into(char *dst, size_t cap, const char *prefix,
+                        uint32_t value) {
+    size_t n = 0;
+    while (prefix && *prefix && n + 1 < cap) dst[n++] = *prefix++;
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        if (n + 1 >= cap) break;
+        int d = (int)((value >> shift) & 0xF);
+        dst[n++] = (char)(d < 10 ? '0' + d : 'A' + d - 10);
+    }
+    dst[n < cap ? n : cap - 1] = 0;
+    return (int)n;
 }
 
 static int user_va_range_mapped(uint64_t address, uint64_t length) {
@@ -128,6 +145,36 @@ static void dump_user_stack_window(uint64_t rsp) {
     console_puts("  stack @0x");
     print_hex64(rsp);
     console_putchar('\n');
+    /* 栈窗口里的 ASCII 段
+     *
+     * 同一屏崩溃现场里，栈上偶尔残留可打印字符串（路径、断言表达式、
+     * 命令行开关名）。按 1 字节滑窗扫前 256 字节，要求连续 >= 8 个可打印
+     * 字符才认定为文本——这样不会把普通整数/指针误判成"字符串"，但一旦
+     * 命中往往直接指向"崩在哪条配置或哪个路径上"，比一堆十六进制好读得多。
+     * 最多打 4 段，避免把串口刷满（QEMU 串口是逐字符模拟的）。 */
+    int strings_shown = 0;
+    for (int off = 0; off + 8 <= 0x100 && strings_shown < 4; off++) {
+        uint64_t addr = rsp + (uint64_t)off;
+        if (!user_va_range_mapped(addr, 1)) break;
+        const char *p = (const char *)(uintptr_t)addr;
+        int len = 0;
+        while (len < 64 && user_va_range_mapped(addr + (uint64_t)len, 1)) {
+            char c = p[len];
+            if (c < 0x20 || c > 0x7E) break;
+            len++;
+        }
+        if (len >= 8) {
+            if (strings_shown == 0) console_puts("  stack-str:");
+            console_puts(" +0x");
+            print_hex64((uint64_t)off);
+            console_puts(" \"");
+            for (int k = 0; k < len; k++) console_putchar(p[k]);
+            console_puts("\"");
+            strings_shown++;
+            off += len - 1;
+        }
+    }
+    if (strings_shown) console_putchar('\n');
     for (int i = 0; i < USER_STACK_DUMP_WORDS; i++) {
         uint64_t address = rsp + (uint64_t)i * 8;
         if (!user_va_range_mapped(address, 8)) break;
@@ -137,7 +184,10 @@ static void dump_user_stack_window(uint64_t rsp) {
             print_hex64((uint64_t)i * 8);
             console_puts(": ");
         }
-        print_hex64(value);
+        /* 栈上绝大多数是小整数和标志位，打满 16 位十六进制既占带宽又难扫。
+         * 高 32 位为 0 时只打低 32 位——这是排查时最常看的那一类值。 */
+        if (value <= 0xFFFFFFFFULL) print_hex64(value & 0xFFFFFFFFULL);
+        else print_hex64(value);
         console_putchar(((i % 4) == 3) ? '\n' : ' ');
     }
     if ((USER_STACK_DUMP_WORDS % 4) != 0) console_putchar('\n');
@@ -198,7 +248,57 @@ static void dump_user_vma_for(uint64_t rip) {
         console_putchar('\n');
         printed++;
     }
-    if (printed == 0) console_puts("  vma: (rip 不在任何映射区间内)\n");
+    if (printed == 0) {
+        console_puts("  vma: (rip 不在任何映射区间内)\n");
+        /* rip 不在任何 VMA 里，最可能的原因是**取指落在一段确实映射过、
+         * 但 VMA 记录被 mremap 缩小时漏改的区间**（Linux 语义里 mremap
+         * 缩小的尺寸必须正好等于 VMA 大小，Chromium 的分区分配器据此把
+         * 一个大区拆成多段；内核这边对不上的部分返回了 EFAULT，VMA 链表
+         * 就与真实页表脱节）。VMA 链表本身这时已经不可信，改从页表反查：
+         * 从 rip 所在页向上/向下走，遇到 PTE 为 0 或权限变化就停，
+         * 得到"真实映射段"。这一段的起止 + PTE flags 就是判断
+         * "到底映射过没有、能不能执行"的唯一可靠依据。 */
+        uint64_t p0 = rip & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t flags0 = vmm_get_page_flags(p0);
+        if (flags0) {
+            uint64_t lo2 = p0;
+            for (int i = 0; i < 8192 && lo2 >= PAGE_SIZE; i++) {
+                uint64_t prev = lo2 - PAGE_SIZE;
+                if (!vmm_get_phys(prev) ||
+                    vmm_get_page_flags(prev) != flags0) break;
+                lo2 = prev;
+            }
+            uint64_t hi2 = p0 + PAGE_SIZE;
+            for (int i = 0; i < 8192; i++) {
+                if (!vmm_get_phys(hi2) ||
+                    vmm_get_page_flags(hi2) != flags0) break;
+                hi2 += PAGE_SIZE;
+            }
+            console_puts("  pte-span: ");
+            print_hex64(lo2);
+            console_puts("-");
+            print_hex64(hi2);
+            console_puts(" flags=");
+            print_hex64(flags0);
+            console_puts(" size=0x");
+            print_hex64(hi2 - lo2);
+            console_putchar('\n');
+        }
+        /* VMA 链表里离 rip 最近的两段：一段在下面、一段在上面。
+         * mremap 把 VMA start 改错时，这里能直接看出"洞"有多大。 */
+        uint64_t below_end = 0, above_start = ~(uint64_t)0;
+        for (vm_area_t *area = mm->areas; area; area = area->next) {
+            if (area->end <= rip && area->end > below_end)
+                below_end = area->end;
+            if (area->start > rip && area->start < above_start)
+                above_start = area->start;
+        }
+        console_puts("  vma-gap: below_end=");
+        print_hex64(below_end);
+        console_puts(" above_start=");
+        print_hex64(above_start == ~(uint64_t)0 ? 0 : above_start);
+        console_putchar('\n');
+    }
 
     /* 只看 VMA 链表是不够的：库/mmap 有些路径只建页表不登 VMA。直接把
      * rip 所在页的页表项翻出来，P/W/U/NX 一看就知道 rip 这一页到底存在
@@ -232,11 +332,221 @@ static void dump_user_vma_for(uint64_t rip) {
     console_puts(")\n");
 }
 
+/* ── 反汇编 rip 前后各两条指令 ────────────────────────────────────────
+ *
+ * 为什么要这个：Chromium 的 crash handler 第一次调用会 `int3`（-1 作为
+ * 信号值），内核这边看到的就是一条光秃秃的 `cc`；而 Chromium 的
+ * `CHECK` 失败分支则是 `cc; ud2`。两者的区别**只在前后指令里**：
+ *
+ *   ... e8 xx xx xx xx   call logging::CheckFatal
+ *   cc                   int3        <- crash handler 的 trap
+ *   ud2                  CHECK 失败的兜底
+ *
+ * 只要把 rip 前面那几条 call 的返回地址算出来，就能顺着 `call rel32`
+ * 落点去二进制里找字符串引用，拿到 (文件, 行号, 表达式) 三元组。
+ * 反过来，如果前面是 `mov edx, <行号>; call ...`，那就是直接 CHECK。
+ *
+ * 这是个**只认常见编码**的最小反汇编器（x86-64 子集），不认识就原样
+ * 打字节并标注 "?"，绝不猜。目的是省掉"重新起一次 QEMU + 手算偏移"的
+ * 半天，而不是做通用反汇编。 */
+/** 从 va 处解析一条指令，返回长度；op 里回填助记符与目标。
+ *  只处理这次真正用到的几类：call/jmp rel32、jcc rel8/rel32、int3、
+ *  ud2、ret、mov esi,imm32、lea r?, [rip+d]、push/pop、nop。 */
+typedef struct {
+    char     text[48];
+    uint64_t call_target;   /* call/jmp rel32 的落点，0 = 不是 */
+    uint32_t imm32;
+} user_insn_t;
+
+static int decode_user_insn(uint64_t va, user_insn_t *out) {
+    const uint8_t *p = (const uint8_t *)(uintptr_t)va;
+    out->call_target = 0;
+    out->imm32 = 0;
+    if (!user_va_range_mapped(va, 16)) return 0;
+    uint8_t b0 = p[0];
+    char *t = out->text;
+    size_t cap = sizeof(out->text);
+    if (b0 == 0xCC) { strcpy(t, "int3"); return 1; }
+    if (b0 == 0x90) { strcpy(t, "nop"); return 1; }
+    if (b0 == 0xC3) { strcpy(t, "ret"); return 1; }
+    if (b0 == 0x0F && p[1] == 0x0B) { strcpy(t, "ud2"); return 2; }
+    if (b0 == 0xE8 || b0 == 0xE9) {
+        int32_t rel = (int32_t)((uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+                                ((uint32_t)p[3] << 16) |
+                                ((uint32_t)p[4] << 24));
+        out->call_target = va + 5 + (uint64_t)(int64_t)rel;
+        strcpy(t, b0 == 0xE8 ? "call" : "jmp");
+        strcat(t, " -> ");
+        fmt_hex_into(t + strlen(t), cap - strlen(t), "0x",
+                     (uint32_t)out->call_target);
+        return 5;
+    }
+    if (b0 >= 0x70 && b0 <= 0x7F) {
+        int8_t rel = (int8_t)p[1];
+        strcpy(t, "jcc ");
+        fmt_hex_into(t + strlen(t), cap - strlen(t), "+0x",
+                     (uint32_t)(int32_t)rel);
+        return 2;
+    }
+    if (b0 == 0x0F && p[1] >= 0x80 && p[1] <= 0x8F) {
+        int32_t rel = (int32_t)((uint32_t)p[2] | ((uint32_t)p[3] << 8) |
+                                ((uint32_t)p[4] << 16) |
+                                ((uint32_t)p[5] << 24));
+        strcpy(t, "jcc32 ");
+        fmt_hex_into(t + strlen(t), cap - strlen(t), "-> 0x",
+                     (uint32_t)(va + 6 + (int64_t)rel));
+        return 6;
+    }
+    /* mov esi/edi/edx/ecx, imm32：BE / BF / BA / B9。CHECK 的行号就是
+     * 这么传进 CheckFatal 的。 */
+    if (b0 == 0xBE || b0 == 0xBF || b0 == 0xBA || b0 == 0xB9) {
+        out->imm32 = (uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+                     ((uint32_t)p[3] << 16) | ((uint32_t)p[4] << 24);
+        strcpy(t, "mov ");
+        strcat(t, b0 == 0xBE ? "esi" : b0 == 0xBF ? "edi" :
+                   b0 == 0xBA ? "edx" : "ecx");
+        strcat(t, ", ");
+        fmt_hex_into(t + strlen(t), cap - strlen(t), "0x", out->imm32);
+        return 5;
+    }
+    /* lea r?, [rip+d]：只有 48/4C 8D /r 且 mod=00 rm=101。 */
+    if ((b0 == 0x48 || b0 == 0x4C) && p[1] == 0x8D && (p[2] & 0xC7) == 0x05) {
+        int32_t d = (int32_t)((uint32_t)p[3] | ((uint32_t)p[4] << 8) |
+                              ((uint32_t)p[5] << 16) |
+                              ((uint32_t)p[6] << 24));
+        out->call_target = va + 7 + (uint64_t)(int64_t)d;
+        strcpy(t, "lea rip-relative -> ");
+        fmt_hex_into(t + strlen(t), cap - strlen(t), "0x",
+                     (uint32_t)out->call_target);
+        return 7;
+    }
+    if (b0 == 0x55) { strcpy(t, "push rbp"); return 1; }
+    if (b0 == 0x5D) { strcpy(t, "pop rbp"); return 1; }
+    /* 其余：原样打 4 字节并明确标 "?"，绝不装作认得。 */
+    strcpy(t, "? ");
+    for (int i = 0; i < 4; i++) {
+        static const char hexd[] = "0123456789ABCDEF";
+        size_t n = strlen(t);
+        if (n + 3 >= cap) break;
+        t[n] = hexd[p[i] >> 4];
+        t[n + 1] = hexd[p[i] & 0xF];
+        t[n + 2] = ' ';
+        t[n + 3] = 0;
+    }
+    return 4;
+}
+
+/** 打印 rip 前 16 条 / 后 4 条指令。
+ *
+ * 前 16 条是为了回溯"崩之前调用了谁"——Chromium 的 crash handler 一进来
+ * 就 `int3`/`ud2`，真正的调用者在 rip 之前若干条 `call` 里。 */
+static void dump_user_tail(uint64_t rip) {
+    /* x86 是变长指令，`rip - 48` 几乎必然落在某条指令中间，单向前向解码
+     * 从错位处起跑就一路错到底（r71 的实测现象：在 `leave; ret` 上打出
+     * `? FF FF C9 C3`）。
+     *
+     * 正确做法是反向枚举起点：真正的指令边界只能是 rip-1 … rip-15 之一
+     * （x86-64 单指令最长 15 字节）。对每个候选起点前向解码，谁的落点
+     * 恰好等于 rip 谁就是正确的对齐点；多个候选都命中时取**最早**的那个
+     * —— 更早的起点会插进 rip 之前、不属于这条代码路径的字节。 */
+    struct { uint64_t va; user_insn_t in; } hist[32];
+    int n = 0;
+    for (int back = 1; back <= 15 && rip >= (uint64_t)back; back++) {
+        uint64_t start = rip - (uint64_t)back;
+        uint64_t p = start;
+        int cnt = 0;
+        uint64_t vas[32];
+        user_insn_t ins[32];
+        for (int guard = 0; guard < 32 && p < rip; guard++) {
+            user_insn_t in;
+            int len = decode_user_insn(p, &in);
+            if (!len) break;
+            if (cnt < 32) { vas[cnt] = p; ins[cnt] = in; cnt++; }
+            p += (uint64_t)len;
+            if (p > rip) break;
+        }
+        if (p != rip || cnt == 0) continue;
+        /* 命中了：把这条解码链搬到 hist（只留最后 16 条）。 */
+        n = 0;
+        int first = cnt > 16 ? cnt - 16 : 0;
+        for (int i = first; i < cnt; i++) {
+            hist[n].va = vas[i];
+            hist[n].in = ins[i];
+            n++;
+        }
+        break;
+    }
+    if (n == 0) {
+        console_puts("  code: (rip 前无法对齐解码)\n");
+    }
+    int first = n > 16 ? n - 16 : 0;
+    for (int i = first; i < n; i++) {
+        console_puts("  code ");
+        print_hex64(hist[i].va);
+        console_puts(hist[i].va == rip ? ": * " : ":   ");
+        console_puts(hist[i].in.text);
+        /* call 落点如果可读，顺手在它前 96 字节里找一个 rip 相对 lea 的
+         * 字符串引用：CheckFatal 一进去就会 lea 到 "CHECK failed: ..."，
+         * 或者 lea 到文件名/表达式，直接给出行号三元组的前两段。 */
+        uint64_t target = hist[i].in.call_target;
+        if (target && hist[i].in.text[0] == 'c') {
+            if (user_va_range_mapped(target, 8)) {
+                const uint8_t *q = (const uint8_t *)(uintptr_t)target;
+                for (int k = 0; k + 7 < 96; k++) {
+                    if ((q[k] != 0x48 && q[k] != 0x4C) || q[k + 1] != 0x8D ||
+                        (q[k + 2] & 0xC7) != 0x05)
+                        continue;
+                    int32_t d = (int32_t)((uint32_t)q[k + 3] |
+                                          ((uint32_t)q[k + 4] << 8) |
+                                          ((uint32_t)q[k + 5] << 16) |
+                                          ((uint32_t)q[k + 6] << 24));
+                    uint64_t sva = target + (uint64_t)k + 7 +
+                                   (uint64_t)(int64_t)d;
+                    if (!user_va_range_mapped(sva, 1)) continue;
+                    const char *s = (const char *)(uintptr_t)sva;
+                    int sl = 0;
+                    while (sl < 60 && user_va_range_mapped(sva + (uint64_t)sl, 1) &&
+                           s[sl] >= 0x20 && s[sl] <= 0x7E)
+                        sl++;
+                    if (sl >= 6) {
+                        console_puts("  <- \"");
+                        for (int m = 0; m < sl; m++) console_putchar(s[m]);
+                        console_puts("\"");
+                        break;
+                    }
+                }
+            }
+        }
+        console_putchar('\n');
+    }
+    uint64_t cur = rip;
+    for (int i = 0; i < 4; i++) {
+        user_insn_t in;
+        int len = decode_user_insn(cur, &in);
+        if (!len) break;
+        console_puts("  code ");
+        print_hex64(cur);
+        console_puts(":   ");
+        console_puts(in.text);
+        console_putchar('\n');
+        cur += (uint64_t)len;
+    }
+}
+
 static void dump_user_backtrace(uint64_t rip, uint64_t rbp)
 {
     console_puts("  bt[0] rip=0x");
     print_hex64(rip);
     console_putchar('\n');
+    /* 打印这个返回地址落在哪个 VMA 里。
+     *
+     * 起因：Chromium 子进程撞 `ud2` 时，bt[1..] 打出来是
+     *   0x1108C4AD4D / 0x1108C2898E / 0x1108C2986F —— 这几个数值**全是偶数**
+     *   的玩具级概率不可能，说明它们根本不是真实返回地址，而是栈上残留的
+     *   数据被 RBP 链串起来了（Chromium 主体用 -fomit-frame-pointer，
+     *   RBP 是普通局部变量）。光看数值只能猜，带上 VMA 就一目了然：
+     *   真实代码地址必然落在某个可执行 VMA 内，落在 backing_type 为
+     *   文件/匿名且 flags 无 X 的区间里的就是栈垃圾。 */
     uint64_t frame = rbp;
     for (int depth = 1; depth <= 16; depth++) {
         if (!user_va_range_mapped(frame, 16)) break;
@@ -248,6 +558,27 @@ static void dump_user_backtrace(uint64_t rip, uint64_t rbp)
         print_dec(depth);
         console_puts("] ret=0x");
         print_hex64(return_address);
+        /* 归属区间：在 mm/areas 里找包含它的那一段，打 "+段内偏移"。
+         * 同一段内的连续几个返回地址就属于同一个 ELF 映像，可以直接按
+         * （rip - 段基址）去二进制里反查。 */
+        task_t *self = task_current();
+        if (self && self->mm) {
+            for (vm_area_t *area = self->mm->areas; area; area = area->next) {
+                if (return_address >= area->start &&
+                    return_address < area->end) {
+                    console_puts(" @");
+                    print_hex64(area->start);
+                    console_puts("+");
+                    print_hex64(return_address - area->start);
+                    console_puts(" bt=");
+                    print_dec((int)area->backing_type);
+                    console_puts(" fl=");
+                    print_hex64(vmm_get_page_flags(
+                        return_address & ~(uint64_t)(PAGE_SIZE - 1)));
+                    break;
+                }
+            }
+        }
         console_putchar('\n');
         if (next_rbp <= frame) break;     /* 栈必须向高地址增长 */
         frame = next_rbp;
@@ -600,6 +931,7 @@ void isr_handler(isr_regs_t *regs) {
          * 定位 load/store 的源/目的）和最近系统调用轨迹，和 #BP 路径对齐。 */
         dump_user_trap_regs(regs);
         dump_user_vma_for(regs->rip);
+        dump_user_tail(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);
         /* syscall 环形 dump 每次崩溃都重打几百行。QEMU 的串口是逐字符
@@ -659,6 +991,7 @@ void isr_handler(isr_regs_t *regs) {
             }
         }
         dump_user_vma_for(regs->rip);
+        dump_user_tail(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);
         if (linux_debug_syscall_dump) linux_syscall_trace_dump();

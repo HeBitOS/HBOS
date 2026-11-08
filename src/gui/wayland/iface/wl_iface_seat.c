@@ -36,6 +36,15 @@ void wl_seat_request(wl_client_t *client, wl_object_t *object,
         wl_event_i32(client, -1);
         wl_event_u32(client, 0);   /* size：没有 keymap 文件，长度为 0 */
         wl_event_end(client);
+        /* wl_seat v4+ 规定 keymap 之后必须跟一条 repeat_info(rate, delay)。
+         * 客户端把它当作「键盘对象初始化收尾」的标志：Chromium Ozone 与
+         * Qt Wayland 都在键盘就绪后才让 seat 初始化返回，随后才往下建
+         * 窗口。缺这一条时日志里的表现就是 get_keyboard 之后收到 20 字节
+         * 便再无任何请求 —— 客户端在等一个永远不会来的事件。 */
+        wl_event_begin(client, new_id, WL_KEYBOARD_E_REPEAT_INFO);
+        wl_event_i32(client, 25);    /* rate：每秒 25 次 */
+        wl_event_i32(client, 400);   /* delay：按住 400ms 才开始重复 */
+        wl_event_end(client);
         break;
     }
     case WL_SEAT_GET_TOUCH: {

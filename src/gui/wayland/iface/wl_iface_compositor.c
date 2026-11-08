@@ -8,8 +8,9 @@
  * commit 时做三件事：
  *   1. 把 attached 提升为 current，旧 buffer 发 release 还给客户端；
  *   2. 标记 damaged，让 backend 下一轮把这块像素合成上屏；
- *   3. 如果这是第一次 commit（还没有 configure 过），先补发 configure ——
- *      客户端在收到 configure 之前不会真正映射窗口。
+ *   3. configured 兜底 —— 正常的 configure 已在 xdg get_toplevel 时
+ *      主动发过（见 wl_iface_xdg.c），这里只补没走 xdg 的纯 surface。
+ *      「等 commit 才发 configure」会与 toolkit 形成互等死锁。
  */
 
 #include "wl_iface.h"
@@ -21,16 +22,27 @@ void wl_compositor_request(wl_client_t *client, wl_object_t *object,
     switch (opcode) {
     case WL_COMPOSITOR_CREATE_SURFACE: {
         uint32_t surface_id = wl_arg_u32(args);
-        if (wl_args_failed(args) || !surface_id) return;
+        if (wl_args_failed(args) || !surface_id) {
+            wl_dbg_note("surf.args_rejected", (int)surface_id, 0, 0);
+            return;
+        }
         wl_surface_state_t *state = wl_surface_alloc();
-        if (!state) return;
-        if (!wl_client_adopt_id(client, surface_id, WL_OBJ_SURFACE, state))
+        if (!state) {
+            wl_dbg_note("surf.alloc_failed", (int)surface_id, 0, 0);
+            return;
+        }
+        if (!wl_client_adopt_id(client, surface_id, WL_OBJ_SURFACE, state)) {
+            wl_dbg_note("surf.adopt_failed", (int)surface_id, 0, 0);
             wl_surface_free(state);
+            return;
+        }
+        wl_dbg_note("surf.ok", (int)surface_id, 0, 0);
         break;
     }
     case WL_COMPOSITOR_CREATE_REGION: {
         uint32_t region_id = wl_arg_u32(args);
         if (wl_args_failed(args) || !region_id) return;
+        /* region 用 NULL data 占位即可：wl_region_request 只认 destroy。 */
         wl_client_adopt_id(client, region_id, WL_OBJ_REGION, NULL);
         break;
     }
@@ -139,16 +151,11 @@ void wl_surface_request(wl_client_t *client, wl_object_t *object,
         }
         surface->commit_serial = client->serial++;
 
-        /* 第一次 commit 时补 configure：客户端在拿到 configure 之前不会
-         * 当作"窗口已就绪"，很多 toolkit 会一直等下去。 */
-        if (!surface->configured) {
+        /* 兜底：客户端没走 xdg_toplevel（例如纯 wl_surface 的光标表面）时
+         * 也别让 configured 永远为 0；实际 configure 已在 get_toplevel
+         * 里主动发过，这里只在状态位要求时补一次。 */
+        if (!surface->configured || surface->pending_configure)
             wl_surface_send_configure(client, surface);
-            surface->configured = 1;
-            surface->pending_configure = 0;
-        } else if (surface->pending_configure) {
-            wl_surface_send_configure(client, surface);
-            surface->pending_configure = 0;
-        }
 
         /* 交给 backend：建窗口 / 贴图 / 请求重绘。 */
         wl_backend_surface_committed(client, surface);

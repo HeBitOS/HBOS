@@ -129,6 +129,13 @@ void wl_registry_request(wl_client_t *client, wl_object_t *object,
         wl_event_end(client);
     } else if (strcmp(interface, WL_IFACE_XDG_WM_BASE) == 0) {
         bound->kind = WL_OBJ_XDG_WM_BASE;
+        /* xdg-shell 的心跳：服务端 ping，客户端必须 pong。Chromium 的
+         * WaylandXdgShell 在 bind 时就装好 ping listener，第一轮
+         * roundtrip 会把 pong 一起带回；缺 ping 时它仍会把这条握手算作
+         * 未完成，窗口创建流程就不再往前走。 */
+        wl_event_begin(client, new_id, XDG_WM_BASE_E_PING);
+        wl_event_u32(client, client->serial++);
+        wl_event_end(client);
     } else if (strcmp(interface, WL_IFACE_OUTPUT) == 0) {
         bound->kind = WL_OBJ_OUTPUT;
         /* 屏幕信息在 bind 的那一刻就发：客户端拿它算窗口大小，
