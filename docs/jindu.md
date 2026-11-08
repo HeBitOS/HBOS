@@ -1145,3 +1145,19 @@ FATAL:base/path_service.cc:264] Failed to get the path for 1001
 
 Chromium 的路径常量里 1001 = **`DIR_CURRENT`**，也就是 `getcwd()` 失败。
 所以下一步不是 wayland 协议问题，是 HBOS 的 `getcwd` 在这个进程里返回了错误。
+
+#### R50：`path_service.cc:264` 的那条号码不是 `DIR_CURRENT`（自我纠正）
+
+上一条记的"1001 = DIR_CURRENT，所以是 getcwd 失败"是**错的**。给
+`HBOS_SYS_GETCWD` 加了一次性诊断打印（预算 12 条，默认关），完整跑一遍
+`--ozone-platform=wayland`，日志里 **一条 `[GETCWD]` 都没有** —— 也就是
+Chromium 全程没调过 `getcwd`。所以 `PathService::Get(1001)` 的失败点不在
+`getcwd`，号码到名字的映射也是我自己猜的，没有依据。这条线索到此为止，
+下次要用「反查 Chromium 156 里 1001 的实际含义（读 `base/path_service.h`
+或直接反汇编 `path_service.cc:264` 附近的 switch）」重新起。
+
+同时修掉一个更底层的问题：`setenv tracepid <pid>` 这两个诊断开关
+（`[T]` 全量 / `[E]` 只报失败）在本轮实测**一条输出都没有** —— 说明
+`task_current()->id` 从来不等于用户给的 pid。也就是说 R46/R49 里
+"过滤 ENOENT 之后没有其它失败 syscall"那个结论是**空结论**（追踪器根本没
+生效），不能当作证据。开关本身没错，是匹配条件不可靠（pid 每次启动会变）。

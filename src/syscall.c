@@ -974,7 +974,9 @@ static int linux_debug_stderr_echo;
 /* 用户态 TRAP 时是否 dump 最近 syscall 环形缓冲（`setenv syscdump 1`）。 */
 int linux_debug_syscall_dump;
 /* tracepid 模式下"只报失败 syscall"的预算，见 linux_syscall_dispatch_frame。 */
-static int g_syserr_budget = 200;
+static int g_syserr_budget = 400;
+/* [GETCWD] 诊断预算（见 HBOS_SYS_GETCWD）。 */
+static int g_getcwd_dbg = 0;
 /* 按 pid 实时追踪 syscall（`setenv tracepid <pid>`），0 = 关闭。 */
 static int hbos_trace_pid;
 
@@ -3563,6 +3565,17 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             char *buf = (char *)f->a0;
             size_t size = (size_t)f->a1;
             char *ret = getcwd(buf, size);
+            /* 诊断：Chromium 的 PathService 取 DIR_CURRENT 失败时报
+             * path_service.cc:264，需要确认这条 syscall 到底有没有被调、
+             * 返回了什么。预算有限，打十几条就停。 */
+            if (g_getcwd_dbg > 0) {
+                g_getcwd_dbg--;
+                console_puts("[GETCWD] size=");
+                trace_put_udec((uint64_t)size);
+                console_puts(" ret=");
+                console_puts(ret ? ret : "(null)");
+                console_putchar('\n');
+            }
             if (!ret) return (uint64_t)(-(int64_t)errno);
             return (uint64_t)strlen(ret);
         }
@@ -5560,7 +5573,10 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
     /* tracepid 的"只报错误"模式：全量打每条 syscall 在串口上跑不动
      * （客户端一秒钟几万条），但"哪条返回了负值"才是查"某个功能没生效"
      * 时真正要的信息。预算有限，够看清一次失败序列即可。 */
-    if ((int64_t)result < 0 && g_syserr_budget > 0 && hbos_trace_pid &&
+    /* ENOENT 是启动期最吵的一类（一堆"这个文件不存在就试下一个"的探测），
+     * 把预算全吃掉反而看不见真正的失败。这里只过滤 ENOENT，别的照打。 */
+    if ((int64_t)result < 0 && (int64_t)result != -2 && g_syserr_budget > 0 &&
+        hbos_trace_pid &&
         task_current() &&
         (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
         g_syserr_budget--;
