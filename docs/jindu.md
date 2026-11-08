@@ -1161,3 +1161,38 @@ Chromium 全程没调过 `getcwd`。所以 `PathService::Get(1001)` 的失败点
 `task_current()->id` 从来不等于用户给的 pid。也就是说 R46/R49 里
 "过滤 ENOENT 之后没有其它失败 syscall"那个结论是**空结论**（追踪器根本没
 生效），不能当作证据。开关本身没错，是匹配条件不可靠（pid 每次启动会变）。
+
+#### R51：`path_service.cc:264` 是通用失败点，号码从这儿查不出来（零成本定位）
+
+不再跑 QEMU，直接在 `build/tmp/v156/usr/lib/chromium/chromium` 上反汇编。先按
+字符串找到 FATAL 的生成点：
+
+```
+"Failed to get the path for"        @ 0x1fd12a1
+"../../base/path_service.cc"        @ 0x1d95ffb
+```
+
+再全量 `objdump -d | grep` 找引用它们的指令，命中两处，紧挨在一起：
+
+```
+9cb39df: lea  <../../base/path_service.cc>, %rsi
+9cb39e?: mov  $0x108, %edx                 ; 行号 264
+         call <LogMessage ctor>
+9cb3a06: lea  <Failed to get the path for>, %rsi
+         call <LogMessage::stream>
+9cb3a12: mov  %rax,%rdi
+9cb3a15: mov  %ebx,%esi                    ; ← 号码在 %ebx，是运行期入参
+         call <operator<<(int)>
+```
+
+**结论**：这一段是 `PathService::Get(int key, FilePath*)` 的通用失败分支，
+号码来自函数入参（`%ebx`）。所以"1001 是什么"**没法从这个点查出来**，
+必须去查 provider 注册表里 1001 对应哪个回调。
+
+配合 R50 的实测（Chromium 全程没调过 `getcwd`），可以确定：
+**1001 ≠ `DIR_CURRENT`**，之前那个映射是我凭印象猜的，作废。
+下一步要么读 Chromium 156 的 `base/path_service.h` 定死枚举，要么反汇编
+provider 注册处（`PathService::RegisterProvider` 的调用点），别再猜。
+
+> 本轮没有跑 QEMU、没有改内核代码，只做静态定位，避免在余额见底时
+> 引入未验证的改动。
