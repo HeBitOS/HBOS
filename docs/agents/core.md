@@ -1,6 +1,8 @@
 # Core — 内核核心 (`src/core/`)
 
 > CPU 基础设施: GDT/IDT/中断/异常, 物理/虚拟内存管理, 堆分配器, 任务调度
+> 目录：`src/core/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 

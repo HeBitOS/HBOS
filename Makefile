@@ -4,7 +4,20 @@ LD = ld
 
 BUILD_DIR ?= build
 PDF_PYTHON ?= python3
+# 源码分树。构建产物严格镜像源码树（$(SRC_GUI_DIR)/wm.c → build/gui/wm.o），
+# 因此每加一个 SRC_* 变量，都要把对应的 .c/.asm 归到下面的源码列表里，
+# 否则它不会被编译。
+#   SRC_DIR             内核核心：启动后 C 代码、驱动、文件系统、网络、加密、
+#                       内核侧头文件（sys/ types/ libc/）与工具命令
+#   SRC_BOOT_DIR        启动期纯汇编（Long mode 入口、引导器 blob、SMP 引导）
+#   SRC_APP_DIR         用户态应用框架：HAX SDK、注册式应用 ABI、旧式应用
+#   SRC_GUI_DIR         GUI 子系统：桌面、合成器、窗口管理、Wayland、图形栈
+#   SRC_USER_DIR        用户态：syscall ABI、libc、动态链接器、用户程序
 SRC_DIR = src
+SRC_BOOT_DIR = $(SRC_DIR)/boot
+SRC_APP_DIR = $(SRC_DIR)/app
+SRC_GUI_DIR = $(SRC_DIR)/gui
+SRC_USER_DIR = $(SRC_DIR)/user
 APP_DIR ?= app
 HIVE_REPO ?= HIVE
 # HAX 编译模块（HAX-Compile）：.hax 应用构建规则与 genhax.py 打包器。
@@ -161,7 +174,7 @@ LIMINE_CONF = $(BUILD_DIR)/boot/limine-timeout-$(BOOT_MENU_TIMEOUT).conf
 CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
          -O2 -Wall -Wextra -MMD -MP \
-         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_DIR)/gui -I$(SRC_DIR)/user \
+         -I$(SRC_DIR) -I$(SRC_DIR)/graphics -I$(SRC_DIR)/shell -I$(SRC_DIR)/core -I$(SRC_DIR)/tools -I$(SRC_GUI_DIR) -I$(SRC_USER_DIR) \
          -DHBOS_ENABLE_GUI=$(HBOS_ENABLE_GUI) -DHBOS_BUNDLE_APPS=$(HBOS_BUNDLE_APPS)
 
 ASFLAGS = -f elf64 -DHBOS_BUILD_DIR='"$(BUILD_DIR)"'
@@ -172,6 +185,29 @@ QEMU_ENV = env -u SNAP -u SNAP_NAME -u SNAP_REVISION -u SNAP_ARCH -u SNAP_INSTAN
            -u SNAP_COMMON -u SNAP_DATA -u SNAP_USER_COMMON -u SNAP_USER_DATA \
            -u SNAP_LIBRARY_PATH -u GTK_PATH -u GTK_EXE_PREFIX -u GIO_MODULE_DIR \
            -u GTK_IM_MODULE_FILE -u LOCPATH -u LD_LIBRARY_PATH -u LD_PRELOAD
+
+# ── 用户素材（files/）──────────────────────────────────────────────
+# 你放进 files/ 的任何东西，构建 release 产物时被原样打到镜像根下，
+# 开机后在 HBOS 里是 /files/<原文件名>。这是"把素材带上，别去改源码"
+# 的通道：壁纸、示例数据、待装软件包都走这里。
+# 内容为空时不复制，也不会让 ISO 目标每次重打（用 stamp 记录最近一次
+# 收集的内容指纹，files/ 变了才重建镜像）。
+FILES_DIR ?= $(CURDIR)/files
+FILES_PAYLOAD_STAMP = $(BUILD_DIR)/.files-stamp
+# 目录说明文件不是用户素材，别打进镜像；.keep 只用来占住空目录。
+FILES_TEXT_PATTERN = -name README.md -o -name .keep -o -name '.git*'
+# 真正要打包的文件列表（排除说明文件）。留空 = 不复制任何东西。
+# 必须在这里用 make 函数算好：写进 recipe 里的 $(...) 会被 make 当作变量
+# 展开掉一轮，到 shell 里就成了空串，条件判断会永远为真。
+# 用 wildcard 而不是 $(shell find)：wildcard 每次展开都重新求值，
+# 而 $(shell) 在解析阶段只算一次、之后被缓存——那样新增文件后条件仍为假。
+# 说明文件由 filter-out 排除（目录里的层级用 */* 覆盖到两级，够用且直观）。
+FILES_PAYLOAD = $(filter-out %/README.md %/.keep,$(wildcard $(FILES_DIR)/* $(FILES_DIR)/*/*))
+$(FILES_PAYLOAD_STAMP): $(FILES_PAYLOAD)
+	@mkdir -p $(BUILD_DIR)
+	@if [ -n "$(FILES_PAYLOAD)" ]; then \
+	    sha256sum $(FILES_PAYLOAD) | sort > $@; \
+	 else : > $@; fi
 
 # 字体文件
 FONT_TTF = fonts/ZhengGeDianHei-16.ttf
@@ -197,7 +233,7 @@ GUI_ICON_OVERRIDE_DIR = icon-overrides
 # 注册式内建应用与 .hax 应用使用同一总开关。关闭时内核仍保留应用加载 ABI，
 # 但不反向依赖任何具体应用实现。
 ifeq ($(HBOS_BUNDLE_APPS),1)
-APP_SRCS = $(wildcard $(SRC_DIR)/apps/*.c)
+APP_SRCS = $(wildcard $(SRC_APP_DIR)/legacy/*.c)
 else
 APP_SRCS =
 endif
@@ -263,10 +299,6 @@ C_SRCS = \
 	$(SRC_DIR)/crypto/p256.c \
 	$(SRC_DIR)/crypto/chacha20_poly1305.c \
 	$(SRC_DIR)/crypto/aes_gcm.c \
-	$(SRC_DIR)/user/app_runtime.c \
-	$(SRC_DIR)/user/syscall.c \
-	$(SRC_DIR)/user/ldso.c \
-	$(SRC_DIR)/user/hax.c \
 	$(SRC_DIR)/tools/help.c \
 	$(SRC_DIR)/tools/system.c \
 	$(SRC_DIR)/tools/debug.c \
@@ -288,10 +320,22 @@ C_SRCS = \
 	$(SRC_DIR)/rtc_tz.c \
 	$(APP_SRCS)
 
+# 用户态运行时：应用加载 ABI、syscall 分发、动态链接器与 HAX 装载器。
+# 它们和内核一起链接（同一 ELF），但只允许通过 ABI 边界互相调用。
+USER_C_SRCS = \
+	$(SRC_USER_DIR)/app_runtime.c \
+	$(SRC_USER_DIR)/syscall.c \
+	$(SRC_USER_DIR)/ldso.c \
+	$(SRC_USER_DIR)/hax.c
+
+C_SRCS += $(USER_C_SRCS)
+
+# 桌面/GUI 是独立子系统：源码在 $(SRC_GUI_DIR)/，产物落 build/gui/。
+# HBOS_ENABLE_GUI=0 时整棵子树换成 $(SRC_GUI_DIR)/nogui.c 一个空实现。
 GUI_C_SRCS = \
-	$(SRC_DIR)/gui/gui_draw_impl.c \
-	$(SRC_DIR)/gui/gui_html.c \
-	$(SRC_DIR)/gui/gui_browser_layout.c \
+	$(SRC_GUI_DIR)/gui_draw_impl.c \
+	$(SRC_GUI_DIR)/gui_html.c \
+	$(SRC_GUI_DIR)/gui_browser_layout.c \
 	$(SRC_DIR)/ui/ui_widget.c \
 	$(SRC_DIR)/ui/ui_controls.c \
 	$(SRC_DIR)/gpu.c \
@@ -299,76 +343,78 @@ GUI_C_SRCS = \
 	$(SRC_DIR)/graphics/gui_wall.c \
 	$(SRC_DIR)/graphics/gui_icons.c \
 	$(SRC_DIR)/tools/gui.c \
-	$(SRC_DIR)/gui/service.c \
-	$(SRC_DIR)/gui/wm.c \
-	$(SRC_DIR)/gui/winsrv.c \
-	$(SRC_DIR)/gui/compositor.c \
-	$(SRC_DIR)/gui/effects.c \
-	$(SRC_DIR)/gui/gui_dirty.c \
-	$(SRC_DIR)/gui/gui_effects.c \
-	$(SRC_DIR)/gui/overview_layout.c \
-	$(SRC_DIR)/gui/wl/wl_surface.c \
-	$(SRC_DIR)/gui/wl/wl_compositor.c \
-	$(SRC_DIR)/gui/wl/wl_seat.c \
-	$(SRC_DIR)/gui/wayland/core/wl_wire.c \
-	$(SRC_DIR)/gui/wayland/core/wl_server.c \
-	$(SRC_DIR)/gui/wayland/iface/wl_iface_state.c \
-	$(SRC_DIR)/gui/wayland/iface/wl_iface_display.c \
-	$(SRC_DIR)/gui/wayland/iface/wl_iface_compositor.c \
-	$(SRC_DIR)/gui/wayland/iface/wl_iface_shm.c \
-	$(SRC_DIR)/gui/wayland/iface/wl_iface_seat.c \
-	$(SRC_DIR)/gui/wayland/iface/wl_iface_xdg.c \
-	$(SRC_DIR)/gui/wayland/backend/wl_backend_hive.c \
-	$(SRC_DIR)/gui/browser_backend.c \
-	$(SRC_DIR)/gui/browser_layout.c \
-	$(SRC_DIR)/gui/desktop_entry.c \
-	$(SRC_DIR)/gui/app_registry.c \
-	$(SRC_DIR)/gui/glass.c \
-	$(SRC_DIR)/gui/hiverc.c \
-	$(SRC_DIR)/gui/gui_apps.c \
-	$(SRC_DIR)/gui/apps/app_uigallery.c \
-	$(SRC_DIR)/gui/apps/app_browser.c \
-	$(SRC_DIR)/gui/apps/app_calc.c \
-	$(SRC_DIR)/gui/apps/app_clock.c \
-	$(SRC_DIR)/gui/apps/app_settings.c \
-	$(SRC_DIR)/gui/apps/app_files.c \
-	$(SRC_DIR)/gui/apps/app_taskmgr.c \
-	$(SRC_DIR)/gui/apps/app_shortcuts.c \
-	$(SRC_DIR)/gui/apps/app_imgview.c \
-	$(SRC_DIR)/gui/apps/app_hexview.c \
-	$(SRC_DIR)/gui/apps/app_snake.c \
-	$(SRC_DIR)/gui/apps/app_uwc.c \
-	$(SRC_DIR)/gui/apps/app_diag.c \
-	$(SRC_DIR)/gui/apps/app_notes.c \
-	$(SRC_DIR)/gui/apps/app_code.c \
-	$(SRC_DIR)/gui/apps/app_hpt.c
+	$(SRC_GUI_DIR)/service.c \
+	$(SRC_GUI_DIR)/wm.c \
+	$(SRC_GUI_DIR)/winsrv.c \
+	$(SRC_GUI_DIR)/compositor.c \
+	$(SRC_GUI_DIR)/effects.c \
+	$(SRC_GUI_DIR)/gui_dirty.c \
+	$(SRC_GUI_DIR)/gui_effects.c \
+	$(SRC_GUI_DIR)/overview_layout.c \
+	$(SRC_GUI_DIR)/wl/wl_surface.c \
+	$(SRC_GUI_DIR)/wl/wl_compositor.c \
+	$(SRC_GUI_DIR)/wl/wl_seat.c \
+	$(SRC_GUI_DIR)/wayland/core/wl_wire.c \
+	$(SRC_GUI_DIR)/wayland/core/wl_server.c \
+	$(SRC_GUI_DIR)/wayland/iface/wl_iface_state.c \
+	$(SRC_GUI_DIR)/wayland/iface/wl_iface_display.c \
+	$(SRC_GUI_DIR)/wayland/iface/wl_iface_compositor.c \
+	$(SRC_GUI_DIR)/wayland/iface/wl_iface_shm.c \
+	$(SRC_GUI_DIR)/wayland/iface/wl_iface_seat.c \
+	$(SRC_GUI_DIR)/wayland/iface/wl_iface_xdg.c \
+	$(SRC_GUI_DIR)/wayland/backend/wl_backend_hive.c \
+	$(SRC_GUI_DIR)/browser_backend.c \
+	$(SRC_GUI_DIR)/browser_layout.c \
+	$(SRC_GUI_DIR)/desktop_entry.c \
+	$(SRC_GUI_DIR)/app_registry.c \
+	$(SRC_GUI_DIR)/glass.c \
+	$(SRC_GUI_DIR)/hiverc.c \
+	$(SRC_GUI_DIR)/gui_apps.c \
+	$(SRC_GUI_DIR)/apps/app_uigallery.c \
+	$(SRC_GUI_DIR)/apps/app_browser.c \
+	$(SRC_GUI_DIR)/apps/app_calc.c \
+	$(SRC_GUI_DIR)/apps/app_clock.c \
+	$(SRC_GUI_DIR)/apps/app_settings.c \
+	$(SRC_GUI_DIR)/apps/app_files.c \
+	$(SRC_GUI_DIR)/apps/app_taskmgr.c \
+	$(SRC_GUI_DIR)/apps/app_shortcuts.c \
+	$(SRC_GUI_DIR)/apps/app_imgview.c \
+	$(SRC_GUI_DIR)/apps/app_hexview.c \
+	$(SRC_GUI_DIR)/apps/app_snake.c \
+	$(SRC_GUI_DIR)/apps/app_uwc.c \
+	$(SRC_GUI_DIR)/apps/app_diag.c \
+	$(SRC_GUI_DIR)/apps/app_notes.c \
+	$(SRC_GUI_DIR)/apps/app_code.c \
+	$(SRC_GUI_DIR)/apps/app_hpt.c
 
 ifeq ($(HBOS_ENABLE_GUI),1)
 C_SRCS += $(GUI_C_SRCS)
 else
-C_SRCS += $(SRC_DIR)/gui/nogui.c
+C_SRCS += $(SRC_GUI_DIR)/nogui.c
 endif
 
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
-# 所有汇编源文件
+# 内核核心的 CPU/内存/调度层（含启动期用的核心内存管理）
 C_SRCS += \
 	$(SRC_DIR)/core/gdt_idt.c \
 	$(SRC_DIR)/core/pmm.c \
 	$(SRC_DIR)/core/vmm.c \
 	$(SRC_DIR)/core/heap.c
 
+# 所有汇编源文件。启动期入口与 SMP 引导分别在 $(SRC_BOOT_DIR)/ 与 src/core/，
+# 都随源码树落进 build/boot/ 与 build/core/。
 ASM_SRCS = \
-	$(SRC_DIR)/boot.asm \
-	$(SRC_DIR)/boot/grub_blob.asm \
+	$(SRC_BOOT_DIR)/boot.asm \
+	$(SRC_BOOT_DIR)/grub_blob.asm \
 	$(SRC_DIR)/core/task_switch.asm \
 	$(SRC_DIR)/core/interrupt_asm.asm \
+	$(SRC_DIR)/core/smp_trampoline.asm \
 	$(SRC_DIR)/graphics/cjk_glyph.asm \
-	$(SRC_DIR)/user/tcc_runtime_blob.asm \
-	$(SRC_DIR)/user/tcc_headers_blob.asm \
-	$(SRC_DIR)/user/hpt_repo_blob.asm \
-	$(SRC_DIR)/user/web_vendor_blob.asm \
-	$(SRC_DIR)/smp_trampoline.asm
+	$(SRC_USER_DIR)/tcc_runtime_blob.asm \
+	$(SRC_USER_DIR)/tcc_headers_blob.asm \
+	$(SRC_USER_DIR)/hpt_repo_blob.asm \
+	$(SRC_USER_DIR)/web_vendor_blob.asm
 
 ifeq ($(HBOS_ENABLE_GUI),1)
 ASM_SRCS += \
@@ -482,11 +528,10 @@ $(GUI_ICON_BIN): tools/genicon.py $(wildcard $(GUI_ICON_OVERRIDE_DIR)/*.png)
 	@echo "[MAKE] Icons: $(GUI_ICON_BIN)"
 
 # NASM (.asm) — various directories
-$(BUILD_DIR)/boot.o: $(SRC_DIR)/boot.asm | $(BUILD_DIR)
-	@mkdir -p $(@D)
-	$(AS) $(ASFLAGS) $< -o $@
-
-$(BUILD_DIR)/smp_trampoline.o: $(SRC_DIR)/smp_trampoline.asm | $(BUILD_DIR)
+# 启动期汇编在 $(SRC_BOOT_DIR)/ 下，产物落在 build/boot/；SMP 引导与核心切换在
+# src/core/，由 core/%.o 通配规则接管。boot_efi.asm 已迁入 $(SRC_BOOT_DIR)/ 但暂不
+# 参与构建（UEFI 走 Limine），日后启用时给 ASM_SRCS 加一行即可。
+$(BUILD_DIR)/boot/%.o: $(SRC_BOOT_DIR)/%.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -509,7 +554,7 @@ $(BUILD_DIR)/graphics/gui_iconsimg.o: $(GUI_ICON_BIN)
 # 用户要求 BIOS 用 GRUB（UEFI 用 Limine）。让 `install auto` 产出的盘能
 # 独立引导，需要 MBR 引导代码（boot.img 前 446B）与 core.img（LBA1 起）。
 # 内核里没有 ISO9660/ATAPI，拿不到 CD 上的引导文件，所以构建期生成后经
-# src/boot/grub_blob.asm 的 incbin 嵌入内核。
+# $(SRC_BOOT_DIR)/grub_blob.asm 的 incbin 嵌入内核。
 #
 # core.img 内嵌一段最小 config：它只负责找到 FAT 分区上的 grub.cfg 并
 # configfile 过去，真正的菜单留给盘上的 /boot/grub/grub.cfg（可由 install
@@ -538,18 +583,18 @@ $(BUILD_DIR)/boot/grub_blob.o: $(SRC_DIR)/boot/grub_blob.asm $(GRUB_BOOT_IMG) $(
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/user/tcc_runtime_blob.o: $(SRC_DIR)/user/tcc_runtime_blob.asm $(BUILD_DIR)/tcc/hbos_runtime.o | $(BUILD_DIR)
+$(BUILD_DIR)/user/tcc_runtime_blob.o: $(SRC_USER_DIR)/tcc_runtime_blob.asm $(BUILD_DIR)/tcc/hbos_runtime.o | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # TCC sysinclude header bundle (tools/genheaders.py, seeded into ramfs at
 # boot by src/tools/tcc_runtime_seed.c) — lets `#include <stdio.h>` etc.
-# resolve in TCC-compiled user programs; see src/user/tcc_headers_blob.asm.
-$(BUILD_DIR)/tcc/headers.bin: tools/genheaders.py $(wildcard $(SRC_DIR)/user/libc/*.h) $(wildcard $(SRC_DIR)/user/libc/sys/*.h) $(wildcard $(TCC_DIR)/include/*.h) | $(BUILD_DIR)
+# resolve in TCC-compiled user programs; see $(SRC_USER_DIR)/tcc_headers_blob.asm.
+$(BUILD_DIR)/tcc/headers.bin: tools/genheaders.py $(wildcard $(SRC_USER_DIR)/libc/*.h) $(wildcard $(SRC_USER_DIR)/libc/sys/*.h) $(wildcard $(TCC_DIR)/include/*.h) | $(BUILD_DIR)
 	@mkdir -p $(@D)
-	python3 tools/genheaders.py $(SRC_DIR)/user/libc $(TCC_DIR)/include $@
+	python3 tools/genheaders.py $(SRC_USER_DIR)/libc $(TCC_DIR)/include $@
 
-$(BUILD_DIR)/user/tcc_headers_blob.o: $(SRC_DIR)/user/tcc_headers_blob.asm $(BUILD_DIR)/tcc/headers.bin | $(BUILD_DIR)
+$(BUILD_DIR)/user/tcc_headers_blob.o: $(SRC_USER_DIR)/tcc_headers_blob.asm $(BUILD_DIR)/tcc/headers.bin | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -562,7 +607,7 @@ WEB_VENDOR_BIN = $(BUILD_DIR)/web-vendor.bin
 $(WEB_VENDOR_BIN): tools/genwebblob.py $(wildcard third_party/web-vendor/*)
 	python3 tools/genwebblob.py third_party/web-vendor $@
 
-$(BUILD_DIR)/user/web_vendor_blob.o: $(SRC_DIR)/user/web_vendor_blob.asm $(WEB_VENDOR_BIN) | $(BUILD_DIR)
+$(BUILD_DIR)/user/web_vendor_blob.o: $(SRC_USER_DIR)/web_vendor_blob.asm $(WEB_VENDOR_BIN) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -583,7 +628,7 @@ $(BUILD_DIR)/input/%.o: $(SRC_DIR)/input/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/gui/%.o: $(SRC_DIR)/gui/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/gui/%.o: $(SRC_GUI_DIR)/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
@@ -599,11 +644,11 @@ $(BUILD_DIR)/lib/%.o: $(SRC_DIR)/lib/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/user/%.o: $(SRC_DIR)/user/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/user/%.o: $(SRC_USER_DIR)/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/apps/%.o: $(SRC_DIR)/apps/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/apps/%.o: $(SRC_APP_DIR)/legacy/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
@@ -627,24 +672,31 @@ $(LIMINE_CONF): limine.conf Makefile
 	@mkdir -p $(dir $@)
 	@sed -e 's/^\(TIMEOUT[[:space:]]*:[[:space:]]*\).*/\1$(BOOT_MENU_TIMEOUT)/' limine.conf > $@
 
-$(ISO_BIOS): $(KERNEL_BIOS) $(GRUB_CFG)
+$(ISO_BIOS): $(KERNEL_BIOS) $(GRUB_CFG) $(FILES_PAYLOAD_STAMP)
 	@rm -rf $(BUILD_DIR)/isodir-bios
 	@mkdir -p $(BUILD_DIR)/isodir-bios/boot/grub
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-bios/boot/hbos.bin
 	@cp $(GRUB_CFG) $(BUILD_DIR)/isodir-bios/boot/grub/grub.cfg
 	@if [ -n "$(ISO_PAYLOAD)" ]; then cp -a "$(ISO_PAYLOAD)" $(BUILD_DIR)/isodir-bios/payload; fi
+	@if [ -n "$(FILES_PAYLOAD)" ]; then \
+	    cp -a $(FILES_DIR) $(BUILD_DIR)/isodir-bios/files; \
+	    echo "✓ 已打包 $(FILES_DIR)/ → ISO:/files"; \
+	 fi
 	@grub-mkrescue -o $@ $(BUILD_DIR)/isodir-bios
 	@cp $@ "$(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 	@echo "✓ BIOS ISO: $@"
 	@echo "✓ Versioned BIOS ISO: $(BUILD_DIR)/hbos-bios-$(HBOS_VERSION)_$(shell date +%Y%m%d).iso"
 
-$(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) $(LIMINE_CONF)
+$(ISO_UEFI): $(KERNEL_BIOS) $(LIMINE_EFI) $(UEFI_CD_IMG) $(LIMINE_CONF) $(FILES_PAYLOAD_STAMP)
 	@rm -rf $(BUILD_DIR)/isodir-uefi
 	@mkdir -p $(BUILD_DIR)/isodir-uefi/EFI/BOOT $(BUILD_DIR)/isodir-uefi/boot
 	@cp $(KERNEL_BIOS) $(BUILD_DIR)/isodir-uefi/boot/hbos.bin
 	@cp $(LIMINE_CONF) $(BUILD_DIR)/isodir-uefi/limine.conf
 	@cp $(LIMINE_EFI) $(BUILD_DIR)/isodir-uefi/EFI/BOOT/BOOTX64.EFI
 	@cp $(UEFI_CD_IMG) $(BUILD_DIR)/isodir-uefi/boot/uefi-cd.img
+	@if [ -n "$(FILES_PAYLOAD)" ]; then \
+	    cp -a $(FILES_DIR) $(BUILD_DIR)/isodir-uefi/files; \
+	 fi
 	@xorriso -as mkisofs -R -r -J -V HBOS_UEFI \
 		-eltorito-alt-boot -e boot/uefi-cd.img -no-emul-boot \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
@@ -826,7 +878,7 @@ inflate-bench: | $(BUILD_DIR)
 # .desktop 解析/生成：安装器与启动器的共同契约，纯字符串逻辑，宿主直编
 de-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Werror -Isrc \
-		src/gui/desktop_entry.c tests/host/test_desktop_entry.c \
+		$(SRC_GUI_DIR)/desktop_entry.c tests/host/test_desktop_entry.c \
 		-o $(BUILD_DIR)/test_desktop_entry
 	$(BUILD_DIR)/test_desktop_entry
 
@@ -866,7 +918,7 @@ ui-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/test_wm
 	$(BUILD_DIR)/test_wm
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
-		tests/host/test_html.c src/gui/gui_html.c src/ui/theme.c src/lib/json.c \
+		tests/host/test_html.c $(SRC_GUI_DIR)/gui_html.c src/ui/theme.c src/lib/json.c \
 		tests/host/theme_fs_stub.c tests/host/json_alloc_stub.c \
 		tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_html
@@ -882,18 +934,18 @@ hax-anim-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/test_hax_anim
 
 browser-test: | $(BUILD_DIR)
-	$(CC) -O2 -Wall -Wextra -Isrc/gui \
-		tests/test_browser_backend.c src/gui/browser_backend.c \
-		src/gui/browser_layout.c \
+	$(CC) -O2 -Wall -Wextra -I$(SRC_GUI_DIR) \
+		tests/test_browser_backend.c $(SRC_GUI_DIR)/browser_backend.c \
+		$(SRC_GUI_DIR)/browser_layout.c \
 		-o $(BUILD_DIR)/test_browser_backend
 	$(BUILD_DIR)/test_browser_backend
 
 hive-test: | $(BUILD_DIR)
-	$(CC) -O2 -Wall -Wextra -Iapp/include -Isrc/user \
+	$(CC) -O2 -Wall -Wextra -Iapp/include -I$(SRC_USER_DIR) \
 		scripts/test_hive_ui.c -o $(BUILD_DIR)/test_hive_ui
 	$(BUILD_DIR)/test_hive_ui
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
-		scripts/test_hive_winsrv.c src/gui/winsrv.c \
+		scripts/test_hive_winsrv.c $(SRC_GUI_DIR)/winsrv.c \
 		src/ui/theme.c src/lib/json.c tests/host/theme_fs_stub.c \
 		tests/host/json_alloc_stub.c tests/host/hbos_string_wrap.c \
 		-o $(BUILD_DIR)/test_hive_winsrv
@@ -923,20 +975,20 @@ exfat-test: | $(BUILD_DIR)
 # 脏区合并：相交取并集、超限退化整屏。
 dirty-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_dirty.c \
-		$(SRC_DIR)/gui/gui_dirty.c -o $(BUILD_DIR)/test_dirty
+		$(SRC_GUI_DIR)/gui_dirty.c -o $(BUILD_DIR)/test_dirty
 	$(BUILD_DIR)/test_dirty
 
 # 概览排布：高度降序 / 同高按 x / 等比缩放。
 ov-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_overview.c \
-		$(SRC_DIR)/gui/overview_layout.c -o $(BUILD_DIR)/test_overview
+		$(SRC_GUI_DIR)/overview_layout.c -o $(BUILD_DIR)/test_overview
 	$(BUILD_DIR)/test_overview
 
 # Wayland 地基：surface 双缓冲/脏区/释放、seat 焦点与事件队列。
 wl-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_wl.c \
-		$(SRC_DIR)/gui/wl/wl_surface.c $(SRC_DIR)/gui/wl/wl_seat.c \
-		$(SRC_DIR)/gui/wl/wl_compositor.c \
+		$(SRC_GUI_DIR)/wl/wl_surface.c $(SRC_GUI_DIR)/wl/wl_seat.c \
+		$(SRC_GUI_DIR)/wl/wl_compositor.c \
 		-o $(BUILD_DIR)/test_wl
 	$(BUILD_DIR)/test_wl
 
@@ -945,7 +997,7 @@ wl-test: | $(BUILD_DIR)
 # 纯宿主机，不需要 QEMU。
 wl-libwayland-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra tests/host/wl_libwayland_replay.c \
-		$(SRC_DIR)/gui/wayland/core/wl_wire.c \
+		$(SRC_GUI_DIR)/wayland/core/wl_wire.c \
 		$(shell pkg-config --cflags --libs wayland-client) \
 		-o $(BUILD_DIR)/wl_libwayland_replay
 	WAYLAND_DEBUG=1 $(BUILD_DIR)/wl_libwayland_replay
@@ -953,7 +1005,7 @@ wl-libwayland-test: | $(BUILD_DIR)
 # 动效策略：总开关 / 两级权限 / 帧数上限。
 fx-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_gui_effects.c \
-		$(SRC_DIR)/gui/gui_effects.c -o $(BUILD_DIR)/test_gui_effects
+		$(SRC_GUI_DIR)/gui_effects.c -o $(BUILD_DIR)/test_gui_effects
 	$(BUILD_DIR)/test_gui_effects
 
 # GUI 侧宿主基准：gui_blit_argb8888 的单帧成本（并单独量出"每行扫 alpha"
@@ -977,7 +1029,7 @@ sysprof-log:
 # 最大化后标题栏按钮仍可点、吸附→最大化→还原、无快照回落。
 wm-geo-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -I$(SRC_DIR) tests/host/test_wm_geometry.c \
-		$(SRC_DIR)/gui/wm.c $(SRC_DIR)/gui/gui_effects.c \
+		$(SRC_GUI_DIR)/wm.c $(SRC_GUI_DIR)/gui_effects.c \
 		-o $(BUILD_DIR)/test_wm_geometry
 	$(BUILD_DIR)/test_wm_geometry
 
@@ -1049,7 +1101,7 @@ nogui-smoke:
 fat32-smoke:
 	bash scripts/test_fat32_persist.sh
 
-# docs/PERFORMANCE.md §6/§6.1 验收流程固化：IPv4 TCP 大响应端到端回归。
+# docs/wiki/PERFORMANCE.md §6/§6.1 验收流程固化：IPv4 TCP 大响应端到端回归。
 # QEMU + 宿主 python3 -m http.server，guest `wget -O -` 的串口正文与宿主
 # 源文件逐字节比对；覆盖 142000（报告用例）、115200/113760（80 段边界两侧）、
 # 42600（基准）、100000（落盘+重启回读）、分段无关性 300/600/900/1440，
@@ -1207,13 +1259,13 @@ run-uefi-ahci: $(ISO_UEFI) $(DISK_IMG)
 # User-space ring3 programs
 # ============================================================
 
-USER_PROG_DIR = $(SRC_DIR)/user/progs
-USER_LIBC_DIR = $(SRC_DIR)/user/libc
+USER_PROG_DIR = $(SRC_USER_DIR)/progs
+USER_LIBC_DIR = $(SRC_USER_DIR)/libc
 USER_BUILD_DIR = $(BUILD_DIR)/user
 
 USER_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
               -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 -O2 -Wall -Wextra \
-              -I$(SRC_DIR)/user/libc -I$(SRC_DIR)/user
+              -I$(SRC_USER_DIR)/libc -I$(SRC_USER_DIR)
 
 USER_LDFLAGS = -m elf_x86_64 -static -nostdlib -T user.ld
 
@@ -1379,7 +1431,7 @@ HPT_REPO_PACKED = $(BUILD_DIR)/hpt-repo.pack
 $(HPT_REPO_PACKED): $(HPT_REPO_BIN) tools/pack_blob.py
 	@python3 tools/pack_blob.py $(HPT_REPO_BIN) $@ --raw 
 
-$(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_DIR)/user/hpt_repo_blob.asm $(HPT_REPO_PACKED) | $(BUILD_DIR)
+$(BUILD_DIR)/user/hpt_repo_blob.o: $(SRC_USER_DIR)/hpt_repo_blob.asm $(HPT_REPO_PACKED) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 USER_LINUX_COMPAT_OBJ = $(BUILD_DIR)/user/libc/linux.o
@@ -1586,11 +1638,16 @@ GLIBC_EXTRA_HAX := $(BUILD_DIR)/tests/linux_glibc_libm.hax \
 	$(BUILD_DIR)/tests/linux_glibc_libgcc_s.hax
 
 # 七个补充库逐个 cp：名字即 genhax 的 blob 名（无 .haxmeta 时取文件名）。
-$(BUILD_DIR)/tests/linux_glibc_libm.hax: | $(BUILD_DIR)
+# 前置目录必须是 $(BUILD_DIR)/tests，不能只依赖 $(BUILD_DIR)——新建
+# build-nogui/ 时 tests/ 不存在，cp 会直接失败。
+$(BUILD_DIR)/tests/linux_glibc_libm.hax: | $(BUILD_DIR)/tests
 	@test -f "$(HBOS_GLIBC_LIBDIR)/libm.so.6" || \
 		{ echo "glibc libm.so.6 not found" >&2; exit 2; }
 	cp "$(HBOS_GLIBC_LIBDIR)/libm.so.6" $@
 	@echo "✓ Native glibc runtime lib: libm.so.6"
+
+$(BUILD_DIR)/tests:
+	@mkdir -p $@
 
 $(BUILD_DIR)/tests/linux_glibc_libpthread.hax: | $(BUILD_DIR)
 	@test -f "$(HBOS_GLIBC_LIBDIR)/libpthread.so.0" || \
@@ -1742,11 +1799,11 @@ $(BUILD_DIR)/tests/linux_dlopen_deps.hax: tests/linux_dlopen_deps.c \
 USER_PROG_SRCS = $(wildcard $(USER_PROG_DIR)/*.c)
 USER_PROG_BINS = $(USER_PROG_SRCS:$(USER_PROG_DIR)/%.c=$(USER_BUILD_DIR)/%.elf)
 
-$(BUILD_DIR)/user/libc/%.o: $(SRC_DIR)/user/libc/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/user/libc/%.o: $(SRC_USER_DIR)/libc/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(USER_CFLAGS) $< -o $@
 
-$(BUILD_DIR)/user/libc/setjmp.o: $(SRC_DIR)/user/libc/setjmp.asm | $(BUILD_DIR)
+$(BUILD_DIR)/user/libc/setjmp.o: $(SRC_USER_DIR)/libc/setjmp.asm | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -1784,7 +1841,7 @@ QJS_DIR = third_party/quickjs
 MUSL_MATH_DIR = third_party/musl-math
 QJS_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
              -mno-red-zone -O2 -Wall -Wextra -MMD -MP \
-             -I$(SRC_DIR)/user/libc -I$(QJS_DIR) -I$(MUSL_MATH_DIR) \
+             -I$(SRC_USER_DIR)/libc -I$(QJS_DIR) -I$(MUSL_MATH_DIR) \
              -I$(BUILD_DIR)/quickjs \
              -DCONFIG_VERSION=\"QuickJS-HBOS\"
 
@@ -1826,7 +1883,7 @@ $(BUILD_DIR)/app/js.hax: $(QJS_OBJS) $(USER_LIBC_OBJS) | $(BUILD_DIR)
 TCC_DIR = third_party/tinycc
 TCC_CFLAGS = -m64 -mcmodel=large -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
              -mno-red-zone -O2 -Wall -MMD -MP \
-             -I$(SRC_DIR)/user/libc -I$(SRC_DIR)/user -I$(TCC_DIR)
+             -I$(SRC_USER_DIR)/libc -I$(SRC_USER_DIR) -I$(TCC_DIR)
 
 # tcc.c #includes everything else in $(TCC_DIR) as one unity-build translation
 # unit (see third_party/tinycc/README.md) — -MMD/-MP (like the kernel's own
@@ -1902,7 +1959,7 @@ HAX_BLOB_PACKED = $(BUILD_DIR)/hax_blob.pack
 $(HAX_BLOB_PACKED): $(HAX_BLOB) tools/pack_blob.py
 	@python3 tools/pack_blob.py $(HAX_BLOB) $@
 
-$(BUILD_DIR)/user/hax_blob.o: $(SRC_DIR)/user/hax_blob.asm $(HAX_BLOB_PACKED) | $(BUILD_DIR)
+$(BUILD_DIR)/user/hax_blob.o: $(SRC_USER_DIR)/hax_blob.asm $(HAX_BLOB_PACKED) | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -1912,8 +1969,8 @@ hax-apps: $(HAX_ALL_BINS)
 
 # 由 HTML 源经 WeasyPrint 生成紧凑、省油墨的应用开发手册 PDF
 .PHONY: hax-doc
-hax-doc: docs/HBOS_HAX_API.html tools/genpdf.py
-	$(PDF_PYTHON) tools/genpdf.py docs/HBOS_HAX_API.html -o HBOS_HAX_API.pdf
+hax-doc: docs/wiki/HBOS_HAX_API.html tools/genpdf.py
+	$(PDF_PYTHON) tools/genpdf.py docs/wiki/HBOS_HAX_API.html -o HBOS_HAX_API.pdf
 	@echo "✓ 应用开发手册: HBOS_HAX_API.pdf"
 
 # ── HBFS file injection ──────────────────────────────────────────

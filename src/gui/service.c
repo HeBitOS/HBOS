@@ -2,7 +2,7 @@
  * @file service.c
  * @brief 完整 GUI 对内核 gui_service ABI 的适配实现。
  */
-#include "../api/gui_service.h"
+#include "../app/api/gui_service.h"
 #include "../core/task.h"
 #include "gui_canvas.h"
 #include "winsrv.h"

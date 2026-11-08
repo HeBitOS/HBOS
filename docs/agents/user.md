@@ -1,6 +1,8 @@
 # User — 用户空间 (`src/user/`)
 
 > Ring3 用户程序运行时, 动态链接器, 系统调用, libc, 内建用户程序
+> 目录：`src/user/` + `src/app/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 
@@ -133,4 +135,4 @@ dlfcn:   dlopen, dlsym
 `src/linux_compat.c` 复用原生任务 fd 表，实现固定容量、无守护进程的
 `poll/pipe2/eventfd/epoll/futex` 事件与同步底座；用户态
 `src/user/libc/linux.c` 提供常用 Linux x86-64 `SYS_*` 号码翻译。完整边界
-和 KDE 分阶段目标见 `docs/LINUX_KDE_COMPAT.md`。
+和 KDE 分阶段目标见 `docs/wiki/LINUX_KDE_COMPAT.md`。

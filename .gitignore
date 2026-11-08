@@ -36,3 +36,9 @@ tests/host/vectors/
 *.bak
 # 全仓库无任何引用的散图（非文档配图，别随手放这里）
 /docs/image.png
+
+# files/ 是用户往发行镜像里塞素材的落地目录（见 files/README.md）。
+# 只保留占位与说明；用户自己的素材不该进版本库。
+/files/*
+!/files/README.md
+!/files/.keep

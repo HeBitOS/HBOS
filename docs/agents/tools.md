@@ -1,6 +1,8 @@
 # Tools — GUI + 系统工具 (`src/tools/`)
 
 > 4600 行 GUI (桌面+窗口管理+应用), 多种内建命令工具
+> 目录：`src/tools/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 

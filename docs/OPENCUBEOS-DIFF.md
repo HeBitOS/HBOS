@@ -288,7 +288,7 @@ klog l1 loader net ocembed power selfhost sysapi time tui usb watchdog`——
 ### C6 · 分层依赖门禁（P0）
 
 - **HBOS 现状**：无。`src/core/`（16 文件 / 5.8k 行）与 `src/*.c` 之间靠人守约定；
-  `docs/REPOSITORY_SPLIT_BOUNDARIES.md` 写了规则但没有机器执行。
+  `docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md` 写了规则但没有机器执行。
 - **对方做法**：`tools/check_deps.py` 扫 `#include` 图，强制 `core/` 不得依赖
   `drivers/`、`services/`，`drivers/` 不得依赖 `services/`；**跑在测试矩阵里**，
   违反即红。为满足它，对方把「平台控制台」下沉到 `core/console`、把 klog 环留在 core

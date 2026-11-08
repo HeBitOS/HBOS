@@ -2,7 +2,7 @@
 """生成 inflate 差分测试的真值向量（C 头文件）。
 
 真值由宿主 Python 的 zlib 生成（RFC 1950 的标准实现），因此和内核里自己写的
-inflate 是**独立实现**，逐字节比对才有意义 —— 这正是 docs/PERFORMANCE.md §1
+inflate 是**独立实现**，逐字节比对才有意义 —— 这正是 docs/wiki/PERFORMANCE.md §1
 里"解压正确性"那一栏描述的方法。
 
 向量按构建时生成而不是入库：4 MiB 档的原始+压缩数据接近 20 MB，入库会让仓库

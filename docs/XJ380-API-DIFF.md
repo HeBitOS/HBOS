@@ -132,15 +132,15 @@ pdftotext -layout XJ380_API_Spec_CPP_1_4.pdf build/tmp/xj380.txt   # 8118 行 / 
 ### 3.2 HIVE 运行时（**应用不可直接包含**）
 
 `HIVE/src/gui/{compositor,wm,winsrv,effects,service,gui_dirty}.c`、`HIVE/src/graphics/gui_font.h`。
-`docs/REPOSITORY_SPLIT_BOUNDARIES.md:33–50` 强制依赖方向：应用 → HAX SDK / Window ABI；GUI → Kernel UAPI / `gui_service` ABI；**内核不依赖 GUI 或应用**。
-`docs/HIVE_DESKTOP_API.md:193` 明确：应用不得包含 `gui_state.h`、`gui_draw.h`、`gui_app.h`、`wm.h`、`winsrv.h`，不得访问 framebuffer。
+`docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md:33–50` 强制依赖方向：应用 → HAX SDK / Window ABI；GUI → Kernel UAPI / `gui_service` ABI；**内核不依赖 GUI 或应用**。
+`docs/wiki/HIVE_DESKTOP_API.md:193` 明确：应用不得包含 `gui_state.h`、`gui_draw.h`、`gui_app.h`、`wm.h`、`winsrv.h`，不得访问 framebuffer。
 
 > 这条边界直接决定了本文所有"补全方式"：能放 `app/include/` 的（纯头文件/内联）即时可做；需要 `gui_service` 或 syscall 的必须走主代理域。
 
 ### 3.3 已登记的自认缺口（与本文重合项）
 
-- `docs/HIVE_DESKTOP_API.md:85`：「当前键盘事件仍只直接输入 ASCII，完整输入法与系统剪贴板协议后续增加」→ 对应本文 4.8 / 4.9。
-- `docs/LINUX_KDE_COMPAT.md:256–306`「当前明确缺口」：vDSO、clone3 进程形态、AF_INET `getpeername`、inotify 覆盖、符号链接、D-Bus/Wayland/DRM → 影响本文 5.x 判定，**不重复登记**。
+- `docs/wiki/HIVE_DESKTOP_API.md:85`：「当前键盘事件仍只直接输入 ASCII，完整输入法与系统剪贴板协议后续增加」→ 对应本文 4.8 / 4.9。
+- `docs/wiki/LINUX_KDE_COMPAT.md:256–306`「当前明确缺口」：vDSO、clone3 进程形态、AF_INET `getpeername`、inotify 覆盖、符号链接、D-Bus/Wayland/DRM → 影响本文 5.x 判定，**不重复登记**。
 
 ---
 
@@ -165,7 +165,7 @@ pdftotext -layout XJ380_API_Spec_CPP_1_4.pdf build/tmp/xj380.txt   # 8118 行 / 
 | --- | --- | --- | --- | --- |
 | 「兼容一部分 POSIX」 | p20 | `src/user/libc/`（50+ 文件）+ `src/linux_compat.c`（约 130 syscall） | ✅ | HBOS 的 POSIX 面**远大于** XJ380 该章（该章 0 函数、0 内容） |
 
-> Ch2 没有可比对象。反而 HBOS 的 `docs/LINUX_KDE_COMPAT.md` 已是该层更完整的实现记录。
+> Ch2 没有可比对象。反而 HBOS 的 `docs/wiki/LINUX_KDE_COMPAT.md` 已是该层更完整的实现记录。
 
 ### 4.3 L2 TUI 层（Ch3，90 函数）
 
@@ -244,7 +244,7 @@ pdftotext -layout XJ380_API_Spec_CPP_1_4.pdf build/tmp/xj380.txt   # 8118 行 / 
 | `xapi_RequestPaste/GetPasteInfo/ReadPaste/FinishPaste` | p110–111 | 无 | ❌ | 无异步粘贴事务，无 `MSG_PASTE` |
 | `xapi_ClipboardClaimMove` | p111 | 无 | ❌ | 无"移动/剪切"所有权转移 |
 | `xapi_TextInputGetSelection/SetSelection/SetFlags` | p111–112 | `hax_ui_textbox_selection`（:816）、`hax_ui_textbox_select`（:833）、`hax_ui_textbox_select_all`（:843） | ◐ | 选区端点语义一致（UTF-8 字节偏移 + 码点钳制），但无 `flags`（密码/只读等集中位） |
-| `xapi_Ime*`（16 项） | p112–126 | 无 | ❌ | 键盘事件目前只有 ASCII（`docs/HIVE_DESKTOP_API.md:85`） |
+| `xapi_Ime*`（16 项） | p112–126 | 无 | ❌ | 键盘事件目前只有 ASCII（`docs/wiki/HIVE_DESKTOP_API.md:85`） |
 | `xapi_CaptureScreen` | p127 | 无对外接口 | ❌ | 无截屏 syscall |
 | `xapi_SetSecret` | p128 | 无 | ❌ | 无内容保护/防截屏层 |
 | `xapi_SendAppMessage` | p129 | 无 | ❌ | 无应用间消息投递 |
@@ -261,7 +261,7 @@ pdftotext -layout XJ380_API_Spec_CPP_1_4.pdf build/tmp/xj380.txt   # 8118 行 / 
 | `NetSetTcpOptions/GetTcpOptions` | p144 | `setsockopt/getsockopt`（`HBOS_SYS_SETSOCKOPT/GETSOCKOPT`） | ◐ | `XNetTcpOptions` 把 no_delay/keepalive×4 打包进一个结构；BSD 需逐项 setsockopt |
 | `NetSetUdpOptions/GetUdpOptions` | p145 | `setsockopt(SO_BROADCAST)` | ◐ | 同上 |
 | `NetWaitMany` | p146 | `poll`、`epoll_*`（`HBOS_SYS_POLL/EPOLL_*`、`poll.h`、`sys/epoll.h`） | ◐ | `XNetWaitItem{object,events,ready,tag}` 可映射到 `epoll_event.data.u64` |
-| `NetQuery` | p143 | `getsockname/getpeername` | ◐ | 见 `docs/LINUX_KDE_COMPAT.md`：AF_INET 的 `getpeername` 仍缺 |
+| `NetQuery` | p143 | `getsockname/getpeername` | ◐ | 见 `docs/wiki/LINUX_KDE_COMPAT.md`：AF_INET 的 `getpeername` 仍缺 |
 | `NetSendAll` | p142 | 无（应用自行循环 `send`） | ◐ | 易补（内联循环） |
 | `NetParseAddress/FormatAddress` | p137 | `inet_pton/inet_ntop`（若在 `netdb.h`） | ◐ | 语义等价，命名不同 |
 | `NetGetCapabilities` | p131 | 无 | ❌ | 无后端能力探测（`max_objects/max_transfer_bytes/features`） |
@@ -315,7 +315,7 @@ pdftotext -layout XJ380_API_Spec_CPP_1_4.pdf build/tmp/xj380.txt   # 8118 行 / 
 | 项 | 内容 |
 | --- | --- |
 | XJ380 来源 | 4.8.9–4.8.17，p107–p111：`ClipboardSetText/SetData/Query/Attach/RequestPaste/GetPasteInfo/ReadPaste/FinishPaste/ClipboardClaimMove`；配套 `MSG_PASTE`(19, p90)、`MSG_EDIT`(18, p90) |
-| HBOS 现状 | **系统级无实现**。仅应用内选区：`hax_widgets.h:816` `hax_ui_textbox_selection`、`:833` `hax_ui_textbox_select`、`:843` `select_all`、`:848` `copy_selection`、`:864` `delete_selection`。`docs/HIVE_DESKTOP_API.md:85` 已自认该缺口 |
+| HBOS 现状 | **系统级无实现**。仅应用内选区：`hax_widgets.h:816` `hax_ui_textbox_selection`、`:833` `hax_ui_textbox_select`、`:843` `select_all`、`:848` `copy_selection`、`:864` `delete_selection`。`docs/wiki/HIVE_DESKTOP_API.md:85` 已自认该缺口 |
 | 差距 | (1) 无法跨应用复制/粘贴；(2) 无所有者 + 修订号（`XClipInfo{revision,window,control}`），无法做变更通知；(3) 无格式协商（文本/图片/文件列表/路径五类）；(4) 无剪切所有权转移 |
 | 补全方式 | 在 `gui_service` ABI 增加 4 个 op（`CLIP_SET/CLIP_QUERY/CLIP_ATTACH/CLIP_REVISION`），`hax.h` 增：<br>`typedef struct { HU32 size, version, formats; HU64 revision, owner; } hax_clip_info_t;`<br>`int hax_clipboard_set_text(const char *utf8, HU32 bytes);`<br>`int hax_clipboard_query(hax_clip_info_t *out);`<br>`int hax_clipboard_get_text(char *buf, HU32 cap, HU32 *required);`<br>`int hax_clipboard_attach(hax_window_t w, HU32 formats);`<br>事件侧：`HAX_EV_PASTE`(=`MSG_PASTE` 等价)、`HAX_EV_EDIT`。控件侧在 `hax_widgets.h` 增加 `Ctrl+C/X/V` 到 `hax_ui_textbox_key`(:899) 的分支 |
 | 代价 | 中。要定义所有权语义（窗口关闭后内容存续）、变更修订号、跨进程缓冲区拷贝上限 |
@@ -409,12 +409,12 @@ pdftotext -layout XJ380_API_Spec_CPP_1_4.pdf build/tmp/xj380.txt   # 8118 行 / 
 
 ### P3-13　IME（16 函数）—— 暂不补
 
-- 现状：零。键盘事件只有 ASCII（`docs/HIVE_DESKTOP_API.md:85`）。
+- 现状：零。键盘事件只有 ASCII（`docs/wiki/HIVE_DESKTOP_API.md:85`）。
 - 不补理由：前置条件不成立——需先有 (a) UTF-8 键盘事件、(b) 候选窗服务、(c) 跨进程 IME 会话协议。XJ380 的 16 个函数 + 双代 V1/V2 结构是这三者的**结果**，不是起点。建议路线：UTF-8 键盘 → 应用内软键盘 → 独立 IME 进程 + 候选窗 → 最后才谈 `XIme*` 兼容层。
 
 ### P3-14　`xapi_PaintControls` / 服务端控件布局 —— 不补
 
-- 理由：与 HBOS 架构冲突。`docs/REPOSITORY_SPLIT_BOUNDARIES.md:92–103` 规定"应用状态必须由应用进程自己持有；SDK 控件状态保存在 `hax_ui_t`"。让服务端持有控件布局会把 18 类控件的绘制/命中/焦点全部搬进 HIVE，破坏拆分边界。
+- 理由：与 HBOS 架构冲突。`docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md:92–103` 规定"应用状态必须由应用进程自己持有；SDK 控件状态保存在 `hax_ui_t`"。让服务端持有控件布局会把 18 类控件的绘制/命中/焦点全部搬进 HIVE，破坏拆分边界。
 - 等价收益：HBOS 的 `hax_ui_dispatch`（:1072）+ `hax_ui_hit_index`（:987）已提供同一能力，只是位置在应用侧。
 
 ---
@@ -491,5 +491,5 @@ grep -cE '^[0-9]+(-[0-9]+)+\s+xapi_?\w+\(\);' build/tmp/xj380.txt | head   # 目
 ## 9. 边界声明
 
 - 本文**未修改** `src/syscall.c`、`src/linux_compat.c`、`src/elf.c`、`src/core/**`（主代理域）。
-- 本文涉及的 `gui_service` op 追加、syscall 追加均为**契约草案**，实施需主代理域排期；按 `docs/REPOSITORY_SPLIT_BOUNDARIES.md:49` 要求，ABI 编号只追加、不重排。
+- 本文涉及的 `gui_service` op 追加、syscall 追加均为**契约草案**，实施需主代理域排期；按 `docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md:49` 要求，ABI 编号只追加、不重排。
 - 未运行 QEMU / `make bios-iso` / `make run*` / `make test-all`。

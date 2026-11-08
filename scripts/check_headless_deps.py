@@ -5,7 +5,7 @@
 检查四件事:
   1. ELF 依赖闭包  —— shell 的 NEEDED 逐层展开,每个 soname 在镜像的库搜索
      路径里找得到(ld-linux/libc/libm 由 HBOS 自带,不算缺失)。
-  2. 固定依赖清单  —— docs/HEADLESS-DEPS.md 里钉死的那些包必须都在,
+  2. 固定依赖清单  —— docs/wiki/HEADLESS-DEPS.md 里钉死的那些包必须都在,
      同时报告"二进制新引入但清单没记"的漂移。
   3. 资源文件      —— shell 自己目录里必须有的数据文件;符号链接必须能解析
      到真实存在的非空文件(悬空链接单独报)。
@@ -236,7 +236,7 @@ class Checker:
             if self.find_lib(soname) is None and soname not in provided:
                 missing.append(soname)
         self.report.info("2. 固定依赖清单",
-                         f"docs/HEADLESS-DEPS.md 钉住 {len(pinned)} 个 soname")
+                         f"docs/wiki/HEADLESS-DEPS.md 钉住 {len(pinned)} 个 soname")
         if missing:
             for soname in missing:
                 self.report.fail("2. 固定依赖清单", f"{soname} 不在镜像里")

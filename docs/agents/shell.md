@@ -1,6 +1,8 @@
 # Shell — 交互式命令行 (`src/shell/`)
 
 > 1066 行, REPL 命令行解释器, 命令注册/查找/执行, 历史记录, 参数解析
+> 目录：`src/shell/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 

@@ -1,3 +1,19 @@
+/**
+ * @file    vmm.h
+ * @brief   虚拟内存管理器：4 级页表、按需映射、COW 与大页拆分
+ *
+ * @layer   core
+ * @owner   src/core/
+ * @stable  stable
+ *
+ * 依赖    <stdint.h>/<stdbool.h>/<stddef.h>。**刻意不** include pmm.h：vmm
+ *         只操作页表，具体物理页由调用方（heap / 驱动）从 pmm 取好再传进来。
+ * 被依赖  heap.c、task.c（地址空间）、elf.c（加载段）、所有 DMA 驱动。
+ *
+ * 启动期约束：进来之前 boot.asm 已经建好 0-4 GiB 的 2 MiB 大页恒等映射，
+ * vmm_init() 的职责是"接管"这套页表而不是重建，否则 kernel.c 里正在跑的
+ * 代码会被自己换掉。
+ */
 #ifndef HBOS_VMM_H
 #define HBOS_VMM_H
 
@@ -5,11 +21,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-// ============================================================
-// Virtual Memory Manager (VMM) — 4-level paging
-// ============================================================
 
-// Page table entry flags (x86_64)
+/* ═══ 常量 ═══════════════════════════════════════════════════════════
+ * 页表项标志位（x86_64 硬件语义 + HBOS 软件位）。
+ * 软件位（VMM_OWNED/COW/COW_W）占用硬件忽略的位，所以页表可以直接交给
+ * CPU 而无需先屏蔽——但不能与硬件将来可能启用的位冲突，改动前先查手册。
+ */
 #define VMM_P      0x001   // Present
 #define VMM_W      0x002   // Writable
 #define VMM_U      0x004   // User accessible

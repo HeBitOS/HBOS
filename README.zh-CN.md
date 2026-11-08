@@ -166,7 +166,7 @@ make bench-boot RUNS=5     # 实测冷启动时间（引导器阶段 + 内核阶
 
 参考数字（QEMU 512M，BIOS ISO）：默认配置约 **3.0 s**（其中内核阶段
 **0.04 s**），`BOOT_MENU_TIMEOUT=0` 约 **1.9 s**。测量方法与历代对比见
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
+[`docs/wiki/PERFORMANCE.md`](docs/wiki/PERFORMANCE.md)。
 ### 5. 构建失败对照表
 
 | 报错 | 原因 | 处理 |
@@ -205,7 +205,7 @@ libfdt、picoefi 等），第一次构建且网络不好时最容易卡在这一
 
 HBOS 暂时保留 HIVE runtime 的集成副本，以确保完整版本和 no-GUI 版本都能
 持续构建。拆仓边界与迁移顺序见
-[`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md)。
+[`docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md)。
 使用 `git clone --recurse-submodules` 会同时取得 HIVE、HPT 和其他依赖。
 `make hive-sync` 默认同步仓库内的 `HIVE/`；若需要操作其他 HIVE 工作副本，
 可显式传入 `HIVE_REPO=/path/to/HIVE`。
@@ -243,8 +243,8 @@ framebuffer、窗口管理器或桌面私有状态。
 完整开发资料：
 
 - [HBOS HAX 应用开发手册（PDF）](HBOS_HAX_API.pdf)
-- [HAX API HTML 源文档](docs/HBOS_HAX_API.html)
-- [HIVE 桌面与控件 API](docs/HIVE_DESKTOP_API.md)
+- [HAX API HTML 源文档](docs/wiki/HBOS_HAX_API.html)
+- [HIVE 桌面与控件 API](docs/wiki/HIVE_DESKTOP_API.md)
 
 ## 模块化构建
 
@@ -293,37 +293,49 @@ graph TD
 
 ```text
 HBOS/
-├── app/                HAX 应用与公开 SDK 头文件
-├── docs/               API、模块边界与兼容性文档
+├── app/                HAX 应用源码与公开 SDK 头文件（用户自己的应用放这儿）
+├── files/              用户放进发行镜像的素材（构建 release 时自动打包）
+├── docs/
+│   ├── agents/         AI 工作区：子系统地图与进度台账
+│   ├── wiki/           人类读的长期参考文档（改代码后需同步）
+│   └── */              某轮的证据、对比报告与截图
 ├── scripts/            构建、启动和 smoke test 脚本
 ├── src/
-│   ├── api/            内核与可选组件的公开契约
+│   ├── boot/           启动期纯汇编：长模式入口、引导器 blob
 │   ├── core/           任务、内存和中断核心
+│   ├── app/            用户态应用框架（api/ 内核↔GUI 契约，legacy/ 旧式应用）
+│   ├── gui/            桌面、WM、合成器、Wayland 与图形栈
+│   ├── user/           用户态运行时、libc、动态链接器与 HAX 装载
 │   ├── crypto/         TLS 使用的密码学实现
 │   ├── graphics/       终端、字体与 GUI 图形资源
-│   ├── gui/            HIVE runtime 集成副本
 │   ├── input/          键盘与鼠标输入
 │   ├── shell/          Shell 和命令注册
 │   ├── tools/          系统、文件、网络和图形命令
-│   └── user/           用户态运行时、libc 和程序加载
+│   └── */              其余驱动与文件系统平铺在 src/ 根
 ├── third_party/        移植的第三方组件
 ├── Makefile            构建入口
 └── version.mk          版本号来源
 ```
+
+构建产物严格镜像源码树：`src/gui/wm.c` → `build/gui/wm.o`。三种构建目录
+互不干扰——`build/`（完整）、`build-nogui/`（无桌面）、`build-core/`
+（仅内核）。
 
 ## 文档与路线图
 
 | 文档 | 内容 |
 |---|---|
 | [`docs/README.md`](docs/README.md) | 文档索引与 PDF 生成方式 |
-| [`docs/HIVE_DESKTOP_API.md`](docs/HIVE_DESKTOP_API.md) | HIVE 控件、事件和应用迁移 |
-| [`docs/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/REPOSITORY_SPLIT_BOUNDARIES.md) | 内核、GUI、应用拆仓边界 |
+| [`docs/agents/README.md`](docs/agents/README.md) | AI 工作区约定：子系统地图、检索顺序、命名规范 |
+| [`docs/agents/PROGRESS.md`](docs/agents/PROGRESS.md) | 主进度台账：当前阶段、已知坑、改动日志 |
+| [`docs/wiki/HIVE_DESKTOP_API.md`](docs/wiki/HIVE_DESKTOP_API.md) | HIVE 控件、事件和应用迁移 |
+| [`docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md`](docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md) | 内核、GUI、应用拆仓边界 |
 | [`docs/CHROMIUM_COMPAT_BASELINE.md`](docs/CHROMIUM_COMPAT_BASELINE.md) | Chromium 兼容工作的阶段 1 基线 |
 | [`CHROMIUM_COMPAT_ROADMAP.md`](CHROMIUM_COMPAT_ROADMAP.md) | Chromium 平台兼容层十阶段计划 |
-| [`docs/LINUX_KDE_COMPAT.md`](docs/LINUX_KDE_COMPAT.md) | 轻量 Linux ABI 与原版 KDE 分阶段路线 |
+| [`docs/wiki/LINUX_KDE_COMPAT.md`](docs/wiki/LINUX_KDE_COMPAT.md) | 轻量 Linux ABI 与原版 KDE 分阶段路线 |
 | [`HIVE/docs/BROWSER_BILIBILI_UPGRADE.md`](HIVE/docs/BROWSER_BILIBILI_UPGRADE.md) | 浏览器现状、Vue/Bilibili 技术栈审计与分级验收方案 |
-| [`docs/CODE_STYLE.md`](docs/CODE_STYLE.md) | 代码规范、注释规范与性能纪律 |
-| [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | 性能工作记录：测量方法、已做优化、刻意不改的项与待办清单 |
+| [`docs/wiki/CODE_STYLE.md`](docs/wiki/CODE_STYLE.md) | 代码规范、注释规范（含头文件模板）与性能纪律 |
+| [`docs/wiki/PERFORMANCE.md`](docs/wiki/PERFORMANCE.md) | 性能工作记录：测量方法、已做优化、刻意不改的项与待办清单 |
 
 Chromium 目前尚未移植；路线图描述的是兼容层建设计划，而不是已经可运行的
 Chromium 浏览器。

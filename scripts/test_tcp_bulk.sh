@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TCP 大响应静默截断端到端回归（docs/PERFORMANCE.md §6 / §6.1 验收流程固化）。
+# TCP 大响应静默截断端到端回归（docs/wiki/PERFORMANCE.md §6 / §6.1 验收流程固化）。
 #
 # 背景：手写 IPv4 TCP 栈曾在约 113 KB 处静默截断大响应（guest `wget -O -`
 # 无报错、少字节）。根因是 net_tcp_exchange 的固定 80 次迭代上限（见 §6.1.1）。

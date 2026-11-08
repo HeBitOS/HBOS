@@ -1,6 +1,8 @@
 # Input — 输入子系统 (`src/input/`)
 
 > PS/2 键盘/鼠标, USB HID 框架 (已实现 xHCI 控制器并完整支持 USB 键盘/鼠标/存储设备)
+> 目录：`src/input/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 

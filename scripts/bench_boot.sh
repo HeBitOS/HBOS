@@ -15,7 +15,7 @@
 #                    BOOT_MENU_TIMEOUT=0  → BIOS ISO 冷启动 ≈ 1.9s
 # 其中"固件+引导器"约占 3.0s 里的 2.98s（含菜单倒计时与加载 31MB 内核），
 # 内核阶段只有约 0.04s。详细拆分见 scripts/boot_time.py 的输出与
-# docs/PERFORMANCE.md。
+# docs/wiki/PERFORMANCE.md。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

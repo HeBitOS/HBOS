@@ -4,7 +4,7 @@
 #include "../../ui/theme.h"
 #include "../../ui/ui_tokens.h"
 #include "gui_draw.h"
-#include "../../api/gui_service.h"
+#include "../../app/api/gui_service.h"
 #include "../../graphics/gui_font.h"
 #include "../../string.h"
 #include "../../version.h"

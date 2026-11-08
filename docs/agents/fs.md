@@ -1,6 +1,8 @@
 # FS — 文件系统 (`src/`)
 
 > VFS (虚拟文件系统) + ext2 只读 + fat32 只读 + devfs + ramfs + 块设备层
+> 目录：`src/` 根目录：`vfs.c fs.c ext2.c exfat.c fat32.c devfs.c partition.c block.c` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 

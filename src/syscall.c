@@ -38,7 +38,7 @@
 #include "user/hax_app.h"
 #include "vfs.h"
 #include "version.h"
-#include "api/gui_service.h"
+#include "app/api/gui_service.h"
 #include "tls.h"
 #include "https.h"
 #include "linux_compat.h"
@@ -120,6 +120,36 @@ typedef struct {
     int64_t st_ctime_nsec;
     int64_t reserved[3];
 } linux_x86_stat_t;
+
+/* statx(2) 结构（kernel uapi/linux/stat.h）。glibc 2.28+ 的 fstatat/stat
+ * 会优先走这条，Chromium 的 file_util 也在用。字段顺序与内核一模一样，
+ * 唯一要小心的是 stx_mask 必须与真正填过的字段对上，否则调用方会读垃圾。 */
+typedef struct {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __spare0;
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct { int64_t tv_sec; uint32_t tv_nsec; int32_t __res; } stx_atime;
+    struct { int64_t tv_sec; uint32_t tv_nsec; int32_t __res; } stx_btime;
+    struct { int64_t tv_sec; uint32_t tv_nsec; int32_t __res; } stx_ctime;
+    struct { int64_t tv_sec; uint32_t tv_nsec; int32_t __res; } stx_mtime;
+    uint32_t stx_rdev_major, stx_rdev_minor;
+    uint32_t stx_dev_major, stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint32_t stx_dio_mem_align;
+    uint32_t stx_dio_offset_align;
+    uint64_t __spare3[12];
+} linux_x86_statx_t;
+
+#define HBOS_STATX_BASIC_STATS 0x7ffu
 
 typedef struct {
     void *base;
@@ -1637,9 +1667,25 @@ static void linux_copy_stat(linux_x86_stat_t *output,
     output->st_ctime = input->st_ctime;
 }
 
+static uint64_t linux_statx_impl(int dirfd, const char *path, int flags,
+                                 linux_x86_statx_t *output);
+
 static uint64_t linux_stat_path(const char *path, linux_x86_stat_t *output) {
     if (!path || !output) return (uint64_t)(-EFAULT);
     struct stat native;
+    if (linux_compat_overlay_is_path(path)) {
+        uint64_t shm_size = 0;
+        if (linux_compat_shm_stat(path, &shm_size) < 0)
+            return (uint64_t)(-(errno > 0 ? errno : ENOENT));
+        memset(&native, 0, sizeof(native));
+        native.st_dev = 3;
+        native.st_ino = 1;
+        native.st_mode = S_IFREG | S_IRUSR | S_IWUSR;
+        native.st_nlink = 1;
+        native.st_size = (off_t)shm_size;
+        linux_copy_stat(output, &native);
+        return 0;
+    }
     if (stat(path, &native) < 0)
         return (uint64_t)(-(errno > 0 ? errno : EIO));
     linux_copy_stat(output, &native);
@@ -1649,6 +1695,19 @@ static uint64_t linux_stat_path(const char *path, linux_x86_stat_t *output) {
 static uint64_t linux_lstat_path(const char *path, linux_x86_stat_t *output) {
     if (!path || !output) return (uint64_t)(-EFAULT);
     struct stat native;
+    if (linux_compat_overlay_is_path(path)) {
+        uint64_t shm_size = 0;
+        if (linux_compat_shm_stat(path, &shm_size) < 0)
+            return (uint64_t)(-(errno > 0 ? errno : ENOENT));
+        memset(&native, 0, sizeof(native));
+        native.st_dev = 3;
+        native.st_ino = 1;
+        native.st_mode = S_IFREG | S_IRUSR | S_IWUSR;
+        native.st_nlink = 1;
+        native.st_size = (off_t)shm_size;
+        linux_copy_stat(output, &native);
+        return 0;
+    }
     if (lstat(path, &native) < 0)
         return (uint64_t)(-(errno > 0 ? errno : EIO));
     linux_copy_stat(output, &native);
@@ -2328,6 +2387,62 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
     }
 }
 
+/* statx(dirfd, path, flags, mask, buf)。不需要真的支持 mask 过滤：内核
+ * 惯例是"能填的都填，stx_mask 报告实际填了哪些"，调用方按 mask 取值。 */
+static uint64_t linux_statx_impl(int dirfd, const char *path, int flags,
+                            linux_x86_statx_t *output) {
+    if (!output) return (uint64_t)(-EFAULT);
+    if (flags & ~(0x100u | 0x200u | 0x400u | 0x800u | 0x1000u))
+        return (uint64_t)(-EINVAL);         /* AT_SYMLINK_NOFOLLOW/EMPTY_PATH/… */
+
+    char resolved[VFS_MAX_NAME];
+    if (!path || !path[0]) {
+        /* AT_EMPTY_PATH：对 dirfd 本身做 fstat */
+        if (!(flags & 0x1000u)) return (uint64_t)(-ENOENT);
+        linux_x86_stat_t st;
+        uint64_t rc = linux_fstat_fd(dirfd, &st);
+        if (rc) return rc;
+        memset(output, 0, sizeof(*output));
+        output->stx_mask = HBOS_STATX_BASIC_STATS;
+        output->stx_blksize = (uint32_t)st.st_blksize;
+        output->stx_nlink = (uint32_t)st.st_nlink;
+        output->stx_uid = st.st_uid;
+        output->stx_gid = st.st_gid;
+        output->stx_mode = (uint16_t)st.st_mode;
+        output->stx_ino = st.st_ino;
+        output->stx_size = (uint64_t)st.st_size;
+        output->stx_blocks = (uint64_t)st.st_blocks;
+        output->stx_atime.tv_sec = st.st_atime;
+        output->stx_mtime.tv_sec = st.st_mtime;
+        output->stx_ctime.tv_sec = st.st_ctime;
+        output->stx_dev_major = 8;
+        return 0;
+    }
+    int resolved_rc = linux_resolve_at_path(dirfd, path, resolved);
+    if (resolved_rc < 0) return (uint64_t)(int64_t)resolved_rc;
+
+    linux_x86_stat_t st;
+    uint64_t rc = (flags & 0x100u) ? linux_lstat_path(resolved, &st)
+                                   : linux_stat_path(resolved, &st);
+    if (rc) return rc;
+    memset(output, 0, sizeof(*output));
+    output->stx_mask = HBOS_STATX_BASIC_STATS;
+    output->stx_blksize = (uint32_t)st.st_blksize;
+    output->stx_nlink = (uint32_t)st.st_nlink;
+    output->stx_uid = st.st_uid;
+    output->stx_gid = st.st_gid;
+    output->stx_mode = (uint16_t)st.st_mode;
+    output->stx_ino = st.st_ino;
+    output->stx_size = (uint64_t)st.st_size;
+    output->stx_blocks = (uint64_t)st.st_blocks;
+    output->stx_atime.tv_sec = st.st_atime;
+    output->stx_mtime.tv_sec = st.st_mtime;
+    output->stx_ctime.tv_sec = st.st_ctime;
+    output->stx_dev_major = 8;
+    output->stx_dev_minor = (uint32_t)(st.st_dev & 0xff);
+    return 0;
+}
+
 static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
     if (!linux_frame) return (uint64_t)(-EFAULT);
     hbos_syscall_frame_t native = *linux_frame;
@@ -2352,7 +2467,20 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             }
             native.nr = HBOS_SYS_WRITE;
             break;
-        case 2:   native.nr = HBOS_SYS_OPEN; break;
+        case 2: {                                     /* open(path, flags, mode) */
+            char path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                -100, (const char *)(uintptr_t)linux_frame->a0, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            if (linux_compat_overlay_is_path(path)) {
+                int fd = linux_compat_shm_open(path, (int)linux_frame->a1);
+                return fd < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO))
+                              : (uint64_t)fd;
+            }
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a1,
+                linux_frame->a2, 0, 0, 0);
+        }
         case 3:   native.nr = HBOS_SYS_CLOSE; break;
         case 4:
             return linux_stat_path(
@@ -2421,9 +2549,12 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 (int)linux_frame->a0,
                 (const linux_x86_iovec_t *)linux_frame->a1,
                 linux_frame->a2, 1);
-        case 21: {                                    /* access：覆盖层文件当存在 */
+        case 21: {                                    /* access */
             const char *p = (const char *)(uintptr_t)linux_frame->a0;
-            if (p && linux_compat_shm_is_path(p)) return 0;
+            if (p && linux_compat_overlay_is_path(p)) {
+                return linux_compat_shm_stat(p, NULL) == 0 ?
+                    0 : (uint64_t)(-(errno > 0 ? errno : ENOENT));
+            }
             native.nr = HBOS_SYS_ACCESS;
             break;
         }
@@ -2493,48 +2624,36 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         case 77:  native.nr = HBOS_SYS_FTRUNCATE; break;
         case 79:  native.nr = HBOS_SYS_GETCWD; break;
         case 80:  native.nr = HBOS_SYS_CHDIR; break;
-        case 82: {                                    /* rename：覆盖层内当成功 */
-            const char *a = (const char *)(uintptr_t)linux_frame->a0;
-            const char *b = (const char *)(uintptr_t)linux_frame->a1;
-            if ((a && linux_compat_shm_is_path(a)) ||
-                (b && linux_compat_shm_is_path(b))) return 0;
+        case 82: {                                    /* rename */
             native.nr = HBOS_SYS_RENAME;
             native.a2 = 0;
             break;
         }
-        case 83: {                                    /* mkdir：覆盖层目录当已存在 */
-            const char *p = (const char *)(uintptr_t)linux_frame->a0;
-            if (p && linux_compat_shm_is_path(p)) return 0;
-            native.nr = HBOS_SYS_MKDIR;
-            break;
-        }
+        case 83:  native.nr = HBOS_SYS_MKDIR; break;
         case 84:  native.nr = HBOS_SYS_RMDIR; break;
         /* link(): VFS 没有硬链接。返回 EPERM（Linux 在文件系统不支持硬链接
          * 时的标准错误）比 ENOSYS 更安全——ENOSYS 会让调用方判定"内核太老"
          * 而走另一条兜底路径。 */
         case 86:  return (uint64_t)(-EPERM);
-        case 87: {                                    /* unlink：/dev/shm 走内存后备 */
+        case 87: {                                    /* unlink：覆盖层走内存后备 */
             const char *p = (const char *)(uintptr_t)linux_frame->a0;
-            if (p && linux_compat_shm_is_path(p)) {
-                /* 覆盖层里的文件是虚拟的：解绑成不成功都当成功，
-                 * 否则只读 ext2 会返回 EPERM 把上层直接打死。 */
+            if (p && linux_compat_overlay_is_path(p)) {
+                /* 覆盖层里的文件是虚拟的：解绑成不成功都当成功，否则只读
+                 * ext2 会返回 EPERM 把上层打死（ProcessSingleton 要的正是
+                 * "删掉上一次的锁一定成功"）。 */
                 (void)linux_compat_shm_unlink(p);
                 return 0;
             }
             native.nr = HBOS_SYS_UNLINK;
             break;
         }
-        case 88: {                                    /* symlink：/tmp 下当 no-op 成功 */
-            const char *p = (const char *)(uintptr_t)linux_frame->a1;
-            if (p && linux_compat_shm_is_path(p)) return 0;
-            native.nr = HBOS_SYS_SYMLINK;
-            break;
-        }
+        case 88:  native.nr = HBOS_SYS_SYMLINK; break;
         case 89:  native.nr = HBOS_SYS_READLINK; break;
         case 90:  native.nr = HBOS_SYS_CHMOD; break;
         case 91:                                       /* fchmod(fd, mode) */
-        case 95:                                       /* fchmodat 的 fd 形态 */
             return 0;                                  /* 权限模型暂不区分 */
+        case 95:                                       /* umask(mask) */
+            return 022;
         case 92:  native.nr = HBOS_SYS_CHOWN; break;
         /* fchown/lchown：HBOS 的权限模型只有单用户，属主一律 root 且不可改；
          * 直接成功比 ENOSYS 安全（Chromium 装扩展/复制 profile 时会调）。 */
@@ -2623,15 +2742,27 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             int resolved = linux_resolve_at_path(
                 (int)linux_frame->a0, (const char *)linux_frame->a1, path);
             if (resolved < 0) return (uint64_t)(int64_t)resolved;
-            /* /dev/shm 下的文件走内存后备（memfd slot），不落到只读 ext2 上。
-             * 不这样做 Chromium 建共享内存会拿到 ENOSPC，进而交不出任何帧。 */
-            if (linux_compat_shm_is_path(path))
-                return (uint64_t)(int64_t)linux_compat_shm_open(
-                    path, (int)linux_frame->a2 | 0x40 /* 强制 O_CREAT */);
+            /* /dev/shm 下的文件走内存后备（memfd slot）。 */
+            if (linux_compat_overlay_is_path(path)) {
+                int fd = linux_compat_shm_open(path, (int)linux_frame->a2);
+                return fd < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO))
+                              : (uint64_t)fd;
+            }
             return (uint64_t)linux_native_call(
                 HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a2,
                 linux_frame->a3, 0, 0, 0);
         }
+        case 258: {                                   /* mkdirat */
+            char path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_MKDIR, (uint64_t)path, linux_frame->a2,
+                0, 0, 0, 0);
+        }
+        case 260:                                     /* fchownat */
+            return 0;
         case 262: {
             return linux_newfstatat(
                 (int)linux_frame->a0, (const char *)linux_frame->a1,
@@ -2653,6 +2784,8 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 HBOS_SYS_RENAME, (uint64_t)old_path, (uint64_t)new_path,
                 0, 0, 0, 0);
         }
+        case 265:                                     /* linkat */
+            return (uint64_t)(-EPERM);
         case 266: {
             char link_path[VFS_MAX_NAME];
             int resolved = linux_resolve_at_path(
@@ -2671,6 +2804,17 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             return (uint64_t)linux_native_call(
                 HBOS_SYS_READLINK, (uint64_t)path, linux_frame->a2,
                 linux_frame->a3, 0, 0, 0);
+        }
+        case 268:                                     /* fchmodat */
+        case 452: {                                   /* fchmodat2 */
+            char path[VFS_MAX_NAME];
+            int resolved = linux_resolve_at_path(
+                (int)linux_frame->a0, (const char *)linux_frame->a1, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            if (linux_compat_overlay_is_path(path)) return 0;
+            return (uint64_t)linux_native_call(
+                HBOS_SYS_CHMOD, (uint64_t)path, linux_frame->a2,
+                0, 0, 0, 0);
         }
         case 273: native.nr = HBOS_SYS_SET_ROBUST_LIST; break;
         case 274: native.nr = HBOS_SYS_GET_ROBUST_LIST; break;
@@ -2734,10 +2878,18 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 linux_frame->a4, 0, 0, 0);
         }
         case 318: native.nr = HBOS_SYS_GETRANDOM; break;
-        case 319:
-            return (uint64_t)(int64_t)linux_compat_memfd_create(
+        case 332:                                     /* statx */
+            return linux_statx_impl((int)linux_frame->a0,
+                               (const char *)(uintptr_t)linux_frame->a1,
+                               (int)linux_frame->a2,
+                               (linux_x86_statx_t *)(uintptr_t)linux_frame->a4);
+        case 319: {
+            int fd = linux_compat_memfd_create(
                 (const char *)linux_frame->a0,
                 (unsigned int)linux_frame->a1);
+            return fd < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO))
+                          : (uint64_t)fd;
+        }
         /* ── C3：Chromium/glib/NSS 启动路径上常见但此前缺失的调用 ─────
          * 这些要么是"查询能力"，要么是"无实际语义的加固操作"。在
          * --no-sandbox 的单进程场景里，返回合理的兼容值比返回 -ENOSYS
@@ -2753,9 +2905,14 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             return (uint64_t)(-EOPNOTSUPP);
         case 85: {                                    /* creat(path, mode) */
             char path[VFS_MAX_NAME];
-            if (linux_resolve_at_path(-100, (const char *)linux_frame->a0,
-                                      path) < 0)
-                return (uint64_t)(-EFAULT);
+            int resolved = linux_resolve_at_path(
+                -100, (const char *)linux_frame->a0, path);
+            if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            if (linux_compat_overlay_is_path(path)) {
+                int fd = linux_compat_shm_open(path, 0x40 | 0x1 | 0x200);
+                return fd < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO))
+                              : (uint64_t)fd;
+            }
             return (uint64_t)linux_native_call(
                 HBOS_SYS_OPEN, (uint64_t)path,
                 O_CREAT | O_WRONLY | O_TRUNC, linux_frame->a1, 0, 0, 0);
@@ -2931,7 +3088,9 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             uint64_t flags = linux_frame->a2;
             if (flags & ~(uint64_t)0x200)
                 return (uint64_t)(-EINVAL);
-            if (!(flags & 0x200) && linux_compat_shm_is_path(path)) {
+            if (!(flags & 0x200) && linux_compat_overlay_is_path(path)) {
+                /* 覆盖层里的东西本来就"不存在"：解绑成不成功都当成功。只读
+                 * ext2 返回 EPERM 会把上层直接打死，而这里没有真实文件可留。 */
                 (void)linux_compat_shm_unlink(path);
                 return 0;
             }
@@ -2939,11 +3098,16 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 flags & 0x200 ? HBOS_SYS_RMDIR : HBOS_SYS_UNLINK,
                 (uint64_t)path, 0, 0, 0, 0, 0);
         }
-        case 269: {                                   /* faccessat */
+        case 269:                                     /* faccessat */
+        case 439: {                                   /* faccessat2 */
             char path[VFS_MAX_NAME];
             int resolved = linux_resolve_at_path(
                 (int)linux_frame->a0, (const char *)linux_frame->a1, path);
             if (resolved < 0) return (uint64_t)(int64_t)resolved;
+            if (linux_compat_overlay_is_path(path)) {
+                return linux_compat_shm_stat(path, NULL) == 0 ?
+                    0 : (uint64_t)(-(errno > 0 ? errno : ENOENT));
+            }
             return (uint64_t)linux_native_call(
                 HBOS_SYS_ACCESS, (uint64_t)path, linux_frame->a2,
                 linux_frame->a3, 0, 0, 0);

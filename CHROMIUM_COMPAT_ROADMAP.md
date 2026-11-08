@@ -16,7 +16,7 @@
 4. 阶段 4、5 当前成果属于提前实施的基础子集，不代表窗口 API v2 或完整控件库
    已经验收完成。
 
-具体拆仓边界见 `docs/REPOSITORY_SPLIT_BOUNDARIES.md`。
+具体拆仓边界见 `docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md`。
 
 ## 总体目标
 

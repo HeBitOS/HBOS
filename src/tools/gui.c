@@ -29,7 +29,7 @@
 #include "../tls.h"
 #include "../unistd.h"
 #include "../elf.h"
-#include "../api/gui_service.h"
+#include "../app/api/gui_service.h"
 #include "../user/app.h"
 #include "../user/hax_app.h"
 #include "../version.h"

@@ -39,7 +39,7 @@ GUI  → Kernel UAPI / gui_service ABI
 ```
 
 - 内核不得包含 `wm.h`、`winsrv.h`、`gui_state.h` 或应用模块头。
-- 系统调用层只包含 `src/api/gui_service.h`。
+- 系统调用层只包含 `src/app/api/gui_service.h`。
 - GUI 完整构建提供 `src/gui/service.c`；no-GUI 构建提供
   `src/gui/nogui.c`，两者实现相同服务契约。
 - 应用只包含公开 SDK（首选 `hive.h`，兼容 `hax.h`/`hax_widgets.h`）和用户态 libc，不得调用

@@ -10,7 +10,7 @@ from pathlib import Path
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", nargs="?", type=Path,
-                        default=Path(__file__).parents[1] / "docs/HBOS_HAX_API.html")
+                        default=Path(__file__).parents[1] / "docs/wiki/HBOS_HAX_API.html")
     parser.add_argument("--output", "-o", type=Path,
                         default=Path(__file__).parents[1] / "HBOS_HAX_API.pdf")
     args = parser.parse_args()

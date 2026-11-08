@@ -19,7 +19,9 @@
 extern void cmd_distro(int argc, char **argv);
 
 /* 指针位置（实现在 tools/gui.c）。HIVE 主循环每帧发布，供调试和
- * `make mouse-test` 验证"注入的鼠标移动真的走完了整条链路"。 */
+ * `make mouse-test` 验证"注入的鼠标移动真的走完了整条链路"。
+ * no-GUI 构建里没有这份实现，所以声明、命令和表项一起放在同一开关里。 */
+#if HBOS_ENABLE_GUI
 extern int gui_pointer_x(void);
 extern int gui_pointer_y(void);
 extern unsigned gui_pointer_move_count(void);
@@ -45,6 +47,8 @@ static void cmd_mouse(int argc, char **argv) {
         console_puts(v == 0 ? "," : (v == 1 ? " moves=" : "\n"));
     }
 }
+#endif /* HBOS_ENABLE_GUI */
+
 #include "tool.h"
 
 #define APP_ELF_MAX_SIZE 131072
@@ -613,9 +617,10 @@ static void cmd_ps(int argc, char **argv) {
     }
 }
 
-/* 内核排错开关。QEMU 上"A/B 对比"比读代码快得多：同一个 ISO 里用
- * `setenv clone3 1` 开日志、`setenv clone3 0` 关掉，再跑一次就能确认
- * 某个崩溃是否与特定系统调用参数相关。 */
+/* wayland 服务端只在 GUI 构建里存在：no-GUI 的链接集里没有
+ * src/gui/wayland/，留着这个命令会以 undefined reference 的形式
+ * 让整个 no-GUI 构建失败。命令表也在同一开关里（见 #if HBOS_ENABLE_GUI）。 */
+#if HBOS_ENABLE_GUI
 static void cmd_wayland(int argc, char **argv) {
     /* 默认路径要和客户端约定的一致：libwayland 会拼
      * $XDG_RUNTIME_DIR/wayland-0，HBOS 里把 XDG_RUNTIME_DIR 设成 /tmp，
@@ -648,7 +653,11 @@ static void cmd_wayland(int argc, char **argv) {
     console_puts(path);
     console_puts("\n");
 }
+#endif /* HBOS_ENABLE_GUI */
 
+/* 内核排错开关。QEMU 上"A/B 对比"比读代码快得多：同一个 ISO 里用
+ * `setenv clone3 1` 开日志、`setenv clone3 0` 关掉，再跑一次就能确认
+ * 某个崩溃是否与特定系统调用参数相关。 */
 static void cmd_setenv(int argc, char **argv) {
     static const struct {
         const char *name;
@@ -875,12 +884,16 @@ void tool_app_init(void) {
          "sysprof [reset]", cmd_sysprof},
         {"export", CMD_GROUP_USER, "Pass env vars to Linux programs",
          "export NAME=value | export | export -c", cmd_export},
+#if HBOS_ENABLE_GUI
         {"wayland", CMD_GROUP_USER, "Start the Wayland compositor socket",
          "wayland [path]", cmd_wayland},
+#endif
         {"distro", CMD_GROUP_USER, "Show or switch distribution identity",
          "distro [status|use ID|add ID [VER]|reset]", cmd_distro},
+#if HBOS_ENABLE_GUI
         {"mouse", CMD_GROUP_USER, "Show pointer position and move count",
          "mouse", cmd_mouse},
+#endif
 #if HBOS_ENABLE_GUI
         {"jspage", CMD_GROUP_USER, "Run inline <script> of an HTML file",
          "jspage <file.html>", cmd_jspage},

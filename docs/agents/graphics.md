@@ -1,6 +1,8 @@
 # Graphics — 图形与字体 (`src/graphics/`)
 
 > Framebuffer 图形输出, CJK 位图字体渲染, VESA/VGA 初始化
+> 目录：`src/graphics/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 

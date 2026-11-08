@@ -1,6 +1,8 @@
 # Net — 网络子系统 (`src/net.c` + `net.h`)
 
 > 1549 行, 4 种网卡驱动检测 + E1000/PCnet 完整实现, DHCP/ARP/ICMP/DNS/TCP/HTTP 协议栈
+> 目录：`src/` 根的 `net*.c` + `src/net/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 驱动类型 (`net.h`)
 

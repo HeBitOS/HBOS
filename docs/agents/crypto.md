@@ -1,6 +1,8 @@
 # Crypto — 加密子系统 (`src/crypto/`)
 
 > ChaCha20-Poly1305 (AEAD), SHA-256 (哈希), X25519 (密钥交换)
+> 目录：`src/crypto/` ｜ 产物：`build/<同名子目录>/` ｜ 索引：[`README.md`](README.md)
+
 
 ## 文件清单
 

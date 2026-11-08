@@ -5,7 +5,7 @@
  * no-GUI 内核保留公开系统调用编号，保证 ABI 不重排；所有图形入口明确报告
  * 不可用，不分配窗口或表面。
  */
-#include "../api/gui_service.h"
+#include "../app/api/gui_service.h"
 
 int gui_service_canvas_info(int *w, int *h) {
     if (w) *w = 0;

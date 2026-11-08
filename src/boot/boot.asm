@@ -197,6 +197,9 @@ gdt64:
 ; ---- BSS 段（未初始化数据） ----
 section .bss
 align 4096
+stack_bottom: resb 131072                ; 128KB 内核栈（置于页表之前，向下增长绝不踩页表）
+stack_top:
+align 4096
 p4_table: resb 4096                      ; PML4 表
 p3_table: resb 4096                      ; PDPT 表
 p2_0: resb 4096                          ; PD 表: 0GB - 1GB
@@ -204,5 +207,3 @@ p2_1: resb 4096                          ; PD 表: 1GB - 2GB
 p2_2: resb 4096                          ; PD 表: 2GB - 3GB
 p2_3: resb 4096                          ; PD 表: 3GB - 4GB
 saved_mbi: resq 1                        ; 保存的 Multiboot2 信息指针
-stack_bottom: resb 65536                 ; 64KB 内核栈
-stack_top:

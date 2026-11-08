@@ -62,8 +62,8 @@ Wayland 风格的合成器，分 P0–P5 六个阶段完成。
   2) 一个包 = 一个文件（/bin/<name>）—— 而 deb 是目录树（/usr/lib、/etc、/usr/share）；
   3) 依赖字段只有包名，没有版本区间。
 - HBOS 的 Linux 兼容层：src/linux_compat.c（syscall 翻译）、src/user/hax.c、
-  src/user/ldso.c（动态链接）；文档 docs/LINUX_KDE_COMPAT.md、
-  CHROMIUM_COMPAT_ROADMAP.md、docs/HBOS_HAX_API.html。
+  src/user/ldso.c（动态链接）；文档 docs/wiki/LINUX_KDE_COMPAT.md、
+  CHROMIUM_COMPAT_ROADMAP.md、docs/wiki/HBOS_HAX_API.html。
 
 【按三个可独立验收的子任务推进，不要一口气全做】
 
