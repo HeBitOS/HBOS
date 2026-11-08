@@ -462,6 +462,28 @@ static inline bool compare_char(struct flanterm_fb_char *a, struct flanterm_fb_c
     return !(a->c != b->c || a->bg != b->bg || a->fg != b->fg);
 }
 
+/* 从 map 取队列项，并校验它确实落在 queue 缓冲区内。
+ *
+ * map[i] 存的是 &queue[queue_i++] 的快照：队列只会整段重置（queue_i=0），
+ * 不会逐项失效，所以正常情况下这些指针永远有效。但堆一旦被写坏，map 里
+ * 就会留下野指针，而 flanterm_fb_move_character 会把 &q->c 当成数据源
+ * 交给 push_to_queue —— 那是一次非规范地址读取，#GP(err=0, cr2=0) 直接
+ * 内核 panic。实测 Chromium 的 Ozone/Wayland 启动路径上就这么死过一次：
+ * panic rip 落在 push_to_queue 的 `mov (%r8),%rax`，r8 是被当数据源的 c。
+ * 丢一格字符远好过 panic。 */
+static struct flanterm_fb_queue_item *fb_map_at(struct flanterm_fb_context *ctx,
+                                                uint64_t i) {
+    if (ctx == NULL || ctx->map == NULL || ctx->queue == NULL) return NULL;
+    struct flanterm_fb_queue_item *q = ctx->map[i];
+    if (q == NULL) return NULL;
+    uint64_t capacity = ctx->queue_size / sizeof(struct flanterm_fb_queue_item);
+    if (q < ctx->queue || q >= ctx->queue + capacity) {
+        ctx->map[i] = NULL;                 /* 自愈：丢掉野指针 */
+        return NULL;
+    }
+    return q;
+}
+
 static void
 push_to_queue(struct flanterm_context *_ctx, struct flanterm_fb_char *c, uint64_t x, uint64_t y) {
     struct flanterm_fb_context *ctx = (void *)_ctx;
@@ -472,10 +494,17 @@ push_to_queue(struct flanterm_context *_ctx, struct flanterm_fb_char *c, uint64_
 
     uint64_t i = y * _ctx->cols + x;
 
-    struct flanterm_fb_queue_item *q = ctx->map[i];
+    struct flanterm_fb_queue_item *q = fb_map_at(ctx, i);
 
     if (q == NULL) {
         if (compare_char(&ctx->grid[i], c)) {
+            return;
+        }
+        /* 队列满就丢这一格，绝不写穿缓冲。写穿会毁掉堆，进而让 map 里的
+         * 快照变成野指针 —— 那才是真正的雪崩点。 */
+        uint64_t capacity =
+            ctx->queue_size / sizeof(struct flanterm_fb_queue_item);
+        if (ctx->queue_i >= capacity) {
             return;
         }
         q           = &ctx->queue[ctx->queue_i++];
@@ -507,7 +536,7 @@ static void flanterm_fb_revscroll(struct flanterm_context *_ctx) {
             break;
         }
         struct flanterm_fb_char *c;
-        struct flanterm_fb_queue_item *q = ctx->map[i];
+        struct flanterm_fb_queue_item *q = fb_map_at(ctx, i);
         if (q != NULL) {
             c = &q->c;
         } else {
@@ -568,7 +597,7 @@ static void flanterm_fb_scroll(struct flanterm_context *_ctx) {
          i < _ctx->scroll_bottom_margin * _ctx->cols;
          i++) {
         struct flanterm_fb_char *c;
-        struct flanterm_fb_queue_item *q = ctx->map[i];
+        struct flanterm_fb_queue_item *q = fb_map_at(ctx, i);
         if (q != NULL) {
             c = &q->c;
         } else {
@@ -668,7 +697,7 @@ static void flanterm_fb_move_character(
     uint64_t i = old_x + old_y * _ctx->cols;
 
     struct flanterm_fb_char *c;
-    struct flanterm_fb_queue_item *q = ctx->map[i];
+    struct flanterm_fb_queue_item *q = fb_map_at(ctx, i);
     if (q != NULL) {
         c = &q->c;
     } else {
@@ -750,7 +779,7 @@ static void draw_cursor(struct flanterm_context *_ctx) {
     // Always redraw the normal character at cursor position
     // (erases I-beam pixels when cursor is off)
     struct flanterm_fb_char c;
-    struct flanterm_fb_queue_item *q = ctx->map[i];
+    struct flanterm_fb_queue_item *q = fb_map_at(ctx, i);
     if (q != NULL) {
         c = q->c;
     } else {

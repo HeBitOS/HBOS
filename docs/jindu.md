@@ -941,3 +941,51 @@ a90c26a: je    a90c46a           ; rdx == 0  -> int3 / ud2 冷块
 下一步只有两条路，都不需要再猜：①拿到 chromium 156 的 dbgsym（或从 Debian
 `chromium-dbgsym` 取），直接把 `0xa90c060` 的函数名与行号读出来；②反汇编
 `0xa90c060..0xa90c230` 把被查的全局/资源 id 认出来，再比对 pak 里的 id 表。
+
+#### R44：两个真根因 —— 资源文件版本不匹配、控制台队列野指针
+
+**① 资源文件不是一个版本。** 之前那个 `0xa90c26a: je -> int3` 用反汇编 + 栈回溯
+认了出来：函数是 `ui::ResourceBundle::GetLocalizedStringImpl(int)`（用 headless-shell
+的符号表按"同形状"比对确认：`call GetRawDataResourceForScale` → `test %rdx,%rdx`
+→ `je <冷块>` 三条指令逐字对应）。也就是说**本地化资源 id 查出来是空的**。
+
+再把镜像里的资源文件和包里那份逐个比大小，问题一目了然：
+
+| 文件 | 镜像里（错） | chromium 156 包（对） |
+|---|---|---|
+| resources.pak | 13 046 519 | **20 368 637** |
+| locales/en-US.pak | 577 990 | **592 014** |
+| icudtl.dat | 10 876 560 | **10 824 576** |
+| chrome_100_percent.pak | 696 632 | **583 800** |
+| snapshot_blob.bin | 365 488 | **374 096** |
+
+pak 头还是 `05 00 00 00`（DataPack v5），所以"加载成功"，但 id 表对不上，
+查不到就命中不变量。用新脚本 `scripts/install_guest_tree.sh` 把
+`build/tmp/app-tree/usr/lib/chromium` 整棵（18 个文件 / 68 175 560 字节）写回镜像后，
+**int3 崩溃消失**，客户端一路走到真正的窗口握手。
+
+**② 控制台队列的野指针把内核打崩。** 修完 ① 之后立刻换了个死法：内核 panic，
+`vec=0x0D (#GP) err=0 cr2=0`。`addr2line` 落到 `fb.c:push_to_queue`，
+再反汇编认到具体一条：`0x103BE45 mov (%r8),%rax` —— r8 是数据源 `c`，
+取值非规范（err=0 + cr2=0 正是非规范地址的特征）。
+
+链条：`flanterm_fb_move_character` 里 `c = &q->c`，`q = ctx->map[i]`；
+`map[i]` 是 `&queue[queue_i++]` 的快照。`push_to_queue` 里
+**`queue_i` 无上界检查**，写满就写穿 `queue` 缓冲，堆一坏，map 里的快照就成
+野指针，随后被当数据源解引用。
+
+修法（`src/fb.c`）：加 `fb_map_at()` 统一取 map 项并校验指针落在 `queue`
+区间内，越界就自愈置 NULL；`push_to_queue` 在 `queue_i` 到容量时丢这一格而不是
+写穿。宁可丢一个字符，不要 panic。
+
+修完 `PANIC` 计数 0，客户端走到：
+```
+req 20.1 xdg_surface    <- get_toplevel
+req 21.3 xdg_toplevel   <- set_app_id
+req 21.2 xdg_toplevel   <- set_title
+req 21.7/21.8           <- set_min_size / set_max_size
+req 16.6 surface        <- commit
+req 20.3 xdg_surface    <- set_window_geometry
+req 20.4 xdg_surface    <- ack_configure
+```
+xdg 握手全通，**只差 attach + 带 buffer 的 commit**。
