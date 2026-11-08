@@ -989,3 +989,38 @@ req 20.3 xdg_surface    <- set_window_geometry
 req 20.4 xdg_surface    <- ack_configure
 ```
 xdg 握手全通，**只差 attach + 带 buffer 的 commit**。
+
+#### R45：xdg 握手全通，卡在"没有 buffer 可 attach"
+
+资源文件换成同版本之后，客户端把整套窗口握手走完了（服务端日志顺序）：
+
+```
+19.1 region / 18.4 surface      <- set_opaque_region
+20.1 xdg_surface                <- get_toplevel
+21.3 xdg_toplevel               <- set_app_id
+21.2 xdg_toplevel               <- set_title
+21.7 / 21.8 xdg_toplevel        <- set_min_size / set_max_size
+16.6 surface                    <- commit（无 buffer 的首次 commit，协议要求）
+20.3 xdg_surface                <- set_window_geometry
+20.4 xdg_surface                <- ack_configure
+```
+
+`ack_configure` 说明 configure 已经送达并被接受 —— **合成器这一侧是通的**。
+缺的是最后一步：`wl_surface.attach(buffer)` + 带 buffer 的 `commit`。
+`wl_shm_pool.create_buffer`（op 0）始终没有出现，也就是说渲染端一个帧都没交上来。
+
+两条渲染路都不通，各有各的日志：
+
+- 默认路径：`Could not dlopen native EGL: libEGL.so.1: cannot open shared object file`。
+  镜像里 `/usr/lib/x86_64-linux-gnu/libEGL.so` 是个 **47 字节的符号链接**，
+  而 ANGLE 找的是 `libEGL.so.1` —— 名字对不上，且 HBOS 上也没有任何 GL 驱动，
+  所以这条路本来就必然失败。
+- `--disable-gpu`（纯软件合成）：握手同样走完，但在
+  `0x9cfa0dd` 上是 `int3; ud2` 冷块，`run: exit 132`（SIGILL）。
+  该冷块前面是一条 `call 0x2d94c50` —— 调用方按"不返回"编排，
+  实际却返回了，于是落到 ud2。和 R42 的 `__stack_chk_fail` 是同一个形状，
+  说明这类 glibc 终止路径在 HBOS 上还有没走通的地方。
+
+下一步是**明确二选一**：要么把 SwiftShader（`libvk_swiftshader.so` +
+`libvulkan.so.1` + `vk_swiftshader_icd.json`，这三样 app-tree 里都有）跑起来，
+要么把 shm 软件合成的 `create_buffer` 路径接上。两条都不需要再猜协议。
