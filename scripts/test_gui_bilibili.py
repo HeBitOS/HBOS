@@ -23,7 +23,7 @@ SOCK = ROOT / "build/qemu-bilibili-monitor.sock"
 PPM = ROOT / "build/gui-bilibili.ppm"
 PNG = ROOT / "build/gui-bilibili.png"
 URL = os.environ.get("HBOS_BILIBILI_URL", "https://www.bilibili.com/video/BV1GJ411x7h7")
-
+''' ps:链接是【官方 MV】Never Gonna Give You Up - Rick Astley  啥比大肥鱼怎么把这个弄进测试(qwq)'''
 
 def wait_text(text, needle, timeout):
     deadline = time.time() + timeout

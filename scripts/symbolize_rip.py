@@ -402,7 +402,8 @@ def symbolize(addr, base, elf, syms):
 TRAP_RE = re.compile(r"^\[TRAP\] user (.*?) rip=(0x[0-9a-fA-F]+)")
 BT_RE = re.compile(r"^\s*bt\[(\d+)\] (?:rip|ret)=(0x[0-9a-fA-F]+)")
 SPAN_RE = re.compile(r"same-perm span=([0-9a-fA-F]+)-([0-9a-fA-F]+) \(rip at \+0x([0-9a-fA-F]+)\)")
-CMDLINE_RE = re.compile(r"/[\w./-]*(?:chromium[\w.-]*|ld-linux[\w.-]*|libc[\w.-]*)")
+# 收集日志里出现的绝对路径(用于按镜像内路径认二进制)
+CMDLINE_RE = re.compile(r"(?<![\w./+-])(/[\w./+-]{4,})")
 
 
 def parse_log(path):
@@ -418,6 +419,10 @@ def parse_log(path):
             continue
         if "FATAL" in line or "CHECK failed" in line:
             last_fatal = line.strip()[:160]
+        for p in CMDLINE_RE.findall(line):
+            p = p.strip("\"'`,;)")
+            if p not in paths and len(paths) < 500:
+                paths.append(p)
         if cur is None:
             continue
         m = BT_RE.match(line)
@@ -430,9 +435,6 @@ def parse_log(path):
                 cur["span"] = {"lo": int(m.group(1), 16), "hi": int(m.group(2), 16),
                                "rip": int(m.group(1), 16) + int(m.group(3), 16)}
             continue
-        for p in CMDLINE_RE.findall(line):
-            if "/" in p and p not in paths:
-                paths.append(p)
     traps = [{"kind": b["kind"], "rip": b["rip"], "trap": b["trap"]} for b in blocks]
     bt = [x for b in blocks for x in b["bt"]]
     spans = [b["span"] for b in blocks if b["span"]]
@@ -464,8 +466,37 @@ def span_check(addr, span, base, elf):
     return size, out
 
 
+def _path_match(p, g):
+    """日志里的路径 p 与 profile 登记的镜像内路径 g 是否指同一个可执行文件。"""
+    if len(p) < 8 or len(g) < 8:
+        return False
+    return p == g or p.endswith(g) or g.endswith(p)
+
+
+def _cand_table(scored, log_data, base):
+    """无法唯一确定时,把每个候选的证据摊开,便于人一眼判断(而不是猜)。"""
+    addrs = [t["rip"] for t in log_data["traps"]] + [a for _i, a in log_data["bt"]]
+    pie = [a for a in addrs if PIE_REGION_LO <= a < PIE_REGION_HI]
+    lines = []
+    for entry, syms_ok, guest, hits, tested in scored:
+        try:
+            _e, elf = _open_profile(entry)
+        except SystemExit:
+            continue
+        bias = base if base is not None else (loader_pie_base()[0] - elf.image_min)
+        ev = elf.exec_load
+        fit = None
+        if ev and pie:
+            fit = all(ev[0] <= a - bias < ev[1] for a in pie)
+        lines.append(
+            f"{entry['name']}({entry['build_id'][:8]}) syms={'有' if syms_ok else '无'} "
+            f"命令行吻合={'是' if guest else '否'} trap指纹={hits}/{tested} "
+            f"地址都在可执行段内={'-' if fit is None else ('是' if fit else '否')}")
+    return "  候选:\n    " + "\n    ".join(lines) if lines else ""
+
+
 def pick_profile(log_data, base=None):
-    """按日志自身证据选 profile:先看命令行里的路径,再用 ud2 指纹确认。"""
+    """按日志自身证据选 profile:ud2 指纹优先,命令行路径次之,都不行就拒绝。"""
     reg = load_registry()
     traps = [t["rip"] for t in log_data["traps"] if t["trap"]]
     scored = []
@@ -475,13 +506,14 @@ def pick_profile(log_data, base=None):
         except SystemExit:
             continue
         syms_ok = bool(entry.get("syms")) and os.path.exists(os.path.join(ROOT, entry["syms"]))
-        guest = any(any(g == p or p.endswith(g.split("/usr/")[-1]) for g in entry.get("guest_paths", []))
+        guest = any(_path_match(p, g)
+                    for g in entry.get("guest_paths", [])
                     for p in log_data["paths"])
         hits = tested = 0
         if traps and elf.has_bytes:
+            bias = base if base is not None else (loader_pie_base()[0] - elf.image_min)
             for t in traps:
-                b = elf.read_vaddr(t - (base if base is not None else
-                                        (loader_pie_base()[0] - elf.image_min)), 2)
+                b = elf.read_vaddr(t - bias, 2)
                 if b is None:
                     continue
                 tested += 1
@@ -496,14 +528,25 @@ def pick_profile(log_data, base=None):
         if len(g) == 1:
             return g[0][0], "ud2 指纹命中且命令行路径吻合"
         return None, ("多个 profile 都通过 ud2 指纹测试(" +
-                      ", ".join(s[0]["name"] for s in perfect) + "),无法唯一确定")
-    byguest = [s for s in scored if s[2] and s[4] > 0]
+                      ", ".join(s[0]["name"] for s in perfect) + "),无法唯一确定\n" +
+                      _cand_table(scored, log_data, base))
+    byguest = [s for s in scored if s[2]]
     if len(byguest) == 1:
-        return byguest[0][0], "命令行路径唯一吻合(但无 trap 可做指纹校验)"
-    if len(byguest) == 1 and not traps:
-        return byguest[0][0], "命令行路径吻合"
+        e = byguest[0]
+        if not traps:
+            return e[0], "命令行路径唯一吻合(该日志没有 Breakpoint trap,做不了指纹校验)"
+        return None, (f"命令行路径指向 {e[0]['name']},但它的 trap 字节对不上"
+                      f"({e[3]}/{e[4]}):日志里跑的二进制与磁盘上这份不是同一次构建"
+                      " -> 拒绝符号化(先重新提取镜像里的二进制并 --register)")
+    if len(byguest) > 1:
+        return None, ("命令行路径匹配到多个 profile(" +
+                      ", ".join(s[0]["name"] for s in byguest)
+                      + "),无法唯一确定(日志里没有 Breakpoint trap 可做字节指纹;"
+                        "用 --profile 明确指定,或只保留镜像里实际安装的那个 build)\n"
+                      + _cand_table(scored, log_data, base))
     detail = "; ".join(f"{s[0]['name']}:{s[3]}/{s[4]}" for s in scored if s[4])
-    return None, f"没有任何 profile 通过 ud2 指纹测试({detail or '无可用 trap'})"
+    return None, (f"没有任何 profile 通过 ud2 指纹测试({detail or '无可用 trap'})\n"
+                  + _cand_table(scored, log_data, base))
 
 
 # ------------------------------------------------------------------- 自检
@@ -830,7 +873,10 @@ def main():
         debug_path = os.path.join(ROOT, entry["debug"]) if entry.get("debug") else None
         verify_provenance(elf, syms_path, debug_path)
         return cmd_addrs(addrs, entry, elf, Symbols(syms_path), base, False)
-    print("需要 --profile 或 --elf(或 --log/--selfcheck)。可用 profile:")
+    print("光给地址无法安全判断属于哪个二进制(不同 build 的 .text 布局不同),"
+          "所以这里拒绝猜测。")
+    print("用法:地址取自日志时用 --log FILE(会自动认二进制);"
+          "已知是哪个二进制时用 --profile <名|build-id 前缀>。可用 profile:")
     print(profiles_summary())
     return 1
 

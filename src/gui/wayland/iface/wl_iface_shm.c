@@ -19,14 +19,35 @@ void wl_shm_request(wl_client_t *client, wl_object_t *object,
     (void)object;
     if (opcode != WL_SHM_CREATE_POOL) return;
     uint32_t pool_id = wl_arg_u32(args);
-    /* fd 参数在线协议里是个 uint32 索引，真 fd 走的是 ancillary。 */
-    (void)wl_arg_u32(args);
-    uint32_t size = wl_arg_u32(args);
-    if (wl_args_failed(args) || !pool_id || !size) return;
+    /* create_pool 的签名是 "nhi"：new_id、fd 索引、size。fd 本身走
+     * SCM_RIGHTS，线上那 4 字节只是索引。但实测 Chromium 156 发出来的
+     * 消息体只有 8 字节（new_id + size），索引那 4 字节根本不写 —— 于是
+     * 严格按 "nhi" 解析会把 size 读成 0 并判定参数越界，create_pool 全部
+     * 被丢掉，客户端随后在"永远拿不到 pool"的路径上崩掉。
+     * 这里按消息体长度两种形态都收：12 字节走标准 "nhi"，8 字节把第二个
+     * 字当 size，fd 从 pending_fds 里按顺序取。 */
+    uint32_t size;
+    if (args->length >= 12) {
+        (void)wl_arg_u32(args);              /* fd 索引 */
+        size = wl_arg_u32(args);
+    } else {
+        size = wl_arg_u32(args);
+    }
+    wl_dbg_note("shm.create_pool", (int)size, (int)args->length,
+                (int)args->offset);
+    if (wl_args_failed(args) || !pool_id || !size) {
+        wl_dbg_note("pool.args_rejected", (int)pool_id, (int)size,
+                    (int)wl_args_failed(args));
+        return;
+    }
 
-    if (!wl_client_adopt_id(client, pool_id, WL_OBJ_SHM_POOL, NULL)) return;
+    if (!wl_client_adopt_id(client, pool_id, WL_OBJ_SHM_POOL, NULL)) {
+        wl_dbg_note("pool.adopt_failed", (int)pool_id, 0, 0);
+        return;
+    }
     wl_shm_pool_state_t *pool = wl_pool_alloc();
     if (!pool) {
+        wl_dbg_note("pool.alloc_failed", (int)pool_id, 0, 0);
         wl_client_destroy(client, pool_id);
         return;
     }
@@ -40,10 +61,12 @@ void wl_shm_request(wl_client_t *client, wl_object_t *object,
     }
     if (pool_fd < 0) {
         /* 没拿到 fd：pool 建了也没用，直接回收。 */
+        wl_dbg_note("pool.no_fd", (int)pool_id, (int)size, 0);
         wl_pool_free(pool);
         wl_client_destroy(client, pool_id);
         return;
     }
+    wl_dbg_note("pool.ok", (int)pool_id, (int)pool_fd, (int)size);
     pool->fd = pool_fd;
     pool->size = size;
 

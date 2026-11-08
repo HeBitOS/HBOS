@@ -168,6 +168,35 @@ $ python3 scripts/symbolize_rip.py --profile 0de17064 0x1000015A4137 0x6FFFFFFFC
 
 ---
 
+## 4.1 全量回归:107 个含崩溃块的日志
+
+`build/tmp/*.log` 里带 `[TRAP]` 块的日志共 107 个,新工具逐个自动认二进制
+(证据存在 `build/tmp/t8-log-sweep.txt`):
+
+```
+  74  chromium-150.0.7871.100-1~deb12u1     (c3-*/run-*/r7..r58/r32-chromium2 等)
+  15  chromium-headless-shell-156.0.8078.73-1(hs-dom*.log;其中 5 个靠 ud2 指纹,
+                                            4 个无 Breakpoint trap,靠命令行路径)
+  18  REFUSE(并给出理由与候选表)
+```
+
+被拒绝的 18 个里,典型两类:
+* `r32.log` / `wl17.log`:地址本身在共享库/其它程序区间,主程序符号表不适用;
+* `chr5..9.log` / `v156-test.log`:日志里**没有 Breakpoint trap**可做字节指纹,
+  而 `/opt/chromium/usr/lib/chromium/chromium` 这一路径下登记了 3 个 build
+  (150 / 156-`1` / 156-`1~deb12u1`)。这时工具**拒绝猜**,并把候选表打出来:
+
+```
+  候选:
+    chromium-150.0.7871.100-1~deb12u1(203b7252) syms=有 命令行吻合=是 trap指纹=0/0 ...
+    chromium-156.0.8078.73-1(8f201a24)          syms=有 命令行吻合=是 trap指纹=0/0 ...
+    chromium-156.0.8078.73-1~deb12u1(d2ca4df7)  syms=无 命令行吻合=是 trap指纹=0/0 ...
+```
+
+用 `--profile <名>` 指明即可继续;这也印证了“没有字节级证据时,工具宁可不说话”。
+
+---
+
 ## 5. 之前哪些结论是错的
 
 * **错的**:对 `hs-dom5..14.log`(headless-shell)给出的任何 chromium 函数名,
@@ -210,14 +239,32 @@ python3 scripts/symbolize_rip.py --register --name xx --elf /path/binary --syms 
 
 ## 7. 遗留与建议
 
-1. **桌面 chromium 装的是 `156.0.8078.73-1~deb12u1`**(build-id `d2ca4df7…`),
-   而公开源里只有 `-1` 的 dbgsym(`8f201a24…`),两者**不是同一次构建**,
-   段布局都不一样(`.text` 起点 `0x2d92000` vs `0x2da7000`)。
-   → 要么把镜像里的桌面 chromium 换成 `-1`(其符号表 `build/tmp/chromium156.syms`
-   已就绪),要么接受“桌面版 156 无法符号化”(工具会明确拒绝,不会再编)。
-   当前的 headless-shell 工作不受影响:它跑的是 `-1`,符号表已配好。
+1. **镜像里到底装了哪个 chromium(用 build-id 直接搜镜像确认)**:
+
+   ```
+   build/c3-chromium.img(当前)      : 命中 203b7252(v150 残留) + d2ca4df7 + 0de17064
+   build/c3-chromium-151-backup.img : 只有 203b7252
+   ```
+
+   即当前镜像的**桌面版是 `156.0.8078.73-1~deb12u1`(d2ca4df7)**,
+   headless-shell 是 `156.0.8078.73-1`(0de17064)。
+   问题在于:`d2ca4df7` 的那个 revision **公开源里没有 dbgsym**
+   (`deb.debian.org/debian-debug/pool/main/c/chromium/` 只有 `-1` 的;
+   `debian-security` 的 pool 里连 dbgsym 目录都没有),而两者 `-1` 与 `-1~deb12u1`
+   `.text` 起点差 0x9000、段布局不同,**不能混用**。
+   → 桌面版要能符号化,就把镜像里的桌面 chromium 换成 `-1`
+   (`chromium_156.0.8078.73-1_amd64.deb` 已下载到
+   `build/tmp/v156/chromium_156.0.8078.73-1_amd64.deb`,符号表
+   `build/tmp/chromium156.syms` 已就绪);否则桌面版的崩溃只能“拒绝符号化”。
+   当前 headless-shell 线不受影响。
 2. **`0x1000_0000_0000` 区间的崩溃**(`r32-chromium2.log` 的
    `SIGSEGV rip=0x1000017F95A5` 就落在 ld.so/libc)需要各自的 dbgsym
-   (`libc6-dbgsym` / `libc6` 对应的 `ld-linux`),现在工具会明确说明,不再假装知道。
-3. 未改动 `src/`、未重写 `build/tmp/chromium156.syms`、未跑 QEMU、未 `git push`。
-   `build/` 在 `.gitignore` 里,大符号表不会进 git。
+   (`libc6-dbgsym` / 对应 `ld-linux`),现在工具会明确说明,不再假装知道。
+3. **登记的参考二进制要放稳定路径**:任务进行中 `build/tmp/headless-check/` 下的
+   headless-shell 被移走,profile 的 build-id 校验立刻判定“参考二进制不可用”
+   并拒绝出符号(而不是继续用旧表) —— 这是守卫按设计生效的实例。
+   为此把已验证过的二进制固定到 `build/tmp/symbin/`
+   (`chromium-203b7252`、`chromium-headless-shell-0de17064`),
+   profile 指向这里;`build/tmp/v156/*` 里的两份 v156 桌面版是自己解出来的,同样固定。
+4. 未改动 `src/`、未重写 `build/tmp/chromium156.syms`、未跑 QEMU、未 `git push`。
+   `build/` 在 `.gitignore` 里,大符号表与参考二进制不会进 git。

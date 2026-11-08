@@ -862,3 +862,39 @@ ORDER PROTO-OUT {"id":1,"result":{}}
 至此本项的归因链已经完整且每一步都有实测：
 `--dump-dom` ✅ → 光栅 ✅（canvas 逐像素核对）→ 合成 ✅（DrawAndSwap 命中）
 → **拷贝输出 ❌（全零位图）**。
+
+#### R42：Wayland 客户端真的连上并建了池 —— 三个真 bug + 一个真阻塞
+
+目标从 "headless 出图" 转到 "在 HIVE 的 Wayland 合成器里出窗口"。
+`chromium --ozone-platform=wayland` 现在能走完 registry → bind 全部 7 个
+全局 → 建 shm pool → 建 surface，然后挂在客户端进程内的一个 `int3` 上。
+
+本轮修掉的三处（都是**真**阻塞，不是绕路）：
+
+1. **xkb 数据缺失**。镜像里没有 `/usr/share/X11/xkb`，libxkbcommon 打印
+   `failed to add default include path` 后拿到空键映射，键盘初始化路径随即
+   解引用空指针。新增 `scripts/install_guest_xkb.sh`（293 个文件、3.9 MB，
+   debugfs 一次 `-f` 批量写入），报错消失。
+2. **`wl_shm.create_pool` 参数解析**。实测 Chromium 156 发出的消息体只有
+   **8 字节**（`new_id` + `size`），而协议签名是 `"nhi"`（new_id、fd 索引、
+   size）。严格按签名解析会把 size 读成 0 并判越界 → 每个 create_pool 都被
+   丢掉 → 客户端永远拿不到 pool。现在按消息体长度两种形态都收（≥12 走标准
+   `nhi`，8 走 `ni`，fd 从 pending_fds 顺次取）。证据：
+   `pool.ok a=10 b=6 c=4096`，随后 `req 10.2 shm_pool`（resize）正常分派。
+3. **补 5 个 syscall**：`link`(86, →EPERM)、`sched_getattr`(315)、
+   `sched_setattr`(314)、`rt_tgsigqueueinfo`(297, 按 tgkill 语义投递)、
+   `clock_getres`(229)。顺带修正一处**误标**：原来 `case 229` 注释写的是
+   sched_getattr（那是 315），于是 `clock_getres` 变成"返回成功但不写缓冲区"，
+   调用方拿到未初始化的分辨率。
+
+服务端诊断也补齐了（这些是后面继续查的支点，不是装饰）：
+`bind iface=<名> name= v= id=`、对象种类短名（`req 10.2 shm_pool` 而不是
+`kind=9`）、以及一次性原始字节 hexdump（`wl_hexdump_budget`，默认关闭）。
+
+**仍然阻塞**：浏览器主线程（pid 2）在一次 `int3` 上终止，
+`rip=0x110A90C46B`，落在 `__stack_chk_fail` 冷路径之后的 padding
+（`0xa90c46a: int3` / `0xa90c46b: ud2`）。全量 chromium 的 dbgsym 不可得，
+符号化只到 headless-shell（`--log` 指纹模式会正确拒绝套错符号表），所以这
+一处目前**没有函数名**。已知的上下文：崩溃前最后几笔请求是
+pool.resize ×2 → compositor.create_surface ×2 → data_device_manager.get_data_device
+→ display.sync，之后就不再发任何字节；且同一地址在修复前后完全一致。

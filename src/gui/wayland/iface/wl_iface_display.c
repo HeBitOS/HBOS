@@ -101,6 +101,7 @@ void wl_registry_request(wl_client_t *client, wl_object_t *object,
     uint32_t version = wl_arg_u32(args);
     uint32_t new_id = wl_arg_u32(args);
     if (wl_args_failed(args) || !new_id) return;
+    wl_dbg_bind(interface, name, version, new_id);
 
     wl_object_t *bound = wl_client_adopt_id(client, new_id, WL_OBJ_FREE, NULL);
     if (!bound) return;

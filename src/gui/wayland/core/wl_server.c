@@ -44,6 +44,18 @@ static void wl_put_dec(int value) {
     while (position) console_putchar(buffer[--position]);
 }
 
+void wl_dbg_bind(const char *interface, uint32_t name, uint32_t version,
+                 uint32_t id) {    console_puts("[WL] bind iface=");
+    console_puts(interface ? interface : "?");
+    console_puts(" name=");
+    wl_put_dec((int)name);
+    console_puts(" v=");
+    wl_put_dec((int)version);
+    console_puts(" id=");
+    wl_put_dec((int)id);
+    console_puts("\n");
+}
+
 /* 服务器 socket 的 sockaddr_un（必须和客户端构造的逐字节一致）。 */
 typedef struct {
     uint16_t family;
@@ -53,7 +65,9 @@ typedef struct {
 static wl_client_t wl_clients[WL_MAX_CLIENTS];
 /* 收数据日志的预算：只打前 8 条，正常运行时不会刷屏。 */
 static int wl_rx_log_budget = 8;
-static int wl_dbg_dispatch_budget = 8;
+static int wl_dbg_dispatch_budget = 96;
+/* 一次性原始字节 dump：用来核对线上消息的 size 字段与参数排布。 */
+static int wl_hexdump_budget = 0;
 static int wl_dbg_flush_budget = 8;
 static wl_global_t wl_globals[WL_MAX_GLOBALS];
 static int wl_global_count;
@@ -264,6 +278,46 @@ int wl_server_client_count(void) {
 
 /* ── 请求分派 ───────────────────────────────────────────────── */
 
+void wl_dbg_note(const char *label, int a, int b, int c) {
+    console_puts("[WL] ");
+    console_puts(label ? label : "?");
+    console_puts(" a=");
+    wl_put_dec(a);
+    console_puts(" b=");
+    wl_put_dec(b);
+    console_puts(" c=");
+    wl_put_dec(c);
+    console_puts("\n");
+}
+
+/* 对象种类短名，只用于诊断日志。比打印裸枚举值省事得多：
+ * "req 9.1 tty_surface" 一眼就懂，`kind=6` 还得回来查枚举。 */
+static const char *wl_kind_name(int kind) {
+    switch (kind) {
+        case WL_OBJ_DISPLAY:        return "display";
+        case WL_OBJ_REGISTRY:       return "registry";
+        case WL_OBJ_CALLBACK:       return "callback";
+        case WL_OBJ_COMPOSITOR:     return "compositor";
+        case WL_OBJ_SURFACE:        return "surface";
+        case WL_OBJ_REGION:         return "region";
+        case WL_OBJ_SHM:            return "shm";
+        case WL_OBJ_SHM_POOL:       return "shm_pool";
+        case WL_OBJ_BUFFER:         return "buffer";
+        case WL_OBJ_SEAT:           return "seat";
+        case WL_OBJ_POINTER:        return "pointer";
+        case WL_OBJ_KEYBOARD:       return "keyboard";
+        case WL_OBJ_POINTER_OR_KEYBOARD: return "pointer_or_keyboard";
+        case WL_OBJ_XDG_WM_BASE:    return "xdg_wm_base";
+        case WL_OBJ_XDG_SURFACE:    return "xdg_surface";
+        case WL_OBJ_XDG_TOPLEVEL:   return "xdg_toplevel";
+        case WL_OBJ_XDG_POPUP:      return "xdg_popup";
+        case WL_OBJ_OUTPUT:         return "output";
+        case WL_OBJ_DATA_DEVICE_MANAGER: return "data_device_manager";
+        case WL_OBJ_SUBCOMPOSITOR:  return "subcompositor";
+        default:                    return "free/other";
+    }
+}
+
 static void wl_dispatch_request(wl_client_t *client, uint32_t object_id,
                                 uint16_t opcode, const uint8_t *body,
                                 uint32_t body_length) {
@@ -279,13 +333,13 @@ static void wl_dispatch_request(wl_client_t *client, uint32_t object_id,
     }
     if (wl_dbg_dispatch_budget > 0) {
         wl_dbg_dispatch_budget--;
-        console_puts("[WL] req obj=");
+        console_puts("[WL] req ");
         wl_put_dec((int)object_id);
-        console_puts(" op=");
+        console_puts(".");
         wl_put_dec((int)opcode);
-        console_puts(object ? " kind=" : " UNKNOWN\n");
+        console_puts(object ? " " : " UNKNOWN\n");
         if (object) {
-            wl_put_dec((int)object->kind);
+            console_puts(wl_kind_name(object->kind));
             console_puts("\n");
         }
     }
@@ -441,6 +495,19 @@ static int wl_client_read_and_dispatch(wl_client_t *client) {
                 console_puts("[WL] rx ");
                 wl_put_dec((int)got);
                 console_puts(" bytes\n");
+                if (wl_hexdump_budget > 0) {
+                    wl_hexdump_budget--;
+                    const uint8_t *dump =
+                        &client->input[client->input_length - (uint32_t)got];
+                    for (long i = 0; i < got && i < 400; i++) {
+                        static const char digits[] = "0123456789abcdef";
+                        if (i && (i % 16) == 0) console_putchar('\n');
+                        console_putchar(digits[(dump[i] >> 4) & 0xF]);
+                        console_putchar(digits[dump[i] & 0xF]);
+                        console_putchar(' ');
+                    }
+                    console_puts("\n--end hexdump--\n");
+                }
             }
             /* 收本轮随消息过来的 ancillary fd（wl_shm.create_pool 传 memfd
              * 用）。必须在分派请求之前收：create_pool 处理时要从

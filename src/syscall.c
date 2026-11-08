@@ -2492,6 +2492,10 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             break;
         case 83:  native.nr = HBOS_SYS_MKDIR; break;
         case 84:  native.nr = HBOS_SYS_RMDIR; break;
+        /* link(): VFS 没有硬链接。返回 EPERM（Linux 在文件系统不支持硬链接
+         * 时的标准错误）比 ENOSYS 更安全——ENOSYS 会让调用方判定"内核太老"
+         * 而走另一条兜底路径。 */
+        case 86:  return (uint64_t)(-EPERM);
         case 87:  native.nr = HBOS_SYS_UNLINK; break;
         case 88:  native.nr = HBOS_SYS_SYMLINK; break;
         case 89:  native.nr = HBOS_SYS_READLINK; break;
@@ -2812,7 +2816,45 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         case 146: return 0;                           /* sched_getscheduler -> SCHED_OTHER */
         case 147: return 0;                           /* sched_get_priority_max */
         case 148: return 0;                           /* sched_get_priority_min */
-        case 229: return 0;                           /* sched_getattr */
+        /* 314/315 sched_setattr/sched_getattr。原先把 315 误标成 229，导致
+         * sched_getattr 一直是 ENOSYS，而真正的 229（clock_getres）反而被
+         * 当成 no-op 返回成功却不写缓冲区——调用方拿到未初始化的分辨率。 */
+        case 314: return 0;                           /* sched_setattr */
+        case 315: {                                   /* sched_getattr */
+            struct { uint32_t size; int32_t policy; uint64_t flags;
+                     int32_t nice; uint32_t priority;
+                     uint64_t runtime, deadline, period; } *attr =
+                (void *)(uintptr_t)linux_frame->a2;
+            uint32_t size = (uint32_t)linux_frame->a1;
+            if (!attr || size < 8) return (uint64_t)(-EINVAL);
+            if (size > sizeof(*attr)) size = sizeof(*attr);
+            memset(attr, 0, size);                    /* SCHED_OTHER, nice 0 */
+            attr->size = size;
+            return 0;
+        }
+        /* 297 rt_tgsigqueueinfo(tgid, tid, sig, siginfo*)：Chromium 自举崩溃
+         * 上报时用它把自己重新打死。这里按 tgkill 语义投递，等价于内核在
+         * 单进程下的效果。 */
+        case 297: {
+            int sig = (int)linux_frame->a2;
+            if (sig < 0 || sig > 64) return (uint64_t)(-EINVAL);
+            if (sig == 0) return 0;
+            return linux_tgkill((int)linux_frame->a0,
+                                (int)linux_frame->a1, sig);
+        }
+        /* 229 clock_getres：填一个 1ns 的高分辨率值，别留未初始化内存。 */
+        case 229: {
+            linux_x86_timespec_t *res =
+                (linux_x86_timespec_t *)(uintptr_t)linux_frame->a1;
+            int clock_id = (int)linux_frame->a0;
+            if (clock_id < 0 || clock_id > 11)
+                return (uint64_t)(-EINVAL);
+            if (res) {
+                res->seconds = 0;
+                res->nanoseconds = 1;
+            }
+            return 0;
+        }
         case 203: return 0;                           /* sched_setaffinity */
         case 204: {                                   /* sched_getaffinity */
             size_t size = (size_t)linux_frame->a1;

@@ -127,6 +127,15 @@ void wl_server_broadcast_global(const wl_global_t *global);
 typedef void (*wl_object_release_fn)(wl_client_t *client, wl_object_t *object);
 void wl_server_set_release_hook(wl_object_release_fn hook);
 
+/* registry.bind 的一行摘要：接口名、全局名、版本、新 id。
+ * 只打一行，诊断"客户端到底绑了哪些全局、哪个没绑"时不必再猜。 */
+void wl_dbg_bind(const char *interface, uint32_t name, uint32_t version,
+                 uint32_t id);
+
+/* 通用三值诊断行：`[WL] <label> a=.. b=.. c=..`。分派/接口层查"某个请求
+ * 在哪一步被丢掉"时用，比给每处单独写一套打印省事。 */
+void wl_dbg_note(const char *label, int a, int b, int c);
+
 /* ── 全局对象查询 ───────────────────────────────────────────── */
 
 const wl_global_t *wl_server_global_by_interface(const char *interface);
