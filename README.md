@@ -8,8 +8,8 @@
 
 > He Bit OS — a small experimental operating system for x86_64
 
-Version: `v0.1-beta5-pre18` · BIOS / UEFI · early development
-GUI: `HIVE 0.1-beta5-gui.4` (Toolkit API 1.4 / TUI Kit 1.0)
+Version: `v0.2-beta1-pre1-gui.1` · BIOS / UEFI · early development
+GUI: `HIVE 0.2-beta1-pre1-gui.1` (Toolkit API 1.4 / TUI Kit 1.0)
 
 ![HBOS desktop](docs/screenshots/hive-desktop.jpg)
 
@@ -116,14 +116,15 @@ make bios-iso ISO_PAYLOAD=./payload-dir     # copied to payload/ inside the ISO
 | `statx`, `rseq` | `ENOSYS` |
 | `unlink()` of an open file | not yet (deferred inode free missing) |
 | multi-process shared memory (`MAP_SHARED`) | private snapshot only |
-| **tty / termios / pty** | **missing** — every interactive program fails here |
+| tty / termios / pty | works (`TCGETS`/`TCSETS`, line discipline, pty pairs) |
+| Wayland compositor (HIVE) | handshake + surface creation work; Chromium still traps in `LOG(FATAL)` |
+| GPU / accelerated compositing | not yet (Chromium runs with `--disable-gpu`) |
 
-Concrete example — `sl` installs fine but cannot run:
+Concrete example — `sl` installs and runs, with the line discipline driving it:
 
 ```
 hbos:/# run /opt/sl/usr/games/sl
-Error opening te…                       ← ncurses: "Error opening terminal: …"
-kernel: ioctl(1, TCGETS) = -EBADF
+                                   <- art animation, driven by the tty ring buffer
 ```
 
 Anything curses/readline based (`sl`, `top`, `vim`, `bash`, `zsh`) needs termios
@@ -136,7 +137,12 @@ first; shells additionally need pty and job control.
 * `--ozone-platform=headless` (without `--headless`) keeps the browser alive, which
   is the useful starting point for CDP / Wayland work.
 * Symbolize any guest RIP with `python3 scripts/symbolize_rip.py 0x110xxxxxxx`
-  (Chromium PIE base `0x1100000000`).
+  (Chromium PIE load base `0x1100001000`; file vaddr = runtime vaddr - `0x1100001000`).
+* The browser currently gets as far as a Wayland compositor handshake and a
+  `wl_surface`/`wl_region` creation burst; the remaining blocker is a Chromium
+  `LOG(FATAL)` trap in the browser process. Run with `--disable-gpu --no-zygote`
+  to get a full guest backtrace, and `--enable-logging=stderr` to surface the
+  FATAL message on the serial console.
 
 ## Troubleshooting
 

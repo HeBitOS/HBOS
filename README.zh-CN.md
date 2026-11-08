@@ -10,9 +10,9 @@
 
 > He Bit OS — 面向 x86_64 的轻量实验操作系统
 
-当前版本：`v0.1-beta5-pre6` · 支持 BIOS / UEFI · 正在积极开发
+当前版本：`v0.2-beta1-pre1-gui.1` · 支持 BIOS / UEFI · 正在积极开发
 
-GUI 版本：`HIVE 0.1-beta5-gui.4`（Toolkit API 1.4 / TUI Kit 1.0）
+GUI 版本：`HIVE 0.2-beta1-pre1-gui.1`（Toolkit API 1.4 / TUI Kit 1.0）
 
 ![HBOS 桌面截图](docs/screenshots/hive-desktop.jpg)
 
@@ -337,8 +337,20 @@ HBOS/
 | [`docs/wiki/CODE_STYLE.md`](docs/wiki/CODE_STYLE.md) | 代码规范、注释规范（含头文件模板）与性能纪律 |
 | [`docs/wiki/PERFORMANCE.md`](docs/wiki/PERFORMANCE.md) | 性能工作记录：测量方法、已做优化、刻意不改的项与待办清单 |
 
-Chromium 目前尚未移植；路线图描述的是兼容层建设计划，而不是已经可运行的
-Chromium 浏览器。
+Chromium 的移植已推进到 **Wayland 合成器握手与首个 surface 创建**阶段：Debian
+`chromium` 156 的主二进制能加载、能建立 `wl_display`/`wl_registry`/`wl_compositor`
+连接，并走到 `wl_surface` + `wl_region` 的创建序列。当前剩余阻塞点是浏览器进程
+内的一个 Chromium `LOG(FATAL)` trap（`int3`+`ud2`），正在定位。
+
+> 路线图描述的是兼容层建设计划，而不是已经可用的 Chromium 浏览器。
+
+排障要点：
+
+* Chromium 为 PIE，**实测加载基址 `0x1100001000`**；文件内虚拟地址
+  = 运行时地址 − `0x1100001000`。
+* 用 `--disable-gpu --no-zygote` 启动可拿到完整的来宾栈回溯。
+* 用 `--enable-logging=stderr` 把 Chromium 的 FATAL 消息送上串口；HBOS 内核
+  侧需 `setenv stderr 1` 才会回显 stderr。
 
 ## HBOS Linux ABI 兼容层进展
 
@@ -388,6 +400,9 @@ HBOS 正在建设轻量级 Linux ABI 兼容层，长期目标是在不修改上�
 
 ## 版本简史
 
+- `0.2 beta1 pre1 gui.1`：Chromium 兼容性攻坚 —— 打通 Wayland 合成器握手与
+  `wl_surface`/`wl_region` 创建序列；修复 `/tmp` 覆盖层持久化语义与 `F_GETFL`
+  访问模式记账；169 个头文件全量模板化并落地索引，`make check-headers` 全绿。
 - `beta5 pre6`：HIVE Toolkit API 1.4（Radio/Toggle/Dropdown/Spinbox/Groupbox/Separator）、TUI Kit 1.0 文本控件、浅色省墨控制台。
 - `beta5 pre5`：HIVE Toolkit API 1.3、no-GUI 构建边界、浏览器/TLS 兼容性和模块化路线。
 - `beta4`：新桌面、TinyCC、动态链接、BusyBox、网络栈和真机输入修复。
