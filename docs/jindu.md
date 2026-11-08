@@ -1082,3 +1082,34 @@ bilibili 解开要 465 MB，镜像只剩 356 MB，只能扩。结果扩完**必�
 另外 `debugfs write` 建出来的文件是 0644，可执行文件必须补 x 位，
 `install_guest_tree.sh` 已改成按源文件 mode 写 `sif ... mode 0100xxx`
 （bilibili 里 7 个可执行文件已修）。
+
+#### R48：bilibili 装不进去，卡在三个内核侧上限（都还没修）
+
+这一轮把 bilibili 的 7 925 个文件真写进了镜像，然后一路撞墙，逐一记录：
+
+**① 内核文件表是固定大小 `FS_MAX_FILES = 8192`**（`src/fs.h:21`，
+`file_t files[FS_MAX_FILES]`）。启动日志直接写着 `fs: ext2 mounted, files=8192`，
+紧接着 `[SELFTEST] FAIL open create`。镜像里已经有 11 万多个文件，
+这个 8 192 的表就是硬顶。
+
+**② inode 用光了**。`debugfs stats` 显示 `Inode count: 115200 / Free inodes: 0`。
+原因是我把镜像从 1.88 GB 扩到 2.8 GB 再缩回来，`resize2fs` 缩容时把
+inode 数从 168 960 砍到 115 200，而文件数没变。没有空 inode 之后
+`write`/`symlink` 全部失败 —— 第一次安装看起来"成功"，其实
+`/opt/apps/.../files/bin/electron` 里一个文件都没有。
+
+**③ 镜像一扩容就内核 panic**（R47 已记）：块组 15 → 16 是分界，
+1.96 GB / 2.8 GB 都直接 panic，连 `[PANIC] vec=` 都打不出来。
+所以"扩镜像换空间"这条路当前是堵死的。
+
+**回归证据**：把 bilibili 装进去之后，
+`run /opt/chromium/usr/lib/chromium/chromium --version` 也变成
+`run: app not found`（同样的路径之前能跑）。也就是说整个 `/opt` 下的
+路径都解析不到了 —— 怀疑与 ① 的表满有关，但没有定论。
+
+**当前状态（已回滚）**：bilibili 的 7 925 个文件已从镜像删掉，
+`Free blocks: 132250`(517 MB) / `Free inodes: 915`，启动到 Shell、PANIC 0。
+chromium 侧没有代码改动，仍是 R46 的状态。
+
+下一步必须先修 ①（把文件表改成可增长/可淘汰，或至少提到能覆盖镜像规模），
+然后才谈得上装 bilibili；②③ 是同一类"固定上限"问题，建议一并处理。
