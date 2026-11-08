@@ -1370,7 +1370,7 @@ int fs_check(fs_check_result_t *out) {
     r.first_error = "ok";
 
     uint32_t seen_names = 0;
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < fs.file_count; i++) {
         file_t *f = &fs.files[i];
         if (!f->used) continue;
         r.files_seen++;
@@ -1388,7 +1388,7 @@ int fs_check(fs_check_result_t *out) {
         if (f->node.size != f->size) {
             if (r.errors++ == 0) r.first_error = "vfs size mismatch";
         }
-        for (uint32_t j = i + 1; j < MAX_FILES; j++) {
+        for (uint32_t j = i + 1; j < fs.file_count; j++) {
             if (fs.files[j].used && strcmp(f->name, fs.files[j].name) == 0) {
                 if (r.errors++ == 0) r.first_error = "duplicate file name";
             }
@@ -1923,7 +1923,7 @@ uint32_t fs_used_bytes(void) {
         return used > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)used;
     }
     uint32_t used = 0;
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < fs.file_count; i++) {
         if (fs.files[i].used) used += fs.files[i].size;
     }
     return used;
@@ -1938,7 +1938,7 @@ void fs_list(void) {
 file_t *fs_find_file(const char *name) {
     char norm[MAX_FILENAME];
     if (!normalize_path(name, norm)) return NULL;
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < fs.file_count; i++) {
         if (fs.files[i].used && strcmp(fs.files[i].name, norm) == 0)
             return &fs.files[i];
     }
@@ -2008,7 +2008,7 @@ file_t *fs_create_file(const char *name) {
             (void)fs_fail("exFAT 创建文件失败");
             return NULL;
         }
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             file_t *f = &fs.files[i];
             if (f->used) continue;
             strcpy(f->name, norm);
@@ -2038,7 +2038,7 @@ file_t *fs_create_file(const char *name) {
         if (!parent) return NULL;
         int ino = ext2_create_file(&ext2_fs, parent, basename, 1);
         if (ino < 0) return NULL;
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             file_t *f = &fs.files[i];
             if (f->used) continue;
             strcpy(f->name, norm);
@@ -2069,7 +2069,7 @@ file_t *fs_create_file(const char *name) {
         if (!parent) return NULL;
         uint32_t cluster;
         if (fat32_create_file(&fat32_fs, parent, basename, &cluster) < 0) return NULL;
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             file_t *f = &fs.files[i];
             if (f->used) continue;
             strcpy(f->name, norm);
@@ -2094,7 +2094,7 @@ file_t *fs_create_file(const char *name) {
         return NULL;
     }
 
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < fs.file_count; i++) {
         if (fs_backend != FS_BACKEND_HBFS && i >= RAMFS_MAX_FILES)
             break;   /* ramfs 数据区只有 RAMFS_MAX_FILES 个槽 */
         file_t *f = &fs.files[i];
@@ -2148,7 +2148,7 @@ file_t *fs_create_symlink(const char *name, const char *target) {
         if (!parent) return NULL;
         int ino = ext2_symlink(&ext2_fs, parent, basename, target);
         if (ino < 0) return NULL;
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             file_t *f = &fs.files[i];
             if (f->used) continue;
             strcpy(f->name, norm);
@@ -2348,11 +2348,17 @@ int fs_rename_file(const char *old_name, const char *new_name) {
         if (fs_path_in_tree(new_norm, old_norm))
             return fs_fail("不能把目录移动到自身内部");
 
-        static uint8_t moved[MAX_FILES];
-        static char previous[MAX_FILES][MAX_FILENAME];
+        /* 目录改名的祖先追踪表：用固定上限而不是 MAX_FILES（那是运行期
+         * 容量，不能拿来定静态数组）。超过这个规模就拒绝目录改名 ——
+         * 系统里没有任何路径会去改一个上万项目录的名字。 */
+        enum { FS_RENAME_MAX_ENTRIES = 16384 };
+        static uint8_t moved[FS_RENAME_MAX_ENTRIES];
+        static char previous[FS_RENAME_MAX_ENTRIES][MAX_FILENAME];
+        if (fs.file_count > FS_RENAME_MAX_ENTRIES)
+            return fs_fail("文件表过大，暂不支持目录改名");
         memset(moved, 0, sizeof(moved));
         size_t max_name_cap = (fs_backend == FS_BACKEND_HBFS) ? HBFS_NAME_MAX : MAX_FILENAME;
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             file_t *entry = &fs.files[i];
             if (!entry->used || !fs_path_in_tree(entry->name, old_norm))
                 continue;
@@ -2363,20 +2369,20 @@ int fs_rename_file(const char *old_name, const char *new_name) {
             strcpy(previous[i], entry->name);
         }
 
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             if (!moved[i]) continue;
             const char *suffix = previous[i] + old_length;
             char candidate[MAX_FILENAME];
             strcpy(candidate, new_norm);
             strcat(candidate, suffix);
-            for (uint32_t j = 0; j < MAX_FILES; j++) {
+            for (uint32_t j = 0; j < fs.file_count; j++) {
                 if (!fs.files[j].used || moved[j]) continue;
                 if (strcmp(fs.files[j].name, candidate) == 0)
                     return fs_fail("重命名后的后代路径冲突");
             }
         }
 
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             if (!moved[i]) continue;
             const char *suffix = previous[i] + old_length;
             strcpy(fs.files[i].name, new_norm);
@@ -2389,7 +2395,7 @@ int fs_rename_file(const char *old_name, const char *new_name) {
             }
         }
         if (fs_backend == FS_BACKEND_HBFS && hbfs_sync_table() < 0) {
-            for (uint32_t i = 0; i < MAX_FILES; i++) {
+            for (uint32_t i = 0; i < fs.file_count; i++) {
                 if (!moved[i]) continue;
                 strcpy(fs.files[i].name, previous[i]);
                 strcpy(fs.files[i].node.name, previous[i]);
@@ -2471,7 +2477,7 @@ uint32_t fs_get_count(void) {
 /** 按索引获取文件（跳过未使用的槽位） */
 file_t *fs_get_file(uint32_t index) {
     uint32_t seen = 0;
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < fs.file_count; i++) {
         if (!fs.files[i].used) continue;
         if (seen == index) return &fs.files[i];
         seen++;
@@ -2538,7 +2544,7 @@ int fs_mkdir(const char *name) {
         if (!parent) return -1;
         int ino = ext2_mkdir(&ext2_fs, parent, basename);
         if (ino < 0) return -1;
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             file_t *f = &fs.files[i];
             if (f->used) continue;
             strcpy(f->name, norm);
@@ -2570,7 +2576,7 @@ int fs_mkdir(const char *name) {
         if (fat32_mkdir(&fat32_fs, parent, basename) < 0) return -1;
         uint32_t new_cluster;
         if (fat32_lookup(&fat32_fs, parent, basename, &new_cluster, NULL, NULL) < 0) return -1;
-        for (uint32_t i = 0; i < MAX_FILES; i++) {
+        for (uint32_t i = 0; i < fs.file_count; i++) {
             file_t *f = &fs.files[i];
             if (f->used) continue;
             strcpy(f->name, norm);
@@ -2595,7 +2601,7 @@ int fs_mkdir(const char *name) {
         return -1;
     }
 
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < fs.file_count; i++) {
         file_t *f = &fs.files[i];
         if (f->used) continue;
         strcpy(f->name, norm);
@@ -2629,7 +2635,7 @@ int fs_rmdir(const char *name) {
     file_t *f = fs_find_file(name);
     if (!f || f->type != 1) return -1;
 
-    for (uint32_t i = 0; i < MAX_FILES; i++) {
+    for (uint32_t i = 0; i < fs.file_count; i++) {
         if (!fs.files[i].used) continue;
         if (&fs.files[i] == f) continue;
         size_t dlen = strlen(f->name);

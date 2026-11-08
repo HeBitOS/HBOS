@@ -1113,3 +1113,35 @@ chromium 侧没有代码改动，仍是 R46 的状态。
 
 下一步必须先修 ①（把文件表改成可增长/可淘汰，或至少提到能覆盖镜像规模），
 然后才谈得上装 bilibili；②③ 是同一类"固定上限"问题，建议一并处理。
+
+#### R49：文件表 8192 → 131072 —— chromium 恢复，并拿到下一个 FATAL 的准确坐标
+
+R48 里那个"装完 bilibili 就整个 `/opt` 解析不到"的根因找到了：
+`ext2_rebuild_files()` 把整棵树**平铺进静态数组** `file_t files[FS_MAX_FILES]`，
+而 `FS_MAX_FILES` 只有 **8192**。镜像有 11 万个文件，表一满
+`ext2_scan_cb` 就 `return 1` 停止遍历，后面的路径（`/opt/chromium`、`/opt/bili`）
+根本没进表 —— 于是 `run` 报 `app not found`。之前能跑只是因为 `/opt` 恰好
+落在前 8192 项里，加进 bilibili 的文件后就被挤出去了。
+
+修法：把 `FS_MAX_FILES` 提到 **131072**（`file_t` 约 456 字节，约 57 MiB 静态
+BSS；BSS 不进内核镜像，`hbos-bios.bin` 仍是 20.5 MB）。同时把查找/扫描循环的
+上界从 `MAX_FILES` 改成 `fs.file_count`，避免每次查找扫满 13 万项；
+目录改名用的两张祖先追踪表改成固定 16384 项并显式拒绝超规模改名。
+
+> 走过的弯路：一开始把表改成"堆上按需增长"，结果 `fs: ext2 mounted, files=0`
+> —— `src/core/heap.c` 的 `HEAP_POOL_SIZE` 只有 **2 MB** 静态池，
+> 3.7 MB 的首次分配必然失败。静态 BSS 才是这里的正解。
+
+**验证**：`fs: ext2 mounted, files=13340`（不再卡在 8192），
+`run /opt/chromium/usr/lib/chromium/chromium --version` →
+`Chromium 156.0.8078.73`。PANIC 0。
+
+**下一个卡点（已拿到准确坐标）**：带 `--ozone-platform=wayland` 跑，
+`run: exit 132`(SIGILL)，栈上残留的字符串是
+
+```
+FATAL:base/path_service.cc:264] Failed to get the path for 1001
+```
+
+Chromium 的路径常量里 1001 = **`DIR_CURRENT`**，也就是 `getcwd()` 失败。
+所以下一步不是 wayland 协议问题，是 HBOS 的 `getcwd` 在这个进程里返回了错误。

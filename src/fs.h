@@ -18,10 +18,13 @@
 /* 1024 只够装几个 Debian 库：Chromium 的依赖闭包（glib、gtk、nss、X11…）
  * 装下来是数千个文件 + 目录项。file_t 约 456 字节，8192 项 ≈ 3.7 MiB 静态
  * BSS——相比"装到一半没槽位"的代价，这点常驻内存是划算的。 */
-#define FS_MAX_FILES     8192
+/* 初始容量。ext2 挂载时会把整棵树平铺进这张表，8192 一满就再也看不到
+ * 后面的路径（实测 11 万文件的 Debian rootfs 把 /opt/chromium 挤出了窗口，
+ * chromium 直接 app not found）。表按需倍增，上限见 FS_MAX_FILES_CAP。 */
+#define FS_MAX_FILES     131072
 #define RAMFS_MAX_FILES  128
 #define HBFS_MAX_FILES   128
-#define MAX_FILES FS_MAX_FILES   /**< 兼容旧调用点：默认按内存表容量 */
+#define MAX_FILES FS_MAX_FILES   /**< 兼容旧调用点：按内存表容量 */
 #define MAX_FILENAME 128         /**< 文件路径最大长度（含结尾 '\0'） */
 #define HBFS_NAME_MAX 56         /**< HBFS 磁盘 64B 表项中的文件名最大长度 */
 #define RAMFS_MAX_FILE_SIZE 131072 /**< ramfs/HBFS 单文件最大容量（字节） */
@@ -40,7 +43,7 @@ typedef struct file {
 
 // 文件系统结构
 typedef struct filesystem {
-    file_t files[FS_MAX_FILES];  /**< 文件表 */
+    file_t files[FS_MAX_FILES];  /**< 文件表（静态 BSS，不进内核镜像体积） */
     uint32_t file_count;         /**< 当前已使用的文件数 */
     uint32_t total_sectors;      /**< 磁盘总扇区数 */
 } filesystem_t;
