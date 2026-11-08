@@ -87,11 +87,25 @@ void wl_shm_pool_request(wl_client_t *client, wl_object_t *object,
         int32_t height = wl_arg_i32(args);
         int32_t stride = wl_arg_i32(args);
         uint32_t format = wl_arg_u32(args);
-        if (wl_args_failed(args) || !buffer_id) return;
-        if (offset < 0 || width <= 0 || height <= 0 || stride <= 0) return;
-        if ((uint64_t)offset + (uint64_t)stride * (uint64_t)height >
-            (uint64_t)pool->size)
+        /* 交帧链路上最关键的一步：没有 buffer 就没有 attach。这里的四个
+         * 拒绝分支原先都是静默 return，日志里只能看到"客户端不发 attach"，
+         * 完全看不出是被我们丢掉的。 */
+        wl_dbg_note("shm.buf", (int)buffer_id, (int)width, (int)height);
+        wl_dbg_note("shm.buf2", (int)stride, (int)format, (int)offset);
+        if (wl_args_failed(args) || !buffer_id) {
+            wl_dbg_note("buf.args_rejected", (int)buffer_id, 0, 0);
             return;
+        }
+        if (offset < 0 || width <= 0 || height <= 0 || stride <= 0) {
+            wl_dbg_note("buf.bad_geom", (int)width, (int)height, (int)stride);
+            return;
+        }
+        if ((uint64_t)offset + (uint64_t)stride * (uint64_t)height >
+            (uint64_t)pool->size) {
+            wl_dbg_note("buf.too_big", (int)pool->size,
+                        (int)(stride * height), (int)offset);
+            return;
+        }
 
         if (!wl_client_adopt_id(client, buffer_id, WL_OBJ_BUFFER, NULL)) return;
         wl_shm_buffer_t *buffer = wl_buffer_alloc();

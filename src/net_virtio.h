@@ -5,8 +5,17 @@
  * Polling-only driver: net.c calls virtio_net_send()/virtio_net_poll()
  * exactly like the E1000/RTL8139/PCnet backends, so no interrupt service
  * path or MSI-X setup is required.
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  virtio_net_send  VirtIO network driver…
  */
-
 #ifndef HBOS_NET_VIRTIO_H
 #define HBOS_NET_VIRTIO_H
 

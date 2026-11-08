@@ -8,8 +8,21 @@
  * 为什么不直接用 fs.c 里那份：那份是给"找 HBFS 分区"用的，只保留 4 项、
  * 不处理扩展分区、不校验 GPT CRC，也没有名字。这里做通用的分区视图，
  * 后续安装器（P4）和 exFAT/ext4 挂载（P3）都走这一份。
+ *
+ * @layer   fs
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  partition_entry_t  结构体 / 类型别名
+ *   宏    PART_MAX_ENTRIES  常量 / 特性宏
+ *         PART_NAME_MAX     常量 / 特性宏
+ *   函数  partition_scheme_name  表类型名："none" / "MBR" /…
+ *         partition_type_name    分区类型的人类可读名（按 MBR 类型码
  */
-
 #ifndef HBOS_PARTITION_H
 #define HBOS_PARTITION_H
 

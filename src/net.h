@@ -1,8 +1,45 @@
 /**
  * @file net.h
  * @brief 网络子系统头文件，基于 Intel E1000 网卡实现，支持 DHCP、ARP、ICMP、DNS、TCP、HTTP 等协议
+ *
+ * @layer   net
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  net_driver_t    网卡驱动类型
+ *         net_device_t    结构体 / 类型别名
+ *         net_tcp_conn_t  结构体 / 类型别名
+ *   宏    NET_TCP_RXBUF_SIZE  接收缓冲区
+ *   函数  net_init                初始化网络子系统，探测并配置网卡硬件
+ *         net_primary             获取主网卡设备信息指针，若未初始化则自动调…
+ *         net_driver_name         获取网卡驱动类型对应的名称字符串
+ *         net_last_error          获取最近一次网络操作的错误描述字符串
+ *         net_dhcp                通过 DHCP 协议自动获取 IP 地址、…
+ *         net_configure           手动配置网络参数（IP、子网掩码、网关、D…
+ *         net_ping                向指定 IP 发送 ICMP Echo R…
+ *         net_dns_resolve         通过 DNS 协议解析域名为 IPv4 地址
+ *         net_dns_resolve_ipv6    通过 DNS 协议解析域名的 AAAA 记…
+ *         net_ntp_sync            通过 NTP 协议向服务器（域名或点分 I…
+ *         net_tcp_connect         发起 TCP 三次握手，建立到指定 IP:…
+ *         net_tcp_connect_start   非阻塞 connect：只发 SYN 立即…
+ *         net_tcp_finish_connect  推进非阻塞 connect：收到 SYN+…
+ *         net_tcp_send            通过已建立的 TCP 连接发送数据
+ *         net_tcp_recv            从已建立的 TCP 连接接收数据
+ *         net_tcp_close           发送 TCP FIN 包关闭连接
+ *         net_tcp_listen          在指定端口上开始 TCP 监听
+ *         net_tcp_rx_available    非消费式查询：连接接收缓冲是否有数据可读（…
+ *         net_tcp_conn_open       非消费式查询：连接是否仍打开（可写）
+ *         net_pump                泵一次网络收包分发（供 poll/epol…
+ *         net_udp_queue           驱动层调用：UDP 收包入全局队列（避免被…
+ *         net_pkt_is_udp          判断帧是否为 IPv4 UDP
+ *         net_tcp_accept          接受一个 TCP 客户端连接
+ *         net_parse_ipv4          将点分十进制 IPv4 字符串解析为网络字…
+ *         net_ipv4_to_str         将网络字节序的 32 位 IPv4 地址转…
  */
-
 #ifndef HBOS_NET_H
 #define HBOS_NET_H
 

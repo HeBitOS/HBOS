@@ -1,0 +1,8 @@
+{
+  "env": {
+    "TMPDIR": "/media/data/hbosv2/build/tmp"
+  },
+  "scriptFiles": [
+    "/media/data/hbosv2/Makefile"
+  ]
+}

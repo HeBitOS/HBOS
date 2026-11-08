@@ -12,8 +12,22 @@
  *
  * 注意：本驱动**不**处理链路状态变化后的重新协商；链路就绪只在
  * `r8169_init_hw()` 返回时报告一次。
+ *
+ * @layer   net
+ * @owner   src/net/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  r8169_probe               Realtek RTL8168/8111/…
+ *         r8169_driver_name         驱动名（用于日志/启动横幅）
+ *         r8169_device_name         上次 `r8169_init_hw()`…
+ *         r8169_device_mac_version  判断某个 PCI device id 是否…
+ *         r8169_send                Realtek RTL8168/8111/…
+ *         r8169_link_up             3
  */
-
 #ifndef HBOS_NIC_R8169_H
 #define HBOS_NIC_R8169_H
 

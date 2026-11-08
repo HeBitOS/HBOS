@@ -5,6 +5,33 @@
  * 这些函数在 src/tools/gui.c 中实现，直接操作 GUI 的离屏表面。用户态 .hax
  * 应用通过 HBOS_SYS_GUI_* 系统调用间接调用它们，从而在窗口/全屏画布上绘图。
  * 当 GUI 未运行（g_gui_surface 为 NULL）时，gui_app_info 返回 0。
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  gui_app_info         HAX GUI 应用画布接口 —— 内核…
+ *         gui_app_clear        用指定颜色填满整个画布
+ *         gui_app_rect         在画布上填充矩形
+ *         gui_app_text         在画布上绘制文本（UTF-8，scale…
+ *         gui_app_present      把画布内容提交到真实帧缓冲（显示到屏幕）
+ *         gui_app_pollkey      轮询一个按键，返回键值
+ *         gui_app_pollmouse    轮询鼠标
+ *         gui_app_line         直线（Bresenham，1px）
+ *         gui_app_thick_line   粗直线（thickness >= 1）
+ *         gui_app_circle       圆轮廓（1px）
+ *         gui_app_fill_circle  实心圆
+ *         gui_app_round_rect   圆角矩形
+ *         gui_app_gradient     垂直渐变（top → bottom）
+ *         gui_app_alpha_rect   半透明矩形（color 最高字节为 alp…
+ *         gui_app_blit         贴一张 RGBA 图标（src 为 w*h…
+ *         gui_app_icon         画内置图标集中的一张（icon_id 见…
+ *         gui_app_text_width   文本像素宽度/行高（用于居中排版）
+ *         gui_app_text_height  （待补）
  */
 #ifndef HBOS_GUI_CANVAS_H
 #define HBOS_GUI_CANVAS_H

@@ -4,6 +4,32 @@
  *
  * 定义文件打开标志、文件控制命令等常量。
  * 参考 Linux fcntl.h 补充了 O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK 等标志。
+ *
+ * @layer   user
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    O_RDONLY             只读打开
+ *         O_WRONLY             只写打开
+ *         O_RDWR               读写打开
+ *         O_ACCMODE            访问模式掩码
+ *         O_CREAT              若不存在则创建
+ *         O_EXCL               与 O_CREAT 一起使用，文件必须不存在
+ *         O_NOCTTY             不将终端设为控制终端
+ *         O_TRUNC              截断为 0 长度
+ *         O_APPEND             追加写入
+ *         O_NONBLOCK           非阻塞模式
+ *         O_DIRECTORY          必须是目录
+ *         O_NOFOLLOW           不跟随符号链接
+ *         O_CLOEXEC            执行时关闭
+ *         AT_FDCWD             以 cwd 为基准解析相对路径
+ *         AT_SYMLINK_NOFOLLOW  不跟随末端符号链接
+ *         AT_EMPTY_PATH        允许空路径操作 fd 自身
+ *   函数  open        打开路径，返回 fd
  */
 #ifndef HBOS_FCNTL_H
 #define HBOS_FCNTL_H

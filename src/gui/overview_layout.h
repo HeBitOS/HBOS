@@ -7,6 +7,19 @@
  * 每格内按比例缩放并居中，保持窗口宽高比。
  *
  * 纯计算、无绘制依赖，可宿主机单测。
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  ov_win_t     结构体 / 类型别名
+ *         ov_cell_t    结构体 / 类型别名
+ *         ov_layout_t  结构体 / 类型别名
+ *   宏    OV_MAX_WINDOWS  常量 / 特性宏
  */
 #ifndef HBOS_OVERVIEW_LAYOUT_H
 #define HBOS_OVERVIEW_LAYOUT_H

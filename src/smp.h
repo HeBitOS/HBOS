@@ -1,3 +1,64 @@
+/**
+ * @file    smp.h
+ * @brief   导出 48 个接口（2 类型 / 29 宏 / 17 函数）
+ *
+ * @layer   core
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  per_cpu_t   结构体 / 类型别名
+ *         spinlock_t  结构体 / 类型别名
+ *   宏    MAX_CPUS                常量 / 特性宏
+ *         APIC_ID_MASK            APIC编号掩码
+ *         LAPIC_ID                LAPIC编号
+ *         LAPIC_VERSION           LAPIC版本
+ *         LAPIC_TPR               常量 / 特性宏
+ *         LAPIC_EOI               常量 / 特性宏
+ *         LAPIC_LDR               常量 / 特性宏
+ *         LAPIC_DFR               常量 / 特性宏
+ *         LAPIC_SPURIOUS          常量 / 特性宏
+ *         LAPIC_ICR_LO            常量 / 特性宏
+ *         LAPIC_ICR_HI            常量 / 特性宏
+ *         LAPIC_LVT_TIMER         常量 / 特性宏
+ *         LAPIC_LVT_LINT0         常量 / 特性宏
+ *         LAPIC_LVT_LINT1         常量 / 特性宏
+ *         LAPIC_LVT_ERROR         LAPICLVT错误
+ *         LAPIC_TIMER_INIT        LAPICTIMER初始化
+ *         LAPIC_TIMER_CUR         常量 / 特性宏
+ *         LAPIC_TIMER_DIV         常量 / 特性宏
+ *         LAPIC_ENABLE            LAPIC使能
+ *         LAPIC_TIMER_MASK        LAPICTIMER掩码
+ *         LAPIC_TIMER_PERIODIC    常量 / 特性宏
+ *         LAPIC_DELIVERY_INIT     LAPICDELIVERY初始化
+ *         LAPIC_DELIVERY_STARTUP  常量 / 特性宏
+ *         LAPIC_DELIVERY_FIXED    常量 / 特性宏
+ *         LAPIC_LEVEL_DEASSERT    常量 / 特性宏
+ *         LAPIC_LEVEL_ASSERT      常量 / 特性宏
+ *         LAPIC_EDGE              常量 / 特性宏
+ *         LAPIC_ICR_PENDING       常量 / 特性宏
+ *         IRQ_SMP_TIMER           中断号SMPTIMER
+ *   函数  smp_init              （待补）
+ *         smp_cpu_count         （待补）
+ *         smp_send_ipi          （待补）
+ *         smp_get_apic_id       （待补）
+ *         smp_cpu_index         调用者所在核心的编号（0..smp_cpu…
+ *         smp_lapic_eoi         给本核 LAPIC 发 EOI（LAPIC…
+ *         smp_ap_timer_start    启动本核的周期性 LAPIC 定时器，用于…
+ *         smp_ap_release        BSP 的调度器建好后放行 AP：之前 A…
+ *         smp_panic_puts        崩溃现场专用输出：直写 COM1，不碰 c…
+ *         smp_panic_hex         （待补）
+ *         smp_sched_lock        （待补）
+ *         smp_sched_unlock      （待补）
+ *         spinlock_init         （待补）
+ *         spinlock_acquire      （待补）
+ *         spinlock_release      （待补）
+ *         smp_get_percpu        （待补）
+ *         smp_get_percpu_by_id  （待补）
+ */
 #ifndef HBOS_SMP_H
 #define HBOS_SMP_H
 

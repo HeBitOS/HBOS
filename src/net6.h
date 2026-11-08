@@ -1,3 +1,21 @@
+/**
+ * @file    net6.h
+ * @brief   导出 9 个接口（1 类型 / 1 宏 / 7 函数）
+ *
+ * @layer   net
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  net6_tcp_conn_t  结构体 / 类型别名
+ *   宏    NET6_RX_CAPACITY  常量 / 特性宏
+ *   函数  net6_init             Initialize IPv6, link…
+ *         net6_tcp_close        （待补）
+ *         net6_primary_address  Render the first pref…
+ */
 #ifndef HBOS_NET6_H
 #define HBOS_NET6_H
 

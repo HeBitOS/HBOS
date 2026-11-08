@@ -4,8 +4,26 @@
  *
  * 提供统一的块设备读写接口，屏蔽底层 AHCI/ATA 差异。
  * 支持扇区级别的读写操作和后端类型查询。
+ *
+ * @layer   fs
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  block_backend_t  结构体 / 类型别名
+ *   宏    BLOCK_SECTOR_SIZE  块扇区
+ *   函数  block_init           初始化块设备子系统，自动检测 AHCI 和…
+ *         block_read_sector    读取指定 LBA 的一个扇区
+ *         block_read_sectors   连续读取多个扇区
+ *         block_write_sector   写入指定 LBA 的一个扇区
+ *         block_write_sectors  连续写入多个扇区
+ *         block_sector_count   获取块设备的扇区总数
+ *         block_backend        获取当前块设备后端类型
+ *         block_backend_name   获取当前块设备后端名称字符串
  */
-
 #ifndef HBOS_BLOCK_H
 #define HBOS_BLOCK_H
 

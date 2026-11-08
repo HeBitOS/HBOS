@@ -1,3 +1,28 @@
+/**
+ * @file    sched.h
+ * @brief   导出 13 个接口（0 类型 / 10 宏 / 3 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    CLONE_VM              常量 / 特性宏
+ *         CLONE_FS              常量 / 特性宏
+ *         CLONE_FILES           常量 / 特性宏
+ *         CLONE_SIGHAND         常量 / 特性宏
+ *         CLONE_THREAD          CLONE线程
+ *         CLONE_SYSVSEM         常量 / 特性宏
+ *         CLONE_SETTLS          常量 / 特性宏
+ *         CLONE_PARENT_SETTID   常量 / 特性宏
+ *         CLONE_CHILD_CLEARTID  常量 / 特性宏
+ *         CLONE_CHILD_SETTID    常量 / 特性宏
+ *   函数  sched_yield        （待补）
+ *         sched_getaffinity  CPU 亲和位图：每个 bit 一个 CPU
+ */
 #ifndef HBOS_USER_LIBC_SCHED_H
 #define HBOS_USER_LIBC_SCHED_H
 

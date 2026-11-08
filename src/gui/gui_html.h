@@ -9,6 +9,83 @@
  * 命名：对外符号加 `gh_`（gui-html）前缀，gui.c 保留 static inline 同义
  * 短名转发，既有调用点零改动。类型与常量放这里是因为 gui.c 里剩余的
  * 浏览器代码（发射/布局/绘制）同样要用它们。
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  browser_style_t  结构体 / 类型别名
+ *         css_decl_t       结构体 / 类型别名
+ *         css_rule_t       结构体 / 类型别名
+ *         br_run_t         结构体 / 类型别名
+ *         br_card_t        结构体 / 类型别名
+ *   宏    BR_STACK_MAX           BR栈
+ *         BR_META_MARK           常量 / 特性宏
+ *         BR_META_LEN            常量 / 特性宏
+ *         BR_FLAG_COLOR          BR标志颜色
+ *         BR_FLAG_BOLD_ON        BR标志BOLDON
+ *         BR_FLAG_UNDER_ON       BR标志UNDERON
+ *         BR_FLAG_SCALE2         BR标志SCALE2
+ *         BR_FLAG_BG             BR标志BG
+ *         BR_FLAG_ALIGN_CENTER   BR标志ALIGNCENTER
+ *         BR_FLAG_ALIGN_RIGHT    BR标志ALIGNRIGHT
+ *         BR_FLAG_EXTRA_GAP      BR标志EXTRAGAP
+ *         BR_RUN_MARK            常量 / 特性宏
+ *         BR_RUN_MAX             常量 / 特性宏
+ *         BR_TBL_COLS            常量 / 特性宏
+ *         BR_CARD_META           常量 / 特性宏
+ *         BR_CARD_DUR            常量 / 特性宏
+ *         BR_CARD_CAP            常量 / 特性宏
+ *         BR_FLAG2_ITALIC_ON     常量 / 特性宏
+ *         BR_FLAG2_INDENT_SHIFT  常量 / 特性宏
+ *         BR_FLAG2_BORDER        常量 / 特性宏
+ *         BR_CELL_MARK           常量 / 特性宏
+ *         BROWSER_LINK_RECT_MAX  常量 / 特性宏
+ *         BR_TOOL_H              常量 / 特性宏
+ *         BR_TAB_H               常量 / 特性宏
+ *         BR_BTN_R               常量 / 特性宏
+ *         BR_BACK_CX             常量 / 特性宏
+ *         BR_FWD_CX              常量 / 特性宏
+ *         BR_RELOAD_CX           常量 / 特性宏
+ *         BR_BTN_CY              常量 / 特性宏
+ *   函数  gh_br_decode_entity        ── 解析入口（实现见 src/gui/g…
+ *         gh_browser_text_from_html  （待补）
+ *         gh_br_is_inline_type       （待补）
+ *         gh_tag_ci_eq               （待补）
+ *         gh_browser_style_get       （待补）
+ *         gh_browser_style_for_tag   （待补）
+ *         gh_css_parse_color         （待补）
+ *         gh_css_parse_decls         （待补）
+ *         gh_css_parse_stylesheet    （待补）
+ *         gh_css_reset               （待补）
+ *         gb_img_set                 （待补）
+ *         gb_img_set_src             （待补）
+ *         gb_img_count               （待补）
+ *         gb_img_reset               （待补）
+ *         gb_browser_add_link_rect   （待补）
+ *         gb_browser_draw_segment    （待补）
+ *         gb_br_read_style           （待补）
+ *         gb_br_utf8_next            （待补）
+ *         gb_br_cp_is_cjk            （待补）
+ *         gb_br_draw_tok             （待补）
+ *         gb_browser_flow_block      （待补）
+ *         gb_br_table_cell           （待补）
+ *         gb_br_table_scan           （待补）
+ *         gb_br_draw_table_row       （待补）
+ *         gb_br_card_read            （待补）
+ *         gb_br_card_text_copy       （待补）
+ *         gb_browser_draw_card_grid  （待补）
+ *         gb_browser_draw_hero_card  （待补）
+ *         gb_draw_rendered_page      （待补）
+ *         gb_br_icon_arrow           （待补）
+ *         gb_br_icon_reload          （待补）
+ *         gb_link_rect_count         （待补）
+ *         gb_link_rect_at            （待补）
+ *         gb_link_rects_reset        （待补）
  */
 #ifndef HBOS_GUI_HTML_H
 #define HBOS_GUI_HTML_H

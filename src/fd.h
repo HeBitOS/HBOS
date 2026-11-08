@@ -1,3 +1,31 @@
+/**
+ * @file    fd.h
+ * @brief   文件描述符表
+ *
+ * @layer   fs
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  pipe_t      结构体 / 类型别名
+ *         fd_entry_t  结构体 / 类型别名
+ *         fd_table_t  结构体 / 类型别名
+ *   宏    POSIX_MAX_FDS  常量 / 特性宏
+ *         FD_FILE        常量 / 特性宏
+ *         FD_SOCKET      FD套接字
+ *         FD_PIPE        常量 / 特性宏
+ *         FD_EVENT       FD事件
+ *         FD_EPOLL       常量 / 特性宏
+ *         FD_UNIX        常量 / 特性宏
+ *         FD_MEMFD       常量 / 特性宏
+ *         FD_INOTIFY     常量 / 特性宏
+ *         FD_TIMER       常量 / 特性宏
+ *         FD_SIGNALFD    常量 / 特性宏
+ *         PIPE_BUF_SIZE  PIPE缓冲区
+ */
 #ifndef HBOS_FD_H
 #define HBOS_FD_H
 

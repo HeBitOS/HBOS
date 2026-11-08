@@ -1004,6 +1004,10 @@ void isr_handler(isr_regs_t *regs) {
         dump_user_vma_for(regs->rip);
         dump_user_canary(regs->rbp);
         linux_open_trace_dump();
+        /* 最近 8 次 fcntl(F_GETFL)。Chromium 的 base::File::Open 在
+         * open 成功之后还会 F_GETFL 校验访问模式，不一致就 CHECK 崩溃；
+         * 这一段能看出"哪个 fd 返回了什么模式"。 */
+        linux_getfl_trace_dump();
         dump_user_tail(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);
@@ -1047,6 +1051,11 @@ void isr_handler(isr_regs_t *regs) {
          * base::File::Open 失败会走 CHECK() 直接 int3，只看断点地址
          * 不知道是哪个文件没打开；这一段能直接把崩溃翻译成路径。 */
         linux_open_trace_dump();
+        /* 最近 8 次 fcntl(F_GETFL)：定位 base::File::Open 的访问模式校验失败。 */
+        linux_getfl_trace_dump();
+        /* fd 表：Chromium 从已有 fd 构造 base::File 时会校验 F_GETFL，
+         * open trace 里没有这个 fd 的记录，只能靠 fd 表反查身份。 */
+        linux_fd_table_dump();
         /* 打印 rip 处的指令字节：GP/UD 只看 rip 查不出原因 —— 得知道到底是
          * 哪条指令非法（rdmsr？特权指令？SIMD？还是取指越界）。Chromium
          * 每次 exec 子进程都在 ld.so 同一个地址上 GP Fault，没有这条只能猜。 */

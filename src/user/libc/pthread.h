@@ -1,3 +1,26 @@
+/**
+ * @file    pthread.h
+ * @brief   导出 13 个接口（1 类型 / 2 宏 / 10 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  pthread_mutex_t  结构体 / 类型别名
+ *   宏    PTHREAD_MUTEX_INITIALIZER  PTHREAD互斥量INITIALIZER
+ *         PTHREAD_COND_INITIALIZER   常量 / 特性宏
+ *   函数  pthread_mutex_destroy   （待补）
+ *         pthread_mutex_lock      加互斥锁
+ *         pthread_mutex_unlock    解互斥锁
+ *         pthread_cond_destroy    （待补）
+ *         pthread_cond_signal     （待补）
+ *         pthread_cond_broadcast  （待补）
+ *         pthread_cond_wait       HBOS is single-thread…
+ */
 #ifndef HBOS_USER_LIBC_PTHREAD_H
 #define HBOS_USER_LIBC_PTHREAD_H
 

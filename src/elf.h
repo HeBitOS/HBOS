@@ -5,8 +5,50 @@
  * 对标 Linux fs/binfmt_elf.c，实现 ELF64 可执行文件的
  * 解析、段加载和栈初始化。
  * 当前仅支持静态链接的 ET_EXEC 类型 x86_64 ELF。
+ *
+ * @layer   user
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    EI_MAG0        常量 / 特性宏
+ *         EI_MAG1        常量 / 特性宏
+ *         EI_MAG2        常量 / 特性宏
+ *         EI_MAG3        常量 / 特性宏
+ *         EI_CLASS       常量 / 特性宏
+ *         EI_DATA        常量 / 特性宏
+ *         EI_VERSION     EI版本
+ *         EI_OSABI       常量 / 特性宏
+ *         EI_ABIVERSION  常量 / 特性宏
+ *         EI_NIDENT      常量 / 特性宏
+ *         ELFCLASS32     常量 / 特性宏
+ *         ELFCLASS64     常量 / 特性宏
+ *         ELFDATA2LSB    常量 / 特性宏
+ *         ELFDATA2MSB    常量 / 特性宏
+ *         ET_NONE        常量 / 特性宏
+ *         ET_REL         常量 / 特性宏
+ *         ET_EXEC        常量 / 特性宏
+ *         ET_DYN         常量 / 特性宏
+ *         ET_CORE        ET核心
+ *         EM_X86_64      常量 / 特性宏
+ *         PT_NULL        常量 / 特性宏
+ *         PT_LOAD        常量 / 特性宏
+ *         PT_DYNAMIC     常量 / 特性宏
+ *         PT_INTERP      常量 / 特性宏
+ *         PT_NOTE        常量 / 特性宏
+ *         PT_PHDR        常量 / 特性宏
+ *         PT_TLS         常量 / 特性宏
+ *         PF_X           常量 / 特性宏
+ *         PF_W           常量 / 特性宏
+ *         PF_R           常量 / 特性宏
+ *         SHT_SYMTAB     常量 / 特性宏
+ *         SHT_STRTAB     常量 / 特性宏
+ *   函数  elf_set_exec_path  Stream an ELF image d…
+ *         elf64_last_error   （待补）
  */
-
 #ifndef HBOS_ELF_H
 #define HBOS_ELF_H
 

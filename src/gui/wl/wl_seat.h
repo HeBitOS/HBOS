@@ -7,6 +7,32 @@
  *   - 焦点变化会生成 ENTER / LEAVE 事件；
  *   - 键盘同理，焦点单独维护。
  * 事件入队后由 wl_seat_dispatch() 统一派发，合成器不再直接读鼠标。
+ *
+ * @layer   gui
+ * @owner   src/gui/wl/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  wl_event_type_t  结构体 / 类型别名
+ *         wl_event_t       结构体 / 类型别名
+ *         wl_seat          （待补）
+ *         wl_seat_t        结构体 / 类型别名
+ *   宏    WL_SEAT_QUEUE  WLSEAT队列
+ *   函数  wl_seat_create              （待补）
+ *         wl_seat_destroy             （待补）
+ *         wl_seat_add_listener        （待补）
+ *         wl_seat_set_pointer_focus   设置指针焦点（-1/0 表示无）
+ *         wl_seat_set_keyboard_focus  设置键盘焦点
+ *         wl_seat_pointer_motion      （待补）
+ *         wl_seat_pointer_button      （待补）
+ *         wl_seat_pointer_axis        （待补）
+ *         wl_seat_key                 （待补）
+ *         wl_seat_dispatch            Wayland 风格输入席位（① 的地基）
+ *         wl_seat_pending             （待补）
+ *         wl_seat_dropped             （待补）
  */
 #ifndef HBOS_WL_SEAT_H
 #define HBOS_WL_SEAT_H

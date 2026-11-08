@@ -23,6 +23,23 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * @file    fb_private.h
+ * @brief   导出 4 个接口（3 类型 / 1 宏 / 0 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  frozen（上游代码，勿改正文）
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  flanterm_fb_char        （待补）
+ *         flanterm_fb_queue_item  （待补）
+ *         flanterm_fb_context     （待补）
+ *   宏    FLANTERM_FB_FONT_GLYPHS  FLANTERMFB字体GLYPHS
+ */
 #ifndef FLANTERM_FB_PRIVATE_H
 #    define FLANTERM_FB_PRIVATE_H 1
 

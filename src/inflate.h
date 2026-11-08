@@ -1,3 +1,16 @@
+/**
+ * @file    inflate.h
+ * @brief   导出 2 个接口（0 类型 / 0 宏 / 2 函数）
+ *
+ * @layer   lib
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ */
 #ifndef HBOS_INFLATE_H
 #define HBOS_INFLATE_H
 

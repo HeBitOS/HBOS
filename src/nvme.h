@@ -10,8 +10,21 @@
  * AQA/ASQ/ACQ 布局、Identify → Set Features → Create CQ/SQ），但代码是按
  * HBOS 的接口重新实现的，没有拷贝 Linux 源码；寄存器/命令编号来自 NVMe
  * 规范。这样也和 HBOS 的 GPLv3 许可没有冲突。
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  nvme_init           探测并初始化 NVMe 控制器
+ *         nvme_ready          控制器是否就绪（已识别到命名空间）
+ *         nvme_sector_count   命名空间 0 的扇区总数（512B 扇区）
+ *         nvme_read_sectors   读/写连续扇区
+ *         nvme_write_sectors  （待补）
  */
-
 #ifndef HBOS_NVME_H
 #define HBOS_NVME_H
 

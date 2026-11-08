@@ -1,3 +1,50 @@
+/**
+ * @file    ext2.h
+ * @brief   导出 40 个接口（1 类型 / 17 宏 / 22 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  ext2_fs_t   结构体 / 类型别名
+ *   宏    EXT2_SIGNATURE          常量 / 特性宏
+ *         EXT2_INCOMPAT_RECOVER   常量 / 特性宏
+ *         EXT2_INCOMPAT_EXTENTS   常量 / 特性宏
+ *         EXT2_INCOMPAT_64BIT     常量 / 特性宏
+ *         EXT2_INCOMPAT_FLEX_BG   常量 / 特性宏
+ *         EXT2_EXTENTS_FL         常量 / 特性宏
+ *         EXT2_SUPERBLOCK_OFFSET  常量 / 特性宏
+ *         EXT2_SUPERBLOCK_SIZE    常量 / 特性宏
+ *         EXT2_ROOT_INO           常量 / 特性宏
+ *         EXT2_S_IFMT             常量 / 特性宏
+ *         EXT2_S_IFREG            常量 / 特性宏
+ *         EXT2_S_IFDIR            常量 / 特性宏
+ *         EXT2_S_IFLNK            常量 / 特性宏
+ *         EXT2_NDIR_BLOCKS        常量 / 特性宏
+ *         EXT2_IND_BLOCK          EXT2IND块
+ *         EXT2_DIND_BLOCK         EXT2DIND块
+ *         EXT2_TIND_BLOCK         EXT2TIND块
+ *   函数  ext2_mount          Read
+ *         ext2_last_error     最近一次挂载失败原因（静态字符串），成功时…
+ *         ext2_read_inode     （待补）
+ *         ext2_read_block     （待补）
+ *         ext2_iter_dir       一次性遍历目录（按块扫描，不重复从头扫描）
+ *         ext2_path_to_inode  （待补）
+ *         ext2_write_block    Write
+ *         ext2_write_inode    （待补）
+ *         ext2_alloc_block    （待补）
+ *         ext2_free_block     （待补）
+ *         ext2_alloc_inode    （待补）
+ *         ext2_free_inode     （待补）
+ *         ext2_create_file    （待补）
+ *         ext2_unlink         （待补）
+ *         ext2_truncate       （待补）
+ *         ext2_mkdir          （待补）
+ */
 #ifndef HBOS_EXT2_H
 #define HBOS_EXT2_H
 

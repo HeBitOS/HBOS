@@ -1,3 +1,35 @@
+/**
+ * @file    epoll.h
+ * @brief   导出 20 个接口（2 类型 / 15 宏 / 3 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  epoll_data_t  结构体 / 类型别名
+ *         epoll_event   epoll 事件
+ *   宏    EPOLLIN         常量 / 特性宏
+ *         EPOLLPRI        常量 / 特性宏
+ *         EPOLLOUT        常量 / 特性宏
+ *         EPOLLERR        常量 / 特性宏
+ *         EPOLLHUP        常量 / 特性宏
+ *         EPOLLRDNORM     常量 / 特性宏
+ *         EPOLLRDHUP      常量 / 特性宏
+ *         EPOLLEXCLUSIVE  常量 / 特性宏
+ *         EPOLLWAKEUP     常量 / 特性宏
+ *         EPOLLONESHOT    常量 / 特性宏
+ *         EPOLLET         常量 / 特性宏
+ *         EPOLL_CLOEXEC   常量 / 特性宏
+ *         EPOLL_CTL_ADD   EPOLLCTL添加
+ *         EPOLL_CTL_DEL   常量 / 特性宏
+ *         EPOLL_CTL_MOD   常量 / 特性宏
+ *   函数  epoll_create1  （待补）
+ *         epoll_ctl      （待补）
+ */
 #ifndef HBOS_USER_LIBC_SYS_EPOLL_H
 #define HBOS_USER_LIBC_SYS_EPOLL_H
 

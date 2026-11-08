@@ -1,6 +1,40 @@
 /**
  * @file vfs.h
  * @brief 虚拟文件系统（VFS）头文件，定义统一的文件操作接口与数据结构
+ *
+ * @layer   fs
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  vfs_node_type_t  节点类型
+ *         vfs_ops_t        操作接口函数指针表
+ *         vfs_node         （待补）
+ *         vfs_node_t       查找节点并跟随符号链接
+ *   宏    VFS_MAX_NAME   完整 VFS 路径最大长度（含结尾 '/0…
+ *         VFS_MAX_NODES  最大 VFS 节点数
+ *   函数  vfs_init             初始化 VFS 层
+ *         vfs_resolve_path     （待补）
+ *         vfs_lookup           查找节点并跟随符号链接
+ *         vfs_lookup_nofollow  不跟随最终符号链接
+ *         vfs_create           按路径创建 VFS 节点
+ *         vfs_symlink          创建符号链接
+ *         vfs_unlink           按路径删除 VFS 节点
+ *         vfs_rename           （待补）
+ *         vfs_read             从 VFS 节点读取数据
+ *         vfs_write            向 VFS 节点写入数据
+ *         vfs_truncate         把 VFS 节点截断/扩展到 size 字节
+ *         vfs_count            获取 VFS 节点数量
+ *         vfs_get              按索引获取 VFS 节点
+ *         vfs_mkdir            （待补）
+ *         vfs_rmdir            （待补）
+ *         vfs_opendir          （待补）
+ *         vfs_readdir          （待补）
+ *         vfs_readdir_at       （待补）
+ *         vfs_closedir         （待补）
  */
 #ifndef HBOS_VFS_H
 #define HBOS_VFS_H

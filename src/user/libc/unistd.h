@@ -1,3 +1,56 @@
+/**
+ * @file    unistd.h
+ * @brief   导出 40 个接口（0 类型 / 10 宏 / 30 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    F_OK           常量 / 特性宏
+ *         R_OK           常量 / 特性宏
+ *         W_OK           常量 / 特性宏
+ *         X_OK           常量 / 特性宏
+ *         STDIN_FILENO   常量 / 特性宏
+ *         STDOUT_FILENO  常量 / 特性宏
+ *         STDERR_FILENO  常量 / 特性宏
+ *         SEEK_SET       SEEK设置
+ *         SEEK_CUR       常量 / 特性宏
+ *         SEEK_END       常量 / 特性宏
+ *   函数  sleep           休眠整秒
+ *         usleep          休眠微秒
+ *         getpid          取当前进程号
+ *         getcwd          取当前工作目录
+ *         chdir           切换工作目录
+ *         unlink          删除目录项
+ *         symlink         （待补）
+ *         readlink        （待补）
+ *         read            从文件描述符读
+ *         write           向文件描述符写
+ *         lseek           移动 fd 读写位置
+ *         ftruncate       按 fd 截断
+ *         close           关闭 fd
+ *         rmdir           删空目录
+ *         pipe2           （待补）
+ *         execve          替换当前进程映像
+ *         execvp          按 PATH 查找并替换映像
+ *         access          检查可达性
+ *         isatty          fd 是否为终端
+ *         rename          重命名路径
+ *         getuid          HBOS-specific: HBOS's…
+ *         geteuid         取有效用户号
+ *         getgid          （待补）
+ *         getegid         取有效组号
+ *         setuid          设置用户号
+ *         setgid          （待补）
+ *         getgroups       （待补）
+ *         setgroups       （待补）
+ *         getpgid         （待补）
+ *         hax_app_exists  （待补）
+ */
 #ifndef HBOS_USER_LIBC_UNISTD_H
 #define HBOS_USER_LIBC_UNISTD_H
 

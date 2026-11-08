@@ -5,6 +5,21 @@
  * 提供 ACPI 初始化和系统关机功能。
  * acpi_init() 从 Multiboot2 信息中解析 ACPI 表，
  * acpi_poweroff() 通过 S5 睡眠状态实现关机。
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  acpi_cpu_t        结构体 / 类型别名
+ *         acpi_madt_info_t  结构体 / 类型别名
+ *   宏    ACPI_MAX_CPUS  常量 / 特性宏
+ *   函数  acpi_init      ACPI 高级配置与电源接口 — 头文件
+ *         acpi_poweroff  ACPI 高级配置与电源接口 — 头文件
+ *         acpi_get_madt  获取 MADT 解析信息（CPU 列表、I…
  */
 #ifndef HBOS_ACPI_H
 #define HBOS_ACPI_H

@@ -16,8 +16,20 @@
  *   /proc/<pid>/fd      — 文件描述符目录（readlink 由 POSIX 层提供）
  *   /sys/devices/system/cpu — 在线 CPU 与 cpu0 拓扑只读视图
  *   /sys/class/net/{lo,eth0} — 网卡地址、链路、MTU 与类型只读视图
+ *
+ * @layer   fs
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  devfs_init            初始化 /dev、/proc 和轻量只读…
+ *         devfs_lookup          尝试解析伪文件系统路径，返回合成 VFS…
+ *         devfs_readdir         枚举 /dev、/proc、/proc/<…
+ *         devfs_register_nodes  注册伪文件系统节点到全局表中
  */
-
 #ifndef HBOS_DEVFS_H
 #define HBOS_DEVFS_H
 

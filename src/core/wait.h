@@ -4,8 +4,20 @@
  *
  * IRQ 开启后优先使用 PIT 真实 tick。启动早期 PIT 已编程但 tick 尚不递增，
  * 因此保留“连续无时钟进展”的自旋上限，避免初始化异常永久挂死。
+ *
+ * @layer   core
+ * @owner   src/core/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hw_deadline_t  结构体 / 类型别名
+ *   函数  pit_deadline_after_ms  （待补）
+ *         pit_deadline_reached   （待补）
+ *         hw_deadline_start      （待补）
  */
-
 #ifndef HBOS_CORE_WAIT_H
 #define HBOS_CORE_WAIT_H
 

@@ -1,3 +1,49 @@
+/**
+ * @file    stdio.h
+ * @brief   导出 33 个接口（1 类型 / 6 宏 / 26 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  FILE        （待补）
+ *   宏    EOF           文件结束标志（−1）
+ *         BUFSIZ        标准缓冲大小
+ *         FILENAME_MAX  路径名最大长度
+ *         FOPEN_MAX     同时打开文件数上限
+ *         getc          从流读一字符
+ *         putc          向流写一字符
+ *   函数  fopen       按模式打开流
+ *         fdopen      （待补）
+ *         fclose      关闭流并刷新
+ *         remove      删除文件或空目录
+ *         fflush      刷新流缓冲
+ *         fread       从流读一块
+ *         fwrite      向流写一块
+ *         fseek       设置流位置
+ *         ftell       取流当前位置
+ *         fgetc       读一个字符
+ *         fputc       写一个字符
+ *         fgets       读一行到缓冲
+ *         fputs       写字符串到流
+ *         feof        是否已到流末尾
+ *         ferror      流是否出错
+ *         printf      格式化输出到 stdout
+ *         fprintf     格式化输出到流
+ *         sprintf     格式化到缓冲
+ *         snprintf    格式化到缓冲，返回应写长度
+ *         vprintf     va_list 版 printf
+ *         vfprintf    va_list 版 fprintf
+ *         vsprintf    va_list 版 sprintf
+ *         vsnprintf   va_list 版 snprintf
+ *         getchar     从 stdin 读一字符
+ *         putchar     输出一个字符
+ *         puts        输出字符串 + 换行
+ */
 #ifndef HBOS_USER_LIBC_STDIO_H
 #define HBOS_USER_LIBC_STDIO_H
 

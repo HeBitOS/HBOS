@@ -1,3 +1,105 @@
+/**
+ * @file    ldso.h
+ * @brief   导出 90 个接口（7 类型 / 69 宏 / 14 函数）
+ *
+ * @layer   user
+ * @owner   src/user/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  elf64_dyn_t      结构体 / 类型别名
+ *         elf64_sym_t      结构体 / 类型别名
+ *         elf64_rela_t     结构体 / 类型别名
+ *         elf64_verdef_t   结构体 / 类型别名
+ *         elf64_verdaux_t  结构体 / 类型别名
+ *         elf64_verneed_t  结构体 / 类型别名
+ *         elf64_vernaux_t  结构体 / 类型别名
+ *   宏    DT_NULL             常量 / 特性宏
+ *         DT_NEEDED           常量 / 特性宏
+ *         DT_PLTRELSZ         常量 / 特性宏
+ *         DT_PLTGOT           常量 / 特性宏
+ *         DT_HASH             常量 / 特性宏
+ *         DT_STRTAB           常量 / 特性宏
+ *         DT_SYMTAB           常量 / 特性宏
+ *         DT_RELA             常量 / 特性宏
+ *         DT_RELASZ           常量 / 特性宏
+ *         DT_RELAENT          常量 / 特性宏
+ *         DT_STRSZ            常量 / 特性宏
+ *         DT_SYMENT           常量 / 特性宏
+ *         DT_INIT             DT初始化
+ *         DT_FINI             常量 / 特性宏
+ *         DT_SONAME           常量 / 特性宏
+ *         DT_RPATH            常量 / 特性宏
+ *         DT_SYMBOLIC         常量 / 特性宏
+ *         DT_REL              常量 / 特性宏
+ *         DT_RELSZ            常量 / 特性宏
+ *         DT_RELENT           常量 / 特性宏
+ *         DT_PLTREL           常量 / 特性宏
+ *         DT_DEBUG            DT调试
+ *         DT_TEXTREL          常量 / 特性宏
+ *         DT_JMPREL           常量 / 特性宏
+ *         DT_BIND_NOW         常量 / 特性宏
+ *         DT_INIT_ARRAY       DT初始化ARRAY
+ *         DT_FINI_ARRAY       常量 / 特性宏
+ *         DT_INIT_ARRAYSZ     DT初始化ARRAYSZ
+ *         DT_FINI_ARRAYSZ     常量 / 特性宏
+ *         DT_RUNPATH          常量 / 特性宏
+ *         DT_FLAGS            常量 / 特性宏
+ *         DT_GNU_HASH         常量 / 特性宏
+ *         DT_VERSYM           常量 / 特性宏
+ *         DT_RELACOUNT        常量 / 特性宏
+ *         DT_VERDEF           常量 / 特性宏
+ *         DT_VERDEFNUM        常量 / 特性宏
+ *         DT_VERNEED          常量 / 特性宏
+ *         DT_VERNEEDNUM       常量 / 特性宏
+ *         DT_FLAGS_1          常量 / 特性宏
+ *         VER_NDX_LOCAL       常量 / 特性宏
+ *         VER_NDX_GLOBAL      常量 / 特性宏
+ *         VER_NDX_HIDDEN      常量 / 特性宏
+ *         VER_NDX_MASK        VERNDX掩码
+ *         R_X86_64_NONE       常量 / 特性宏
+ *         R_X86_64_64         常量 / 特性宏
+ *         R_X86_64_PC32       常量 / 特性宏
+ *         R_X86_64_GOT32      常量 / 特性宏
+ *         R_X86_64_PLT32      常量 / 特性宏
+ *         R_X86_64_COPY       RX8664复制
+ *         R_X86_64_GLOB_DAT   常量 / 特性宏
+ *         R_X86_64_JUMP_SLOT  RX8664JUMP槽位
+ *         R_X86_64_RELATIVE   常量 / 特性宏
+ *         R_X86_64_DTPMOD64   常量 / 特性宏
+ *         R_X86_64_DTPOFF64   常量 / 特性宏
+ *         R_X86_64_IRELATIVE  常量 / 特性宏
+ *         STB_LOCAL           常量 / 特性宏
+ *         STB_GLOBAL          常量 / 特性宏
+ *         STB_WEAK            常量 / 特性宏
+ *         STT_NOTYPE          常量 / 特性宏
+ *         STT_OBJECT          常量 / 特性宏
+ *         STT_FUNC            常量 / 特性宏
+ *         STT_SECTION         常量 / 特性宏
+ *         STT_FILE            常量 / 特性宏
+ *         STT_TLS             常量 / 特性宏
+ *         STT_GNU_IFUNC       常量 / 特性宏
+ *         ELF64_R_SYM         常量 / 特性宏
+ *         ELF64_R_TYPE        常量 / 特性宏
+ *         ELF64_ST_BIND       常量 / 特性宏
+ *         ELF64_ST_TYPE       常量 / 特性宏
+ *   函数  ldso_load                   加载 ELF 共享对象 (.so)
+ *         ldso_load_vfs               Stream an ET_DYN obje…
+ *         ldso_load_vfs_path          Stream an ET_DYN obje…
+ *         ldso_init_next              Enumerate constructor…
+ *         ldso_fini_next              （待补）
+ *         ldso_ifunc_next             Enumerate/apply GNU I…
+ *         ldso_ifunc_apply            （待补）
+ *         ldso_tls_get_addr           Resolve one General D…
+ *         ldso_release_thread_tls     Release lazily alloca…
+ *         ldso_resolve                在所有已加载的共享库中解析符号（用于库间相…
+ *         ldso_dlsym                  加载 ELF 共享对象 (.so)
+ *         ldso_close                  加载 ELF 共享对象 (.so)
+ *         ldso_release_address_space  Drop every loaded-obj…
+ */
 #ifndef HBOS_LDSO_H
 #define HBOS_LDSO_H
 

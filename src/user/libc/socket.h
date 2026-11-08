@@ -1,3 +1,67 @@
+/**
+ * @file    socket.h
+ * @brief   导出 55 个接口（7 类型 / 24 宏 / 24 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  sockaddr     通用套接字地址
+ *         sockaddr_un  UNIX 域套接字地址
+ *         sockaddr_in  IPv4 套接字地址
+ *         msghdr       （待补）
+ *         cmsghdr      （待补）
+ *         ucred        （待补）
+ *         socklen_t    套接字地址长度
+ *   宏    AF_UNIX        常量 / 特性宏
+ *         AF_LOCAL       常量 / 特性宏
+ *         AF_INET        常量 / 特性宏
+ *         SOCK_STREAM    常量 / 特性宏
+ *         SOCK_DGRAM     常量 / 特性宏
+ *         SOCK_NONBLOCK  常量 / 特性宏
+ *         SOCK_CLOEXEC   常量 / 特性宏
+ *         MSG_DONTWAIT   消息DONTWAIT
+ *         MSG_NOSIGNAL   消息NOSIGNAL
+ *         MSG_CTRUNC     消息CTRUNC
+ *         SOL_SOCKET     SOL套接字
+ *         SO_TYPE        常量 / 特性宏
+ *         SO_ERROR       SO错误
+ *         SO_PASSCRED    常量 / 特性宏
+ *         SO_PEERCRED    常量 / 特性宏
+ *         SCM_RIGHTS     常量 / 特性宏
+ *         CMSG_ALIGN     常量 / 特性宏
+ *         CMSG_SPACE     常量 / 特性宏
+ *         CMSG_LEN       常量 / 特性宏
+ *         CMSG_DATA      常量 / 特性宏
+ *         CMSG_FIRSTHDR  常量 / 特性宏
+ *         SHUT_RD        常量 / 特性宏
+ *         SHUT_WR        常量 / 特性宏
+ *         SHUT_RDWR      常量 / 特性宏
+ *   函数  socket       创建套接字
+ *         socketpair   （待补）
+ *         bind         绑定地址
+ *         listen       进入监听
+ *         accept       接受连接
+ *         accept4      （待补）
+ *         connect      发起连接
+ *         getsockname  （待补）
+ *         getpeername  （待补）
+ *         send         发送数据
+ *         recv         接收数据
+ *         sendmsg      （待补）
+ *         recvmsg      （待补）
+ *         shutdown     关闭套接字单向流
+ *         close        关闭 fd
+ *         htonl        （待补）
+ *         htons        （待补）
+ *         ntohl        （待补）
+ *         ntohs        （待补）
+ *         inet_addr    （待补）
+ */
 #ifndef HBOS_USER_LIBC_SOCKET_H
 #define HBOS_USER_LIBC_SOCKET_H
 

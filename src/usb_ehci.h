@@ -9,8 +9,21 @@
  *
  * 模型：纯轮询。不使用中断（`USBINTR` 全程为 0），所有完成判定都靠轮询
  * qTD 的 Active 位，并带时间 + 自旋双重截止。
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  usb_ehci_register         把 EHCI 控制器注册进 USB 主机控…
+ *         usb_ehci_init             把 EHCI 控制器注册进 USB 主机控…
+ *         usb_ehci_device_count     已枚举（已分配地址）的设备数量
+ *         usb_ehci_get_device_desc  探测并初始化所有 EHCI 控制器，复位根…
+ *         usb_ehci_poll             推进控制器事件处理（本驱动为轮询模型，主要…
  */
-
 #ifndef HBOS_USB_EHCI_H
 #define HBOS_USB_EHCI_H
 

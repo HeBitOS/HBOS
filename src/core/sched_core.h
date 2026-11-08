@@ -10,6 +10,24 @@
  *   - 取任务只看最高非空级，扫描级数是常数 → O(1)。
  *   - 老化：每 age_quantum 次取出，把最低非空级的队首升一级，
  *     避免低优先级任务饿死（对应笔记里的"同级先来后到"）。
+ *
+ * @layer   core
+ * @owner   src/core/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  sched_node_t   结构体 / 类型别名
+ *         sched_queue_t  结构体 / 类型别名
+ *   宏    SCHED_LEVELS  0..SCHED_LEVELS-1
+ *   函数  schedq_init    （待补）
+ *         schedq_push    入队到指定等级（超出范围会被夹到两端）
+ *         schedq_remove  从队列摘除（未入队返回 -1）
+ *         schedq_pick    取出最高优先级的队首
+ *         schedq_count   （待补）
+ *         schedq_empty   （待补）
  */
 #ifndef HBOS_SCHED_CORE_H
 #define HBOS_SCHED_CORE_H

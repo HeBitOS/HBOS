@@ -7,8 +7,28 @@
  *   - 正常退出: status = (exit_code << 8)
  *   - 信号终止: status = signal_number
  *   - 信号停止: status = (signal_number << 8) | 0x7f
+ *
+ * @layer   user
+ * @owner   src/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    WNOHANG       不阻塞，没有子进程时立即返回 0
+ *         WUNTRACED     也报告已停止的子进程
+ *         WCONTINUED    也报告已继续的子进程
+ *         WIFEXITED     常量 / 特性宏
+ *         WEXITSTATUS   常量 / 特性宏
+ *         WIFSIGNALED   常量 / 特性宏
+ *         WTERMSIG      常量 / 特性宏
+ *         WIFSTOPPED    常量 / 特性宏
+ *         WSTOPSIG      常量 / 特性宏
+ *         WIFCONTINUED  常量 / 特性宏
+ *         W_EXITCODE    常量 / 特性宏
+ *         W_STOPCODE    常量 / 特性宏
  */
-
 #ifndef HBOS_SYS_WAIT_H
 #define HBOS_SYS_WAIT_H
 

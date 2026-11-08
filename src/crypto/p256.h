@@ -1,3 +1,18 @@
+/**
+ * @file    p256.h
+ * @brief   导出 2 个接口（0 类型 / 0 宏 / 2 函数）
+ *
+ * @layer   crypto
+ * @owner   src/crypto/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  p256_public_key  由私钥标量算公钥点（X||Y，64 字节）
+ *         p256_ecdh        ECDH：out_x = (priv *…
+ */
 #ifndef HBOS_P256_H
 #define HBOS_P256_H
 

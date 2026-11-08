@@ -7,6 +7,16 @@
  * 服务器（比如走 Azure/IIS 的站点）只在 TLS 1.3 里提供 AES-GCM 系列，不
  * 提供 ChaCha20-Poly1305。这里只实现 AES-128（不是 AES-256），因为
  * TLS_AES_256_GCM_SHA384 要配 SHA-384，这个项目目前只有 SHA-256。
+ *
+ * @layer   crypto
+ * @owner   src/crypto/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  aes128_encrypt_block  对单个 16 字节分组做 AES-128…
  */
 #ifndef HBOS_AES_GCM_H
 #define HBOS_AES_GCM_H

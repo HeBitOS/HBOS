@@ -1,3 +1,20 @@
+/**
+ * @file    browser_layout.h
+ * @brief   导出 5 个接口（2 类型 / 1 宏 / 2 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hive_browser_card_rect_t  结构体 / 类型别名
+ *         hive_browser_grid_t       结构体 / 类型别名
+ *   宏    HIVE_BROWSER_LAYOUT_MAX_CARDS  常量 / 特性宏
+ *   函数  hive_browser_grid_hit_test  Return the card index…
+ */
 #ifndef HIVE_BROWSER_LAYOUT_H
 #define HIVE_BROWSER_LAYOUT_H
 

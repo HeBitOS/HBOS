@@ -1,3 +1,28 @@
+/**
+ * @file    browser_backend.h
+ * @brief   导出 14 个接口（2 类型 / 5 宏 / 7 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hive_browser_level_t    结构体 / 类型别名
+ *         hive_browser_backend_t  结构体 / 类型别名
+ *   宏    HIVE_BROWSER_BACKEND_ABI_MAJOR  HIVEBROWSERBACKENDABI主
+ *         HIVE_BROWSER_BACKEND_ABI_MINOR  HIVEBROWSERBACKENDABI次
+ *         HIVE_WEB_CAPS_VUE3            常量 / 特性宏
+ *         HIVE_WEB_CAPS_BILIBILI_HOME   常量 / 特性宏
+ *         HIVE_WEB_CAPS_BILIBILI_VIDEO  常量 / 特性宏
+ *   函数  hive_browser_lite_backend     （待补）
+ *         hive_browser_backend_valid    （待补）
+ *         hive_browser_level_requirements  （待补）
+ *         hive_browser_capability_name  （待补）
+ *         hive_browser_detect_requirements  （待补）
+ */
 #ifndef HIVE_BROWSER_BACKEND_H
 #define HIVE_BROWSER_BACKEND_H
 

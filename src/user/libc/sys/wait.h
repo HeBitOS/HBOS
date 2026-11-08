@@ -1,3 +1,21 @@
+/**
+ * @file    wait.h
+ * @brief   等待队列：阻塞一个任务直到被唤醒
+ *
+ * @layer   user
+ * @owner   src/user/libc/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    WNOHANG      常量 / 特性宏
+ *         WIFEXITED    常量 / 特性宏
+ *         WEXITSTATUS  常量 / 特性宏
+ *         W_EXITCODE   常量 / 特性宏
+ *   函数  waitpid     等待子进程状态变化
+ */
 #ifndef HBOS_USER_LIBC_SYS_WAIT_H
 #define HBOS_USER_LIBC_SYS_WAIT_H
 

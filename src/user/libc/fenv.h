@@ -1,3 +1,26 @@
+/**
+ * @file    fenv.h
+ * @brief   导出 17 个接口（0 类型 / 10 宏 / 7 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    FE_INVALID     常量 / 特性宏
+ *         FE_DIVBYZERO   常量 / 特性宏
+ *         FE_OVERFLOW    常量 / 特性宏
+ *         FE_UNDERFLOW   常量 / 特性宏
+ *         FE_INEXACT     常量 / 特性宏
+ *         FE_ALL_EXCEPT  常量 / 特性宏
+ *         FE_TONEAREST   常量 / 特性宏
+ *         FE_DOWNWARD    常量 / 特性宏
+ *         FE_UPWARD      常量 / 特性宏
+ *         FE_TOWARDZERO  常量 / 特性宏
+ */
 #ifndef HBOS_USER_LIBC_FENV_H
 #define HBOS_USER_LIBC_FENV_H
 

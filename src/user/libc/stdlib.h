@@ -1,3 +1,37 @@
+/**
+ * @file    stdlib.h
+ * @brief   malloc/free/exit 等最常用的 stdlib 声明
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    EXIT_SUCCESS  成功退出码（0）
+ *         EXIT_FAILURE  失败退出码（1）
+ *         RAND_MAX      rand() 最大值
+ *         PATH_MAX      常量 / 特性宏
+ *         alloca        常量 / 特性宏
+ *   函数  malloc      从堆分配 size 字节
+ *         free        释放堆块
+ *         calloc      分配 nmemb×size 并清零
+ *         realloc     调整已有分配块大小
+ *         atoi        字符串转 int
+ *         atol        字符串转 long
+ *         strtol      按进制转 long，endptr 收尾
+ *         strtoul     按进制转 unsigned long
+ *         strtoull    按进制转 unsigned long long
+ *         realpath    （待补）
+ *         abort       异常终止
+ *         rand        伪随机数
+ *         srand       设置随机种子
+ *         abs         绝对值
+ *         labs        long 绝对值
+ *         getenv      取环境变量
+ */
 #ifndef HBOS_USER_LIBC_STDLIB_H
 #define HBOS_USER_LIBC_STDLIB_H
 

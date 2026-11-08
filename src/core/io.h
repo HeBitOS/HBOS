@@ -4,8 +4,25 @@
  *
  * 驱动统一使用这些名字，避免每个源文件各自复制一套内联汇编。这里不提供
  * 设备级超时策略；有界轮询使用 wait.h。
+ *
+ * @layer   core
+ * @owner   src/core/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  io_out8     （待补）
+ *         io_out16    （待补）
+ *         io_out32    （待补）
+ *         io_in8      （待补）
+ *         io_in16     （待补）
+ *         io_in32     （待补）
+ *         io_delay    传统 ISA I/O 延时
+ *         cpu_relax   在轮询循环中降低执行单元和 SMT 同级线…
+ *         cpu_rdtsc   读取时间戳计数器
  */
-
 #ifndef HBOS_CORE_IO_H
 #define HBOS_CORE_IO_H
 

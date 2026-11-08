@@ -3,8 +3,25 @@
  * @brief PCI 总线配置空间访问驱动头文件
  *
  * 提供 PCI 设备枚举、配置空间读写及 BAR 读取等接口声明。
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  pci_device_t  结构体 / 类型别名
+ *   函数  pci_read32                  从 PCI 配置空间读取 32 位值
+ *         pci_write32                 向 PCI 配置空间写入 32 位值
+ *         pci_read16                  从 PCI 配置空间读取 16 位值
+ *         pci_read8                   从 PCI 配置空间读取 8 位值
+ *         pci_find_class              遍历所有总线、插槽和功能号，查找与指定大类…
+ *         pci_enumerate_all           （待补）
+ *         pci_bar                     读取 PCI 设备的 BAR（Base A…
+ *         pci_enable_bus_master_mmio  启用 PCI 设备的内存空间访问和总线主控…
  */
-
 #ifndef HBOS_PCI_H
 #define HBOS_PCI_H
 

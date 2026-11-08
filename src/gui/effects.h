@@ -3,8 +3,20 @@
  * @brief GUI视觉效果辅助函数
  *
  * 提供阴影、圆角、渐变等视觉效果的绘制函数
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  make_argb      创建ARGB颜色
+ *         color_blend    混合两个颜色
+ *         color_darken   使颜色变暗
+ *         color_lighten  使颜色变亮
  */
-
 #ifndef HBOS_GUI_EFFECTS_H
 #define HBOS_GUI_EFFECTS_H
 

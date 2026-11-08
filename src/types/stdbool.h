@@ -12,6 +12,23 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+/**
+ * @file    stdbool.h
+ * @brief   导出 4 个接口（0 类型 / 4 宏 / 0 函数）
+ *
+ * @layer   types
+ * @owner   src/types/
+ * @stable  frozen（上游代码，勿改正文）
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    bool                          常量 / 特性宏
+ *         true                          常量 / 特性宏
+ *         false                         常量 / 特性宏
+ *         __bool_true_false_are_defined  常量 / 特性宏
+ */
 #ifndef __FREESTND_C_HDRS_STDBOOL_H
 #    define __FREESTND_C_HDRS_STDBOOL_H 1
 

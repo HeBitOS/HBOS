@@ -23,6 +23,22 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * @file    flanterm_private.h
+ * @brief   导出 3 个接口（1 类型 / 1 宏 / 1 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  frozen（上游代码，勿改正文）
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  flanterm_context  （待补）
+ *   宏    FLANTERM_MAX_ESC_VALUES  常量 / 特性宏
+ *   函数  flanterm_context_reinit  （待补）
+ */
 #ifndef FLANTERM_PRIVATE_H
 #    define FLANTERM_PRIVATE_H 1
 

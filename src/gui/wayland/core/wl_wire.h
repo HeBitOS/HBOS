@@ -8,6 +8,33 @@
  *
  * 之所以把 size 放在高 16 位：Wayland 的 opcode 只有 16 位，剩下 16 位给
  * 消息长度（含 8 字节头，上限 64KB）。这两半弄反是整条连接报废级错误。
+ *
+ * @layer   gui
+ * @owner   src/gui/wayland/core/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  wl_args_t            结构体 / 类型别名
+ *         wl_message_header_t  结构体 / 类型别名
+ *         wl_outbuf_t          结构体 / 类型别名
+ *   宏    WL_MESSAGE_HEADER_SIZE  WLMESSAGE首部
+ *         WL_MESSAGE_MAX_SIZE     常量 / 特性宏
+ *   函数  wl_arg_u32          （待补）
+ *         wl_arg_i32          （待补）
+ *         wl_arg_string       读一个字符串到 buf（超长截断到 cap…
+ *         wl_arg_skip_string  跳过字符串/任意 4 字节参数
+ *         wl_arg_skip_u32     （待补）
+ *         wl_args_failed      （待补）
+ *         wl_outbuf_init      （待补）
+ *         wl_out_begin        （待补）
+ *         wl_out_u32          （待补）
+ *         wl_out_i32          （待补）
+ *         wl_out_string       （待补）
+ *         wl_out_end          （待补）
+ *         wl_out_abort        （待补）
  */
 #ifndef HBOS_WL_WIRE_H
 #define HBOS_WL_WIRE_H

@@ -1,3 +1,43 @@
+/**
+ * @file    graphics.h
+ * @brief   导出 27 个接口（1 类型 / 0 宏 / 26 函数）
+ *
+ * @layer   gui
+ * @owner   src/graphics/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  fb_info_t   结构体 / 类型别名
+ *   函数  graphics_init           （待补）
+ *         console_write           输出定长字节到控制台
+ *         console_puts            输出字符串到控制台
+ *         console_putchar         输出一个字符
+ *         console_putchar_raw     （待补）
+ *         console_has_sink        （待补）
+ *         console_clear           清屏
+ *         console_reset_terminal  （待补）
+ *         console_set_fg          设置前景色
+ *         console_set_bg          设置背景色
+ *         console_get_size        取控制台行列数
+ *         console_set_title       （待补）
+ *         console_is_initialized  控制台是否已就绪
+ *         console_cursor_blink    （待补）
+ *         console_is_framebuffer  （待补）
+ *         console_present         （待补）
+ *         console_scroll_up       （待补）
+ *         console_scroll_down     （待补）
+ *         console_is_scrolled     （待补）
+ *         console_scroll_reset    （待补）
+ *         fb_put_pixel            （待补）
+ *         fb_fill_rect            （待补）
+ *         fb_get_info             （待补）
+ *         fb_set_resolution       （待补）
+ *         fb_poll_host_resize     （待补）
+ *         fb_get_edid_dpi         （待补）
+ */
 #ifndef GRAPHICS_H
 #define GRAPHICS_H
 

@@ -4,6 +4,17 @@
  *
  * 提供 ChaCha20 流密码加密、Poly1305 消息认证码（MAC）计算，
  * 以及 ChaCha20-Poly1305 认证加密（AEAD）的密封与开放操作。
+ *
+ * @layer   crypto
+ * @owner   src/crypto/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  chacha20_block  生成一个 ChaCha20 密钥流块
+ *         poly1305_mac    计算消息的 Poly1305 MAC 标签
  */
 #ifndef HBOS_CHACHA20_POLY1305_H
 #define HBOS_CHACHA20_POLY1305_H

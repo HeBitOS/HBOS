@@ -1,3 +1,27 @@
+/**
+ * @file    gui_panel.h
+ * @brief   导出 14 个接口（0 类型 / 1 宏 / 13 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    FILE_ROW_H  常量 / 特性宏
+ *   函数  gui_file_path              （待补）
+ *         gui_set_file_path          （待补）
+ *         gui_file_count             （待补）
+ *         gui_selected_regular_file  （待补）
+ *         gui_select_file            （待补）
+ *         gui_has_suffix             后缀匹配（大小写不敏感，FAT32 短文件…
+ *         gui_set_note_name          记事本共享命名（文件面板选中文件时会把名字…
+ *         gui_note_name              （待补）
+ *         gui_sync_focus             把 st->app_mode / acti…
+ *         gui_open_files_panel       打开文件面板窗口
+ */
 #ifndef HBOS_GUI_PANEL_H
 #define HBOS_GUI_PANEL_H
 

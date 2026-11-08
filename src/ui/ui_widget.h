@@ -15,6 +15,32 @@
  *
  * 设计原则：**控件无全局状态**。每个控件的状态放在调用方栈上的结构体里，
  * 因此同一屏可以放任意多个同类控件，也可以被宿主单测直接驱动。
+ *
+ * @layer   gui
+ * @owner   src/ui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  ui_rect_t        控件矩形（窗口内坐标）
+ *         ui_state_t       当前视觉/交互状态
+ *         ui_event_kind_t  结构体 / 类型别名
+ *         ui_event_t       结构体 / 类型别名
+ *         ui_widget_t      结构体 / 类型别名
+ *   函数  ui_hit                  控件库基础：统一命中测试、控件状态机、事件…
+ *         ui_hit_xy               便捷形式：直接给坐标与尺寸
+ *         ui_rect_overlap         两个矩形是否相交
+ *         ui_rect_clip            把矩形收进容器（返回是否仍有可见区域）
+ *         ui_widget_init          初始化控件公共字段
+ *         ui_widget_handle_mouse  通用的鼠标状态更新（所有控件共用）
+ *         ui_widget_state         根据 hot/held/enabled 推…
+ *         ui_widget_tick          未使用时序参数时的空实现（保持接口一致，便…
+ *         ui_fill_round           按当前主题画一个圆角矩形（实心）
+ *         ui_stroke_round         圆角描边（只画边框）
+ *         ui_draw_shadow          按主题阴影档位绘制"卡片"阴影（内建为固定…
+ *         ui_sel_over             在给定底色上合成令牌里的半透明选中色
  */
 #ifndef HBOS_UI_WIDGET_H
 #define HBOS_UI_WIDGET_H

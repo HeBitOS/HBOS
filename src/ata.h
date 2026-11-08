@@ -1,8 +1,44 @@
 /**
  * @file ata.h
  * @brief IDE/ATA PIO模式硬盘驱动头文件（主/从通道 × 主/从盘共4槽位），LBA28寻址
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  ata_device_t  获取首个可用的 LBA28 硬盘
+ *   宏    ATA_SECTOR_SIZE        扇区大小（字节）
+ *         ATA_PRIMARY_IO_BASE    主通道基址
+ *         ATA_SECONDARY_IO_BASE  从通道基址
+ *         ATA_DATA               数据寄存器（主通道），其余寄存器 = 基址…
+ *         ATA_ERROR              错误寄存器
+ *         ATA_SECTOR_COUNT       扇区计数寄存器
+ *         ATA_LBA_LOW            LBA低8位寄存器（位0-7）
+ *         ATA_LBA_MID            LBA中8位寄存器（位8-15）
+ *         ATA_LBA_HIGH           LBA高8位寄存器（位16-23）
+ *         ATA_DRIVE_HEAD         驱动器/磁头寄存器
+ *         ATA_STATUS             状态寄存器
+ *         ATA_COMMAND            命令寄存器（与状态共用端口）
+ *         ATA_ALT_STATUS_P       主通道备用状态寄存器（读不清中断）
+ *         ATA_ALT_STATUS_S       从通道备用状态寄存器
+ *         ATA_STATUS_BSY         控制器忙
+ *         ATA_STATUS_DRDY        驱动器就绪
+ *         ATA_STATUS_DRQ         数据请求
+ *         ATA_STATUS_ERR         命令出错
+ *         ATA_MAX_DRIVES         主/从通道 × 主/从盘 = 4 个槽位
+ *   函数  ata_init          探测全部 4 个槽位
+ *         ata_primary       获取首个可用的 LBA28 硬盘
+ *         ata_drive_count   已识别的硬盘数
+ *         ata_drive         按序号取设备信息
+ *         ata_wait          等待控制器就绪（BSY清零，主通道）
+ *         ata_identify      （待补）
+ *         ata_read_sector   读取指定LBA扇区到缓冲区
+ *         ata_write_sector  将缓冲区数据写入指定LBA扇区
  */
-
 #ifndef ATA_H
 #define ATA_H
 

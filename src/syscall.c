@@ -1850,6 +1850,7 @@ typedef struct {
     int used;
     int ok;
     int error;
+    int fd;                      /**< 成功时的 fd 号（失败为 -1） */
     uint32_t flags;
     char path[192];
 } linux_open_trace_t;
@@ -1858,13 +1859,14 @@ static linux_open_trace_t linux_open_trace[LINUX_OPEN_TRACE_SLOTS];
 static uint32_t linux_open_trace_next;
 
 static void linux_open_trace_record(const char *path, int flags, int ok,
-                                    int error) {
+                                    int error, int fd) {
     linux_open_trace_t *slot =
         &linux_open_trace[linux_open_trace_next % LINUX_OPEN_TRACE_SLOTS];
     linux_open_trace_next++;
     slot->used = 1;
     slot->ok = ok;
     slot->error = error;
+    slot->fd = fd;
     slot->flags = (uint32_t)flags;
     slot->path[0] = '\0';
     if (path) {
@@ -1892,11 +1894,70 @@ void linux_open_trace_dump(void) {
         console_puts(slot->path);
         console_puts(" flags=0x");
         trace_put_hex(slot->flags);
-        if (!slot->ok) {
+        if (slot->ok) {
+            console_puts(" fd=");
+            trace_put_udec((uint64_t)slot->fd);
+        } else {
             console_puts(" errno=");
             trace_put_udec((uint64_t)slot->error);
         }
         console_putchar('\n');
+    }
+}
+
+/* ── fcntl(F_GETFL) 追踪 ────────────────────────────────────────
+ *
+ * Chromium 的 base::File::Open 打开成功之后，会 fcntl(fd, F_GETFL)
+ * 把返回值的低 2 位（O_ACCMODE）跟它请求的访问模式比对，不一致就判定
+ * "打开失败"并 CHECK 崩溃。崩溃现场只剩一个 int3 地址，看不出是哪个
+ * fd、期望什么模式。
+ *
+ * 这里保留最近 N 次 F_GETFL 的 (fd, 返回值, 期望模式)，崩溃时倒出来。
+ * "期望模式" 由调用方传进来（-1 = 未知）。 */
+#define LINUX_GETFL_TRACE_SLOTS 8
+
+typedef struct {
+    int used;
+    int fd;
+    int returned;                /**< F_GETFL 的返回值 */
+    int expected;                /**< 调用方期望的 O_ACCMODE，-1 = 未知 */
+} linux_getfl_trace_t;
+
+static linux_getfl_trace_t linux_getfl_trace[LINUX_GETFL_TRACE_SLOTS];
+static uint32_t linux_getfl_trace_next;
+
+static void linux_getfl_trace_record(int fd, int returned, int expected) {
+    linux_getfl_trace_t *slot =
+        &linux_getfl_trace[linux_getfl_trace_next % LINUX_GETFL_TRACE_SLOTS];
+    linux_getfl_trace_next++;
+    slot->used = 1;
+    slot->fd = fd;
+    slot->returned = returned;
+    slot->expected = expected;
+}
+
+/** 打印最近的 F_GETFL 记录。 */
+void linux_getfl_trace_dump(void) {
+    console_puts("[GETFL-TRACE] last F_GETFL:\n");
+    uint32_t total = linux_getfl_trace_next;
+    uint32_t count = total < LINUX_GETFL_TRACE_SLOTS ? total
+                                                     : LINUX_GETFL_TRACE_SLOTS;
+    uint32_t start = total - count;
+    for (uint32_t i = 0; i < count; i++) {
+        const linux_getfl_trace_t *slot =
+            &linux_getfl_trace[(start + i) % LINUX_GETFL_TRACE_SLOTS];
+        console_puts("[GETFL-TRACE] fd=");
+        trace_put_udec((uint64_t)slot->fd);
+        console_puts(" ret=0x");
+        trace_put_hex((uint64_t)(unsigned)slot->returned);
+        console_puts(" accmode=");
+        trace_put_udec((uint64_t)(slot->returned & O_ACCMODE));
+        console_puts(" expected=");
+        trace_put_udec((uint64_t)slot->expected);
+        console_puts(slot->expected >= 0 &&
+                             (slot->returned & O_ACCMODE) != slot->expected
+                         ? "  <-- MISMATCH\n"
+                         : "\n");
     }
 }
 
@@ -1915,6 +1976,59 @@ static void linux_open_fail_log(const char *path, int flags, int error) {
     console_puts(" errno=");
     trace_put_udec((uint64_t)error);
     console_putchar('\n');
+}
+
+/* fd 类型的可读名（诊断用）。 */
+static const char *linux_fd_type_name(int type) {
+    switch (type) {
+    case FD_FILE:    return "FILE";
+    case FD_SOCKET:  return "SOCKET";
+    case FD_PIPE:    return "PIPE";
+    case FD_EVENT:   return "EVENT";
+    case FD_EPOLL:   return "EPOLL";
+    case FD_UNIX:    return "UNIX";
+    case FD_MEMFD:   return "MEMFD";
+    case FD_INOTIFY: return "INOTIFY";
+    case FD_TIMER:   return "TIMER";
+    case FD_SIGNALFD:return "SIGNALFD";
+    default:         return "?";
+    }
+}
+
+/** 打印当前进程的 fd 表（用户态异常时调用）。
+ *
+ * Chromium 的 base::File 有两条独立的失败路径：
+ *   1. open 失败 —— 走 open trace 能看到路径；
+ *   2. open 成功但 **F_GETFL 校验访问模式**失败 —— 走 fd 表才能定位。
+ * 第 2 条只在有"某个 fd 拿在手上"时发生（比如 Mojo 从父进程继承来的
+ * 通道 fd），open trace 里根本没有它的记录，必须靠 fd 表反查。
+ *
+ * 不变量：无返回值；只往串口写，不改任何状态。
+ * 前置条件：当前任务存在（有 fd 表）。 */
+void linux_fd_table_dump(void) {
+    task_t *cur = task_current();
+    if (!cur || !cur->fd_table) {
+        console_puts("[FD-TABLE] no fd table\n");
+        return;
+    }
+    console_puts("[FD-TABLE] open fds:\n");
+    for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
+        const fd_entry_t *e = &cur->fd_table->entries[fd];
+        if (!e->used) continue;
+        console_puts("[FD-TABLE] fd=");
+        trace_put_udec((uint64_t)fd);
+        console_puts(" type=");
+        console_puts(linux_fd_type_name(e->type));
+        console_puts(" flags=0x");
+        trace_put_hex((uint64_t)(unsigned)e->flags);
+        console_puts(" accmode=");
+        trace_put_udec((uint64_t)(e->flags & O_ACCMODE));
+        if (e->path[0]) {
+            console_puts(" path=");
+            console_puts(e->path);
+        }
+        console_putchar('\n');
+    }
 }
 
 /* Resolve a Linux *at pathname without adding a second VFS path model.
@@ -2496,8 +2610,14 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
              *
              * Chromium 的 base::File::Open 打开后会
              * fcntl(fd, F_GETFL) 并把低 2 位（O_ACCMODE）跟它请求的
-             * 访问模式比对，不一致就判定打开失败并 CHECK 崩溃。 */
-            return (uint64_t)(unsigned)(entry->flags & LINUX_F_GETFL_MASK);
+             * 访问模式比对，不一致就判定打开失败并 CHECK 崩溃。
+             * 这里把 (fd, 返回值) 记进环形缓冲，崩溃时能直接看到
+             * "哪个 fd 返回了什么模式"。 */
+            {
+                int fl = (int)(entry->flags & LINUX_F_GETFL_MASK);
+                linux_getfl_trace_record(fd, fl, -1);
+                return (uint64_t)(unsigned)fl;
+            }
         case 4:                                       /* F_SETFL */
             /* 只改可改的状态位，访问模式保持不变。 */
             entry->flags = (entry->flags & ~LINUX_F_SETFL_MASK) |
@@ -2642,11 +2762,11 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 int fd = linux_compat_shm_open(path, (int)linux_frame->a1);
                 if (fd < 0) {
                     linux_open_trace_record(path, (int)linux_frame->a1, 0,
-                                            errno);
+                                            errno, -1);
                     linux_open_fail_log(path, (int)linux_frame->a1, errno);
                     return (uint64_t)(-(errno > 0 ? errno : EIO));
                 }
-                linux_open_trace_record(path, (int)linux_frame->a1, 1, 0);
+                linux_open_trace_record(path, (int)linux_frame->a1, 1, 0, fd);
                 return (uint64_t)fd;
             }
             int64_t open_rc = linux_native_call(
@@ -2654,10 +2774,11 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 linux_frame->a2, 0, 0, 0);
             if (open_rc < 0) {
                 int err = errno > 0 ? errno : (int)-open_rc;
-                linux_open_trace_record(path, (int)linux_frame->a1, 0, err);
+                linux_open_trace_record(path, (int)linux_frame->a1, 0, err, -1);
                 linux_open_fail_log(path, (int)linux_frame->a1, err);
             } else {
-                linux_open_trace_record(path, (int)linux_frame->a1, 1, 0);
+                linux_open_trace_record(path, (int)linux_frame->a1, 1, 0,
+                                        (int)open_rc);
             }
             return (uint64_t)open_rc;
         }
@@ -2937,11 +3058,11 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 int fd = linux_compat_shm_open(path, (int)linux_frame->a2);
                 if (fd < 0) {
                     linux_open_trace_record(path, (int)linux_frame->a2, 0,
-                                            errno);
+                                            errno, -1);
                     linux_open_fail_log(path, (int)linux_frame->a2, errno);
                     return (uint64_t)(-(errno > 0 ? errno : EIO));
                 }
-                linux_open_trace_record(path, (int)linux_frame->a2, 1, 0);
+                linux_open_trace_record(path, (int)linux_frame->a2, 1, 0, fd);
                 return (uint64_t)fd;
             }
             int64_t openat_rc = linux_native_call(
@@ -2949,10 +3070,11 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 linux_frame->a3, 0, 0, 0);
             if (openat_rc < 0) {
                 int err = errno > 0 ? errno : (int)-openat_rc;
-                linux_open_trace_record(path, (int)linux_frame->a2, 0, err);
+                linux_open_trace_record(path, (int)linux_frame->a2, 0, err, -1);
                 linux_open_fail_log(path, (int)linux_frame->a2, err);
             } else {
-                linux_open_trace_record(path, (int)linux_frame->a2, 1, 0);
+                linux_open_trace_record(path, (int)linux_frame->a2, 1, 0,
+                                        (int)openat_rc);
             }
             return (uint64_t)openat_rc;
         }
@@ -4062,8 +4184,12 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 return (uint64_t)(-EBADF);
             switch (cmd) {
                 case 0:   /* F_GETFL：只返回状态位，语义与 linux_fcntl 一致 */
-                    return (uint64_t)(unsigned)(
-                        cur->fd_table->entries[fd].flags & LINUX_F_GETFL_MASK);
+                    {
+                        int fl = (int)(cur->fd_table->entries[fd].flags &
+                                       LINUX_F_GETFL_MASK);
+                        linux_getfl_trace_record(fd, fl, -1);
+                        return (uint64_t)(unsigned)fl;
+                    }
                 case 1:   /* F_SETFL：只改可改的状态位，**不能动访问模式**。
                           * Linux 的 F_SETFL 不允许改 O_RDONLY/O_WRONLY/
                           * O_RDWR；原来这里整个 flags 被替换，调用方

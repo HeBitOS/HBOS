@@ -1,3 +1,20 @@
+/**
+ * @file    glass.h
+ * @brief   导出 5 个接口（0 类型 / 0 宏 / 5 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  glass_init                初始化：一次性申请降采样工作缓冲（约 0.…
+ *         glass_available           玻璃功能是否可用（缓冲申请成功）
+ *         glass_full_requested      增量帧上玻璃会采样到"上一帧的模糊输出"（…
+ *         glass_clear_full_request  （待补）
+ */
 #ifndef HBOS_GLASS_H
 #define HBOS_GLASS_H
 

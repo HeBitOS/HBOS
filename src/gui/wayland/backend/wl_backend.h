@@ -7,6 +7,23 @@
  *
  * 现在只有一个实现（wl_backend_hive.c），但接口按"可以有别的实现"设计 ——
  * 比如以后把 compositor 挪到用户态进程，换一个 backend 就行。
+ *
+ * @layer   gui
+ * @owner   src/gui/wayland/backend/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  wl_backend_init               （待补）
+ *         wl_backend_pump               每轮 poll 之后调用：把有新内容的 s…
+ *         wl_backend_pointer_motion     （待补）
+ *         wl_backend_pointer_button     （待补）
+ *         wl_backend_pointer_axis       （待补）
+ *         wl_backend_keyboard_key       （待补）
+ *         wl_backend_has_keyboard_focus  当前是否有 Wayland 窗口持有键盘焦点
+ *         wl_backend_set_input_probe    输入自检开关
  */
 #ifndef HBOS_WL_BACKEND_H
 #define HBOS_WL_BACKEND_H

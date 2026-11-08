@@ -3,8 +3,19 @@
  * @brief   Linux 目录遍历 — HBOS 实现
  *
  * 对标 Linux dirent.h，定义 struct dirent 和 getdents 系统调用。
+ *
+ * @layer   user
+ * @owner   src/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  dirent      （待补）
+ *   宏    NAME_MAX    文件名（以 '/0' 结尾）
+ *   函数  getdents    Linux 目录遍历 — HBOS 实现
  */
-
 #ifndef HBOS_SYS_DIRENT_H
 #define HBOS_SYS_DIRENT_H
 

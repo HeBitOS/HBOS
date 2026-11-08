@@ -1,3 +1,100 @@
+/**
+ * @file    gui_draw.h
+ * @brief   导出 84 个接口（0 类型 / 2 宏 / 82 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏     GUI_MONO_GLYPH_W                控制台等宽字形宽（8）
+ *   宏     GUI_MONO_GLYPH_H                控制台等宽字形高（16）
+ *   函数   gui_rgb                         打包 8:8:8 像素值
+ *   函数   gui_set_layer_opacity           设置整层合成不透明度
+ *   函数   gui_get_layer_opacity           读取整层合成不透明度
+ *   函数   gui_set_surface                 指定绘制目标画布及其尺寸
+ *   函数   gui_target_begin                把后续绘制重定向到独立缓冲
+ *   函数   gui_target_end                  结束离屏目标，恢复上一层
+ *   函数   gui_target_active               查询当前是否在离屏目标内
+ *   函数   gd_target_origin                离屏目标的逻辑原点偏移
+ *   函数   gui_wl_init                     把桌面画布包成 Wayland root surface
+ *   函数   gui_wl_active                   GUI 是否处于 Wayland 合成模式
+ *   函数   gui_present_surface             把离屏目标整块上屏
+ *   函数   gui_present_rect                把离屏目标的一块矩形上屏
+ *   函数   gui_rect                        填充实心矩形
+ *   函数   gui_rect_alpha                  按 alpha 混合填充矩形
+ *   函数   gui_blit_rgb888                 贴一张 RGB888 位图
+ *   函数   gui_blit_argb8888               贴一张 ARGB8888 位图（带混合）
+ *   函数   gui_border                      画一像素矩形边框
+ *   函数   gui_vgradient                   纵向渐变填充
+ *   函数   gui_soft_shadow                 圆角柔化阴影
+ *   函数   gui_draw_panel_shell            绘制面板外壳（圆角＋描边＋阴影）
+ *   函数   gui_text                        在指定位置绘制 UTF-8 文本
+ *   函数   gui_text_clipped                绘制文本并按裁剪区截断
+ *   函数   gui_text_width                  测量 UTF-8 文本像素宽
+ *   函数   gui_cp_advance                  逐码点绘制（供自行排版的调用方）
+ *   函数   gui_draw_codepoint              逐码点绘制（供自行排版的调用方）
+ *   函数   gui_text_mono                   等宽文本：ASCII 走 8x16 位图
+ *   函数   gui_draw_small_button           Flat Breeze 风格小按钮
+ *   函数   gui_draw_mono_char              8x16 位图字体单字符绘制
+ *   函数   gui_key_poll                    GUI 主循环按键轮询
+ *   函数   gui_surface_width               离屏表面宽（GUI 未运行为 0）
+ *   函数   gui_surface_height              离屏表面高（GUI 未运行为 0）
+ *   函数   gui_ui_scale_v                  DPI 缩放系数
+ *   函数   gui_append_char                 向绘制缓冲追加一个字符
+ *   函数   gui_append_str                  向绘制缓冲追加字符串
+ *   函数   gui_append_int                  向绘制缓冲追加有符号整数
+ *   函数   gui_append_uint                 向绘制缓冲追加无符号整数
+ *   函数   gui_append_ll                   向绘制缓冲追加 64 位整数
+ *   函数   gui_append_sci                  向绘制缓冲追加科学计数法
+ *   函数   gui_draw_line                   画一像素直线
+ *   函数   gui_draw_thick_line             画指定线宽的直线
+ *   函数   gui_fill_circle                 填充实心圆
+ *   函数   gui_draw_circle                 画圆环轮廓
+ *   函数   gui_fill_round_rect             填充圆角矩形
+ *   函数   gui_set_brightness              设置全局背光亮度
+ *   函数   gui_get_brightness              读取全局背光亮度
+ *   函数   gd_surface_ptr                  当前绘制目标像素缓冲
+ *   函数   gd_surface_w                    当前绘制目标宽
+ *   函数   gd_surface_h                    当前绘制目标高
+ *   函数   gd_surface_pitch                当前绘制目标行跨度（像素）
+ *   函数   gd_draw_text_codepoint          单码点绘制（内部实现）
+ *   函数   gd_vgradient_alpha              带 alpha 的纵向渐变
+ *   函数   gd_draw_window_control_icon     绘制窗口控制按钮图标
+ *   函数   gd_text_italic_ptr              按斜体指针绘制文本
+ *   函数   gd_rect                         填充实心矩形（内部实现）
+ *   函数   gd_rect_alpha                   alpha 混合矩形（内部实现）
+ *   函数   gd_border                       矩形边框（内部实现）
+ *   函数   gd_vgradient                    纵向渐变（内部实现）
+ *   函数   gd_hgradient                    横向渐变（内部实现）
+ *   函数   gd_soft_shadow                  圆角柔化阴影（内部实现）
+ *   函数   gd_fill_round_rect              圆角矩形（内部实现）
+ *   函数   gd_round_border                 圆角矩形边框
+ *   函数   gd_draw_panel_shell             面板外壳（内部实现）
+ *   函数   gd_draw_inset_shell             绘制内嵌凹陷外壳
+ *   函数   gd_blit_glyph                   贴一张字形位图
+ *   函数   gd_blit_mono_glyph              贴一张等宽字形位图
+ *   函数   gd_blit_icon_rgba               贴一张 RGBA 图标
+ *   函数   gd_blit_icon                    贴一张图标（按当前色调制）
+ *   函数   gd_draw_mono_char               等宽单字符绘制（内部实现）
+ *   函数   gd_text_width                   测量文本像素宽（内部实现）
+ *   函数   gd_text                         绘制文本（内部实现）
+ *   函数   gd_text_clipped                 裁剪绘制文本（内部实现）
+ *   函数   gd_text_mono                    等宽文本绘制（内部实现）
+ *   函数   gd_rgb_mix                      按比例混合两种颜色
+ *   函数   gd_rgb_lift                     按比例提亮颜色
+ *   函数   gd_apply_layer_opacity          把层不透明度应用到像素
+ *   函数   gd_round_corner                 单个圆角的覆盖判定
+ *   函数   gd_append_ll                    追加 64 位整数（内部实现）
+ *   函数   gd_append_sci                   追加科学计数法（内部实现）
+ *   函数   gd_append_char                  追加字符（内部实现）
+ *   函数   gd_append_str                   追加字符串（内部实现）
+ *   函数   gd_append_uint                  追加无符号整数（内部实现）
+ *   函数   gd_append_int                   追加有符号整数（内部实现）
+ */
 #ifndef HBOS_GUI_DRAW_H
 #define HBOS_GUI_DRAW_H
 

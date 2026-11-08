@@ -1,3 +1,35 @@
+/**
+ * @file    usb_hid.h
+ * @brief   导出 19 个接口（2 类型 / 3 宏 / 14 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hid_mouse_report_t  结构体 / 类型别名
+ *         hid_device_t        结构体 / 类型别名
+ *   宏    HID_KEYBOARD     常量 / 特性宏
+ *         HID_MOUSE        常量 / 特性宏
+ *         HID_MAX_DEVICES  常量 / 特性宏
+ *   函数  hid_init                 （待补）
+ *         hid_device_count         （待补）
+ *         hid_keyboard_count       （待补）
+ *         hid_mouse_count          （待补）
+ *         hid_get_keyboard_report  （待补）
+ *         hid_get_mouse_report     （待补）
+ *         hid_poll                 （待补）
+ *         usb_hid_init             （待补）
+ *         usb_kbd_init             （待补）
+ *         usb_kbd_getc             （待补）
+ *         usb_kbd_ready            （待补）
+ *         usb_mouse_init           （待补）
+ *         usb_mouse_get_report     （待补）
+ *         usb_mouse_ready          （待补）
+ */
 #ifndef HBOS_USB_HID_H
 #define HBOS_USB_HID_H
 

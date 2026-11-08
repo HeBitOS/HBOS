@@ -12,8 +12,101 @@
  *   - 页错误错误码位定义
  *   - MSR 地址和 EFER 位定义
  *   - 内联汇编辅助函数（wrmsr, rdmsr, invlpg, cli, sti, hlt 等）
+ *
+ * @layer   core
+ * @owner   src/core/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    GDT_NULL         NULL 描述符（必须为第一个条目）
+ *         GDT_KCODE        内核代码段 (ring0, 64-bit)
+ *         GDT_KDATA        内核数据段 (ring0)
+ *         GDT_UCODE        用户代码段 (ring3, 64-bit)
+ *         GDT_UDATA        用户数据段 (ring3)
+ *         GDT_MAX_CPUS     GDT 条目总数
+ *         GDT_TSS_LOW      第 cpu 个核心的 TSS 描述符低 6…
+ *         GDT_TSS_HIGH     第 cpu 个核心的 TSS 描述符高 6…
+ *         GDT_ENTRIES      GDT 条目总数
+ *         SEL_KCODE        内核代码选择子 (RPL=0)
+ *         SEL_KDATA        内核数据选择子 (RPL=0)
+ *         SEL_UCODE        用户代码选择子 (RPL=3)
+ *         SEL_UDATA        用户数据选择子 (RPL=3)
+ *         SEL_TSS          第 cpu 个核心的 TSS 选择子
+ *         GDT_ACC_PRESENT  P: 段存在
+ *         GDT_ACC_DPL0     DPL=0 (ring0)
+ *         GDT_ACC_DPL3     DPL=3 (ring3)
+ *         GDT_ACC_CODE     代码段: 可执行/可读
+ *         GDT_ACC_DATA     数据段: 可读写
+ *         GDT_ACC_TSS      可用 TSS (非忙)
+ *         GDT_GRAN_4K      G: 4KB 粒度
+ *         GDT_GRAN_64      L: long mode (64 位代码段)
+ *         GDT_GRAN_32      D/B: 默认操作数大小 (32 位)
+ *         IDT_PRESENT      P: 中断门存在
+ *         IDT_DPL0         DPL=0 (仅 ring0 可触发)
+ *         IDT_DPL3         DPL=3 (ring3 可通过 int…
+ *         IDT_INT_GATE     64 位中断门 (清除 IF)
+ *         IDT_TRAP_GATE    64 位陷阱门 (保留 IF)
+ *         IRQ_BASE         IRQ 基向量（PIC 重映射后）
+ *         IRQ              IRQ 基向量（PIC 重映射后）
+ *         EXC_DE           #DE: 除法错误
+ *         EXC_DB           #DB: 调试
+ *         EXC_NMI          NMI: 不可屏蔽中断
+ *         EXC_BP           #BP: 断点
+ *         EXC_OF           #OF: 溢出
+ *         EXC_BR           #BR: 超出界限
+ *         EXC_UD           #UD: 无效操作码
+ *         EXC_NM           #NM: 设备不可用 (x87 FPU)
+ *         EXC_DF           #DF: 双重错误 (有错误码)
+ *         EXC_TS           #TS: 无效 TSS (有错误码)
+ *         EXC_NP           #NP: 段不存在 (有错误码)
+ *         EXC_SS           #SS: 栈段错误 (有错误码)
+ *         EXC_GP           #GP: 通用保护错误 (有错误码)
+ *         EXC_PF           #PF: 页错误 (有错误码)
+ *         EXC_MF           #MF: x87 FPU 浮点错误
+ *         EXC_AC           #AC: 对齐检查 (有错误码)
+ *         EXC_MC           #MC: 机器检查
+ *         EXC_XM           #XM: SIMD 浮点异常
+ *         EXC_VE           #VE: 虚拟化异常
+ *         PF_P             P: 页存在 (0=缺页, 1=保护违规)
+ *         PF_W             W: 写访问 (0=读, 1=写)
+ *         PF_U             U: 用户模式访问 (0=内核, 1=用户)
+ *         PF_RSVD          RSVD: 保留位违规
+ *         PF_I             I: 取指令错误
+ *         MSR_EFER         扩展功能启用寄存器
+ *         MSR_STAR         SYSCALL 目标 CS/SS
+ *         MSR_LSTAR        SYSCALL 64 位入口点
+ *         MSR_CSTAR        SYSCALL 兼容模式入口点
+ *         MSR_SFMASK       SYSCALL RFLAGS 掩码
+ *         MSR_FS_BASE      x86-64 FS segment bas…
+ *         MSR_GS_BASE      x86-64 GS segment base
+ *         EFER_SCE         SCE: SYSCALL 启用
+ *         EFER_LME         LME: Long Mode 启用
+ *         EFER_LMA         LMA: Long Mode 活跃（只读）
+ *         EFER_NXE         NXE: No-Execute 启用
+ *         MSR_PAT          常量 / 特性宏
+ *   函数  wrmsr                 本文件定义了 HBOS 在 x86_64…
+ *         rdmsr                 本文件定义了 HBOS 在 x86_64…
+ *         invlpg                本文件定义了 HBOS 在 x86_64…
+ *         read_cr2              读取 CR2（页错误线性地址）
+ *         read_cr3              读取 CR3（页表基址）
+ *         write_cr3             写入 CR3（切换页表，隐式刷新 TLB）
+ *         fpu_enable            打开 CPU 对 x87/SSE/SSE2…
+ *         pat_init              UC（无缓冲，每次写都是一次总线事务）会慢…
+ *         gdt_init              （待补）
+ *         gdt_idt_init          （待补）
+ *         tss_set_stack         （待补）
+ *         tss_set_stack_cpu     同 tss_set_stack，但指定核心…
+ *         gdt_idt_load_ap       AP 核心专用：加载 BSP 已经建好的共…
+ *         int_enable            （待补）
+ *         int_disable           （待补）
+ *         int_get_state         （待补）
+ *         pit_get_ticks         PIT (IRQ0) 中断计数，pit_i…
+ *         pit_get_frequency_hz  PIT 当前实际频率
+ *         pit_ticks_from_ms     按当前 PIT 频率向上取整转换毫秒
  */
-
 #ifndef HBOS_CPU_H
 #define HBOS_CPU_H
 

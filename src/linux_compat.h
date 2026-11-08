@@ -5,8 +5,88 @@
  * The implementation deliberately reuses the HBOS task fd table and
  * cooperative scheduler.  It does not add a second VFS or a resident
  * compatibility daemon.
+ *
+ * @layer   user
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  linux_pollfd_t      结构体 / 类型别名
+ *         linux_epoll_data_t  结构体 / 类型别名
+ *   宏    LINUX_POLLIN            常量 / 特性宏
+ *         LINUX_POLLOUT           常量 / 特性宏
+ *         LINUX_POLLERR           常量 / 特性宏
+ *         LINUX_POLLHUP           常量 / 特性宏
+ *         LINUX_POLLNVAL          常量 / 特性宏
+ *         LINUX_EPOLL_CTL_ADD     LINUXEPOLLCTL添加
+ *         LINUX_EPOLL_CTL_DEL     常量 / 特性宏
+ *         LINUX_EPOLL_CTL_MOD     常量 / 特性宏
+ *         LINUX_EPOLLONESHOT      常量 / 特性宏
+ *         LINUX_EPOLLET           常量 / 特性宏
+ *         LINUX_EFD_SEMAPHORE     常量 / 特性宏
+ *         LINUX_EFD_NONBLOCK      常量 / 特性宏
+ *         LINUX_EFD_CLOEXEC       常量 / 特性宏
+ *         LINUX_IN_ACCESS         常量 / 特性宏
+ *         LINUX_IN_MODIFY         常量 / 特性宏
+ *         LINUX_IN_ATTRIB         常量 / 特性宏
+ *         LINUX_IN_CLOSE_WRITE    LINUXIN关闭写
+ *         LINUX_IN_CLOSE_NOWRITE  LINUXIN关闭NOWRITE
+ *         LINUX_IN_OPEN           LINUXIN打开
+ *         LINUX_IN_MOVED_FROM     常量 / 特性宏
+ *         LINUX_IN_MOVED_TO       常量 / 特性宏
+ *         LINUX_IN_CREATE         LINUXIN创建
+ *         LINUX_IN_DELETE         LINUXIN删除
+ *         LINUX_IN_DELETE_SELF    LINUXIN删除SELF
+ *         LINUX_IN_MOVE_SELF      LINUXIN移动SELF
+ *         LINUX_IN_Q_OVERFLOW     常量 / 特性宏
+ *         LINUX_IN_IGNORED        常量 / 特性宏
+ *         LINUX_IN_ISDIR          常量 / 特性宏
+ *   函数  linux_compat_read             （待补）
+ *         linux_compat_write            （待补）
+ *         linux_compat_close            （待补）
+ *         linux_compat_retain           （待补）
+ *         linux_compat_retain_entry     按 fd 条目直接调整 pipe 引用计数…
+ *         linux_compat_release_entry    （待补）
+ *         posix_pipe_write_end_open     读端阻塞判断用：除自己以外是否还有写端（见…
+ *         linux_compat_retain_task      （待补）
+ *         linux_compat_release_task     （待补）
+ *         linux_compat_poll             （待补）
+ *         linux_compat_pipe2            （待补）
+ *         linux_compat_eventfd2         （待补）
+ *         linux_compat_epoll_create1    （待补）
+ *         linux_compat_inotify_init1    （待补）
+ *         linux_compat_inotify_add_watch  （待补）
+ *         linux_compat_inotify_rm_watch  （待补）
+ *         linux_compat_getrandom        （待补）
+ *         linux_compat_unix_socket      （待补）
+ *         linux_compat_unix_socketpair  （待补）
+ *         linux_compat_unix_bind        （待补）
+ *         linux_compat_unix_listen      （待补）
+ *         linux_compat_unix_accept      （待补）
+ *         linux_compat_unix_connect     （待补）
+ *         linux_compat_unix_getsockname  （待补）
+ *         linux_compat_unix_getpeername  （待补）
+ *         linux_compat_unix_recv        （待补）
+ *         linux_compat_unix_shutdown    （待补）
+ *         linux_compat_unix_send_rights  （待补）
+ *         linux_compat_shm_is_path      /dev/shm 内存后备（见 linux…
+ *         linux_compat_shm_open         按名字打开或创建内存后备文件
+ *         linux_compat_shm_stat         回填内存后备文件字节数
+ *         linux_compat_shm_unlink       摘掉名字到内存槽的登记
+ *         linux_compat_memfd_create     （待补）
+ *         linux_compat_memfd_truncate   （待补）
+ *         linux_compat_memfd_size       （待补）
+ *         linux_compat_memfd_unmap      （待补）
+ *         linux_compat_memfd_retain_map  （待补）
+ *         linux_compat_shm_lookup       （待补）
+ *         linux_compat_timerfd_create   （待补）
+ *         linux_compat_timerfd_gettime  （待补）
+ *         linux_compat_signalfd         （待补）
+ *         linux_compat_signalfd_consume  （待补）
  */
-
 #ifndef HBOS_LINUX_COMPAT_H
 #define HBOS_LINUX_COMPAT_H
 
@@ -127,7 +207,12 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
 
 /* /dev/shm 内存后备（见 linux_compat.c 的实现注释）。 */
 int linux_compat_shm_is_path(const char *path);
+/* 可写覆盖层统一判断：/dev/shm 下的条目，以及 /tmp 下的普通文件
+ * （目录、符号链接、socket 不算）。syscall.c 里所有 open/unlink/stat/mkdir
+ * 的分流都用它。 */
+int linux_compat_overlay_is_path(const char *path);
 int linux_compat_shm_open(const char *path, int flags);
+int linux_compat_shm_stat(const char *path, uint64_t *size);
 int linux_compat_shm_unlink(const char *path);
 int linux_compat_memfd_create(const char *name, unsigned int flags);
 int linux_compat_memfd_truncate(int fd, uint64_t size);

@@ -1,3 +1,24 @@
+/**
+ * @file    cc.h
+ * @brief   导出 8 个接口（1 类型 / 0 宏 / 7 函数）
+ *
+ * @layer   tools
+ * @owner   src/tools/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  cc_gfx_t    结构体 / 类型别名
+ *   函数  cc_set_gfx                 Graphics hook table f…
+ *         hbos_gcc_run_file          （待补）
+ *         hbos_gcc_run_file_capture  （待补）
+ *         hbos_gcc_last_error        （待补）
+ *         hbos_gcc_last_error_line   （待补）
+ *         hbos_gcc_last_return       （待补）
+ *         tool_cc_init               （待补）
+ */
 #ifndef HBOS_CC_H
 #define HBOS_CC_H
 

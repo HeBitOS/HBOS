@@ -4,8 +4,16 @@
  *
  * 与块设备解耦（索引块通过回调读取），因此可以在宿主机上用合成树单测：
  * depth 0/1、unwritten extent、空洞、坏 magic、48 位起始块号。
+ *
+ * @layer   lib
+ * @owner   src/lib/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
  */
-
 #ifndef HBOS_EXT4_EXTENT_H
 #define HBOS_EXT4_EXTENT_H
 

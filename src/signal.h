@@ -4,6 +4,55 @@
  *
  * 定义标准信号编号、信号处理函数原型等。
  * 参考 Linux signal.h 实现，部分高级信号功能为占位。
+ *
+ * @layer   user
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  sigset_t    信号集
+ *   宏    SIGHUP       终端挂起
+ *         SIGINT       中断 (Ctrl+C)
+ *         SIGQUIT      退出 (Ctrl+/)
+ *         SIGILL       非法指令
+ *         SIGTRAP      断点陷阱
+ *         SIGABRT      异常终止
+ *         SIGBUS       总线错误
+ *         SIGFPE       浮点异常
+ *         SIGKILL      强制终止（不可捕获）
+ *         SIGUSR1      用户定义信号 1
+ *         SIGSEGV      段错误
+ *         SIGUSR2      用户定义信号 2
+ *         SIGPIPE      管道破裂
+ *         SIGALRM      定时器超时
+ *         SIGTERM      终止
+ *         SIGSTKFLT    协处理器栈错误
+ *         SIGCHLD      子进程状态改变
+ *         SIGCONT      继续执行（不可捕获）
+ *         SIGSTOP      停止（不可捕获）
+ *         SIGTSTP      终端停止 (Ctrl+Z)
+ *         SIGTTIN      后台读终端
+ *         SIGTTOU      后台写终端
+ *         SIGURG       紧急套接字条件
+ *         SIGXCPU      CPU 时间超限
+ *         SIGXFSZ      文件大小超限
+ *         SIGVTALRM    虚拟定时器超时
+ *         SIGPROF      性能分析定时器超时
+ *         SIGWINCH     窗口大小改变
+ *         SIGIO        I/O 可操作
+ *         SIGPWR       电源故障
+ *         SIGSYS       错误系统调用
+ *         SIG_DFL      默认信号处理
+ *         SIG_IGN      忽略信号
+ *         SIG_ERR      信号处理错误返回
+ *         SIG_BLOCK    阻塞信号集
+ *         SIG_UNBLOCK  解除阻塞信号集
+ *         SIG_SETMASK  设置信号掩码
+ *   函数  raise       向自身发信号
+ *         kill        向进程发信号
  */
 #ifndef HBOS_SIGNAL_H
 #define HBOS_SIGNAL_H

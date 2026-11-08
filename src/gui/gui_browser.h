@@ -13,6 +13,20 @@
  *   - 所需的绘制原语全部走 gui_draw.h（已在别处公开）
  *   - 少量与桌面状态相关的回调（取路径、存焦点）通过显式参数传入，
  *     而不是让浏览器反向依赖桌面全局状态
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  gui_browser_measure_page  渲染前的准备：解析 CSS 并统计内容高度…
+ *         gui_browser_reset         清空浏览器引擎的解析缓存（切换页面时调用）
+ *         gui_browser_hit_link      命中测试：给定屏幕坐标，返回该处链接的 U…
+ *         gui_browser_image_count   取当前页面内嵌图片的槽位信息（供图片查看器…
+ *         gui_browser_image_info    （待补）
  */
 #ifndef HBOS_GUI_BROWSER_H
 #define HBOS_GUI_BROWSER_H

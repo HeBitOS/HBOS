@@ -1,6 +1,74 @@
 /**
  * @file fs.h
  * @brief HBFS 文件系统头文件，定义文件系统数据结构与接口
+ *
+ * @layer   fs
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  file_t               文件表（静态 BSS，不进内核镜像体积）
+ *         filesystem_t         结构体 / 类型别名
+ *         fs_partition_info_t  读取分区表信息（最多 4 个分区）
+ *         fs_check_result_t    检查文件系统一致性
+ *   宏    SECTOR_SIZE          扇区大小（字节）
+ *         FS_MAX_FILES         兼容旧调用点：按内存表容量
+ *         RAMFS_MAX_FILES      常量 / 特性宏
+ *         HBFS_MAX_FILES       常量 / 特性宏
+ *         MAX_FILES            兼容旧调用点：按内存表容量
+ *         MAX_FILENAME         文件路径最大长度（含结尾 '/0'）
+ *         HBFS_NAME_MAX        HBFS 磁盘 64B 表项中的文件名最大…
+ *         RAMFS_MAX_FILE_SIZE  ramfs/HBFS 单文件最大容量（字节）
+ *   函数  fs_init                       初始化文件系统
+ *         fs_check                      检查文件系统一致性
+ *         fs_format_disk                格式化磁盘（使用默认范围）
+ *         fs_install_disk               在磁盘上安装 HBFS 文件系统
+ *         fs_install_disk_at            在指定 LBA 范围安装 HBFS
+ *         fs_format_disk_fat32          格式化磁盘为 FAT32（使用默认/已有范…
+ *         fs_install_disk_fat32         在磁盘上安装 FAT32 文件系统（自动选…
+ *         fs_install_disk_fat32_at      在指定 LBA 范围安装 FAT32
+ *         fs_install_disk_fat32_partition  把分区表里的第 index 个分区（1 起…
+ *         fs_install_boot_grub          让当前 FAT32 盘可独立引导（BIOS…
+ *         fs_install_boot_kernel        把内核镜像写入 /boot/hbos.bi…
+ *         fs_boot_module_image          取引导器经 multiboot2 modu…
+ *         fs_grub_boot_image_size       构建期嵌入的 GRUB 引导块尺寸（进度显…
+ *         fs_grub_core_image_size       （待补）
+ *         fs_last_error                 获取最近一次错误描述
+ *         fs_read_partitions            读取分区表信息（最多 4 个分区）
+ *         fs_mount_disk                 挂载磁盘上的 HBFS 文件系统
+ *         fs_retry_mount                惰性重挂载：盘晚就绪/热插拔时重新探测，不…
+ *         fs_mount_partition            挂载分区表里的第 index 个分区（1…
+ *         fs_sync                       将文件表同步到磁盘
+ *         fs_is_disk                    判断当前后端是否为磁盘文件系统
+ *         fs_is_readonly                当前后端是否只读（ext4 布局目前只读
+ *         fs_backend_name               获取当前后端名称字符串
+ *         fs_disk_start_lba             获取 HBFS 分区起始 LBA
+ *         fs_disk_total_sectors         获取 HBFS 分区总扇区数
+ *         fs_min_sectors                获取 HBFS 所需最小扇区数
+ *         fs_capacity_bytes             获取文件系统总容量（字节）
+ *         fs_used_bytes                 获取已使用字节数
+ *         fs_list                       列出所有文件（预留接口）
+ *         fs_find_file                  按文件名查找文件
+ *         fs_create_file                创建文件（若已存在则返回已有文件）
+ *         fs_create_symlink             创建 ramfs/HBFS 符号链接
+ *         fs_delete_file                删除文件
+ *         fs_copy_file                  复制文件
+ *         fs_rename_file                重命名文件或目录树
+ *         fs_truncate_file              截断文件（清零大小）
+ *         fs_read_file_data             读取文件数据
+ *         fs_write_file_data            写入文件数据
+ *         fs_get_count                  获取已使用文件数
+ *         fs_get_file                   按索引获取文件
+ *         fs_get_node                   按索引获取 VFS 节点
+ *         fs_read_file                  读取文件（预留接口）
+ *         fs_mkdir                      （待补）
+ *         fs_rmdir                      （待补）
+ *         fs_opendir                    （待补）
+ *         fs_readdir                    （待补）
+ *         fs_closedir                   （待补）
  */
 #ifndef FS_H
 #define FS_H
@@ -18,9 +86,16 @@
 /* 1024 只够装几个 Debian 库：Chromium 的依赖闭包（glib、gtk、nss、X11…）
  * 装下来是数千个文件 + 目录项。file_t 约 456 字节，8192 项 ≈ 3.7 MiB 静态
  * BSS——相比"装到一半没槽位"的代价，这点常驻内存是划算的。 */
-/* 初始容量。ext2 挂载时会把整棵树平铺进这张表，8192 一满就再也看不到
- * 后面的路径（实测 11 万文件的 Debian rootfs 把 /opt/chromium 挤出了窗口，
- * chromium 直接 app not found）。表按需倍增，上限见 FS_MAX_FILES_CAP。 */
+/* 初始容量。ext2 挂载时会把整棵树平铺进这张表，一满就再也看不到
+ * 后面的路径（实测 11 万文件的 Debian rootfs 把 /opt/chromium 挤出了
+ * 窗口，chromium 直接 app not found）。
+ *
+ * 这张表是**静态 BSS**：file_t 实测 456 字节，131072 项就是 57 MiB，
+ * 再加倍没有性价比。所以真正的修法不是无脑调大，而是不把不该进来的东西
+ * 铺进来 —— ext2_scan_cb 现在跳过 /dev 与 /tmp 的子树（前者归 devfs，
+ * 后者归 memfd 覆盖层）。实测镜像里 /dev/shm 积了 97424 个 Chromium
+ * 共享内存残留、/tmp 有 27511 个临时文件，合计吃掉全部配额，而真正
+ * 要用的 /opt/chromium 只占 2650 项。跳过之后 131072 有充足余量。 */
 #define FS_MAX_FILES     131072
 #define RAMFS_MAX_FILES  128
 #define HBFS_MAX_FILES   128

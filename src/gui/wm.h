@@ -1,3 +1,93 @@
+/**
+ * @file    wm.h
+ * @brief   导出 77 个接口（2 类型 / 38 宏 / 37 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  wm_state_t   结构体 / 类型别名
+ *         wm_window_t  结构体 / 类型别名
+ *   宏    WM_MAX_WINDOWS      常量 / 特性宏
+ *         WM_TASKBAR_H        常量 / 特性宏
+ *         WM_TITLE_H          常量 / 特性宏
+ *         WM_BORDER_W         常量 / 特性宏
+ *         WM_BTN_W            常量 / 特性宏
+ *         WM_BTN_GAP          常量 / 特性宏
+ *         SM_W                常量 / 特性宏
+ *         SM_H                常量 / 特性宏
+ *         SM_PAD              常量 / 特性宏
+ *         SM_SEARCH_TOP       常量 / 特性宏
+ *         SM_SEARCH_H         常量 / 特性宏
+ *         SM_PIN_TOP          常量 / 特性宏
+ *         SM_PIN_LABEL_H      常量 / 特性宏
+ *         SM_GRID_TOP         常量 / 特性宏
+ *         SM_GRID_COLS        常量 / 特性宏
+ *         SM_GRID_ROWS        常量 / 特性宏
+ *         SM_CELL_W           常量 / 特性宏
+ *         SM_CELL_H           常量 / 特性宏
+ *         SM_GRID_H           常量 / 特性宏
+ *         SM_SEP_Y            常量 / 特性宏
+ *         SM_BAR_TOP          常量 / 特性宏
+ *         SM_BAR_H            常量 / 特性宏
+ *         SM_PINNED_COUNT     常量 / 特性宏
+ *         SM_SHELL_ITEM       常量 / 特性宏
+ *         SM_POWER_ITEM       常量 / 特性宏
+ *         SM_HAX_BASE         SMHAX基址
+ *         SM_HAX_MAX          常量 / 特性宏
+ *         SM_CELL_BASE        SMCELL基址
+ *         SM_SEARCH_ITEM      常量 / 特性宏
+ *         WM_STATE_NORMAL     WM状态NORMAL
+ *         WM_STATE_MINIMIZED  WM状态MINIMIZED
+ *         WM_STATE_MAXIMIZED  WM状态MAXIMIZED
+ *         WM_ANIM_NONE        常量 / 特性宏
+ *         WM_ANIM_MINIMIZE    常量 / 特性宏
+ *         WM_ANIM_MAXIMIZE    常量 / 特性宏
+ *         WM_ANIM_RESTORE     常量 / 特性宏
+ *         WM_ANIM_OPEN        WMANIM打开
+ *         WM_LAYER_MAX        常量 / 特性宏
+ *   函数  ui_s                      ── DPI 缩放 ───────────…
+ *         wm_window_layer           取窗口当前层级
+ *         wm_knock_down             把 idx 的层级降到 target 之下…
+ *         wm_sink_one               「降维打击」的实际动作：把它和在它**正下…
+ *         wm_tick_knock             每帧调用：递减撞击冷却/高亮帧数
+ *         wm_windows_collide        两个窗口矩形是否相交（用于「撞击」判定）
+ *         wm_init                   （待补）
+ *         wm_set_panel_title        （待补）
+ *         wm_set_app_title          （待补）
+ *         wm_window_title_by_mode   （待补）
+ *         wm_open_window            （待补）
+ *         wm_close_window           （待补）
+ *         wm_focus_window           （待补）
+ *         wm_focus_next             （待补）
+ *         wm_move_window            （待补）
+ *         wm_resize_window          （待补）
+ *         wm_minimize_window        （待补）
+ *         wm_maximize_window        （待补）
+ *         wm_restore_window         （待补）
+ *         wm_restore_target         只查询"还原后的矩形"，不改状态
+ *         wm_toggle_maximize        （待补）
+ *         wm_snap_window            （待补）
+ *         wm_unsnap_window          从吸附态退出：恢复到吸附前的几何
+ *         wm_toggle_start_menu      （待补）
+ *         wm_close_start_menu       （待补）
+ *         wm_get_window             （待补）
+ *         wm_get_active             （待补）
+ *         wm_window_title           （待补）
+ *         wm_get_window_rect        （待补）
+ *         wm_hit_titlebar           （待补）
+ *         wm_hit_close              （待补）
+ *         wm_hit_minimize           （待补）
+ *         wm_hit_maximize           （待补）
+ *         wm_hit_border             （待补）
+ *         wm_hit_start_menu         （待补）
+ *         wm_update_animations      （待补）
+ *         wm_has_active_animations  （待补）
+ */
 #ifndef HBOS_WM_H
 #define HBOS_WM_H
 

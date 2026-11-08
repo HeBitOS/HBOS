@@ -18,6 +18,54 @@
  * 与旧接口的关系：旧 `gui_app_module_t` 的四个回调收拢成虚表，参数从
  * （st, tx, ty, win_w, win_h）变成（app, ev）——应用从 app->ctx 取自己的状态，
  * 从 app->content 取绘制区域。这样新增应用不需要改框架任何一行。
+ *
+ * @layer   gui
+ * @owner   src/ui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  ui_win_state_t  结构体 / 类型别名
+ *         ui_anim_t       结构体 / 类型别名
+ *         ui_edge_t       结构体 / 类型别名
+ *         ui_window_t     所属窗口
+ *         ui_app_vt_t     结构体 / 类型别名
+ *         ui_wm_t         结构体 / 类型别名
+ *         ui_app          （待补）
+ *         ui_app_t        结构体 / 类型别名
+ *   宏    UI_WIN_MAX        同时存在的窗口上限
+ *         UI_WIN_TITLE_MAX  常量 / 特性宏
+ *   函数  ui_alloc               （待补）
+ *         ui_free                （待补）
+ *         ui_wm_init             初始化窗口管理器（清空所有窗口）
+ *         ui_wm_open             创建窗口
+ *         ui_wm_close            关闭窗口
+ *         ui_wm_focus            聚焦窗口（会自动置顶
+ *         ui_wm_focus_next       按方向轮换焦点（dir=+1 下一个，-1…
+ *         ui_wm_raise            把窗口提到最顶（调整 z 序）
+ *         ui_wm_move             （待补）
+ *         ui_wm_resize           （待补）
+ *         ui_wm_minimize         （待补）
+ *         ui_wm_maximize         （待补）
+ *         ui_wm_restore          （待补）
+ *         ui_wm_toggle_maximize  （待补）
+ *         ui_wm_get              取窗口（越界或未使用返回 NULL）
+ *         ui_wm_active           （待补）
+ *         ui_wm_content_rect     取窗口的客户区矩形（屏幕坐标）
+ *         ui_wm_tick             推进动画
+ *         ui_wm_hit_titlebar     命中标题栏？返回窗口索引或 -1
+ *         ui_wm_hit_window       命中的窗口索引（按 z 序从上往下找），-…
+ *         ui_wm_hit_border       命中缩放手柄？返回窗口索引，*edge 给…
+ *         ui_app_register        注册一个应用类型
+ *         ui_app_vt_by_mode      按 mode 查找虚表
+ *         ui_app_vt_count        已注册应用数 / 取第 i 个
+ *         ui_app_vt_at           （待补）
+ *         ui_app_launch          启动应用：创建实例并打开窗口
+ *         ui_app_close           关闭应用实例（会一并关闭其窗口）
+ *         ui_app_find            按 mode 找现存实例
+ *         ui_app_active          当前拥有焦点的应用实例
  */
 #ifndef HBOS_UI_APP_H
 #define HBOS_UI_APP_H

@@ -14,6 +14,165 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+/**
+ * @file    limine.h
+ * @brief   Limine 引导协议结构体（上游冻结，勿改）
+ *
+ * @layer   boot
+ * @owner   src/
+ * @stable  frozen（上游代码，勿改正文）
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  limine_uuid                   （待补）
+ *         limine_file                   （待补）
+ *         limine_bootloader_info_response  Limine 引导协议结构
+ *         limine_bootloader_info_request  Limine 引导协议结构
+ *         limine_executable_cmdline_response  Limine 引导协议结构
+ *         limine_executable_cmdline_request  Limine 引导协议结构
+ *         limine_firmware_type_response  Limine 引导协议结构
+ *         limine_firmware_type_request  Limine 引导协议结构
+ *         limine_stack_size_response    Limine 引导协议结构
+ *         limine_stack_size_request     Limine 引导协议结构
+ *         limine_hhdm_response          Limine 引导协议结构
+ *         limine_hhdm_request           Limine 引导协议结构
+ *         limine_video_mode             （待补）
+ *         limine_framebuffer            （待补）
+ *         limine_framebuffer_response   Limine 引导协议结构
+ *         limine_framebuffer_request    Limine 引导协议结构
+ *         limine_paging_mode_response   Limine 引导协议结构
+ *         limine_paging_mode_request    Limine 引导协议结构
+ *         limine_memmap_entry           （待补）
+ *         limine_memmap_response        Limine 引导协议结构
+ *         limine_memmap_request         Limine 引导协议结构
+ *         limine_entry_point_response   Limine 引导协议结构
+ *         limine_entry_point_request    Limine 引导协议结构
+ *         limine_executable_file_response  Limine 引导协议结构
+ *         limine_kernel_file_response   Limine 引导协议结构
+ *         limine_executable_file_request  Limine 引导协议结构
+ *         limine_kernel_file_request    Limine 引导协议结构
+ *         limine_internal_module        （待补）
+ *         limine_module_response        Limine 引导协议结构
+ *         limine_module_request         Limine 引导协议结构
+ *         limine_rsdp_response          Limine 引导协议结构
+ *         limine_rsdp_request           Limine 引导协议结构
+ *         limine_smbios_response        Limine 引导协议结构
+ *         limine_smbios_request         Limine 引导协议结构
+ *         limine_efi_system_table_response  Limine 引导协议结构
+ *         limine_efi_system_table_request  Limine 引导协议结构
+ *         limine_efi_memmap_response    Limine 引导协议结构
+ *         limine_efi_memmap_request     Limine 引导协议结构
+ *         limine_date_at_boot_response  Limine 引导协议结构
+ *         limine_boot_time_response     Limine 引导协议结构
+ *         limine_date_at_boot_request   Limine 引导协议结构
+ *         limine_boot_time_request      Limine 引导协议结构
+ *         limine_executable_address_response  Limine 引导协议结构
+ *         limine_kernel_address_response  Limine 引导协议结构
+ *         limine_executable_address_request  Limine 引导协议结构
+ *         limine_kernel_address_request  Limine 引导协议结构
+ *         limine_dtb_response           Limine 引导协议结构
+ *         limine_dtb_request            Limine 引导协议结构
+ *         limine_riscv_bsp_hartid_response  Limine 引导协议结构
+ *         limine_riscv_bsp_hartid_request  Limine 引导协议结构
+ *         limine_bootloader_performance_response  Limine 引导协议结构
+ *         limine_bootloader_performance_request  Limine 引导协议结构
+ *   宏    LIMINE_PTR                    常量 / 特性宏
+ *         LIMINE_API_REVISION           常量 / 特性宏
+ *         LIMINE_DEPRECATED             常量 / 特性宏
+ *         LIMINE_DEPRECATED_IGNORE_START  LIMINEDEPRECATEDIGNORE启动
+ *         LIMINE_DEPRECATED_IGNORE_END  常量 / 特性宏
+ *         LIMINE_REQUESTS_START_MARKER  LIMINEREQUESTS启动MARKER
+ *         LIMINE_REQUESTS_END_MARKER    常量 / 特性宏
+ *         LIMINE_REQUESTS_DELIMITER     常量 / 特性宏
+ *         LIMINE_BASE_REVISION          LIMINE基址REVISION
+ *         LIMINE_BASE_REVISION_SUPPORTED  LIMINE基址REVISIONSUPPORTED
+ *         LIMINE_LOADED_BASE_REV_VALID  LIMINELOADED基址REVVALID
+ *         LIMINE_LOADED_BASE_REVISION   LIMINELOADED基址REVISION
+ *         LIMINE_COMMON_MAGIC           常量 / 特性宏
+ *         LIMINE_MEDIA_TYPE_GENERIC     常量 / 特性宏
+ *         LIMINE_MEDIA_TYPE_OPTICAL     常量 / 特性宏
+ *         LIMINE_MEDIA_TYPE_TFTP        常量 / 特性宏
+ *         LIMINE_BOOTLOADER_INFO_REQUEST  LIMINEBOOTLOADER信息REQUEST
+ *         LIMINE_EXECUTABLE_CMDLINE_REQUEST  常量 / 特性宏
+ *         LIMINE_FIRMWARE_TYPE_REQUEST  常量 / 特性宏
+ *         LIMINE_FIRMWARE_TYPE_X86BIOS  常量 / 特性宏
+ *         LIMINE_FIRMWARE_TYPE_UEFI32   常量 / 特性宏
+ *         LIMINE_FIRMWARE_TYPE_UEFI64   常量 / 特性宏
+ *         LIMINE_FIRMWARE_TYPE_SBI      常量 / 特性宏
+ *         LIMINE_STACK_SIZE_REQUEST     LIMINE栈REQUEST
+ *         LIMINE_HHDM_REQUEST           常量 / 特性宏
+ *         LIMINE_FRAMEBUFFER_REQUEST    常量 / 特性宏
+ *         LIMINE_FRAMEBUFFER_RGB        常量 / 特性宏
+ *         LIMINE_TERMINAL_REQUEST       常量 / 特性宏
+ *         LIMINE_TERMINAL_CB_DEC        常量 / 特性宏
+ *         LIMINE_TERMINAL_CB_BELL       常量 / 特性宏
+ *         LIMINE_TERMINAL_CB_PRIVATE_ID  LIMINETERMINALCBPRIVATE编号
+ *         LIMINE_TERMINAL_CB_STATUS_REPORT  LIMINETERMINALCB状态REPORT
+ *         LIMINE_TERMINAL_CB_POS_REPORT  常量 / 特性宏
+ *         LIMINE_TERMINAL_CB_KBD_LEDS   常量 / 特性宏
+ *         LIMINE_TERMINAL_CB_MODE       常量 / 特性宏
+ *         LIMINE_TERMINAL_CB_LINUX      常量 / 特性宏
+ *         LIMINE_TERMINAL_CTX_SIZE      常量 / 特性宏
+ *         LIMINE_TERMINAL_CTX_SAVE      常量 / 特性宏
+ *         LIMINE_TERMINAL_CTX_RESTORE   常量 / 特性宏
+ *         LIMINE_TERMINAL_FULL_REFRESH  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_GET  LIMINETERMINALOOBOUTPUT取
+ *         LIMINE_TERMINAL_OOB_OUTPUT_SET  LIMINETERMINALOOBOUTPUT设置
+ *         LIMINE_TERMINAL_OOB_OUTPUT_OCRNL  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_OFDEL  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_OFILL  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_OLCUC  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_ONLCR  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_ONLRET  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_ONOCR  常量 / 特性宏
+ *         LIMINE_TERMINAL_OOB_OUTPUT_OPOST  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_REQUEST    常量 / 特性宏
+ *         LIMINE_PAGING_MODE_X86_64_4LVL  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_X86_64_5LVL  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_MIN        常量 / 特性宏
+ *         LIMINE_PAGING_MODE_DEFAULT    常量 / 特性宏
+ *         LIMINE_PAGING_MODE_AARCH64_4LVL  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_AARCH64_5LVL  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_RISCV_SV39  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_RISCV_SV48  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_RISCV_SV57  常量 / 特性宏
+ *         LIMINE_PAGING_MODE_LOONGARCH64_4LVL  常量 / 特性宏
+ *         LIMINE_5_LEVEL_PAGING_REQUEST  常量 / 特性宏
+ *         LIMINE_MP_REQUEST             常量 / 特性宏
+ *         LIMINE_MP                     常量 / 特性宏
+ *         LIMINE_SMP_REQUEST            LIMINESMPREQUEST
+ *         LIMINE_MP_X2APIC              常量 / 特性宏
+ *         LIMINE_SMP_X2APIC             LIMINESMPX2APIC
+ *         LIMINE_MEMMAP_REQUEST         常量 / 特性宏
+ *         LIMINE_MEMMAP_USABLE          常量 / 特性宏
+ *         LIMINE_MEMMAP_RESERVED        常量 / 特性宏
+ *         LIMINE_MEMMAP_ACPI_RECLAIMABLE  常量 / 特性宏
+ *         LIMINE_MEMMAP_ACPI_NVS        常量 / 特性宏
+ *         LIMINE_MEMMAP_BAD_MEMORY      LIMINEMEMMAPBAD内存
+ *         LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE  常量 / 特性宏
+ *         LIMINE_MEMMAP_EXECUTABLE_AND_MODULES  常量 / 特性宏
+ *         LIMINE_MEMMAP_KERNEL_AND_MODULES  常量 / 特性宏
+ *         LIMINE_MEMMAP_FRAMEBUFFER     常量 / 特性宏
+ *         LIMINE_ENTRY_POINT_REQUEST    LIMINE表项POINTREQUEST
+ *         LIMINE_EXECUTABLE_FILE_REQUEST  常量 / 特性宏
+ *         LIMINE_KERNEL_FILE_REQUEST    常量 / 特性宏
+ *         LIMINE_MODULE_REQUEST         常量 / 特性宏
+ *         LIMINE_INTERNAL_MODULE_REQUIRED  常量 / 特性宏
+ *         LIMINE_INTERNAL_MODULE_COMPRESSED  常量 / 特性宏
+ *         LIMINE_RSDP_REQUEST           常量 / 特性宏
+ *         LIMINE_SMBIOS_REQUEST         常量 / 特性宏
+ *         LIMINE_EFI_SYSTEM_TABLE_REQUEST  LIMINEEFISYSTEM表REQUEST
+ *         LIMINE_EFI_MEMMAP_REQUEST     常量 / 特性宏
+ *         LIMINE_DATE_AT_BOOT_REQUEST   常量 / 特性宏
+ *         LIMINE_BOOT_TIME_REQUEST      LIMINEBOOT时间REQUEST
+ *         LIMINE_EXECUTABLE_ADDRESS_REQUEST  常量 / 特性宏
+ *         LIMINE_KERNEL_ADDRESS_REQUEST  常量 / 特性宏
+ *         LIMINE_DTB_REQUEST            常量 / 特性宏
+ *         LIMINE_RISCV_BSP_HARTID_REQUEST  常量 / 特性宏
+ *         LIMINE_BOOTLOADER_PERFORMANCE_REQUEST  常量 / 特性宏
+ */
 #ifndef LIMINE_H
 #define LIMINE_H 1
 

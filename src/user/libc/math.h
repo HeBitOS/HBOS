@@ -1,3 +1,84 @@
+/**
+ * @file    math.h
+ * @brief   导出 68 个接口（1 类型 / 26 宏 / 41 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  double_t    结构体 / 类型别名
+ *   宏    INFINITY      常量 / 特性宏
+ *         NAN           常量 / 特性宏
+ *         M_E           常量 / 特性宏
+ *         M_LOG2E       常量 / 特性宏
+ *         M_LOG10E      常量 / 特性宏
+ *         M_LN2         常量 / 特性宏
+ *         M_LN10        常量 / 特性宏
+ *         M_PI          常量 / 特性宏
+ *         M_PI_2        常量 / 特性宏
+ *         M_PI_4        常量 / 特性宏
+ *         M_1_PI        常量 / 特性宏
+ *         M_2_PI        常量 / 特性宏
+ *         M_2_SQRTPI    常量 / 特性宏
+ *         M_SQRT2       常量 / 特性宏
+ *         M_SQRT1_2     常量 / 特性宏
+ *         FP_NAN        常量 / 特性宏
+ *         FP_INFINITE   常量 / 特性宏
+ *         FP_ZERO       常量 / 特性宏
+ *         FP_SUBNORMAL  常量 / 特性宏
+ *         FP_NORMAL     常量 / 特性宏
+ *         fpclassify    常量 / 特性宏
+ *         isfinite      常量 / 特性宏
+ *         isnan         是否 NaN
+ *         isinf         是否无穷
+ *         isnormal      常量 / 特性宏
+ *         signbit       常量 / 特性宏
+ *   函数  fabs        绝对值
+ *         floor       向下取整
+ *         ceil        向上取整
+ *         trunc       （待补）
+ *         round       四舍五入
+ *         sqrt        平方根
+ *         fmod        浮点取余
+ *         modf        （待补）
+ *         copysign    （待补）
+ *         fmin        取较小值
+ *         fmax        取较大值
+ *         remainder   （待补）
+ *         scalbn      （待补）
+ *         ldexp       （待补）
+ *         frexp       （待补）
+ *         nearbyint   （待补）
+ *         lrint       （待补）
+ *         rint        （待补）
+ *         sin         正弦
+ *         cos         余弦
+ *         tan         正切
+ *         asin        （待补）
+ *         acos        （待补）
+ *         atan        （待补）
+ *         atan2       （待补）
+ *         sinh        （待补）
+ *         cosh        （待补）
+ *         tanh        （待补）
+ *         asinh       （待补）
+ *         acosh       （待补）
+ *         atanh       （待补）
+ *         exp         自然指数
+ *         exp2        （待补）
+ *         expm1       （待补）
+ *         log         自然对数
+ *         log2        以 2 为底对数
+ *         log10       以 10 为底对数
+ *         log1p       （待补）
+ *         pow         幂
+ *         cbrt        （待补）
+ *         hypot       （待补）
+ */
 #ifndef HBOS_USER_LIBC_MATH_H
 #define HBOS_USER_LIBC_MATH_H
 

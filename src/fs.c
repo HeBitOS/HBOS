@@ -58,6 +58,11 @@ typedef struct {
 
 // 全局文件系统实例
 static filesystem_t fs;           /**< 全局文件系统实例 */
+/* 已用过的最高槽位 + 1。fs.file_count 是"当前存活条目数"，删中间项会减；
+ * 而槽位是在 [0, MAX_FILES) 里挑第一个空位填的，所以可能落在 file_count
+ * 之后。任何"扫全表"的地方都必须用这个上界，否则刚插进去的条目扫不到。 */
+static uint32_t fs_high_water;    /**< 已用槽位上界（全表扫描的上界） */
+static uint8_t fs_table_full_reported; /**< 文件表溢出只报一次的闸门 */
 static fs_backend_t fs_backend = FS_BACKEND_RAM; /**< 当前文件系统后端类型 */
 static uint8_t ramfs_storage[RAMFS_MAX_FILES][RAMFS_MAX_FILE_SIZE]; /**< ramfs 模式下的文件数据存储区 */
 static hbfs_entry_t hbfs_table[HBFS_MAX_FILES]; /**< HBFS 文件表 */
@@ -215,9 +220,32 @@ static uint32_t ext2_resolve_parent(const char *full_path, char *name_out) {
     }
 }
 
+/* ── 槽位分配 ─────────────────────────────────────────────────
+ *
+ * 全表扫描的统一入口。返回 NULL 表示表满。
+ *
+ * 为什么需要它：以前每个后端各自写一遍 `for (i = 0; i < fs.file_count; i++)
+ * { if (!f->used) {...} }`，把 "file_count"（存活条目数）当成了"表的长
+ * 度"用。删掉中间文件后 file_count 变小，新条目只能落在 [0, file_count)
+ * 里，而占着高位的旧条目仍在 —— 于是"建了却查不到"或者干脆建不出来。
+ * 现在统一用 fs_high_water 当上界，分配与查找一致。
+ *
+ * limit 是后端特有的槽位上限（ramfs 数据区只有 RAMFS_MAX_FILES 个），
+ * 传 0 表示 MAX_FILES。 */
+static file_t *fs_claim_slot(uint32_t limit) {
+    if (limit == 0 || limit > MAX_FILES) limit = MAX_FILES;
+    for (uint32_t i = 0; i < limit; i++) {
+        if (fs.files[i].used) continue;
+        if (i >= fs_high_water) fs_high_water = i + 1;
+        return &fs.files[i];
+    }
+    return NULL;
+}
+
 /** 重置文件系统为 ramfs 模式，初始化所有文件槽位 */
 static void fs_reset_ram(void) {
     fs.file_count = 0;
+    fs_high_water = 0;
     fs.total_sectors = 0;
     fs_backend = FS_BACKEND_RAM;
     hbfs_start_lba = HBFS_DEFAULT_START_LBA;
@@ -306,6 +334,7 @@ static int hbfs_load_table(void) {
 /** 根据 HBFS 文件表重建内存中的文件结构 */
 static void hbfs_rebuild_files_from_table(void) {
     fs.file_count = 0;
+    fs_high_water = 0;
     for (uint32_t i = 0; i < HBFS_MAX_FILES; i++) {
         file_t *f = &fs.files[i];
         hbfs_entry_t *e = &hbfs_table[i];
@@ -329,6 +358,7 @@ static void hbfs_rebuild_files_from_table(void) {
             strcpy(f->name, e->name);
             strcpy(f->node.name, e->name);
             fs.file_count++;
+            if (fs.file_count > fs_high_water) fs_high_water = fs.file_count;
         } else {
             f->name[0] = '\0';
             f->node.name[0] = '\0';
@@ -362,7 +392,18 @@ typedef struct {
 static int ext2_scan_cb(void *ctx, const char *name, uint32_t ftype, uint32_t ino) {
     ext2_walk_t *w = (ext2_walk_t *)ctx;
     if (name[0] == '.') return 0;
-    if (fs.file_count >= MAX_FILES) return 1;   /* 满了就停 */
+    if (fs.file_count >= MAX_FILES) {
+        /* 表满。**必须出声**：以前这里静默 return 1，症状是全盘扫到一半
+         * 就停，后面的路径在 VFS 里根本不存在，表现为"某个目录只剩第一个
+         * 文件"——排查时极难指向文件表容量。只报一次，别刷屏。 */
+        if (!fs_table_full_reported) {
+            fs_table_full_reported = 1;
+            console_puts("[FS] 文件表已满（");
+            fs_put_u32(MAX_FILES);
+            console_puts(" 项），后续路径将不可见\n");
+        }
+        return 1;   /* 满了就停 */
+    }
 
     ext2_inode_t inode;
     if (ext2_read_inode(&ext2_fs, ino, &inode) < 0) return 0;
@@ -386,6 +427,20 @@ static int ext2_scan_cb(void *ctx, const char *name, uint32_t ftype, uint32_t in
 
     int is_dir = (ftype == 2) || ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
     int is_link = (ftype == 7) || ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK);
+
+    /* /dev 与 /tmp 不进 ext2 文件表。
+     *
+     * 这两个子树由别的子系统负责语义：/dev 走 devfs 合成（/proc /sys 同理），
+     * /tmp 由 linux_compat 的 memfd 覆盖层 + fs_mkdir_ramdir 承担。把它们
+     * 平铺进表里不但没有意义，还会**挤掉真正要用的路径** —— 实测镜像的
+     * /dev/shm 里积了 97424 个历史 Chromium 共享内存残留段，加上 /tmp 的
+     * 27511 个临时文件，一起把 131072 项的配额耗尽，于是 /opt/chromium
+     * 下的 icudtl.dat 与 *.pak 一个都装不进来。
+     *
+     * 只登记这两个目录本身（不递归），这样 `ls /` 还能看见它们。 */
+    int skip_subtree = is_dir && w && w->prefix &&
+                       (strcmp(nm, "dev") == 0 || strcmp(nm, "tmp") == 0);
+    if (fs.file_count >= fs_high_water) fs_high_water = fs.file_count + 1;
     file_t *f = &fs.files[fs.file_count];
     memcpy(f->name, nm, pos + 1);
     f->size = inode.i_size;
@@ -406,7 +461,7 @@ static int ext2_scan_cb(void *ctx, const char *name, uint32_t ftype, uint32_t in
     memcpy(f->node.name, f->name, pos + 1);
     fs.file_count++;
 
-    if (is_dir && (!w || w->depth < 12)) {
+    if (is_dir && !skip_subtree && (!w || w->depth < 12)) {
         ext2_walk_t child = { nm, w ? w->depth + 1 : 1 };
         (void)ext2_iter_dir(&ext2_fs, &inode, ext2_scan_cb, &child);
     }
@@ -415,6 +470,7 @@ static int ext2_scan_cb(void *ctx, const char *name, uint32_t ftype, uint32_t in
 
 static void ext2_rebuild_files(void) {
     fs.file_count = 0;
+    fs_high_water = 0;
     ext2_inode_t root;
     if (ext2_read_inode(&ext2_fs, EXT2_ROOT_INO, &root) < 0) return;
     ext2_walk_t walk = { "", 0 };
@@ -601,6 +657,7 @@ static void fat32_rebuild_dir(uint32_t dir_cluster, const char *prefix) {
         if (plen) full[plen++] = '/';
         memcpy(full + plen, name, nlen);
         full[plen + nlen] = '\0';
+        if (fs.file_count >= fs_high_water) fs_high_water = fs.file_count + 1;
         file_t *f = &fs.files[fs.file_count];
         f->size = fsize;
         f->capacity = fsize > RAMFS_MAX_FILE_SIZE ? fsize : RAMFS_MAX_FILE_SIZE;
@@ -626,6 +683,7 @@ static void fat32_rebuild_dir(uint32_t dir_cluster, const char *prefix) {
 /** 从 FAT32 根目录读取文件条目并填充 fs.files[] */
 static void fat32_rebuild_files(void) {
     fs.file_count = 0;
+    fs_high_water = 0;
     fat32_rebuild_dir(fat32_fs.bpb.root_cluster, "");
 }
 
@@ -762,6 +820,7 @@ typedef struct {
 } exfat_walk_t;
 
 static void exfat_add_entry(const exfat_dirent_t *e, const char *full, int is_dir) {
+    if (fs.file_count >= fs_high_water) fs_high_water = fs.file_count + 1;
     file_t *f = &fs.files[fs.file_count++];
     f->size = e->size > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)e->size;
     f->capacity = f->size;
@@ -811,6 +870,7 @@ static int exfat_emit(void *ctx, const exfat_dirent_t *e) {
 
 static void exfat_rebuild_files(void) {
     fs.file_count = 0;
+    fs_high_water = 0;
     exfat_walk_t root = { "", 0 };
     (void)exfat_iter_dir(&exfat_fs, exfat_fs.root_cluster, exfat_emit, &root);
 }
@@ -1370,7 +1430,7 @@ int fs_check(fs_check_result_t *out) {
     r.first_error = "ok";
 
     uint32_t seen_names = 0;
-    for (uint32_t i = 0; i < fs.file_count; i++) {
+    for (uint32_t i = 0; i < fs_high_water; i++) {
         file_t *f = &fs.files[i];
         if (!f->used) continue;
         r.files_seen++;
@@ -1388,7 +1448,7 @@ int fs_check(fs_check_result_t *out) {
         if (f->node.size != f->size) {
             if (r.errors++ == 0) r.first_error = "vfs size mismatch";
         }
-        for (uint32_t j = i + 1; j < fs.file_count; j++) {
+        for (uint32_t j = i + 1; j < fs_high_water; j++) {
             if (fs.files[j].used && strcmp(f->name, fs.files[j].name) == 0) {
                 if (r.errors++ == 0) r.first_error = "duplicate file name";
             }
@@ -1923,7 +1983,7 @@ uint32_t fs_used_bytes(void) {
         return used > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)used;
     }
     uint32_t used = 0;
-    for (uint32_t i = 0; i < fs.file_count; i++) {
+    for (uint32_t i = 0; i < fs_high_water; i++) {
         if (fs.files[i].used) used += fs.files[i].size;
     }
     return used;
@@ -1938,7 +1998,11 @@ void fs_list(void) {
 file_t *fs_find_file(const char *name) {
     char norm[MAX_FILENAME];
     if (!normalize_path(name, norm)) return NULL;
-    for (uint32_t i = 0; i < fs.file_count; i++) {
+    /* 上界必须是 fs_high_water 而不是 fs.file_count：后者是"用过的槽数"，
+     * 而 fs_create_file/fs_mkdir 是在 [0, MAX_FILES) 里找第一个空槽，
+     * 删掉中间的文件后新条目可能落在 file_count 之外 —— 用 file_count
+     * 当上界会让刚建好的文件"查不到"（早先那次 files=0 的假象同源）。 */
+    for (uint32_t i = 0; i < fs_high_water; i++) {
         if (fs.files[i].used && strcmp(fs.files[i].name, norm) == 0)
             return &fs.files[i];
     }
@@ -2008,9 +2072,8 @@ file_t *fs_create_file(const char *name) {
             (void)fs_fail("exFAT 创建文件失败");
             return NULL;
         }
-        for (uint32_t i = 0; i < fs.file_count; i++) {
-            file_t *f = &fs.files[i];
-            if (f->used) continue;
+        file_t *f = fs_claim_slot(0);
+        if (f) {
             strcpy(f->name, norm);
             f->size = 0;
             f->capacity = 0;
@@ -2038,9 +2101,8 @@ file_t *fs_create_file(const char *name) {
         if (!parent) return NULL;
         int ino = ext2_create_file(&ext2_fs, parent, basename, 1);
         if (ino < 0) return NULL;
-        for (uint32_t i = 0; i < fs.file_count; i++) {
-            file_t *f = &fs.files[i];
-            if (f->used) continue;
+        file_t *f = fs_claim_slot(0);
+        if (f) {
             strcpy(f->name, norm);
             f->size = 0;
             f->capacity = RAMFS_MAX_FILE_SIZE;
@@ -2069,9 +2131,8 @@ file_t *fs_create_file(const char *name) {
         if (!parent) return NULL;
         uint32_t cluster;
         if (fat32_create_file(&fat32_fs, parent, basename, &cluster) < 0) return NULL;
-        for (uint32_t i = 0; i < fs.file_count; i++) {
-            file_t *f = &fs.files[i];
-            if (f->used) continue;
+        file_t *f = fs_claim_slot(0);
+        if (f) {
             strcpy(f->name, norm);
             f->size = 0;
             f->capacity = RAMFS_MAX_FILE_SIZE;
@@ -2094,34 +2155,34 @@ file_t *fs_create_file(const char *name) {
         return NULL;
     }
 
-    for (uint32_t i = 0; i < fs.file_count; i++) {
-        if (fs_backend != FS_BACKEND_HBFS && i >= RAMFS_MAX_FILES)
-            break;   /* ramfs 数据区只有 RAMFS_MAX_FILES 个槽 */
-        file_t *f = &fs.files[i];
-        if (f->used) continue;
-        strcpy(f->name, norm);
-        f->size = 0;
-        f->capacity = RAMFS_MAX_FILE_SIZE;
-        f->data = (fs_backend == FS_BACKEND_HBFS) ? NULL : ramfs_storage[i];
-        f->node.type = VFS_NODE_FILE;
-        f->node.size = 0;
-        f->node.capacity = RAMFS_MAX_FILE_SIZE;
-        f->node.private_data = f;
-        f->node.ops = &ramfs_ops;
-        strcpy(f->node.name, norm);
-        f->disk_slot = i;
-        f->used = 1;
-        f->type = 0;
-        f->node.uid = 0;
-        f->node.gid = 0;
-        f->node.mode = S_IFREG | 0644;
-        fs.file_count++;
-        if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0) {
-            f->used = 0;
-            fs.file_count--;
-            return NULL;
+    {
+        file_t *f = fs_claim_slot(fs_backend == FS_BACKEND_HBFS ? 0 : RAMFS_MAX_FILES);
+        if (f) {
+            uint32_t slot = (uint32_t)(f - fs.files);
+            strcpy(f->name, norm);
+            f->size = 0;
+            f->capacity = RAMFS_MAX_FILE_SIZE;
+            f->data = (fs_backend == FS_BACKEND_HBFS) ? NULL : ramfs_storage[slot];
+            f->node.type = VFS_NODE_FILE;
+            f->node.size = 0;
+            f->node.capacity = RAMFS_MAX_FILE_SIZE;
+            f->node.private_data = f;
+            f->node.ops = &ramfs_ops;
+            strcpy(f->node.name, norm);
+            f->disk_slot = slot;
+            f->used = 1;
+            f->type = 0;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFREG | 0644;
+            fs.file_count++;
+            if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0) {
+                f->used = 0;
+                fs.file_count--;
+                return NULL;
+            }
+            return f;
         }
-        return f;
     }
     return NULL;
 }
@@ -2148,9 +2209,8 @@ file_t *fs_create_symlink(const char *name, const char *target) {
         if (!parent) return NULL;
         int ino = ext2_symlink(&ext2_fs, parent, basename, target);
         if (ino < 0) return NULL;
-        for (uint32_t i = 0; i < fs.file_count; i++) {
-            file_t *f = &fs.files[i];
-            if (f->used) continue;
+        file_t *f = fs_claim_slot(0);
+        if (f) {
             strcpy(f->name, norm);
             strcpy(f->node.name, norm);
             f->size = (uint32_t)length;
@@ -2358,7 +2418,7 @@ int fs_rename_file(const char *old_name, const char *new_name) {
             return fs_fail("文件表过大，暂不支持目录改名");
         memset(moved, 0, sizeof(moved));
         size_t max_name_cap = (fs_backend == FS_BACKEND_HBFS) ? HBFS_NAME_MAX : MAX_FILENAME;
-        for (uint32_t i = 0; i < fs.file_count; i++) {
+        for (uint32_t i = 0; i < fs_high_water; i++) {
             file_t *entry = &fs.files[i];
             if (!entry->used || !fs_path_in_tree(entry->name, old_norm))
                 continue;
@@ -2369,20 +2429,20 @@ int fs_rename_file(const char *old_name, const char *new_name) {
             strcpy(previous[i], entry->name);
         }
 
-        for (uint32_t i = 0; i < fs.file_count; i++) {
+        for (uint32_t i = 0; i < fs_high_water; i++) {
             if (!moved[i]) continue;
             const char *suffix = previous[i] + old_length;
             char candidate[MAX_FILENAME];
             strcpy(candidate, new_norm);
             strcat(candidate, suffix);
-            for (uint32_t j = 0; j < fs.file_count; j++) {
+            for (uint32_t j = 0; j < fs_high_water; j++) {
                 if (!fs.files[j].used || moved[j]) continue;
                 if (strcmp(fs.files[j].name, candidate) == 0)
                     return fs_fail("重命名后的后代路径冲突");
             }
         }
 
-        for (uint32_t i = 0; i < fs.file_count; i++) {
+        for (uint32_t i = 0; i < fs_high_water; i++) {
             if (!moved[i]) continue;
             const char *suffix = previous[i] + old_length;
             strcpy(fs.files[i].name, new_norm);
@@ -2395,7 +2455,7 @@ int fs_rename_file(const char *old_name, const char *new_name) {
             }
         }
         if (fs_backend == FS_BACKEND_HBFS && hbfs_sync_table() < 0) {
-            for (uint32_t i = 0; i < fs.file_count; i++) {
+            for (uint32_t i = 0; i < fs_high_water; i++) {
                 if (!moved[i]) continue;
                 strcpy(fs.files[i].name, previous[i]);
                 strcpy(fs.files[i].node.name, previous[i]);
@@ -2477,7 +2537,7 @@ uint32_t fs_get_count(void) {
 /** 按索引获取文件（跳过未使用的槽位） */
 file_t *fs_get_file(uint32_t index) {
     uint32_t seen = 0;
-    for (uint32_t i = 0; i < fs.file_count; i++) {
+    for (uint32_t i = 0; i < fs_high_water; i++) {
         if (!fs.files[i].used) continue;
         if (seen == index) return &fs.files[i];
         seen++;
@@ -2532,11 +2592,77 @@ static int ramfs_vfs_unlink(vfs_node_t *node) {
     return fs_delete_file(node->name);
 }
 
+/* ── 只读后端上的"内存目录"旁路 ──────────────────────────────
+ *
+ * ext2 镜像带 ext4 特性（extents/64bit），src/ext2.c:117 因此把整盘标成
+ * read_only，ext2_mkdir 恒返 -1。而 Chromium/Electron 一启动就要在 /tmp
+ * 下建 0700 私有目录（ProcessSingleton 的 socket 目录、crashpad 的
+ * database 目录、profile 缓存），建不出来直接 exit 21。
+ *
+ * 做法：/tmp 子树下的目录只在内存表里登记（node.ops = &ramfs_ops），
+ * 不落盘。对客户端完全透明 —— stat 看到 S_IFDIR，readdir 能看到子项，
+ * 里面建的文件走 linux_compat 的 /tmp memfd 覆盖层。重启就没了，这对
+ * 临时目录本来就是正确语义。
+ *
+ * 只接管 /tmp：/etc /usr 这些必须保持只读，免得误以为能改系统文件。 */
+static int tmp_ramdir_path(const char *norm) {
+    return norm && strncmp(norm, "tmp", 3) == 0 && (norm[3] == '\0' || norm[3] == '/');
+}
+
+/** 在只读后端上以纯内存语义创建一个目录条目 */
+static int fs_mkdir_ramdir(const char *norm) {
+    file_t *f = fs_claim_slot(0);
+    if (!f) return -1;
+    uint32_t slot = (uint32_t)(f - fs.files);
+    strcpy(f->name, norm);
+    f->size = 0;
+    f->capacity = 0;
+    f->data = NULL;
+    f->node.type = VFS_NODE_DIR;
+    f->node.size = 0;
+    f->node.capacity = 0;
+    f->node.private_data = f;
+    f->node.ops = &ramfs_ops;
+    strcpy(f->node.name, norm);
+    f->disk_slot = slot;
+    f->used = 1;
+    f->type = 1;
+    f->node.uid = 0;
+    f->node.gid = 0;
+    f->node.mode = S_IFDIR | 0700;
+    fs.file_count++;
+    return 0;
+}
+
 int fs_mkdir(const char *name) {
     char norm[MAX_FILENAME];
     if (!normalize_path(name, norm)) return -1;
     file_t *existing = fs_find_file(norm);
     if (existing) return -1;
+
+    /* 只读后端 + /tmp 子树 → 内存目录。
+     *
+     * 这里带 mkdir -p 语义：Chromium 会直接 mkdir("/tmp/.config/chromium/
+     * Crash Reports/database")，中间几层它并不保证先建。以前只在最末一级
+     * 建目录、父级不存在就失败，于是 crashpad 报
+     *   open /tmp/.config/chromium/Crash Reports/settings.dat: ENOENT
+     * 然后整个崩溃上报链断掉。逐级补建的成本只是几次查表。 */
+    if (tmp_ramdir_path(norm) &&
+        (fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_EXFAT)) {
+        char partial[MAX_FILENAME];
+        size_t plen = strlen(norm);
+        if (plen >= sizeof(partial)) return -1;
+        memcpy(partial, norm, plen + 1);
+        for (size_t i = 4; i <= plen; i++) {          /* 跳过 "tmp/" */
+            if (partial[i] != '/' && partial[i] != '\0') continue;
+            char saved = partial[i];
+            partial[i] = '\0';
+            if (!fs_find_file(partial) && fs_mkdir_ramdir(partial) < 0)
+                return -1;
+            partial[i] = saved;
+        }
+        return 0;
+    }
 
     if (fs_backend == FS_BACKEND_EXT2) {
         char basename[MAX_FILENAME];
@@ -2544,9 +2670,8 @@ int fs_mkdir(const char *name) {
         if (!parent) return -1;
         int ino = ext2_mkdir(&ext2_fs, parent, basename);
         if (ino < 0) return -1;
-        for (uint32_t i = 0; i < fs.file_count; i++) {
-            file_t *f = &fs.files[i];
-            if (f->used) continue;
+        file_t *f = fs_claim_slot(0);
+        if (f) {
             strcpy(f->name, norm);
             f->size = 0;
             f->capacity = 0;
@@ -2576,9 +2701,8 @@ int fs_mkdir(const char *name) {
         if (fat32_mkdir(&fat32_fs, parent, basename) < 0) return -1;
         uint32_t new_cluster;
         if (fat32_lookup(&fat32_fs, parent, basename, &new_cluster, NULL, NULL) < 0) return -1;
-        for (uint32_t i = 0; i < fs.file_count; i++) {
-            file_t *f = &fs.files[i];
-            if (f->used) continue;
+        file_t *f = fs_claim_slot(0);
+        if (f) {
             strcpy(f->name, norm);
             f->size = 0;
             f->capacity = 0;
@@ -2601,32 +2725,34 @@ int fs_mkdir(const char *name) {
         return -1;
     }
 
-    for (uint32_t i = 0; i < fs.file_count; i++) {
-        file_t *f = &fs.files[i];
-        if (f->used) continue;
-        strcpy(f->name, norm);
-        f->size = 0;
-        f->capacity = 0;
-        f->data = NULL;
-        f->node.type = VFS_NODE_DIR;
-        f->node.size = 0;
-        f->node.capacity = 0;
-        f->node.private_data = f;
-        f->node.ops = &ramfs_ops;
-        strcpy(f->node.name, norm);
-        f->disk_slot = i;
-        f->used = 1;
-        f->type = 1;
-        f->node.uid = 0;
-        f->node.gid = 0;
-        f->node.mode = S_IFDIR | 0755;
-        fs.file_count++;
-        if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0) {
-            f->used = 0;
-            fs.file_count--;
-            return -1;
+    {
+        file_t *f = fs_claim_slot(0);
+        if (f) {
+            uint32_t slot = (uint32_t)(f - fs.files);
+            strcpy(f->name, norm);
+            f->size = 0;
+            f->capacity = 0;
+            f->data = NULL;
+            f->node.type = VFS_NODE_DIR;
+            f->node.size = 0;
+            f->node.capacity = 0;
+            f->node.private_data = f;
+            f->node.ops = &ramfs_ops;
+            strcpy(f->node.name, norm);
+            f->disk_slot = slot;
+            f->used = 1;
+            f->type = 1;
+            f->node.uid = 0;
+            f->node.gid = 0;
+            f->node.mode = S_IFDIR | 0755;
+            fs.file_count++;
+            if (fs_backend == FS_BACKEND_HBFS && hbfs_update_entry(f) < 0) {
+                f->used = 0;
+                fs.file_count--;
+                return -1;
+            }
+            return 0;
         }
-        return 0;
     }
     return -1;
 }
@@ -2635,7 +2761,7 @@ int fs_rmdir(const char *name) {
     file_t *f = fs_find_file(name);
     if (!f || f->type != 1) return -1;
 
-    for (uint32_t i = 0; i < fs.file_count; i++) {
+    for (uint32_t i = 0; i < fs_high_water; i++) {
         if (!fs.files[i].used) continue;
         if (&fs.files[i] == f) continue;
         size_t dlen = strlen(f->name);

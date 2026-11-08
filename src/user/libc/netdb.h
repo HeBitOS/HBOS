@@ -1,3 +1,34 @@
+/**
+ * @file    netdb.h
+ * @brief   导出 19 个接口（2 类型 / 14 宏 / 3 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hostent     主机表项
+ *         addrinfo    地址解析结果
+ *   宏    EAI_BADFLAGS    常量 / 特性宏
+ *         EAI_NONAME      常量 / 特性宏
+ *         EAI_AGAIN       常量 / 特性宏
+ *         EAI_FAIL        常量 / 特性宏
+ *         EAI_FAMILY      常量 / 特性宏
+ *         EAI_SOCKTYPE    常量 / 特性宏
+ *         EAI_SERVICE     常量 / 特性宏
+ *         EAI_MEMORY      EAI内存
+ *         EAI_SYSTEM      常量 / 特性宏
+ *         h_addr          常量 / 特性宏
+ *         AI_PASSIVE      常量 / 特性宏
+ *         AI_CANONNAME    常量 / 特性宏
+ *         AI_NUMERICHOST  常量 / 特性宏
+ *         AI_ADDRCONFIG   常量 / 特性宏
+ *   函数  freeaddrinfo   （待补）
+ *         gethostbyname  （待补）
+ */
 #ifndef HBOS_USER_LIBC_NETDB_H
 #define HBOS_USER_LIBC_NETDB_H
 

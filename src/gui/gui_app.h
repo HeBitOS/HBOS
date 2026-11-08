@@ -1,3 +1,25 @@
+/**
+ * @file    gui_app.h
+ * @brief   导出 9 个接口（1 类型 / 0 宏 / 8 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  gui_app_module_t  结构体 / 类型别名
+ *   函数  gui_app_by_mode       （待补）
+ *         gui_app_module_count  已注册应用数（应用列表与开始菜单据此派生，…
+ *         gui_app_module_at     取第 index 个已注册应用
+ *         gui_app_draw          （待补）
+ *         gui_app_handle_key    （待补）
+ *         gui_app_tick          （待补）
+ *         gui_app_on_click      （待补）
+ *         app_settings_wheel    （待补）
+ */
 #ifndef HBOS_GUI_APP_H
 #define HBOS_GUI_APP_H
 

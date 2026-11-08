@@ -1,3 +1,31 @@
+/**
+ * @file    gui_font.h
+ * @brief   导出 15 个接口（1 类型 / 0 宏 / 14 函数）
+ *
+ * @layer   gui
+ * @owner   src/graphics/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  gui_glyph_t  结构体 / 类型别名
+ *   函数  gui_font_init              （待补）
+ *         gui_font_size_count        （待补）
+ *         gui_font_size_px           （待补）
+ *         gui_font_line_height_n     （待补）
+ *         gui_font_ascent_n          （待补）
+ *         gui_font_base_count        number of selectable…
+ *         gui_font_active            active base slot, 0..…
+ *         gui_font_set_active        clamp-set the active…
+ *         gui_font_active_base_idx   size-directory index…
+ *         gui_font_active_large_idx  index of its 2x compa…
+ *         gui_font_lookup_n          （待补）
+ *         gui_font_line_height       （待补）
+ *         gui_font_ascent            （待补）
+ *         gui_font_lookup            （待补）
+ */
 #ifndef GUI_FONT_H
 #define GUI_FONT_H
 

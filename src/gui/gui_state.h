@@ -1,3 +1,46 @@
+/**
+ * @file    gui_state.h
+ * @brief   导出 30 个接口（1 类型 / 29 宏 / 0 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  gui_state_t  结构体 / 类型别名
+ *   宏    GUI_APP_NONE       常量 / 特性宏
+ *         GUI_APP_NOTES      常量 / 特性宏
+ *         GUI_APP_CALC       常量 / 特性宏
+ *         GUI_APP_UWC        常量 / 特性宏
+ *         GUI_APP_SNAKE      常量 / 特性宏
+ *         GUI_APP_BROWSER    常量 / 特性宏
+ *         GUI_APP_CODE       常量 / 特性宏
+ *         GUI_APP_DIAG       常量 / 特性宏
+ *         GUI_APP_CLOCK      GUIAPP时钟
+ *         GUI_APP_SETTINGS   常量 / 特性宏
+ *         GUI_APP_FILES      常量 / 特性宏
+ *         GUI_APP_TASKMGR    常量 / 特性宏
+ *         GUI_APP_SHORTCUTS  常量 / 特性宏
+ *         GUI_APP_IMGVIEW    常量 / 特性宏
+ *         GUI_APP_HEXVIEW    常量 / 特性宏
+ *         GUI_APP_UIGALLERY  常量 / 特性宏
+ *         GUI_APP_HPT        常量 / 特性宏
+ *         NOTE_EDIT_CAP      常量 / 特性宏
+ *         BROWSER_URL_CAP    常量 / 特性宏
+ *         BROWSER_PAGE_CAP   BROWSER页
+ *         BROWSER_FETCH_CAP  常量 / 特性宏
+ *         BROWSER_HIST_MAX   常量 / 特性宏
+ *         BROWSER_LINK_MAX   常量 / 特性宏
+ *         CODE_EDIT_CAP      常量 / 特性宏
+ *         SNAKE_MAX          常量 / 特性宏
+ *         GUI_PATH_MAX       常量 / 特性宏
+ *         IMGVIEW_MAX_W      常量 / 特性宏
+ *         IMGVIEW_MAX_H      常量 / 特性宏
+ *         HEXVIEW_MAX_BYTES  常量 / 特性宏
+ */
 #ifndef HBOS_GUI_STATE_H
 #define HBOS_GUI_STATE_H
 

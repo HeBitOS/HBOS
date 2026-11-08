@@ -1,3 +1,20 @@
+/**
+ * @file    signalfd.h
+ * @brief   导出 4 个接口（1 类型 / 2 宏 / 1 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  signalfd_siginfo  （待补）
+ *   宏    SFD_NONBLOCK  常量 / 特性宏
+ *         SFD_CLOEXEC   常量 / 特性宏
+ *   函数  signalfd    （待补）
+ */
 #ifndef HBOS_USER_LIBC_SIGNALFD_H
 #define HBOS_USER_LIBC_SIGNALFD_H
 

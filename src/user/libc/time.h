@@ -1,3 +1,26 @@
+/**
+ * @file    time.h
+ * @brief   导出 10 个接口（4 类型 / 2 宏 / 4 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  timespec    秒 + 纳秒
+ *         tm          分解时间（年月日时分秒）
+ *         time_t      秒级时间戳
+ *         clockid_t   结构体 / 类型别名
+ *   宏    CLOCK_REALTIME   时钟REALTIME
+ *         CLOCK_MONOTONIC  时钟MONOTONIC
+ *   函数  time           取秒级时间
+ *         localtime      时间戳转本地分解时间
+ *         localtime_r    （待补）
+ *         clock_gettime  读某个时钟
+ */
 #ifndef HBOS_USER_LIBC_TIME_H
 #define HBOS_USER_LIBC_TIME_H
 

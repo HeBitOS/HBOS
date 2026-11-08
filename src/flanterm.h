@@ -1,3 +1,41 @@
+/**
+ * @file    flanterm.h
+ * @brief   导出 26 个接口（0 类型 / 17 宏 / 9 函数）
+ *
+ * @layer   gui
+ * @owner   src/
+ * @stable  frozen（上游代码，勿改正文）
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    FLANTERM_H                  常量 / 特性宏
+ *         FLANTERM_CB_DEC             常量 / 特性宏
+ *         FLANTERM_CB_BELL            常量 / 特性宏
+ *         FLANTERM_CB_PRIVATE_ID      FLANTERMCBPRIVATE编号
+ *         FLANTERM_CB_STATUS_REPORT   FLANTERMCB状态REPORT
+ *         FLANTERM_CB_POS_REPORT      常量 / 特性宏
+ *         FLANTERM_CB_KBD_LEDS        常量 / 特性宏
+ *         FLANTERM_CB_MODE            常量 / 特性宏
+ *         FLANTERM_CB_LINUX           常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_OCRNL   常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_OFDEL   常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_OFILL   常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_OLCUC   常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_ONLCR   常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_ONLRET  常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_ONOCR   常量 / 特性宏
+ *         FLANTERM_OOB_OUTPUT_OPOST   常量 / 特性宏
+ *   函数  flanterm_putchar         （待补）
+ *         flanterm_write           （待补）
+ *         flanterm_flush           （待补）
+ *         flanterm_full_refresh    （待补）
+ *         flanterm_get_dimensions  （待补）
+ *         flanterm_set_autoflush   （待补）
+ *         flanterm_get_oob_output  （待补）
+ *         flanterm_set_oob_output  （待补）
+ */
 #ifndef _FLANTERM_H
 #define _FLANTERM_H
 #include "types.h"

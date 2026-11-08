@@ -1300,3 +1300,99 @@ ERROR:base/memory/platform_shared_memory_region_posix.cc:335]
 3. 仍未出现 `[WL] client` —— wayland 连接还没建立，帧自然还没有。
 
 `[SHM]`/`[MEMFD]` 诊断默认已关（预算置 0）。
+
+#### R55：`--single-process` 就是 `CHECK(!channel_)` 的触发器；renderer 从未启动
+
+本轮把 R54 之后那个 `Invalid Opcode rip=0x110681A3BD` 彻底定位了，结论推翻了
+此前"内存不足 / 内核 IPC 缺陷"两条假设。
+
+**一、先把二进制认对（这一条前面几轮一直在错）**
+
+镜像里 `/opt/chromium/usr/lib/chromium/chromium` 是 **296,696,664 字节**、
+build-id `d2ca4df74b4b2be8bca3dd57df999d3ebbe37b80`；而 `build/tmp/chromium.elf`
+（以及 `chromium.syms`）是 **279,452,424 字节**、build-id `203b7252…`。
+**两者不是同一个构建**，此前拿 `chromium.syms` 反查 `0x110681A3BD` 全是错的
+符号。已从镜像提取真身到 `build/tmp/chromium-d2ca.bin`。
+
+基址由"崩溃指令字节串唯一命中"反推：
+
+```
+日志 insn: 0F 0B E8 1C 7C 68 0A CC 0F 0B
+全文件搜索该串 → 唯一命中 file off 0x68193bd
+候选基址 {0x1106800000, 0x1106000000, 0x1100000000} 中
+只有 base=0x1100000000 能把 0x110681A3BD 映射到 0x68193bd
+```
+
+**二、崩溃点到底是什么**
+
+`0x68193bd` 所在函数起点 `0x68192d0`（由 `.eh_frame_hdr` 二分得出），反汇编尾部：
+
+```
+6819366: je   0x68193bd     ← 直接跳进 ud2
+...
+68193bd: ud2
+68193bf: call 0x10ea0fe0    ← __stack_chk_fail 分支，与本崩溃无关
+```
+
+`0x6819366` 处是 `cmp BYTE PTR [r14+0x5b0],0x0` 后的**失败分支直跳 ud2**，
+即一个显式 `CHECK`。RIP 相对引用解出两条字符串：
+
+```
+lea rsi,[rip-0x7824539d] → 0x1d775ea "../../content/browser/renderer_host/render_process_host_impl.cc"
+lea rsi,[rip-0x77a3d917] → 0x1db3f0e "!channel_"
+mov edx,0x8c9            → 行号 2249
+```
+
+**`CHECK(!channel_)` @ `render_process_host_impl.cc:2249`**，失败。
+
+**三、`--single-process` 是条件，不是巧合**
+
+同一命令去掉 `--single-process --no-zygote` 后（r65），这条 `CHECK` **不再出现**，
+崩溃点转移到 `Breakpoint rip=0x110BB27BEE`（另一处 `ud2`）。加回去（r66）必然复现，
+且日志里紧邻：
+
+```
+[EXIT] pid=44 code=0                      ← 一个 zygote/helper 正常退出
+...
+[WL] req 17.0 region                      ← 客户端最后一条 Wayland 请求
+[TRAP] Invalid Opcode rip=0x110681A3BD    ← browser 进程 pid=2
+```
+
+单进程模式下 renderer 与 browser 共享 `channel_`，子进程一退出这条断言就会
+在"还没清空"的窗口期被踩到。
+
+**四、已排除的内核假设（有实测，别重复走）**
+
+| 假设 | 验证方式 | 结果 |
+|---|---|---|
+| socket 槽 refcount 泄漏 → 对端收不到 `POLLHUP` | 加 `[UNIX]` 生命周期诊断，打印每次 reset 的 slot/peer/refs | **全部 `refs=0`、`peer=-1`，槽释放与对端置位都正确 → 假设排除** |
+| `fd_ready_mask` 不支持 HUP | 读码：`FD_UNIX` 在 `slot->peer<0` 或对端 `write_shutdown` 时返回 `POLLIN\|POLLHUP`；`FD_PIPE` 亦同 | 实现是全的，不是缺陷 |
+| `ftruncate` 缩小 memfd 报 `EBUSY(16)` | 日志 `[FDERR] nr=77 fd=37 ret=-16`；`linux_compat_memfd_truncate` 有映射就拒 | **真 bug，本轮已修**（见 R55 第五节） |
+| PMM 只管 4 GiB 以下内存 | 读 `src/core/pmm.c` | 早已改为 `PMM_MANAGED_LIMIT = 8 GiB` + `pmm_enable_high_memory()`，不是当前瓶颈 |
+
+**五、本轮落地（commit `9b09e8f`）**
+
+1. **`ftruncate` 缩小 memfd 返回 `-EBUSY`** → 改为放行。但不能简单删三行：映射
+   直接持有物理页指针，缩小时 `pmm_free_page` 已映射页会造成 **UAF**。做法是
+   "逻辑 size 立即变，有映射时不回收物理页，等 munmap 后由 `memfd_maybe_reset` 收尾"。
+   顺带修 `wanted==0` 时 `kcalloc(0)` 返 NULL 被误判 `ENOMEM`。
+2. **`wl_keyboard.keymap` 从未发送** → `get_keyboard` 后紧跟一条 keymap，
+   format 用 `NO_KEYMAP`（没有 xkbcommon 数据就别伪造 `xkb_v1`，解析失败比不发更糟）。
+   这是"窗口出来了但打不了字"的直接原因。
+3. `[UNIX]` 诊断开关保留但预算归零（`g_unix_dbg = 0`）。
+
+`make -j4` 零告警；`make test` 12 组 + `[wm-geo]` 全绿。
+
+**六、下一个真阻塞（还没解决）**
+
+**renderer 进程从未被 fork 出来。** 两份 zygote（`--no-zygote-sandbox` 与
+`--no-sandbox` 各一）都 exec 成功，但日志里 `--type=renderer` **一次都没出现**，
+`--type=utility --utility-sub-type=network.mojom.NetworkService` 倒是起了一个
+（pid=32）。browser 在等 renderer，等不到就走到 channel 清理，撞上 2249。
+
+同时确认：客户端在 `region.destroy` 之后就停了，**从来没发过
+`xdg_wm_base.get_xdg_surface`** —— 所以即使 renderer 起来，窗口也只是走到
+`wl_surface` 就断。两条都得通。
+
+下一步优先级：先查 zygote 为何不 fork renderer（`ZygoteHostImpl` 那条
+`kZygoteMagic` 握手 / `pid_fd` 通道），那是出窗口的前置条件。

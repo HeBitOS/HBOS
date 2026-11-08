@@ -13,6 +13,30 @@
  *
  * 不支持（也是有意不支持）：嵌套对象/数组、转义序列 \uXXXX、注释。
  * 若将来需要嵌套，应换用完整解析器而不是在这里堆特例。
+ *
+ * @layer   lib
+ * @owner   src/lib/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  json_type_t  结构体 / 类型别名
+ *         json_pair_t  结构体 / 类型别名
+ *         json_doc_t   结构体 / 类型别名
+ *   宏    JSON_MAX_PAIRS  单个对象最多键值对（主题键约 20 个，留…
+ *         JSON_KEY_MAX    常量 / 特性宏
+ *         JSON_VAL_MAX    字符串值或数字的原始文本
+ *   函数  json_alloc         解析结果：定长槽位数组
+ *         json_free          解析结果：定长槽位数组
+ *         json_reset         就地重置一个解析结果（复用同一块内存，避免…
+ *         json_parse_object  解析结果：定长槽位数组
+ *         json_get_str       查找字符串值
+ *         json_get_num1000   数值用整数存放：内核以 -mno-8038…
+ *         json_get_bool      查找布尔
+ *         json_get_int       取整数（内部走 json_get_num…
+ *         json_parse_color   解析 "#RRGGBB" 或 "#AARR…
  */
 #ifndef HBOS_JSON_H
 #define HBOS_JSON_H

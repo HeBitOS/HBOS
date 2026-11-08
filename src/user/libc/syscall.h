@@ -1,3 +1,52 @@
+/**
+ * @file    syscall.h
+ * @brief   系统调用号表与内核侧分发
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hbos_web_fetch_request_t  结构体 / 类型别名
+ *         stat                      取路径元数据
+ *         ssize_t                   有符号大小
+ *         off_t                     文件偏移
+ *         pid_t                     进程号
+ *         mode_t                    文件模式位
+ *         uid_t                     用户号
+ *         gid_t                     组号
+ *         useconds_t                微秒数
+ *         clock_t                   时钟计数
+ *         dev_t                     设备号
+ *         ino_t                     inode 号
+ *         nlink_t                   硬链接数
+ *   宏    HBOS_WEB_FETCH_VERSION  HBOSWEBFETCH版本
+ *         HBOS_WEB_FETCH_HTTPS    常量 / 特性宏
+ *         STDIN_FILENO            常量 / 特性宏
+ *         STDOUT_FILENO           常量 / 特性宏
+ *         STDERR_FILENO           常量 / 特性宏
+ *         O_RDONLY                常量 / 特性宏
+ *         O_WRONLY                常量 / 特性宏
+ *         O_RDWR                  常量 / 特性宏
+ *         O_ACCMODE               常量 / 特性宏
+ *         O_CREAT                 常量 / 特性宏
+ *         O_EXCL                  常量 / 特性宏
+ *         O_TRUNC                 常量 / 特性宏
+ *         O_APPEND                常量 / 特性宏
+ *         O_NONBLOCK              常量 / 特性宏
+ *         O_DIRECTORY             常量 / 特性宏
+ *         O_NOFOLLOW              常量 / 特性宏
+ *         O_CLOEXEC               常量 / 特性宏
+ *         SEEK_SET                SEEK设置
+ *         SEEK_CUR                常量 / 特性宏
+ *         SEEK_END                常量 / 特性宏
+ *   函数  __syscall6  （待补）
+ *         __syscall3  （待补）
+ *         __syscall1  （待补）
+ */
 #ifndef HBOS_USER_LIBC_SYSCALL_H
 #define HBOS_USER_LIBC_SYSCALL_H
 

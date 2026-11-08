@@ -14,6 +14,15 @@
  * 容器格式（见 tools/pack_blob.py）：
  *   magic 'ZBL1' | u32 原始长度(小端) | zlib 流
  * 未压缩的旧资源（无 magic）会被原样接受，便于渐进接入。
+ *
+ * @layer   gui
+ * @owner   src/graphics/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
  */
 #ifndef HBOS_BLOB_UNPACK_H
 #define HBOS_BLOB_UNPACK_H

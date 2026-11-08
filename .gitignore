@@ -42,3 +42,7 @@ tests/host/vectors/
 /files/*
 !/files/README.md
 !/files/.keep
+
+# 编辑器编译数据库：由 `make compile-db` 生成，含绝对路径，不进版本库。
+# 新克隆下来先跑一次 `make compile-db` 才有跳转。
+/compile_commands.json

@@ -1,3 +1,34 @@
+/**
+ * @file    fat32.h
+ * @brief   导出 23 个接口（1 类型 / 9 宏 / 13 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  fat32_fs_t  结构体 / 类型别名
+ *   宏    FAT32_ATTR_READ_ONLY  FAT32ATTR读ONLY
+ *         FAT32_ATTR_HIDDEN     常量 / 特性宏
+ *         FAT32_ATTR_SYSTEM     常量 / 特性宏
+ *         FAT32_ATTR_VOLUME_ID  FAT32ATTRVOLUME编号
+ *         FAT32_ATTR_DIRECTORY  常量 / 特性宏
+ *         FAT32_ATTR_ARCHIVE    常量 / 特性宏
+ *         FAT32_ATTR_LFN        常量 / 特性宏
+ *         FAT32_EOC             常量 / 特性宏
+ *         FAT32_BAD             常量 / 特性宏
+ *   函数  fat32_mount          （待补）
+ *         fat32_read_cluster   （待补）
+ *         fat32_next_cluster   （待补）
+ *         fat32_delete_file    （待补）
+ *         fat32_mkdir          在 dir_cluster 目录下创建子目…
+ *         fat32_rmdir          删除 dir_cluster 目录下的空子…
+ *         fat32_set_file_size  把 dir_cluster 目录下、簇号为…
+ *         fat32_format         在 partition_lba 起、tot…
+ */
 #ifndef HBOS_FAT32_H
 #define HBOS_FAT32_H
 

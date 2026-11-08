@@ -1,3 +1,58 @@
+/**
+ * @file    psa_crypto_config.h
+ * @brief   导出 42 个接口（0 类型 / 42 宏 / 0 函数）
+ *
+ * @layer   net
+ * @owner   src/net/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    TF_PSA_CRYPTO_CONFIG_VERSION  TFPSACRYPTOCONFIG版本
+ *         PSA_WANT_ALG_ECDH             常量 / 特性宏
+ *         PSA_WANT_ALG_ECDSA            常量 / 特性宏
+ *         PSA_WANT_ALG_GCM              常量 / 特性宏
+ *         PSA_WANT_ALG_RSA_PKCS1V15_SIGN  常量 / 特性宏
+ *         PSA_WANT_ALG_RSA_PKCS1V15_CRYPT  常量 / 特性宏
+ *         PSA_WANT_ALG_RSA_PSS          常量 / 特性宏
+ *         PSA_WANT_ALG_SHA_256          常量 / 特性宏
+ *         PSA_WANT_ALG_SHA_384          常量 / 特性宏
+ *         PSA_WANT_ALG_SHA_512          常量 / 特性宏
+ *         PSA_WANT_ALG_TLS12_PRF        常量 / 特性宏
+ *         PSA_WANT_ECC_SECP_R1_256      常量 / 特性宏
+ *         PSA_WANT_KEY_TYPE_AES         常量 / 特性宏
+ *         PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY  常量 / 特性宏
+ *         PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_BASIC  常量 / 特性宏
+ *         PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_IMPORT  常量 / 特性宏
+ *         PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_GENERATE  常量 / 特性宏
+ *         PSA_WANT_KEY_TYPE_RSA_PUBLIC_KEY  常量 / 特性宏
+ *         PSA_WANT_KEY_TYPE_RSA_KEY_PAIR_BASIC  常量 / 特性宏
+ *         MBEDTLS_PSA_CRYPTO_C          常量 / 特性宏
+ *         MBEDTLS_ASN1_PARSE_C          常量 / 特性宏
+ *         MBEDTLS_PK_C                  常量 / 特性宏
+ *         MBEDTLS_PK_PARSE_C            常量 / 特性宏
+ *         MBEDTLS_BASE64_C              常量 / 特性宏
+ *         MBEDTLS_PEM_PARSE_C           常量 / 特性宏
+ *         MBEDTLS_PLATFORM_C            常量 / 特性宏
+ *         MBEDTLS_PLATFORM_MEMORY       MBEDTLSPLATFORM内存
+ *         MBEDTLS_PLATFORM_CALLOC_MACRO  常量 / 特性宏
+ *         MBEDTLS_PLATFORM_FREE_MACRO   MBEDTLSPLATFORM释放MACRO
+ *         MBEDTLS_PLATFORM_NO_STD_FUNCTIONS  常量 / 特性宏
+ *         MBEDTLS_PLATFORM_SNPRINTF_MACRO  常量 / 特性宏
+ *         MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG  常量 / 特性宏
+ *         MBEDTLS_HAVE_TIME             MBEDTLSHAVE时间
+ *         MBEDTLS_HAVE_TIME_DATE        MBEDTLSHAVE时间DATE
+ *         MBEDTLS_PLATFORM_TIME_TYPE_MACRO  MBEDTLSPLATFORM时间TYPEMACRO
+ *         MBEDTLS_PLATFORM_TIME_MACRO   MBEDTLSPLATFORM时间MACRO
+ *         MBEDTLS_PLATFORM_GMTIME_R_ALT  常量 / 特性宏
+ *         MBEDTLS_PLATFORM_MS_TIME_ALT  MBEDTLSPLATFORMMS时间ALT
+ *         MBEDTLS_PLATFORM_ZEROIZE_ALT  常量 / 特性宏
+ *         MBEDTLS_MPI_MAX_SIZE          常量 / 特性宏
+ *         MBEDTLS_ECP_WINDOW_SIZE       MBEDTLSECP窗口
+ *         MBEDTLS_ECP_FIXED_POINT_OPTIM  常量 / 特性宏
+ */
 #ifndef HBOS_PSA_CRYPTO_CONFIG_H
 #define HBOS_PSA_CRYPTO_CONFIG_H
 

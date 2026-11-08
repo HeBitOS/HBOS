@@ -1,3 +1,20 @@
+/**
+ * @file    fcntl.h
+ * @brief   导出 4 个接口（0 类型 / 3 宏 / 1 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    AT_FDCWD             以 cwd 为基准解析相对路径
+ *         AT_SYMLINK_NOFOLLOW  不跟随末端符号链接
+ *         AT_EMPTY_PATH        允许空路径操作 fd 自身
+ *   函数  open        打开路径，返回 fd
+ */
 #ifndef HBOS_USER_LIBC_FCNTL_H
 #define HBOS_USER_LIBC_FCNTL_H
 

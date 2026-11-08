@@ -1,3 +1,18 @@
+/**
+ * @file    usb_hid_parser.h
+ * @brief   导出 4 个接口（1 类型 / 1 宏 / 2 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hid_mouse_layout_t  结构体 / 类型别名
+ *   宏    HID_MAX_MOUSE_LAYOUTS  常量 / 特性宏
+ */
 #ifndef HBOS_USB_HID_PARSER_H
 #define HBOS_USB_HID_PARSER_H
 

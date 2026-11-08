@@ -1,3 +1,44 @@
+/**
+ * @file    stat.h
+ * @brief   导出 28 个接口（0 类型 / 24 宏 / 4 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    S_IFMT      常量 / 特性宏
+ *         S_IFREG     常量 / 特性宏
+ *         S_IFDIR     常量 / 特性宏
+ *         S_IFCHR     常量 / 特性宏
+ *         S_IFBLK     常量 / 特性宏
+ *         S_IFIFO     常量 / 特性宏
+ *         S_IFLNK     常量 / 特性宏
+ *         S_IFSOCK    常量 / 特性宏
+ *         S_IRUSR     常量 / 特性宏
+ *         S_IWUSR     常量 / 特性宏
+ *         S_IXUSR     常量 / 特性宏
+ *         S_IRGRP     常量 / 特性宏
+ *         S_IWGRP     常量 / 特性宏
+ *         S_IXGRP     常量 / 特性宏
+ *         S_IROTH     常量 / 特性宏
+ *         S_IWOTH     常量 / 特性宏
+ *         S_IXOTH     常量 / 特性宏
+ *         S_ISREG     常量 / 特性宏
+ *         S_ISDIR     常量 / 特性宏
+ *         S_ISCHR     常量 / 特性宏
+ *         S_ISBLK     常量 / 特性宏
+ *         S_ISFIFO    常量 / 特性宏
+ *         S_ISLNK     常量 / 特性宏
+ *         S_ISSOCK    常量 / 特性宏
+ *   函数  stat        取路径元数据
+ *         fstat       按 fd 取元数据
+ *         mkdir       建目录
+ *         lstat       取元数据（不跟随符号链接）
+ */
 #ifndef HBOS_USER_LIBC_SYS_STAT_H
 #define HBOS_USER_LIBC_SYS_STAT_H
 

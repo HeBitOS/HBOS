@@ -1,8 +1,28 @@
 /**
  * @file ahci.h
  * @brief AHCI (Advanced Host Controller Interface) SATA 驱动头文件
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  ahci_stats_t  结构体 / 类型别名
+ *   宏    AHCI_MAX_SECTORS_PER_CMD  常量 / 特性宏
+ *   函数  ahci_init           初始化 AHCI 控制器，查找并配置可用端口
+ *         ahci_read_sector    从指定 LBA 读取一个扇区（512 字节）
+ *         ahci_read_sectors   从指定 LBA 连续读取多个扇区
+ *         ahci_write_sector   向指定 LBA 写入一个扇区（512 字节）
+ *         ahci_write_sectors  向指定 LBA 连续写入多个扇区
+ *         ahci_sector_count   获取磁盘的总扇区数
+ *         ahci_model          获取磁盘型号字符串
+ *         ahci_present        检查 AHCI 设备是否已初始化并可用
+ *         ahci_get_stats      获取 AHCI 运行时诊断计数
+ *         ahci_last_error     获取最近一次 AHCI 错误的简短描述
  */
-
 #ifndef HBOS_AHCI_H
 #define HBOS_AHCI_H
 

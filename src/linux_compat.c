@@ -2602,6 +2602,15 @@ int linux_compat_shm_open(const char *path, int flags) {
         int fd = compat_fd_alloc(compat_task(), FD_MEMFD, slot,
                                  overlay_fd_flags(flags));
         if (fd < 0) memfd_slots[slot].refs--;
+        else {
+            /* 记下路径：fd 表诊断时能看出这个 fd 是哪个 shm/tmp 文件。 */
+            fd_entry_t *e = compat_fd(compat_task(), fd);
+            if (e) {
+                size_t n = 0;
+                while (path[n] && n + 1 < sizeof(e->path)) { e->path[n] = path[n]; n++; }
+                e->path[n] = '\0';
+            }
+        }
         return fd;
     }
 
@@ -2651,7 +2660,12 @@ int linux_compat_shm_open(const char *path, int flags) {
      * 就该是 O_RDONLY。这里按调用方的请求模式改写记账，
      * 否则 Chromium 的 base::File::Open 校验 F_GETFL 时会判失败。 */
     fd_entry_t *created = compat_fd(compat_task(), fd);
-    if (created) created->flags = overlay_fd_flags(flags);
+    if (created) {
+        created->flags = overlay_fd_flags(flags);
+        size_t n = 0;
+        while (path[n] && n + 1 < sizeof(created->path)) { created->path[n] = path[n]; n++; }
+        created->path[n] = '\0';
+    }
     int slot = memfd_slot_index(memfd_for_fd(compat_task(), fd));
     if (slot >= 0) {
         shm_names[free_index].used = 1;

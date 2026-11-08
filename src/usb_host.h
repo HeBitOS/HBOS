@@ -11,8 +11,23 @@
  *
  * 索引约定：ops 里的 dev_idx 是**该控制器内部**的设备下标；调用方自己
  * 记录 (host_idx, dev_idx) 二元组，控制器之间互不干扰。
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  usb_host_ops_t  结构体 / 类型别名
+ *   宏    USB_HOST_MAX_TYPES  常量 / 特性宏
+ *   函数  usb_host_register  注册一类主机控制器驱动
+ *         usb_host_init_all  初始化所有已注册的控制器
+ *         usb_host_count     已注册的控制器数量
+ *         usb_host_get       取第 host_idx 个已注册控制器的…
+ *         usb_host_poll_all  遍历所有控制器推进事件处理（hid_pol…
  */
-
 #ifndef HBOS_USB_HOST_H
 #define HBOS_USB_HOST_H
 

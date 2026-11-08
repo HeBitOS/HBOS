@@ -6,6 +6,27 @@
  * 生成一张应用表（hax_app_table）并把所有 .hax 二进制拼接成一个 blob 嵌入内核。
  * 运行期本模块据此把每个应用注册进系统：终端可 `run <名>`，
  * GUI 桌面启动器列出 GUI 类应用。
+ *
+ * @layer   user
+ * @owner   src/user/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hax_app_entry_t  结构体 / 类型别名
+ *   宏    HAX_KIND_TUI      常量 / 特性宏
+ *         HAX_KIND_GUI      常量 / 特性宏
+ *         HAX_KIND_BOTH     常量 / 特性宏
+ *         HAX_KIND_GUI_WIN  常量 / 特性宏
+ *   函数  hax_app_count           已发现的 .hax 应用数量
+ *         hax_app_at              按索引取应用表项，越界返回 NULL
+ *         hax_app_find            按名称查找应用表项，找不到返回 NULL
+ *         hax_app_icon_at         返回应用内嵌图标瓦片（64x64 RGBA…
+ *         hax_app_run             运行一个 .hax 应用（在新任务中加载其…
+ *         hax_app_spawn           非阻塞启动一个 .hax 应用：加载 EL…
+ *         hax_seed_embedded_file  Expose one embedded H…
  */
 #ifndef HBOS_USER_HAX_APP_H
 #define HBOS_USER_HAX_APP_H

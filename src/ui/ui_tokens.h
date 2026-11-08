@@ -15,6 +15,39 @@
  *
  * 命名用短宏是为了让迁移后的代码足够简洁，不至于因为"要打太多字"而
  * 有人继续写裸颜色。
+ *
+ * @layer   gui
+ * @owner   src/ui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    UI_T              常量 / 特性宏
+ *         UI_BG             常量 / 特性宏
+ *         UI_SURFACE        常量 / 特性宏
+ *         UI_SURFACE2       常量 / 特性宏
+ *         UI_SURFACE3       常量 / 特性宏
+ *         UI_LINE           UI行
+ *         UI_LINE2          常量 / 特性宏
+ *         UI_FG             常量 / 特性宏
+ *         UI_FG2            常量 / 特性宏
+ *         UI_DIM            常量 / 特性宏
+ *         UI_ACCENT         常量 / 特性宏
+ *         UI_ACCENT_FG      常量 / 特性宏
+ *         UI_ACCENT_HOVER   常量 / 特性宏
+ *         UI_ACCENT_ACTIVE  常量 / 特性宏
+ *         UI_OK             常量 / 特性宏
+ *         UI_WARN           UI警告
+ *         UI_ERR            常量 / 特性宏
+ *         UI_INFO           UI信息
+ *         UI_SEL            常量 / 特性宏
+ *         UI_RADIUS         常量 / 特性宏
+ *         UI_RADIUS_SM      常量 / 特性宏
+ *         UI_RADIUS_LG      常量 / 特性宏
+ *         UI_SHADOW         常量 / 特性宏
+ *         UI_IS_DARK        常量 / 特性宏
  */
 #ifndef HBOS_UI_TOKENS_H
 #define HBOS_UI_TOKENS_H

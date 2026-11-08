@@ -1,3 +1,115 @@
+/**
+ * @file    syscall.h
+ * @brief   系统调用号表与内核侧分发
+ *
+ * @layer   user
+ * @owner   src/user/libc/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    SYS_read               常量 / 特性宏
+ *         SYS_write              常量 / 特性宏
+ *         SYS_open               常量 / 特性宏
+ *         SYS_close              常量 / 特性宏
+ *         SYS_stat               常量 / 特性宏
+ *         SYS_fstat              常量 / 特性宏
+ *         SYS_poll               常量 / 特性宏
+ *         SYS_lseek              常量 / 特性宏
+ *         SYS_mmap               常量 / 特性宏
+ *         SYS_mprotect           常量 / 特性宏
+ *         SYS_munmap             常量 / 特性宏
+ *         SYS_brk                常量 / 特性宏
+ *         SYS_rt_sigaction       常量 / 特性宏
+ *         SYS_rt_sigprocmask     常量 / 特性宏
+ *         SYS_ioctl              常量 / 特性宏
+ *         SYS_readv              常量 / 特性宏
+ *         SYS_writev             常量 / 特性宏
+ *         SYS_access             常量 / 特性宏
+ *         SYS_pipe               常量 / 特性宏
+ *         SYS_sched_yield        常量 / 特性宏
+ *         SYS_dup                常量 / 特性宏
+ *         SYS_dup2               常量 / 特性宏
+ *         SYS_nanosleep          常量 / 特性宏
+ *         SYS_getpid             常量 / 特性宏
+ *         SYS_socket             常量 / 特性宏
+ *         SYS_connect            常量 / 特性宏
+ *         SYS_accept             常量 / 特性宏
+ *         SYS_sendto             常量 / 特性宏
+ *         SYS_recvfrom           常量 / 特性宏
+ *         SYS_sendmsg            常量 / 特性宏
+ *         SYS_recvmsg            常量 / 特性宏
+ *         SYS_bind               常量 / 特性宏
+ *         SYS_listen             常量 / 特性宏
+ *         SYS_getsockname        常量 / 特性宏
+ *         SYS_getpeername        常量 / 特性宏
+ *         SYS_socketpair         常量 / 特性宏
+ *         SYS_setsockopt         常量 / 特性宏
+ *         SYS_getsockopt         常量 / 特性宏
+ *         SYS_clone              常量 / 特性宏
+ *         SYS_fork               常量 / 特性宏
+ *         SYS_execve             常量 / 特性宏
+ *         SYS_exit               常量 / 特性宏
+ *         SYS_wait4              常量 / 特性宏
+ *         SYS_kill               常量 / 特性宏
+ *         SYS_uname              常量 / 特性宏
+ *         SYS_fcntl              常量 / 特性宏
+ *         SYS_ftruncate          常量 / 特性宏
+ *         SYS_getcwd             常量 / 特性宏
+ *         SYS_statfs             常量 / 特性宏
+ *         SYS_fstatfs            常量 / 特性宏
+ *         SYS_sched_getaffinity  常量 / 特性宏
+ *         SYS_signalfd           常量 / 特性宏
+ *         SYS_signalfd4          常量 / 特性宏
+ *         SYS_mremap             常量 / 特性宏
+ *         SYS_chdir              常量 / 特性宏
+ *         SYS_rename             常量 / 特性宏
+ *         SYS_mkdir              常量 / 特性宏
+ *         SYS_rmdir              常量 / 特性宏
+ *         SYS_unlink             常量 / 特性宏
+ *         SYS_symlink            常量 / 特性宏
+ *         SYS_readlink           常量 / 特性宏
+ *         SYS_chmod              常量 / 特性宏
+ *         SYS_chown              常量 / 特性宏
+ *         SYS_gettimeofday       常量 / 特性宏
+ *         SYS_getuid             常量 / 特性宏
+ *         SYS_getgid             常量 / 特性宏
+ *         SYS_geteuid            常量 / 特性宏
+ *         SYS_getegid            常量 / 特性宏
+ *         SYS_getppid            常量 / 特性宏
+ *         SYS_getgroups          常量 / 特性宏
+ *         SYS_setgroups          常量 / 特性宏
+ *         SYS_getpgid            常量 / 特性宏
+ *         SYS_arch_prctl         常量 / 特性宏
+ *         SYS_gettid             常量 / 特性宏
+ *         SYS_futex              常量 / 特性宏
+ *         SYS_getdents64         常量 / 特性宏
+ *         SYS_set_tid_address    常量 / 特性宏
+ *         SYS_clock_gettime      常量 / 特性宏
+ *         SYS_exit_group         常量 / 特性宏
+ *         SYS_epoll_wait         常量 / 特性宏
+ *         SYS_epoll_ctl          常量 / 特性宏
+ *         SYS_openat             常量 / 特性宏
+ *         SYS_renameat           常量 / 特性宏
+ *         SYS_symlinkat          常量 / 特性宏
+ *         SYS_newfstatat         常量 / 特性宏
+ *         SYS_readlinkat         常量 / 特性宏
+ *         SYS_set_robust_list    常量 / 特性宏
+ *         SYS_get_robust_list    常量 / 特性宏
+ *         SYS_epoll_pwait        常量 / 特性宏
+ *         SYS_accept4            常量 / 特性宏
+ *         SYS_eventfd2           常量 / 特性宏
+ *         SYS_epoll_create1      常量 / 特性宏
+ *         SYS_dup3               常量 / 特性宏
+ *         SYS_pipe2              常量 / 特性宏
+ *         SYS_renameat2          常量 / 特性宏
+ *         SYS_getrandom          常量 / 特性宏
+ *         SYS_memfd_create       常量 / 特性宏
+ *         SYS_shutdown           常量 / 特性宏
+ *   函数  syscall     （待补）
+ */
 #ifndef HBOS_USER_LIBC_SYS_SYSCALL_H
 #define HBOS_USER_LIBC_SYS_SYSCALL_H
 

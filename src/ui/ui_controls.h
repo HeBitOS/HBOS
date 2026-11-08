@@ -15,6 +15,53 @@
  *     ui_button_t ok; ui_button_init(&ok, x, y, 80, 30, UI_BTN_PRIMARY, "确定");
  *     if (ui_button_handle(&ok, &ev)) { ... 点击成立 ... }
  *     ui_button_draw(&ok);
+ *
+ * @layer   gui
+ * @owner   src/ui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  ui_btn_kind_t   结构体 / 类型别名
+ *         ui_button_t     结构体 / 类型别名
+ *         ui_input_t      结构体 / 类型别名
+ *         ui_checkbox_t   结构体 / 类型别名
+ *         ui_switch_t     结构体 / 类型别名
+ *         ui_segment_t    结构体 / 类型别名
+ *         ui_tabs_t       结构体 / 类型别名
+ *         ui_scrollbar_t  结构体 / 类型别名
+ *         ui_list_t       结构体 / 类型别名
+ *         ui_dlg_kind_t   结构体 / 类型别名
+ *         ui_dialog_t     结构体 / 类型别名
+ *   宏    UI_INPUT_MAX     常量 / 特性宏
+ *         UI_SEG_MAX_SEGS  常量 / 特性宏
+ *         UI_TABS_MAX      常量 / 特性宏
+ *   函数  ui_button_handle        - **无全局状态**：控件状态在调用方栈…
+ *         ui_button_draw          同一屏可放任意多个同类控件，也可被宿主单测…
+ *         ui_input_handle         返回 true 表示文本或光标发生了变化（…
+ *         ui_input_draw           （待补）
+ *         ui_input_set            替换全部文本（越界自动截断）
+ *         ui_checkbox_handle      返回 true 表示勾选状态发生了翻转
+ *         ui_checkbox_draw        （待补）
+ *         ui_switch_init          （待补）
+ *         ui_switch_handle        返回 true 表示状态翻转
+ *         ui_switch_draw          （待补）
+ *         ui_segment_handle       返回 true 表示选中项变化
+ *         ui_segment_draw         （待补）
+ *         ui_tabs_handle          返回 true 表示切换了标签
+ *         ui_tabs_draw            （待补）
+ *         ui_scrollbar_handle     返回 true 表示滚动位置变化
+ *         ui_scrollbar_draw       （待补）
+ *         ui_scrollbar_clamp      把内容滚动限制在合法范围
+ *         ui_list_init            （待补）
+ *         ui_list_handle          列表交互
+ *         ui_list_draw            画列表底与行底色（行内容由调用方在行矩形内…
+ *         ui_list_row_rect        取第 index 行的矩形（已按滚动换算）
+ *         ui_list_ensure_visible  确保第 index 行可见（选中项滚动跟随）
+ *         ui_dialog_draw          画对话框外框（标题、背景、阴影、按钮）
+ *         ui_dialog_handle        返回 1=确定被点, 0=取消被点, -1…
  */
 #ifndef HBOS_UI_CONTROLS_H
 #define HBOS_UI_CONTROLS_H

@@ -11,6 +11,31 @@
  *   - **主题来自外部文件**：`/themes/` 下的 .theme（JSON），丢文件即可新增主题，
  *     不必重新编译。加载失败逐级回退，内置 dark/light 永远兜底，保证
  *     坏主题不会让系统起不来。
+ *
+ * @layer   gui
+ * @owner   src/ui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  gui_theme_t  结构体 / 类型别名
+ *   宏    UI_THEME_NAME_MAX   显示名，设置界面用
+ *         UI_THEME_MAX_SLOTS  UI主题SLOTS
+ *   函数  ui_theme                全局主题令牌 —— 全系统唯一的颜色/几何…
+ *         ui_theme_init           初始化主题层：载入内置主题，扫描 /the…
+ *         ui_theme_set            按名切换主题
+ *         ui_theme_set_index      按索引切换（设置界面列表用）
+ *         ui_theme_current_index  当前主题在列表中的索引
+ *         ui_theme_reload         重新扫描 /themes/ 目录
+ *         ui_theme_scan           按名切换主题
+ *         ui_theme_count          可用主题总数
+ *         ui_theme_builtin_dark   内置深/浅色主题（供设置界面的"重置"与兜…
+ *         ui_theme_builtin_light  （待补）
+ *         ui_theme_save_choice    把主题切换持久化到 /startup.cf…
+ *         ui_blend                颜色工具：alpha 混合 （src ov…
+ *         ui_shade                按比例调亮/调暗一个颜色（amount 为…
  */
 #ifndef HBOS_UI_THEME_H
 #define HBOS_UI_THEME_H

@@ -5,8 +5,26 @@
  * 提供统一的 GPU 抽象层，支持 Bochs/QEMU BGA、VirtIO GPU 等硬件加速，
  * 并自动回退到软件渲染。上层组件（如窗口合成器）通过此接口操作 GPU，
  * 无需了解底层硬件细节。
+ *
+ * @layer   gui
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  gpu_driver_t  驱动类型
+ *         gpu_device_t  结构体 / 类型别名
+ *         gpu_ops_t     结构体 / 类型别名
+ *   宏    GPU_CAP_2D_ACCEL    2D 硬件加速
+ *         GPU_CAP_3D_ACCEL    3D 硬件加速
+ *         GPU_CAP_CURSOR      硬件光标
+ *         GPU_CAP_DOUBLE_BUF  双缓冲
+ *   函数  gpu_init     初始化 GPU 子系统
+ *         gpu_primary  获取主 GPU 设备指针
+ *         gpu_flush    刷新 GPU 命令队列
  */
-
 #ifndef HBOS_GPU_H
 #define HBOS_GPU_H
 

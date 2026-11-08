@@ -1,3 +1,97 @@
+/**
+ * @file    tty.h
+ * @brief   导出 81 个接口（6 类型 / 58 宏 / 17 函数）
+ *
+ * @layer   input
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  termios_t      结构体 / 类型别名
+ *         winsize_t      结构体 / 类型别名
+ *         tty_ringbuf_t  结构体 / 类型别名
+ *         ldisc_t        结构体 / 类型别名
+ *         tty_t          结构体 / 类型别名
+ *         pty_t          结构体 / 类型别名
+ *   宏    NCCS           常量 / 特性宏
+ *         ISIG           常量 / 特性宏
+ *         ICANON         常量 / 特性宏
+ *         ECHO           常量 / 特性宏
+ *         ECHOE          常量 / 特性宏
+ *         ECHOK          常量 / 特性宏
+ *         ECHONL         常量 / 特性宏
+ *         IEXTEN         常量 / 特性宏
+ *         ICRNL          常量 / 特性宏
+ *         IXON           常量 / 特性宏
+ *         BRKINT         常量 / 特性宏
+ *         IGNBRK         常量 / 特性宏
+ *         OPOST          常量 / 特性宏
+ *         ONLCR          常量 / 特性宏
+ *         CS8            常量 / 特性宏
+ *         CREAD          常量 / 特性宏
+ *         HUPCL          常量 / 特性宏
+ *         B38400         常量 / 特性宏
+ *         VINTR          常量 / 特性宏
+ *         VQUIT          常量 / 特性宏
+ *         VERASE         常量 / 特性宏
+ *         VKILL          常量 / 特性宏
+ *         VEOF           常量 / 特性宏
+ *         VTIME          常量 / 特性宏
+ *         VMIN           常量 / 特性宏
+ *         VSWTC          常量 / 特性宏
+ *         VSTART         常量 / 特性宏
+ *         VSTOP          常量 / 特性宏
+ *         VSUSP          常量 / 特性宏
+ *         VEOL           常量 / 特性宏
+ *         TCGETS         常量 / 特性宏
+ *         TCSETS         常量 / 特性宏
+ *         TCSETSW        常量 / 特性宏
+ *         TCSETSF        常量 / 特性宏
+ *         TCSBRK         常量 / 特性宏
+ *         TCXONC         常量 / 特性宏
+ *         TCFLSH         常量 / 特性宏
+ *         TIOCEXCL       常量 / 特性宏
+ *         TIOCSCTTY      常量 / 特性宏
+ *         TIOCGPGRP      常量 / 特性宏
+ *         TIOCSPGRP      常量 / 特性宏
+ *         TIOCGWINSZ     常量 / 特性宏
+ *         TIOCSWINSZ     常量 / 特性宏
+ *         TIOCNOTTY      常量 / 特性宏
+ *         TIOCGSID       常量 / 特性宏
+ *         TIOCGPTN       常量 / 特性宏
+ *         TIOCSPTLCK     常量 / 特性宏
+ *         FIONREAD       常量 / 特性宏
+ *         FIONBIO        常量 / 特性宏
+ *         TTY_MAX        常量 / 特性宏
+ *         TTY_BUF_SIZE   TTY缓冲区
+ *         TTY_LDISC_MAX  常量 / 特性宏
+ *         PTY_MAX        常量 / 特性宏
+ *         ISTRIP         常量 / 特性宏
+ *         INLCR          常量 / 特性宏
+ *         IGNCR          常量 / 特性宏
+ *         TOSTOP         常量 / 特性宏
+ *         ECHOCTL        常量 / 特性宏
+ *   函数  tty_init            （待补）
+ *         tty_switch          （待补）
+ *         tty_current         （待补）
+ *         tty_get             （待补）
+ *         tty_write           （待补）
+ *         tty_read            （待补）
+ *         tty_input_char      （待补）
+ *         tty_output_ready    （待补）
+ *         tty_input_ready     （待补）
+ *         tty_register_vfs    （待补）
+ *         tty_console_read    （待补）
+ *         tty_set_foreground  （待补）
+ *         tty_ioctl           （待补）
+ *         tty_console_ops     devfs/open 钩子
+ *         tty_node_is_tty     （待补）
+ *         pty_open_master     （待补）
+ *         pty_master_index    （待补）
+ */
 #ifndef HBOS_TTY_H
 #define HBOS_TTY_H
 

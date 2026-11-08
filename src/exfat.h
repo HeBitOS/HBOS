@@ -8,8 +8,24 @@
  *
  * 与块设备解耦：通过读扇区回调访问，宿主机可以用文件镜像直接单测
  * （tests/host/test_exfat.c）。
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  exfat_fs_t      结构体 / 类型别名
+ *         exfat_dirent_t  结构体 / 类型别名
+ *   宏    EXFAT_NAME_MAX  常量 / 特性宏
+ *   函数  exfat_mount            挂载：校验引导扇区并填 fs
+ *         exfat_list_root        列出根目录中的文件/目录，返回条目数（<0…
+ *         exfat_truncate_in_dir  把文件截断为 0 字节（释放簇、清目录项大…
+ *         exfat_unlink_in_dir    删除文件（标记目录项为已删除并释放簇）
+ *         exfat_volume_label     卷标（最多 11 个 UTF-16 字符）…
  */
-
 #ifndef HBOS_EXFAT_H
 #define HBOS_EXFAT_H
 

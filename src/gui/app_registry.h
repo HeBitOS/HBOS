@@ -1,3 +1,39 @@
+/**
+ * @file    app_registry.h
+ * @brief   导出 23 个接口（1 类型 / 5 宏 / 17 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  app_reg_t   结构体 / 类型别名
+ *   宏    HPT_USER_NAME    常量 / 特性宏
+ *         HPT_USER_HOME    常量 / 特性宏
+ *         HPT_USER_LOCAL   常量 / 特性宏
+ *         APPTAB_MAX       常量 / 特性宏
+ *         APPTAB_PATH_MAX  desktop 实际路径，卸载/重注册用
+ *   函数  appreg_init            建好两个 registry 目录（可重复调…
+ *         appreg_rescan          重新扫描两个目录，用户级覆盖系统级
+ *         appreg_count           （待补）
+ *         appreg_at              （待补）
+ *         appreg_find_id         未找到返回 -1
+ *         appreg_find_by_pkg     从 start 找下一个
+ *         appreg_register        把条目写进 registry 并落盘（覆盖…
+ *         appreg_unregister_pkg  删除某个包注册的所有条目，返回删除数量
+ *         appreg_unregister_id   删除单条（按 id）
+ *         appreg_generation      每次 rescan 递增的代号，UI 用它…
+ *         appreg_scope_name      "user" / "system"
+ *         appreg_apps_dir        （待补）
+ *         appreg_bin_dir         （待补）
+ *         appreg_prefix          安装根：/opt/<pkg> 的父目录
+ *         appreg_state_dir       status / info 所在目录
+ *         appreg_pkg_root        由 scope 决定的实际路径，写成形如…
+ *         appreg_bin_path        （待补）
+ */
 #ifndef HBOS_APP_REGISTRY_H
 #define HBOS_APP_REGISTRY_H
 

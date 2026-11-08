@@ -1,3 +1,85 @@
+/**
+ * @file    task.h
+ * @brief   任务控制块、上下文切换与调度入口
+ *
+ * @layer   core
+ * @owner   src/core/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  vm_area_t                   结构体 / 类型别名
+ *         task_mm_t                   结构体 / 类型别名
+ *         hbos_clone_request_t        结构体 / 类型别名
+ *         hbos_linux_clone_context_t  结构体 / 类型别名
+ *         task_dynamic_tls_t          结构体 / 类型别名
+ *         task_state_t                结构体 / 类型别名
+ *         task_t                      结构体 / 类型别名
+ *   宏    VM_BACKING_ANONYMOUS        常量 / 特性宏
+ *         VM_BACKING_MEMFD            常量 / 特性宏
+ *         VM_BACKING_VFS_PRIVATE      常量 / 特性宏
+ *         VM_BACKING_VFS_SHARED       常量 / 特性宏
+ *         HBOS_CLONE_REQUEST_VERSION  HBOSCLONEREQUEST版本
+ *         TASK_NAME_MAX               任务NAME
+ *         TASK_STACK_SIZE             任务栈
+ *         MAX_TASKS                   常量 / 特性宏
+ *         PIT_DEFAULT_FREQUENCY_HZ    常量 / 特性宏
+ *         TASK_USER_HEAP_START        任务USER堆启动
+ *         TASK_USER_HEAP_SIZE         任务USER堆
+ *         TASK_DYNAMIC_TLS_MAX        任务DYNAMICTLS
+ *         TASK_NGROUPS_MAX            任务NGROUPS
+ *   函数  task_init                （待补）
+ *         task_create_ring3        （待补）
+ *         task_exec_inherit        execve 语义：把当前任务"应当由 e…
+ *         task_yield               （待补）
+ *         task_exit                execve 语义：把当前任务"应当由 e…
+ *         task_set_exit_status     （待补）
+ *         task_wait                （待补）
+ *         task_kill                （待补）
+ *         task_kill_pgrp           （待补）
+ *         task_setpgid             （待补）
+ *         task_setsid              （待补）
+ *         task_getpgid             （待补）
+ *         task_getsid              （待补）
+ *         task_fork                （待补）
+ *         task_fork_linux          （待补）
+ *         task_clone_user_thread   （待补）
+ *         task_set_robust_list     （待补）
+ *         task_get_robust_list     （待补）
+ *         task_set_tid_address     （待补）
+ *         task_get_id              （待补）
+ *         task_get_process_id      （待补）
+ *         task_get_fs_base         （待补）
+ *         task_set_fs_base         （待补）
+ *         task_current             （待补）
+ *         task_get_by_id           （待补）
+ *         task_lookup              同上，但返回可写指针（设置优先级/亲和性等…
+ *         task_set_host_symtab     （待补）
+ *         task_set_exe_path        记录可执行文件路径，供 /proc/<pi…
+ *         task_get_count           （待补）
+ *         task_set_priority        设置任务优先级（0 最高）
+ *         task_get_priority        （待补）
+ *         task_set_dependency      依赖：dep_id 任务未结束时本任务不参…
+ *         task_set_parallel_width  并行宽度提示：>1 表示该任务有可并行的子…
+ *         task_set_affinity_any    亲和性：any=1 时允许调度器把它铺到任…
+ *         task_get_cpu             该任务当前/最近所在核心编号（0..smp…
+ *         task_ready_count_on_cpu  每核就绪任务数（负载均衡与任务管理器展示用）
+ *         task_current_on_cpu      某核上正在跑的任务（空闲核返回空闲任务
+ *         task_ap_enter            AP 上的调度循环入口：task_init…
+ *         task_create_idle         建一个绑定到指定核心的空闲任务（cpu>=…
+ *         task_smp_release_aps     通知 AP 可以进入调度（task_ini…
+ *         task_get_active          （待补）
+ *         task_list_all            （待补）
+ *         task_schedule            （待补）
+ *         task_preempt_enable      （待补）
+ *         task_preempt_disable     （待补）
+ *         pit_init                 （待补）
+ *         pit_get_ticks            （待补）
+ *         pit_get_frequency_hz     （待补）
+ *         pit_ticks_from_ms        （待补）
+ */
 #ifndef HBOS_TASK_H
 #define HBOS_TASK_H
 

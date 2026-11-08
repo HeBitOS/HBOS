@@ -12,6 +12,108 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+/**
+ * @file    stdint.h
+ * @brief   导出 89 个接口（28 类型 / 61 宏 / 0 函数）
+ *
+ * @layer   types
+ * @owner   src/types/
+ * @stable  frozen（上游代码，勿改正文）
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  uint8_t         结构体 / 类型别名
+ *         uint16_t        结构体 / 类型别名
+ *         uint32_t        结构体 / 类型别名
+ *         uint64_t        结构体 / 类型别名
+ *         uint_least8_t   结构体 / 类型别名
+ *         uint_least16_t  结构体 / 类型别名
+ *         uint_least32_t  结构体 / 类型别名
+ *         uint_least64_t  结构体 / 类型别名
+ *         uint_fast8_t    结构体 / 类型别名
+ *         uint_fast16_t   结构体 / 类型别名
+ *         uint_fast32_t   结构体 / 类型别名
+ *         uint_fast64_t   结构体 / 类型别名
+ *         int8_t          结构体 / 类型别名
+ *         int16_t         结构体 / 类型别名
+ *         int32_t         结构体 / 类型别名
+ *         int64_t         结构体 / 类型别名
+ *         int_least8_t    结构体 / 类型别名
+ *         int_least16_t   结构体 / 类型别名
+ *         int_least32_t   结构体 / 类型别名
+ *         int_least64_t   结构体 / 类型别名
+ *         int_fast8_t     结构体 / 类型别名
+ *         int_fast16_t    结构体 / 类型别名
+ *         int_fast32_t    结构体 / 类型别名
+ *         int_fast64_t    结构体 / 类型别名
+ *         uintptr_t       结构体 / 类型别名
+ *         intptr_t        结构体 / 类型别名
+ *         uintmax_t       结构体 / 类型别名
+ *         intmax_t        结构体 / 类型别名
+ *   宏    INT8_C            常量 / 特性宏
+ *         INT16_C           常量 / 特性宏
+ *         INT32_C           常量 / 特性宏
+ *         INT64_C           常量 / 特性宏
+ *         UINT8_C           常量 / 特性宏
+ *         UINT16_C          常量 / 特性宏
+ *         UINT32_C          常量 / 特性宏
+ *         UINT64_C          常量 / 特性宏
+ *         INTMAX_C          常量 / 特性宏
+ *         UINTMAX_C         常量 / 特性宏
+ *         UINT8_MAX         常量 / 特性宏
+ *         UINT16_MAX        常量 / 特性宏
+ *         UINT32_MAX        常量 / 特性宏
+ *         UINT64_MAX        常量 / 特性宏
+ *         INT8_MAX          常量 / 特性宏
+ *         INT16_MAX         常量 / 特性宏
+ *         INT32_MAX         常量 / 特性宏
+ *         INT64_MAX         常量 / 特性宏
+ *         INT8_MIN          常量 / 特性宏
+ *         INT16_MIN         常量 / 特性宏
+ *         INT32_MIN         常量 / 特性宏
+ *         INT64_MIN         常量 / 特性宏
+ *         UINT_LEAST8_MAX   常量 / 特性宏
+ *         UINT_LEAST16_MAX  常量 / 特性宏
+ *         UINT_LEAST32_MAX  常量 / 特性宏
+ *         UINT_LEAST64_MAX  常量 / 特性宏
+ *         INT_LEAST8_MAX    常量 / 特性宏
+ *         INT_LEAST16_MAX   常量 / 特性宏
+ *         INT_LEAST32_MAX   常量 / 特性宏
+ *         INT_LEAST64_MAX   常量 / 特性宏
+ *         INT_LEAST8_MIN    常量 / 特性宏
+ *         INT_LEAST16_MIN   常量 / 特性宏
+ *         INT_LEAST32_MIN   常量 / 特性宏
+ *         INT_LEAST64_MIN   常量 / 特性宏
+ *         UINT_FAST8_MAX    常量 / 特性宏
+ *         UINT_FAST16_MAX   常量 / 特性宏
+ *         UINT_FAST32_MAX   常量 / 特性宏
+ *         UINT_FAST64_MAX   常量 / 特性宏
+ *         INT_FAST8_MAX     常量 / 特性宏
+ *         INT_FAST16_MAX    常量 / 特性宏
+ *         INT_FAST32_MAX    常量 / 特性宏
+ *         INT_FAST64_MAX    常量 / 特性宏
+ *         INT_FAST8_MIN     常量 / 特性宏
+ *         INT_FAST16_MIN    常量 / 特性宏
+ *         INT_FAST32_MIN    常量 / 特性宏
+ *         INT_FAST64_MIN    常量 / 特性宏
+ *         UINTPTR_MAX       常量 / 特性宏
+ *         INTPTR_MAX        常量 / 特性宏
+ *         INTPTR_MIN        常量 / 特性宏
+ *         UINTMAX_MAX       常量 / 特性宏
+ *         INTMAX_MAX        常量 / 特性宏
+ *         INTMAX_MIN        常量 / 特性宏
+ *         PTRDIFF_MAX       常量 / 特性宏
+ *         PTRDIFF_MIN       常量 / 特性宏
+ *         SIG_ATOMIC_MAX    常量 / 特性宏
+ *         SIG_ATOMIC_MIN    常量 / 特性宏
+ *         SIZE_MAX          常量 / 特性宏
+ *         WCHAR_MAX         常量 / 特性宏
+ *         WCHAR_MIN         常量 / 特性宏
+ *         WINT_MAX          常量 / 特性宏
+ *         WINT_MIN          常量 / 特性宏
+ */
 #ifndef __FREESTND_C_HDRS_STDINT_H
 #    define __FREESTND_C_HDRS_STDINT_H 1
 

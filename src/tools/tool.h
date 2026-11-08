@@ -1,3 +1,32 @@
+/**
+ * @file    tool.h
+ * @brief   导出 16 个接口（0 类型 / 0 宏 / 16 函数）
+ *
+ * @layer   tools
+ * @owner   src/tools/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  tool_outb          （待补）
+ *         tool_outw          （待补）
+ *         tool_help_init     （待补）
+ *         tool_system_init   （待补）
+ *         tool_debug_init    （待补）
+ *         tool_history_init  （待补）
+ *         tool_file_init     （待补）
+ *         tool_app_init      （待补）
+ *         tool_ata_init      （待补）
+ *         tool_disk_init     （待补）
+ *         tool_gui_init      （待补）
+ *         tool_net_init      （待补）
+ *         tool_cc_init       （待补）
+ *         tool_cppe_init     （待补）
+ *         tool_audio_init    （待补）
+ *         tool_init_all      （待补）
+ */
 #ifndef HBOS_TOOL_H
 #define HBOS_TOOL_H
 

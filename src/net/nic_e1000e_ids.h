@@ -16,8 +16,19 @@
  *   <从 Linux hw.h + netdev.c 提取 E1000_DEV_ID_* → 本表>
  *   EOF
  * 见本仓库 docs/PERFORMANCE.md 或提交信息里的说明。
+ *
+ * @layer   net
+ * @owner   src/net/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  e1000e_id_entry_t  结构体 / 类型别名
+ *   宏    E1000E_ID_TABLE_COUNT  E1000E编号表
+ *   函数  e1000e_model_name  查一个 device id 对应的型号名
  */
-
 #ifndef HBOS_NIC_E1000E_IDS_H
 #define HBOS_NIC_E1000E_IDS_H
 

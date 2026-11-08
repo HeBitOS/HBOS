@@ -11,6 +11,46 @@
  *  - 合成器（gui.c 主循环）每帧把所有窗口表面贴到桌面背缓冲并加窗口装饰。
  *  - 输入由 GUI 路由到窗口事件队列；鼠标支持移动、按下捕获和松开。
  *  - 应用退出（任务 TERMINATED）后由合成器回收其窗口与表面。
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  winsrv_event_t   结构体 / 类型别名
+ *         winsrv_window_t  结构体 / 类型别名
+ *   宏    WINSRV_MAX              最多并发应用窗口数
+ *         WINSRV_EVQ              每窗口事件队列深度
+ *         WINSRV_TITLE            标题最大字节
+ *         WINSRV_MIN_W            常量 / 特性宏
+ *         WINSRV_MIN_H            常量 / 特性宏
+ *         WINSRV_MAX_W            常量 / 特性宏
+ *         WINSRV_MAX_H            常量 / 特性宏
+ *         WINSRV_STATE_NORMAL     WINSRV状态NORMAL
+ *         WINSRV_STATE_MINIMIZED  WINSRV状态MINIMIZED
+ *         WINSRV_STATE_MAXIMIZED  WINSRV状态MAXIMIZED
+ *   函数  winsrv_create          为任务创建窗口，返回窗口 id（0..WI…
+ *         winsrv_create_handle   v2：允许同一任务创建多个窗口，返回不透明…
+ *         winsrv_destroy         销毁窗口并释放表面
+ *         winsrv_close_for_task  销毁某任务拥有的窗口（若有）
+ *         winsrv_get             取窗口指针，越界/未用返回 NULL
+ *         winsrv_for_task        找到某任务拥有的窗口，无则 NULL
+ *         winsrv_for_handle      校验句柄及 owner 后返回窗口
+ *         winsrv_handle          （待补）
+ *         winsrv_count           当前活动窗口数
+ *         winsrv_has_dirty       （待补）
+ *         winsrv_reap_dead       回收所有 owner 任务已结束的窗口
+ *         winsrv_clear           ── 表面绘制原语（并发安全，写入窗口自有…
+ *         winsrv_fill            （待补）
+ *         winsrv_text            （待补）
+ *         winsrv_resize          （待补）
+ *         winsrv_set_title       （待补）
+ *         winsrv_mark_dirty      （待补）
+ *         winsrv_push_event      ── 事件队列 ─────────────…
+ *         winsrv_pop_event       弹出一个事件到 *ev，成功返回 1，空队…
  */
 #ifndef HBOS_WINSRV_H
 #define HBOS_WINSRV_H

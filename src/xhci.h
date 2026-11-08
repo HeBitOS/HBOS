@@ -1,3 +1,39 @@
+/**
+ * @file    xhci.h
+ * @brief   导出 28 个接口（3 类型 / 12 宏 / 13 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  xhci_t         结构体 / 类型别名
+ *         xhci_trb_t     结构体 / 类型别名
+ *         xhci_device_t  结构体 / 类型别名
+ *   宏    XHCI_MAX_SLOTS               常量 / 特性宏
+ *         XHCI_MAX_PORTS               常量 / 特性宏
+ *         XHCI_MAX_EP                  常量 / 特性宏
+ *         XHCI_MAX_CONTROLLERS         常量 / 特性宏
+ *         XHCI_MAX_DEVICES             常量 / 特性宏
+ *         XHCI_TRB_RING_SIZE           XHCITRB环
+ *         XHCI_EVENT_RING_SIZE         XHCI事件环
+ *         XHCI_CMD_RING_SIZE           XHCICMD环
+ *         XHCI_PCI_CLASS               常量 / 特性宏
+ *         XHCI_PCI_SUBCLASS            常量 / 特性宏
+ *         XHCI_PCI_PROGIF              常量 / 特性宏
+ *         XHCI_MAX_SCRATCHPAD_BUFFERS  常量 / 特性宏
+ *   函数  xhci_init                （待补）
+ *         xhci_poll                （待补）
+ *         xhci_device_count        （待补）
+ *         xhci_device_slot         （待补）
+ *         xhci_get_device_desc     （待补）
+ *         xhci_bulk_transfer       （待补）
+ *         xhci_interrupt_transfer  （待补）
+ *         xhci_dev_bulk_transfer   （待补）
+ */
 #ifndef HBOS_XHCI_H
 #define HBOS_XHCI_H
 

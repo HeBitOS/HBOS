@@ -5,8 +5,27 @@
  * 提供离屏缓冲 + 脏区域跟踪 + 双缓冲的简单窗口合成器。
  * 在离屏缓冲中绘制窗口内容，仅将脏区域刷新到帧缓冲，
  * 减少不必要的像素拷贝。
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  compositor_dirty_t  结构体 / 类型别名
+ *         compositor_op_t     结构体 / 类型别名
+ *         compositor_t        结构体 / 类型别名
+ *   宏    COMPOSITOR_MAX_DIRTY  每帧最多脏矩形数
+ *   函数  compositor_init         初始化合成器
+ *         compositor_begin_frame  开始新一帧
+ *         compositor_end_frame    结束当前帧
+ *         compositor_get_buf      获取当前离屏缓冲区指针（前缓冲）
+ *         compositor_get_width    获取合成器宽度
+ *         compositor_get_height   获取合成器高度
+ *         compositor_blend        Alpha混合两个颜色
  */
-
 #ifndef HBOS_COMPOSITOR_H
 #define HBOS_COMPOSITOR_H
 

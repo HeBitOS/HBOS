@@ -1,3 +1,18 @@
+/**
+ * @file    wav.h
+ * @brief   导出 2 个接口（1 类型 / 0 宏 / 1 函数）
+ *
+ * @layer   lib
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  wav_info_t  结构体 / 类型别名
+ *   函数  wav_parse   解析 RIFF/WAVE、PCM、16 位…
+ */
 #ifndef HBOS_WAV_H
 #define HBOS_WAV_H
 

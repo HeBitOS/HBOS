@@ -17,8 +17,88 @@
  *   - 时间操作: nanosleep, clock_gettime, times
  *   - 网络套接字: socket, bind, listen, accept, connect, send, recv
  *   - 系统管理: reboot, sync, mount, umount
+ *
+ * @layer   user
+ * @owner   src/user/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hbos_utsname   utsname 结构（与 POSIX 兼容）
+ *         hbos_timeval   timeval 结构
+ *         hbos_timespec  timespec 结构
+ *   函数  hbos_syscall6       6 参数系统调用（int 0x80）
+ *         hbos_syscall3       3 参数系统调用（简化封装）
+ *         hbos_read           从文件描述符读取数据
+ *         hbos_write          向文件描述符写入数据
+ *         hbos_open           打开文件
+ *         hbos_close          关闭文件描述符
+ *         hbos_lseek          设置文件偏移量
+ *         hbos_fstat          获取文件描述符的状态信息
+ *         hbos_stat           获取指定路径文件的状态信息
+ *         hbos_unlink         删除文件
+ *         hbos_isatty         检查文件描述符是否为终端
+ *         hbos_getpid         获取当前进程 ID
+ *         hbos_getppid        获取父进程 ID
+ *         hbos_exit           终止当前进程
+ *         hbos_sleep          休眠指定秒数
+ *         hbos_usleep         休眠指定微秒数
+ *         hbos_fork           创建子进程（当前返回 -ENOSYS）
+ *         hbos_execve         执行程序（当前返回 -ENOSYS）
+ *         hbos_waitpid        等待子进程
+ *         hbos_kill           向进程发送信号
+ *         hbos_uname          获取系统信息（uname）
+ *         hbos_gettimeofday   获取当前时间（gettimeofday）
+ *         hbos_access         检查文件访问权限
+ *         hbos_ftruncate      截断文件到指定长度
+ *         hbos_mkdir          创建目录
+ *         hbos_rmdir          删除目录
+ *         hbos_getcwd         获取当前工作目录
+ *         hbos_chdir          更改当前工作目录
+ *         hbos_symlink        创建符号链接（当前返回 -ENOSYS）
+ *         hbos_chmod          修改文件权限
+ *         hbos_chown          修改文件所有者
+ *         hbos_readlink       读取符号链接目标
+ *         hbos_dup            复制文件描述符
+ *         hbos_dup2           复制文件描述符到指定编号
+ *         hbos_pipe           创建管道
+ *         hbos_fcntl          文件描述符控制操作
+ *         hbos_ioctl          设备控制操作
+ *         hbos_geteuid        获取有效用户 ID
+ *         hbos_getegid        获取有效组 ID
+ *         hbos_getuid         获取实际用户 ID
+ *         hbos_getgid         获取实际组 ID
+ *         hbos_setuid         设置用户 ID
+ *         hbos_setgid         设置组 ID
+ *         hbos_getgroups      获取补充组 ID 列表
+ *         hbos_setgroups      设置补充组 ID 列表
+ *         hbos_getpgid        获取进程组 ID
+ *         hbos_sigaction      检查/更改信号处理（当前返回 -ENOSY…
+ *         hbos_sigprocmask    检查/更改信号掩码
+ *         hbos_pause          暂停等待信号
+ *         hbos_sbrk           调整进程数据段边界（brk）
+ *         hbos_brk            设置程序断点
+ *         hbos_mmap           内存映射
+ *         hbos_munmap         取消内存映射
+ *         hbos_mprotect       设置内存保护
+ *         hbos_nanosleep      高精度休眠
+ *         hbos_clock_gettime  获取指定时钟时间
+ *         hbos_times          获取进程时间
+ *         hbos_socket         创建套接字
+ *         hbos_bind           绑定套接字地址
+ *         hbos_listen         监听套接字连接
+ *         hbos_accept         接受套接字连接
+ *         hbos_connect        发起套接字连接
+ *         hbos_send           发送数据
+ *         hbos_recv           接收数据
+ *         hbos_reboot         重启/关机系统
+ *         hbos_sync           同步文件系统缓存
+ *         hbos_mount          挂载文件系统（当前返回 -ENOSYS）
+ *         hbos_umount         卸载文件系统（当前返回 -ENOSYS）
+ *         hbos_puts           向标准输出写入字符串
  */
-
 #ifndef HBOS_USER_SYSCALL_H
 #define HBOS_USER_SYSCALL_H
 

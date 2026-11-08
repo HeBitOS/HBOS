@@ -4,8 +4,29 @@
  *
  * 对标 Linux sys/mman.h，定义 mmap/munmap/mprotect 的
  * 保护标志（prot）和映射标志（flags）。
+ *
+ * @layer   user
+ * @owner   src/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    PROT_NONE      不可访问
+ *         PROT_READ      可读
+ *         PROT_WRITE     可写
+ *         PROT_EXEC      可执行
+ *         MAP_SHARED     共享映射，对映射区的写入写回文件
+ *         MAP_PRIVATE    私有映射（COW），对映射区的写入不写回文件
+ *         MAP_FIXED      必须映射到 addr 指定的地址
+ *         MAP_ANONYMOUS  匿名映射（不对应文件，fd 忽略）
+ *         MAP_FAILED     映射FAILED
+ *   函数  mmap        映射内存/文件到地址空间
+ *         munmap      解除映射
+ *         mprotect    改映射权限
+ *         brk         调整数据段末尾
  */
-
 #ifndef HBOS_SYS_MMAN_H
 #define HBOS_SYS_MMAN_H
 

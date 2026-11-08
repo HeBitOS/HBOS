@@ -890,6 +890,31 @@ de-test: | $(BUILD_DIR)
 check-headers:
 	@bash scripts/check_headers.sh
 
+# 生成 compile_commands.json，给编辑器（clangd / VSCode C/C++ / CLion）提供
+# 每个文件真实的编译环境，从而支持「跳转到定义」「找引用」「补全」。
+#
+# 什么时候该重跑：新增 .c/.h、改了 CFLAGS、改了 mk/secure_net.mk 的 include
+# 路径。日常改函数体不用重跑（参数没变）。
+#
+# 注意：不要改成"生成一个 include 所有头文件的汇总头"。内核与用户态的同名
+# 头（string.h/errno.h/stat.h …16 组）函数签名不同——内核 memcpy 用
+# uint64_t n、libc 用 size_t n——这是内核/用户态分离的设计，塞进同一个翻译
+# 单元必然 redefinition。编辑器要的是"每个文件各自的真实环境"。
+.PHONY: compile-db
+compile-db:
+	@python3 scripts/gen_compile_db.py
+
+# 生成 src/hbos_all.h —— 聚合全部 179 个头文件的索引头，给编辑器用。
+# 单文件浏览：打开它就能搜到 HBOS 的全部导出符号，Ctrl+Click 跳过去。
+.PHONY: all-headers
+all-headers:
+	@python3 scripts/gen_all_headers.py
+
+# 校验聚合头三支都编得过且覆盖完整。改了任何 .h 之后跑一遍。
+.PHONY: check-all-headers
+check-all-headers:
+	@bash scripts/check_all_headers.sh
+
 ui-test: | $(BUILD_DIR)
 	@bash scripts/check_no_hardcoded_colors.sh
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \
@@ -1068,7 +1093,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test
+test: check-headers ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test
 	@echo "✓ 宿主机测试全部通过"
 
 # 真实鼠标移动：QEMU monitor 注入 mouse_move，验证 QEMU → PS/2 → 内核

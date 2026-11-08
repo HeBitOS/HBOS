@@ -11,6 +11,31 @@
  *   wl_iface_shm.c        wl_shm + wl_shm_pool + wl_buffer
  *   wl_iface_seat.c       wl_seat + wl_pointer + wl_keyboard
  *   wl_iface_xdg.c        xdg_wm_base + xdg_surface + xdg_toplevel + xdg_popup
+ *
+ * @layer   gui
+ * @owner   src/gui/wayland/iface/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  wl_shm_buffer_t      最近一次 attach 的 buffer
+ *         wl_shm_pool_state_t  结构体 / 类型别名
+ *         wl_surface_state_t   结构体 / 类型别名
+ *   宏    WL_MAX_BUFFERS   常量 / 特性宏
+ *         WL_MAX_SURFACES  常量 / 特性宏
+ *         WL_MAX_POOLS     常量 / 特性宏
+ *         WL_TITLE_MAX     常量 / 特性宏
+ *   函数  wl_iface_init           （待补）
+ *         wl_surface_alloc        （待补）
+ *         wl_surface_free         （待补）
+ *         wl_buffer_alloc         （待补）
+ *         wl_buffer_free          （待补）
+ *         wl_pool_alloc           （待补）
+ *         wl_pool_free            （待补）
+ *         wl_iface_surface_count  （待补）
+ *         wl_iface_surface_at     （待补）
  */
 #ifndef HBOS_WL_IFACE_H
 #define HBOS_WL_IFACE_H

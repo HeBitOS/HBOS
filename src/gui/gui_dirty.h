@@ -1,3 +1,31 @@
+/**
+ * @file    gui_dirty.h
+ * @brief   导出 16 个接口（0 类型 / 2 宏 / 14 函数）
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    GUI_DIRTY_MAX  常量 / 特性宏
+ *         GUI_DIRTY_PAD  常量 / 特性宏
+ *   函数  gui_dirty_reset      （待补）
+ *         gui_dirty_mark_full  （待补）
+ *         gui_dirty_is_full    （待补）
+ *         gui_dirty_add        （待补）
+ *         gui_dirty_count      （待补）
+ *         gui_dirty_get        （待补）
+ *         gui_clip_clear       （待补）
+ *         gui_clip_set         （待补）
+ *         gui_clip_push        压栈当前裁剪区，并把裁剪区**收缩**到给…
+ *         gui_clip_pop         恢复上一次 push 的裁剪区
+ *         gui_clip_active      （待补）
+ *         gui_clip_intersect   （待补）
+ *         gui_dirty_expand     （待补）
+ */
 #ifndef HBOS_GUI_DIRTY_H
 #define HBOS_GUI_DIRTY_H
 

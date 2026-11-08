@@ -16,6 +16,22 @@
  * Previously gui.c and app_clock.c each had their own copy of the CMOS-read
  * logic; this header centralizes it so a future fix doesn't have to be
  * applied twice and risk drifting out of sync again.
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  rtc_tz_outb             （待补）
+ *         rtc_tz_inb              （待补）
+ *         rtc_tz_cmos_read        （待补）
+ *         rtc_tz_bcd_to_bin       （待补）
+ *         rtc_tz_days_from_civil  Howard Hinnant 的 days…
+ *         rtc_tz_civil_from_days  （待补）
+ *         rtc_tz_cmos_epoch_now   读取 CMOS 原始时间字段，换算为自 1…
  */
 #ifndef HBOS_GUI_RTC_TZ_H
 #define HBOS_GUI_RTC_TZ_H

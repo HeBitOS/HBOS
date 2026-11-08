@@ -1,3 +1,18 @@
+/**
+ * @file    tls.h
+ * @brief   导出 4 个接口（1 类型 / 0 宏 / 3 函数）
+ *
+ * @layer   net
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  tls_status_t  结构体 / 类型别名
+ *   函数  tls_last_error  （待补）
+ */
 #ifndef HBOS_TLS_H
 #define HBOS_TLS_H
 

@@ -7,6 +7,45 @@
  *
  * 分层的意义：换一套协议（比如以后接 X11 或自研 API）时，core/ 完全不动，
  * 只写新的 iface/ 和 backend/。
+ *
+ * @layer   gui
+ * @owner   src/gui/wayland/core/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  wl_object_kind_t  结构体 / 类型别名
+ *         wl_object_t       结构体 / 类型别名
+ *         wl_client_t       结构体 / 类型别名
+ *         wl_global_t       结构体 / 类型别名
+ *   宏    WL_MAX_CLIENTS      常量 / 特性宏
+ *         WL_MAX_OBJECTS      常量 / 特性宏
+ *         WL_MAX_INPUT        常量 / 特性宏
+ *         WL_MAX_OUTPUT       常量 / 特性宏
+ *         WL_MAX_GLOBALS      常量 / 特性宏
+ *         WL_MAX_PENDING_FDS  常量 / 特性宏
+ *   函数  wl_server_start               启动服务端：监听 path 并创建一个内核…
+ *         wl_server_running             （待补）
+ *         wl_server_poll_once           事件循环推进一步（测试用）
+ *         wl_client_object              （待补）
+ *         wl_client_destroy             销毁客户端上的一个对象（接口层的 dest…
+ *         wl_event_begin                （待补）
+ *         wl_event_u32                  （待补）
+ *         wl_event_i32                  （待补）
+ *         wl_event_string               （待补）
+ *         wl_event_end                  （待补）
+ *         wl_event_abort                （待补）
+ *         wl_client_flush               （待补）
+ *         wl_server_broadcast_global    （待补）
+ *         wl_server_set_release_hook    （待补）
+ *         wl_dbg_note                   通用三值诊断行：`[WL] <label>…
+ *         wl_server_global_by_interface  （待补）
+ *         wl_server_global_by_name      （待补）
+ *         wl_server_global_list         （待补）
+ *         wl_server_client_at           （待补）
+ *         wl_server_client_count        （待补）
  */
 #ifndef HBOS_WL_SERVER_H
 #define HBOS_WL_SERVER_H
@@ -16,11 +55,16 @@
 #include "wl_wire.h"
 
 #define WL_MAX_CLIENTS        8
-#define WL_MAX_OBJECTS        128
+/* 对象表按 id 下标寻址，而 id 由客户端单调递增分配：Chromium 一次导航就会
+ * 建 surface/region/buffer/xdg_* 几十个对象，128 会在后续密集创建时悄悄
+ * 用尽（adopt_id 失败是静默的，客户端只会"等不到事件"）。512 × 24B × 8
+ * 客户端 ≈ 96KB 静态 BSS，换取不再有这种悬崖。 */
+#define WL_MAX_OBJECTS        512
 #define WL_MAX_INPUT          4096
 #define WL_MAX_OUTPUT         8192
 #define WL_MAX_GLOBALS        8
-#define WL_MAX_PENDING_FDS    8
+/* getaddrinfo 一次可以带多个 fd（dmabuf + 多个 shm），8 太窄。 */
+#define WL_MAX_PENDING_FDS    16
 
 /** 对象类型：决定该 id 上收到的请求由谁处理。 */
 typedef enum {

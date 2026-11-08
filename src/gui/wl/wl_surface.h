@@ -8,6 +8,28 @@
  *
  * 与现有 gui.c 解耦，因此可以在宿主机上单测；接进 gd_* 只是实现一个
  * commit 监听器的事。
+ *
+ * @layer   gui
+ * @owner   src/gui/wl/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  wl_buffer_t   结构体 / 类型别名
+ *         wl_surface    （待补）
+ *         wl_surface_t  结构体 / 类型别名
+ *   宏    WL_SURFACE_MAX_DAMAGE  常量 / 特性宏
+ *   函数  wl_surface_create             （待补）
+ *         wl_surface_destroy            （待补）
+ *         wl_surface_set_commit_listener  （待补）
+ *         wl_surface_attach             附加缓冲区（NULL 表示解除映射）
+ *         wl_surface_damage             标记脏区（自动裁剪到 surface 范围
+ *         wl_surface_commit             提交：pending→current，旧…
+ *         wl_surface_current            （待补）
+ *         wl_surface_is_mapped          （待补）
+ *         wl_surface_serial             （待补）
  */
 #ifndef HBOS_WL_SURFACE_H
 #define HBOS_WL_SURFACE_H

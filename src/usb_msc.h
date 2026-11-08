@@ -1,3 +1,29 @@
+/**
+ * @file    usb_msc.h
+ * @brief   导出 13 个接口（1 类型 / 6 宏 / 6 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  msc_device_t  结构体 / 类型别名
+ *   宏    MSC_MAX_DEVICES           常量 / 特性宏
+ *         MSC_MAX_TRANSFER_SECTORS  常量 / 特性宏
+ *         MSC_CBW_SIGNATURE         常量 / 特性宏
+ *         MSC_CSW_SIGNATURE         常量 / 特性宏
+ *         MSC_CBW_LENGTH            常量 / 特性宏
+ *         MSC_CSW_LENGTH            常量 / 特性宏
+ *   函数  msc_init             （待补）
+ *         msc_device_count     （待补）
+ *         msc_read_sector      （待补）
+ *         msc_write_sector     （待补）
+ *         msc_get_block_count  （待补）
+ *         msc_get_block_size   （待补）
+ */
 #ifndef HBOS_USB_MSC_H
 #define HBOS_USB_MSC_H
 

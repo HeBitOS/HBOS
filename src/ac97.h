@@ -1,3 +1,19 @@
+/**
+ * @file    ac97.h
+ * @brief   导出 3 个接口（0 类型 / 0 宏 / 3 函数）
+ *
+ * @layer   drivers
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  ac97_init        探测 PCI 总线上的 AC97 声卡（c…
+ *         ac97_present     是否已经找到并初始化好 AC97 控制器
+ *         ac97_play_pcm16  限制，真正的重采样是单独的工作量
+ */
 #ifndef HBOS_AC97_H
 #define HBOS_AC97_H
 

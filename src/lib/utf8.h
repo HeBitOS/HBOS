@@ -11,8 +11,21 @@
  *   - 拒绝代理区 U+D800..U+DFFF
  *   - 拒绝 > U+10FFFF
  *   - 拒绝截断的多字节序列与孤立续字节
+ *
+ * @layer   lib
+ * @owner   src/lib/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    UTF8_INVALID  常量 / 特性宏
+ *   函数  utf8_decode  解码一个码点
+ *         utf8_encode  编码一个码点
+ *         utf8_valid   校验整段是否为合法 UTF-8
+ *         utf8_length  码点个数（非法序列按 1 个"替换字符"计）
  */
-
 #ifndef HBOS_UTF8_H
 #define HBOS_UTF8_H
 

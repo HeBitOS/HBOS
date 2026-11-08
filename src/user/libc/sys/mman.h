@@ -1,3 +1,31 @@
+/**
+ * @file    mman.h
+ * @brief   导出 17 个接口（0 类型 / 13 宏 / 4 函数）
+ *
+ * @layer   user
+ * @owner   src/user/libc/sys/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   宏    PROT_NONE            常量 / 特性宏
+ *         PROT_READ            PROT读
+ *         PROT_WRITE           PROT写
+ *         PROT_EXEC            常量 / 特性宏
+ *         MAP_SHARED           映射SHARED
+ *         MAP_PRIVATE          映射PRIVATE
+ *         MAP_FIXED            映射FIXED
+ *         MAP_ANONYMOUS        映射ANONYMOUS
+ *         MAP_ANON             映射ANON
+ *         MAP_FIXED_NOREPLACE  映射FIXEDNOREPLACE
+ *         MAP_FAILED           映射FAILED
+ *         MREMAP_MAYMOVE       常量 / 特性宏
+ *         MREMAP_FIXED         常量 / 特性宏
+ *   函数  munmap      解除映射
+ *         mprotect    改映射权限
+ */
 #ifndef HBOS_USER_LIBC_SYS_MMAN_H
 #define HBOS_USER_LIBC_SYS_MMAN_H
 

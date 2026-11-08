@@ -7,6 +7,29 @@
  *   - 普通权限只允许位移/透明度这类廉价动效，全屏模糊/大范围阴影需要
  *     管理权限；
  *   - 策略只做判定，不碰绘制，便于宿主机单测。
+ *
+ * @layer   gui
+ * @owner   src/gui/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   函数  gui_effects_set_enabled       动效总开关（默认开）
+ *         gui_effects_enabled           （待补）
+ *         gui_effects_set_perm          当前生效的权限等级（默认 USER）
+ *         gui_effects_perm              （待补）
+ *         gui_effects_allowed           某类动效是否允许执行
+ *         gui_effects_allowed_geometry  窗口几何过渡（最大化/还原）是否允许
+ *         gui_effects_max_frames        动效帧数上限（100Hz 下 10 帧 =…
+ *         gui_effects_duration_ms       窗口打开/最大化/还原的过渡时长（毫秒）
+ *         gui_effects_pit_hz            当前 PIT 频率（Hz）
+ *         gui_effects_now_ticks         当前 PIT tick 计数（单调递增）
+ *         gui_effects_ease_progress     动画进度，0..512（512 = 完成）…
+ *         gui_ease_apply                把 0..512 的线性进度套进某条缓动曲…
+ *         gui_effects_ease_curve        按时间推进、带缓动曲线的进度（0..512）
+ *         gui_effects_now_ms            毫秒级单调时钟（PIT 驱动）
  */
 #ifndef HBOS_GUI_EFFECTS_H
 #define HBOS_GUI_EFFECTS_H

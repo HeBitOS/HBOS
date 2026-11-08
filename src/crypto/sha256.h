@@ -4,6 +4,21 @@
  *
  * 提供 SHA-256 增量哈希计算、HMAC-SHA256 消息认证码、
  * 以及 HKDF-SHA256 密钥派生（提取与扩展）功能。
+ *
+ * @layer   crypto
+ * @owner   src/crypto/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  sha256_ctx_t  结构体 / 类型别名
+ *   宏    SHA256_DIGEST_SIZE  常量 / 特性宏
+ *         SHA256_BLOCK_SIZE   SHA256块
+ *   函数  sha256_init    初始化 SHA-256 上下文
+ *         sha256_update  向 SHA-256 上下文输入数据
+ *         sha256_final   完成 SHA-256 计算，输出摘要
  */
 #ifndef HBOS_SHA256_H
 #define HBOS_SHA256_H

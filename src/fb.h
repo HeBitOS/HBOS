@@ -23,6 +23,19 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * @file    fb.h
+ * @brief   导出 1 个接口（0 类型 / 0 宏 / 1 函数）
+ *
+ * @layer   gui
+ * @owner   src/
+ * @stable  frozen（上游代码，勿改正文）
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ */
 #ifndef FLANTERM_FB_H
 #    define FLANTERM_FB_H 1
 

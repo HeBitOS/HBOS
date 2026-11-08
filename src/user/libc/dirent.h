@@ -5,6 +5,22 @@
  * 与内核 sys/dirent.h 的 struct dirent 布局**逐字节一致**：内核 getdents
  * 系统调用按固定 sizeof(struct dirent) 步长写入记录，因此 readdir 也必须
  * 按同一固定步长前进（而非按 d_reclen）。
+ *
+ * @layer   user
+ * @owner   src/user/libc/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  dirent      （待补）
+ *         DIR         目录流句柄（不透明）
+ *   宏    NAME_MAX    文件名（NUL 结尾）
+ *   函数  opendir     打开目录流
+ *         readdir     读一项目录项
+ *         closedir    关闭目录流
+ *         getdents    目录遍历（用户态 libc）—— 对标 P…
  */
 #ifndef HBOS_USER_LIBC_DIRENT_H
 #define HBOS_USER_LIBC_DIRENT_H

@@ -28,6 +28,7 @@
  *         linux_syscall_dispatch_frame  （待补）
  *         linux_syscall_trace_dump      打印最近 128 条 Linux 系统调用…
  *         linux_open_trace_dump         打印最近 16 次 open/openat 的…
+ *         linux_getfl_trace_dump        打印最近 8 次 fcntl(F_GETFL) 的…
  *         linux_debug_set_flag          （待补）
  *         linux_debug_set_trace_pid     只对指定 pid 实时打印每条 Linux…
  *         linux_syscall_prof_set        按 nr 聚合的 syscall 计数 +…
@@ -290,6 +291,10 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 void linux_syscall_trace_dump(void);
 /** 打印最近 16 次 open/openat 的路径与结果（用户态异常时调用）。 */
 void linux_open_trace_dump(void);
+/** 打印最近 8 次 fcntl(F_GETFL) 的 fd 与返回模式（用户态异常时调用）。 */
+void linux_getfl_trace_dump(void);
+/** 打印当前进程的 fd 表（fd 号 / 类型 / flags / 路径，用户态异常时调用）。 */
+void linux_fd_table_dump(void);
 
 /** 排错开关（shell `setenv` 命令用），见 linux_debug_set_flag 定义处。 */
 enum {

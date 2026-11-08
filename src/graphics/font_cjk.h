@@ -1,3 +1,26 @@
+/**
+ * @file    font_cjk.h
+ * @brief   导出 10 个接口（2 类型 / 2 宏 / 6 函数）
+ *
+ * @layer   gui
+ * @owner   src/graphics/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  cjk_font_header_t  结构体 / 类型别名
+ *         utf8_state_t       结构体 / 类型别名
+ *   宏    CJK_GLYPH_SIZE   pixels
+ *         CJK_GLYPH_BYTES  bytes per glyph (16 r…
+ *   函数  utf8_init           （待补）
+ *         utf8_feed           （待补）
+ *         is_cjk_codepoint    （待补）
+ *         cjk_font_lookup     （待补）
+ *         cjk_font_init       （待补）
+ *         cjk_font_get_count  （待补）
+ */
 #ifndef HBOS_FONT_CJK_H
 #define HBOS_FONT_CJK_H
 

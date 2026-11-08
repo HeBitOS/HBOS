@@ -4,8 +4,23 @@
  *
  * 定义用户态应用的描述结构和注册宏，以及应用的查找、运行和派生接口。
  * 应用通过 HBOS_APP 宏在编译时注册到 hbos_apps 段中。
+ *
+ * @layer   user
+ * @owner   src/user/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hbos_app_t  结构体 / 类型别名
+ *   宏    HBOS_APP    常量 / 特性宏
+ *   函数  hbos_app_count  获取已注册应用的数量
+ *         hbos_app_get    根据索引获取应用描述符
+ *         hbos_app_find   根据名称查找应用描述符
+ *         hbos_app_run    在当前任务中运行指定应用
+ *         hbos_app_spawn  在新任务中派生运行指定应用
  */
-
 #ifndef HBOS_USER_APP_H
 #define HBOS_USER_APP_H
 

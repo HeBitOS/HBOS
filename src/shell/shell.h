@@ -1,3 +1,62 @@
+/**
+ * @file    shell.h
+ * @brief   导出 46 个接口（2 类型 / 24 宏 / 20 函数）
+ *
+ * @layer   tools
+ * @owner   src/shell/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  cmd_group_t  结构体 / 类型别名
+ *         command_t    结构体 / 类型别名
+ *   宏    KB_KEY_UP           常量 / 特性宏
+ *         KB_KEY_DOWN         常量 / 特性宏
+ *         KB_KEY_LEFT         常量 / 特性宏
+ *         KB_KEY_RIGHT        常量 / 特性宏
+ *         KB_KEY_PGUP         常量 / 特性宏
+ *         KB_KEY_PGDWN        常量 / 特性宏
+ *         KB_KEY_HOME         常量 / 特性宏
+ *         KB_KEY_END          常量 / 特性宏
+ *         KB_KEY_INSERT       常量 / 特性宏
+ *         KB_KEY_DELETE       KBKEY删除
+ *         KB_KEY_F1           常量 / 特性宏
+ *         KB_KEY_F2           常量 / 特性宏
+ *         KB_KEY_F3           常量 / 特性宏
+ *         KB_KEY_F4           常量 / 特性宏
+ *         KB_KEY_F5           常量 / 特性宏
+ *         KB_KEY_F6           常量 / 特性宏
+ *         KB_KEY_SHIFT_UP     常量 / 特性宏
+ *         KB_KEY_SHIFT_DOWN   常量 / 特性宏
+ *         KB_KEY_SHIFT_LEFT   常量 / 特性宏
+ *         KB_KEY_SHIFT_RIGHT  常量 / 特性宏
+ *         KB_KEY_F9           常量 / 特性宏
+ *         KB_KEY_F7           常量 / 特性宏
+ *         KB_KEY_F8           常量 / 特性宏
+ *         KB_KEY_SUPER        常量 / 特性宏
+ *   函数  shell_init              （待补）
+ *         cmd_register            （待补）
+ *         cmd_register_multiple   （待补）
+ *         cmd_execute             （待补）
+ *         cmd_get_list            （待补）
+ *         cmd_get_count           （待补）
+ *         cmd_get_group_name      （待补）
+ *         shell_run               （待补）
+ *         shell_print_prompt      （待补）
+ *         shell_get_startup_pref  （待补）
+ *         shell_set_startup_pref  （待补）
+ *         cmd_get_history         （待补）
+ *         cmd_get_history_count   （待补）
+ *         cmd_clear_history       （待补）
+ *         kb_get_key              特殊键码定义（kb_get_key 的返回…
+ *         kb_poll_key             （待补）
+ *         kb_alt_pressed          （待补）
+ *         kb_super_pressed        （待补）
+ *         kb_ctrl_pressed         （待补）
+ *         kb_is_numlock           （待补）
+ */
 #ifndef HBOS_SHELL_H
 #define HBOS_SHELL_H
 
