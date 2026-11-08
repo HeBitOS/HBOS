@@ -68,6 +68,8 @@ static int wl_rx_log_budget = 8;
 static int wl_dbg_dispatch_budget = 96;
 /* 一次性原始字节 dump：用来核对线上消息的 size 字段与参数排布。 */
 static int wl_hexdump_budget = 0;
+/* 出站字节 dump：客户端在事件分派里崩时用来核对事件是否合法。 */
+static int wl_out_hexdump_budget = 0;
 static int wl_dbg_flush_budget = 8;
 static wl_global_t wl_globals[WL_MAX_GLOBALS];
 static int wl_global_count;
@@ -234,6 +236,17 @@ int wl_client_flush(wl_client_t *client) {
             console_puts("[WL] flush ");
             wl_put_dec((int)total);
             console_puts(" bytes\n");
+        }
+        if (wl_out_hexdump_budget > 0 && total >= 64) {
+            wl_out_hexdump_budget--;
+            for (uint32_t i = 0; i < total && i < 400; i++) {
+                static const char digits[] = "0123456789abcdef";
+                if (i && (i % 16) == 0) console_putchar('\n');
+                console_putchar(digits[(client->out.buffer[i] >> 4) & 0xF]);
+                console_putchar(digits[client->out.buffer[i] & 0xF]);
+                console_putchar(' ');
+            }
+            console_puts("\n--end out hexdump--\n");
         }
         /* 只有出过错才吱声；正常收发不刷屏（客户端每帧都在发请求）。 */
         if (client->out.in_error) console_puts("[WL] flush error\n");

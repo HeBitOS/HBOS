@@ -898,3 +898,46 @@ ORDER PROTO-OUT {"id":1,"result":{}}
 一处目前**没有函数名**。已知的上下文：崩溃前最后几笔请求是
 pool.resize ×2 → compositor.create_surface ×2 → data_device_manager.get_data_device
 → display.sync，之后就不再发任何字节；且同一地址在修复前后完全一致。
+
+#### R43：把那次 int3 精确定位到一条指令 —— 它不在 Wayland 层
+
+之前只知道 `rip=0x110A90C46B`。全量 chromium 的 dbgsym 不可得，但反汇编 +
+栈回溯可以拼出真链条（`bt[]` 里的返回地址逐个反查调用点，全部对得上）：
+
+```
+0x6284f85  call *0x38(%rax)            <- 虚调用
+0x786b91f  call 0x7856a20              <- 0x7856cba 处 mov $0x39b,%esi（= 崩溃时 r13）
+0x7856cbf  call 0xa8f8760
+0xa8f8789  call 0xa90c050              <- 0xa90c050 是 thunk，实体在 0xa90c060
+```
+
+实体函数 `0xa90c060..0xa90c46a` 整段只引用**两个** rodata 字符串：
+
+```
+0x1d8fa2e  "../../ui/base/resource/resource_bundle.cc"
+0x1d0d9ac  "locale resources are not loaded"
+```
+
+真正跳进`int3` 的是这一条（不是栈保护，也不是野跳转）：
+
+```
+a90c262: call a90bc30            ; 返回 {rax, rdx}（ptr + 长度）
+a90c267: test %rdx,%rdx
+a90c26a: je    a90c46a           ; rdx == 0  -> int3 / ud2 冷块
+```
+
+所以失败形态是**"取一个 span/string_view，返回长度为 0，命中不变量"**，位置在
+`resource_bundle.cc`。旁边那条 `locale resources are not loaded` 的 LOG(ERROR)
+**没有出现在 stderr**（整轮 chromium 只输出 4 行 stderr），说明 pak 是加载成功的，
+挂的是"某个资源 id 查出来是空的"。
+
+顺带确认了两件事：
+- 没有合成器时 chromium 干净退出（`exit 1`，`Failed to connect to Wayland display:
+  Connection refused`），所以这条崩溃**确实是 Wayland 交互触发的**（UI 初始化走到
+  取本地化资源这一步才会到）。
+- guest 里 `resources.pak`(13 046 519) 与 `locales/en-US.pak`(577 990) 都在，
+  头 4 字节是 `05 00 00 00`（DataPack 格式版本 5），文件本身没坏。
+
+下一步只有两条路，都不需要再猜：①拿到 chromium 156 的 dbgsym（或从 Debian
+`chromium-dbgsym` 取），直接把 `0xa90c060` 的函数名与行号读出来；②反汇编
+`0xa90c060..0xa90c230` 把被查的全局/资源 id 认出来，再比对 pak 里的 id 表。
