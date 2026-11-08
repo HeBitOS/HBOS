@@ -23,6 +23,7 @@
 #include "fd.h"
 #include "graphics/graphics.h"   /* console_puts/console_putchar：IPC 诊断日志 */
 #include "smp.h"
+#include "sys/stat.h"
 #include "string.h"
 #include "unistd.h"
 
@@ -251,6 +252,19 @@ static memfd_slot_t memfd_slots[LINUX_MEMFD_SLOTS];
 static int g_memfd_dbg = 8;
 /* [SHM] /dev/shm 拦截诊断预算。 */
 static int g_shm_dbg = 0;
+/* [UNIX] socket 槽生命周期诊断预算。
+ *
+ * 起因：Chromium 多进程下 renderer 子进程正常退出（日志 `[EXIT] pid=23 code=0`）
+ * 之后，browser 进程撞 `CHECK(!channel_)`（render_process_host_impl.cc:2249）。
+ * 该 CHECK 的含义是"清理完 channel_ 必须为空"，但它挂在"对端已关闭"这条
+ * 事件没到达的情况下 —— 即 fd_ready_mask 从未对这对 socket 报出 POLLHUP。
+ *
+ * 单靠读代码无法判断是 refs 没归零（槽不释放）还是 peer 指针悬垂（槽释放了
+ * 但对面看不到），所以这里把三条关键事实打出来：槽创建、槽销毁、以及对端
+ * 销毁时本端 peer 是否真的被置 -1。预算默认 24 条，够覆盖一次 renderer
+ * 生死；排查完应归零。 */
+static int g_unix_dbg = 0;
+
 static void compat_put_dec(unsigned int value) {
     char buf[12];
     int n = 0;
@@ -948,6 +962,17 @@ static unix_socket_slot_t *unix_slot_alloc(int type, int flags) {
 static void unix_slot_reset(unix_socket_slot_t *slot) {
     if (!slot || !slot->used) return;
     int index = unix_slot_index(slot);
+    if (g_unix_dbg > 0) {
+        g_unix_dbg--;
+        console_puts("[UNIX] reset slot=");
+        compat_put_dec((unsigned int)index);
+        console_puts(" peer=");
+        if (slot->peer < 0) console_puts("-1");
+        else compat_put_dec((unsigned int)slot->peer);
+        console_puts(" refs=");
+        compat_put_dec(slot->refs);
+        console_puts("\n");
+    }
     if (slot->peer >= 0 && slot->peer < UNIX_SOCKET_SLOTS) {
         unix_socket_slot_t *peer = &unix_socket_slots[slot->peer];
         if (peer->used && peer->peer == index) peer->peer = -1;
@@ -1233,10 +1258,19 @@ long linux_compat_write(int fd, const void *buffer, size_t count) {
         fd_entry_t *entry = compat_fd(task, fd);
         if (memfd && entry) {
             if (!buffer && count) return -EFAULT;
-            if (entry->offset >= memfd->size)
-                return count ? -ENOSPC : 0;
-            uint64_t available = memfd->size - entry->offset;
-            if (count > available) count = (size_t)available;
+            if (!count) return 0;
+            /* 越界写要扩展，不能报错。
+             *
+             * 以前这里 `offset >= size` 直接 return -ENOSPC，把"写超出文件
+             * 末尾"当成了"磁盘满" —— 但 Linux 的 write(2) 语义是**自动扩展
+             * 文件**，只有真正的空间耗尽才报 ENOSPC。Chromium/crashpad 的
+             * settings.dat、日志、缓存都是 open(O_CREAT) 之后从头写，
+             * offset==0 而 size==0，这条分支直接把 28 号错误甩回去：
+             *   write: No space left on device (28)
+             * 于是崩溃报告、cookie、profile 全部写不进去。 */
+            uint64_t want = (uint64_t)entry->offset + (uint64_t)count;
+            if (want > memfd->size && linux_compat_memfd_truncate(fd, want) < 0)
+                return -1;
             size_t copied = 0;
             while (copied < count) {
                 uint64_t position = entry->offset + copied;
@@ -1244,6 +1278,7 @@ long linux_compat_write(int fd, const void *buffer, size_t count) {
                 size_t in_page = (size_t)(position % PAGE_SIZE);
                 size_t chunk = PAGE_SIZE - in_page;
                 if (chunk > count - copied) chunk = count - copied;
+                if (page >= memfd->page_count) break;
                 memcpy((uint8_t *)(uintptr_t)memfd->pages[page] + in_page,
                        (const uint8_t *)buffer + copied, chunk);
                 copied += chunk;
@@ -2383,19 +2418,13 @@ typedef struct {
 
 static shm_name_t shm_names[LINUX_SHM_NAMES];
 
-/* 可写覆盖层的前缀。/dev/shm 是 Chromium 的共享内存，/tmp 是它的 profile、
- * SingletonLock 等运行时文件。两者的共同点：**只读 ext2 上建普通文件会
- * 返回 ENOSPC**，而 Chromium 只要一步失败就直接 abort。统一用内存后备的
- * "虚拟文件"顶上 —— 名字表把路径绑到 memfd slot，读写/mmap/ftruncate 全部
- * 复用已有的 FD_MEMFD 分支。 */
+/* 只认 /dev/shm：Chromium 的共享内存与 wl_shm 缓冲都经由
+ * /dev/shm/.org.chromium.Chromium.XXXXXX 创建，而 wl_buffer_read 依赖
+ * FD_MEMFD 直接按物理页读像素。 */
 static int memfile_prefix(const char *path, const char **suffix) {
     if (!path) return 0;
     if (strncmp(path, "/dev/shm/", 9) == 0 && path[9]) {
         if (suffix) *suffix = path + 9;
-        return 1;
-    }
-    if (strncmp(path, "/tmp/", 5) == 0 && path[5]) {
-        if (suffix) *suffix = path;
         return 1;
     }
     return 0;
@@ -2403,6 +2432,45 @@ static int memfile_prefix(const char *path, const char **suffix) {
 
 int linux_compat_shm_is_path(const char *path) {
     return memfile_prefix(path, NULL);
+}
+
+/* ── /tmp 的"普通文件"覆盖层 ─────────────────────────────────
+ *
+ * /tmp 不能整体接进 memfd 名字表：ProcessSingleton 要在 /tmp 里建 0700
+ * 目录、AF_UNIX socket、符号链接，这些都要真实 VFS 语义（早先整体接管后
+ * mkdir 变成空操作，bind 落在不存在的目录上，反而死得更早）。
+ *
+ * 但"普通文件写不进去"是硬伤：只读 ext2 上 open(O_CREAT) 直接 ENOSPC，
+ * 而 Chromium/Electron 在 /tmp 下要建 profile 文件、缓存、崩溃报告——
+ * 一步失败就 LOG(FATAL)。所以这里按"是不是普通文件"分流：
+ *
+ *   路径在 /tmp 下 且 磁盘上不是目录/符号链接 且 目标是普通文件
+ *       → 落到 memfd slot（内存后备，可读可写可 mmap）
+ *   /tmp 下的目录、符号链接、socket
+ *       → 照旧走真实 VFS
+ *
+ * 预检用 lstat：已存在的目录/链接一律让路；不存在的路径按"普通文件"处理
+ * ——调用方 open(O_CREAT) 就是要建文件。 */
+static int tmp_memfile_prefix(const char *path, const char **suffix) {
+    if (!path) return 0;
+    if (strncmp(path, "/tmp/", 5) != 0 || !path[5]) return 0;
+    struct stat st;
+    if (lstat(path, &st) == 0 &&
+        (S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode) ||
+         S_ISSOCK(st.st_mode) || S_ISCHR(st.st_mode) || S_ISFIFO(st.st_mode)))
+        return 0;
+    if (suffix) *suffix = path;      /* 用全路径，避免与 /dev/shm 同名 */
+    return 1;
+}
+
+/* 覆盖层统一入口：/dev/shm 与 /tmp 普通文件两类。 */
+int linux_compat_overlay_is_path(const char *path) {
+    return memfile_prefix(path, NULL) || tmp_memfile_prefix(path, NULL);
+}
+
+static int overlay_prefix(const char *path, const char **suffix) {
+    if (memfile_prefix(path, suffix)) return 1;
+    return tmp_memfile_prefix(path, suffix);
 }
 
 static int memfd_slot_index(const memfd_slot_t *slot) {
@@ -2421,9 +2489,11 @@ int linux_compat_shm_open(const char *path, int flags) {
         compat_put_dec((unsigned int)flags);
         console_puts("\n");
     }
-    if (!linux_compat_shm_is_path(path)) return compat_set_errno(EINVAL);
-    const char *name = path + 9;
-    if (strlen(name) >= LINUX_SHM_NAME_MAX) return compat_set_errno(36) /* ENAMETOOLONG */;
+    const char *name = NULL;
+    if (!overlay_prefix(path, &name) || !name)
+        return compat_set_errno(EINVAL);
+    if (strlen(name) >= LINUX_SHM_NAME_MAX)
+        return compat_set_errno(36) /* ENAMETOOLONG */;
 
     for (int i = 0; i < LINUX_SHM_NAMES; i++) {
         if (!shm_names[i].used || strcmp(shm_names[i].name, name) != 0) continue;
@@ -2461,9 +2531,33 @@ int linux_compat_shm_open(const char *path, int flags) {
     return fd;
 }
 
+/* 查一个 /dev/shm 名字当前对应的内存槽大小。
+ *
+ * 不变量：成功返回 0 并（在 size 非 NULL 时）写出字节数；失败返回 -1
+ * 并把 errno 置为 EINVAL（不是 shm 前缀）或 ENOENT（名字未登记）。
+ * 前置条件：path 可为 NULL（返回 EINVAL）。size 可为 NULL，表示只判存在性
+ * —— access/faccessat 就是这样用的。
+ *
+ * 为什么需要它：`shm_open` 建出来的对象没有普通 inode，`stat()` 走 ext2
+ * 会直接 ENOENT，Chromium 探测 `/dev/shm/.org.chromium.*` 时会被判成
+ * "共享内存不可用"而降级。这里按名字表回填大小，等价于 tmpfs 的 stat。 */
+int linux_compat_shm_stat(const char *path, uint64_t *size) {
+    const char *name = NULL;
+    if (!overlay_prefix(path, &name) || !name) return compat_set_errno(EINVAL);
+    for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+        if (!shm_names[i].used || strcmp(shm_names[i].name, name) != 0) continue;
+        int slot = shm_names[i].slot;
+        if (slot < 0 || slot >= LINUX_MEMFD_SLOTS || !memfd_slots[slot].used)
+            return compat_set_errno(ENOENT);
+        if (size) *size = memfd_slots[slot].size;
+        return 0;
+    }
+    return compat_set_errno(ENOENT);
+}
+
 int linux_compat_shm_unlink(const char *path) {
     const char *name = NULL;
-    if (!memfile_prefix(path, &name) || !name) return compat_set_errno(EINVAL);
+    if (!overlay_prefix(path, &name) || !name) return compat_set_errno(EINVAL);
     for (int i = 0; i < LINUX_SHM_NAMES; i++) {
         if (!shm_names[i].used || strcmp(shm_names[i].name, name) != 0) continue;
         shm_names[i].used = 0;
@@ -2522,12 +2616,42 @@ int linux_compat_memfd_truncate(int fd, uint64_t size) {
         slot->size = size;
         return 0;
     }
-    if (wanted < slot->page_count && slot->map_refs)
-        return compat_set_errno(EBUSY);
 
-    uint64_t *new_pages = wanted
-        ? (uint64_t *)kcalloc(wanted, sizeof(uint64_t)) : NULL;
-    if (wanted && !new_pages) return compat_set_errno(ENOMEM);
+    /* 缩小：**必须成功**，只把逻辑长度改小。
+     *
+     * 以前这里在有映射时直接 -EBUSY，Chromium 的共享内存创建路径
+     * （base::SharedMemory / mojo 的 shm 池）就是 ftruncate 到目标大小，
+     * 于是日志里刷：
+     *   [FDERR] nr=77 fd=37 ret=-16        <-- ftruncate 被拒
+     *   ftruncate: Device or resource busy (16)
+     * crashpad 的 settings.dat 也跟着写不动。
+     *
+     * 直接照 Linux 语义放行不能只删那三行：映射是**直接持有物理页指针**的
+     * （mmap 时把 slot->pages[i] 填进页表），如果缩小时 pmm_free_page 掉
+     * 已经映射出去的页，映射方会访问到已回收的物理页 —— 真实 UAF。
+     * 所以：逻辑 size 立即变，但**页只回收无映射时能回收的那部分**；
+     * 有映射时保留页，等 munmap 后由 memfd_maybe_free 收尾。 */
+    uint32_t keep_pages = slot->page_count;
+    if (slot->map_refs && wanted < keep_pages) {
+        /* 有映射：不动物理页，只裁逻辑长度。
+         * 映射区间仍然合法（页还在），越界访问依赖调用方自觉 ——
+         * 与 Linux 上"缩容后访问被 mmap 覆盖的尾部可能 SIGBUS"等价。 */
+        slot->size = size;
+        return 0;
+    }
+
+    if (wanted == 0) {
+        for (uint32_t i = 0; i < slot->page_count; i++)
+            pmm_free_page(slot->pages[i]);
+        kfree(slot->pages);
+        slot->pages = NULL;
+        slot->page_count = 0;
+        slot->size = 0;
+        return 0;
+    }
+
+    uint64_t *new_pages = (uint64_t *)kcalloc(wanted, sizeof(uint64_t));
+    if (!new_pages) return compat_set_errno(ENOMEM);
     uint32_t keep = wanted < slot->page_count ? wanted : slot->page_count;
     for (uint32_t i = 0; i < keep; i++) new_pages[i] = slot->pages[i];
 

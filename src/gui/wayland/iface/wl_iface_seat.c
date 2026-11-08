@@ -23,6 +23,19 @@ void wl_seat_request(wl_client_t *client, wl_object_t *object,
         uint32_t new_id = wl_arg_u32(args);
         if (wl_args_failed(args) || !new_id) return;
         wl_client_adopt_id(client, new_id, WL_OBJ_KEYBOARD, NULL);
+        /* 必须紧跟一条 keymap，否则客户端会一直等键位表：Qt Wayland 与
+         * Chromium Ozone 都是"收到 keymap 才建映射"，在此之前送来的 key
+         * 事件被静默丢弃 —— 表现为窗口正常但键盘完全没反应。
+         *
+         * format 用 NO_KEYMAP：HBOS 没有 xkbcommon 数据文件，发 xkb_v1
+         * 只能是伪造的映射，客户端解析失败会直接断开连接，比不发更糟。
+         * fd 传 -1（wl_event_i32 写的是 fd 占位，服务端不发 scm_rights
+         * 时客户端按 -1 处理，语义即"没有 keymap 文件"）。 */
+        wl_event_begin(client, new_id, WL_KEYBOARD_E_KEYMAP);
+        wl_event_u32(client, WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP);
+        wl_event_i32(client, -1);
+        wl_event_u32(client, 0);   /* size：没有 keymap 文件，长度为 0 */
+        wl_event_end(client);
         break;
     }
     case WL_SEAT_GET_TOUCH: {
