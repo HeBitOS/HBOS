@@ -17,6 +17,36 @@
  *
  * 为什么需要这一层：GUI 是可选组件（HBOS_ENABLE_GUI=0 时不链接），但窗口
  * 相关 syscall 必须永远存在。因此 syscall 只看函数指针表，不看实现。
+ *
+ * 索引头文件
+ *   宏    HBOS_GUI_SERVICE_ABI_MAJOR    ABI 主版本，不匹配即拒调
+ *         HBOS_GUI_SERVICE_ABI_MINOR    次版本，只增不改
+ *         GUI_SERVICE_CAP_*             能力位（多窗口/缩放/ARGB/脏矩形/批量/焦点）
+ *         GUI_SERVICE_DRAW_*            v2 绘制命令类型（CLEAR/FILL/TEXT/ARGB）
+ *         GUI_THEME_LIGHT / _DARK       设置里的主题枚举
+ *   枚举  （操作码 GUI_SERVICE_V2_* 与 GUI_SERVICE_SETTINGS_* 无独立名字，
+ *          归属下方的 gui_service_window_v2 / gui_service_settings 参数）
+ *   类型  gui_service_caps_t      能力与限额，服务端填写
+ *         gui_service_create_t    开窗入参（标题 + 尺寸）
+ *         gui_service_state_t     窗口几何与状态快照
+ *         gui_service_rect_t      脏矩形
+ *         gui_service_draw_t      单条绘制命令
+ *         gui_service_batch_t     一次提交的命令数组
+ *         gui_service_event_t     事件（type + 三个整型负载）
+ *         gui_service_settings_t  桌面设置快照
+ *   函数  canvas_* 族 7 个          独占全屏画布的旧接口（新代码别再用）
+ *         gui_service_window_open     按 owner_task 开窗，返回句柄
+ *         gui_service_window_info     查尺寸
+ *         gui_service_window_clear    整窗清屏
+ *         gui_service_window_fill     矩形填充
+ *         gui_service_window_text     绘制 UTF-8 文本
+ *         gui_service_window_blit     贴 ARGB 位图
+ *         gui_service_window_present  提交本帧
+ *         gui_service_window_poll     取一个事件，无事件返回 0
+ *         gui_service_window_close    关窗，句柄即刻失效
+ *         gui_service_window_v2       v2 统一入口（operation 分发）
+ *         gui_service_settings        读/改桌面设置
+ *         gui_service_theme_set       只改主题的便捷入口
  */
 #ifndef HBOS_API_GUI_SERVICE_H
 #define HBOS_API_GUI_SERVICE_H

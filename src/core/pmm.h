@@ -11,6 +11,22 @@
  *         直接把启动顺序锁死。
  * 被依赖  vmm.c（建页表）、heap.c（取大块后备）、graphics 的 blob 解压、
  *         几乎所有驱动在做 DMA 缓冲时。
+ *
+ * 索引头文件
+ *   宏    PMM_LOW_LIMIT   4 GiB——boot.asm 恒等映射上界，也是高位内存起点
+ *   类型  （无导出结构体：物理页的身份就是它的物理地址，全部用 uint64_t 传）
+ *   函数  pmm_init                从 Multiboot2 memory map 建位图
+ *         pmm_alloc_page          取 1 页，返回物理地址，0 = OOM
+ *         pmm_free_page           归还 1 页
+ *         pmm_alloc_blocks        取连续 count 页，返回首地址，0 = OOM
+ *         pmm_free_blocks         归还连续区块
+ *         pmm_retain_page         加引用计数，计数归零才真正归还位图
+ *         pmm_page_refcount       查引用计数
+ *         pmm_query_max_phys      探测最高可用物理地址
+ *         pmm_enable_high_memory  放开 limit 以上的页给通用分配
+ *         pmm_get_total_mem       总内存字节数
+ *         pmm_get_free_mem        空闲字节数（诊断/统计用）
+ *         pmm_reserve_region      标记 bootloader/硬件占用的区间
  */
 #ifndef HBOS_PMM_H
 #define HBOS_PMM_H

@@ -882,6 +882,14 @@ de-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/test_desktop_entry
 	$(BUILD_DIR)/test_desktop_entry
 
+# 头文件注释模板与索引的静态检查（docs/wiki/CODE_STYLE.md §3.1）。
+# 纯文本扫描，不需要编译，秒级返回；放在 ui-test 之前跑，改头文件时先挡住
+# "索引和正文不一致"这种文档撒谎。故意不塞进 `make all`：它当前对存量头文件
+# 全量报错，等逐目录补齐后再接进默认构建。
+.PHONY: check-headers
+check-headers:
+	@bash scripts/check_headers.sh
+
 ui-test: | $(BUILD_DIR)
 	@bash scripts/check_no_hardcoded_colors.sh
 	$(CC) -O2 -Wall -Wextra -Isrc -include tests/host/hbos_shim.h \

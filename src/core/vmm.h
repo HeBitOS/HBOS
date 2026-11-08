@@ -13,6 +13,33 @@
  * 启动期约束：进来之前 boot.asm 已经建好 0-4 GiB 的 2 MiB 大页恒等映射，
  * vmm_init() 的职责是"接管"这套页表而不是重建，否则 kernel.c 里正在跑的
  * 代码会被自己换掉。
+ *
+ * 索引头文件
+ *   宏    VMM_P/W/U/WT/CD/A/D/PS/G    x86_64 页表硬件位
+ *         VMM_OWNED / VMM_COW / VMM_COW_W   HBOS 软件位（占用硬件忽略位）
+ *         VMM_NX / VMM_WC           不可执行位 / 4 KiB 上的写合并提示
+ *         VMM_PML4/PDPT/PD/PT       页表层级（vmm_protect_page 的 level 用）
+ *         PAGE_SIZE / KERNEL_HEAP_START / KERNEL_HEAP_SIZE
+ *   类型  （无导出结构体：页表是硬件格式，用裸 uint64_t 物理地址传）
+ *   函数  vmm_init                  接管 boot.asm 建好的页表
+ *         vmm_map_page            映射 1 页，0 成功 / -1 失败
+ *         vmm_unmap_page          只拆映射，不还物理页
+ *         vmm_release_page        拆映射并在 OWNED 时归还物理页
+ *         vmm_get_phys            查映射，未映射返回 0
+ *         vmm_virt_to_phys        同上的别名语义（驱动侧称"取物理地址"）
+ *         vmm_get_page_flags      查叶项原始标志，页不存在返回 0
+ *         vmm_protect_page        改 W/U/NX，不搬页
+ *         vmm_handle_cow_fault    处理写时复制缺页，1 = 已处理
+ *         vmm_make_page_private   内核改用户页前先私有化
+ *         vmm_set_nx_enabled      记录 EFER.NXE 是否生效
+ *         vmm_identity_map_2m     用 2 MiB 大页做恒等映射（>4 GiB 内存靠它）
+ *         vmm_set_range_wc        把 MMIO/帧缓冲区间改写成写合并
+ *         vmm_alloc_page_at       取页并就地映射，OOM 返回 0
+ *         vmm_map_mmio            映射设备 MMIO 区，失败返回 NULL
+ *         vmm_get_pml4 / vmm_set_pml4     取/切换当前地址空间
+ *         vmm_create_address_space        建子地址空间（复制内核映射）
+ *         vmm_clone_address_space         fork 用，逐页 COW 复制
+ *         vmm_destroy_address_space       销毁地址空间并释放页
  */
 #ifndef HBOS_VMM_H
 #define HBOS_VMM_H

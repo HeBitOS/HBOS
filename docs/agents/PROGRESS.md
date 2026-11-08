@@ -77,8 +77,28 @@ src/
    （`wl_server_start`、`gui_pointer_*`）→ 函数、extern 声明、命令表项
    一起放进 `#if HBOS_ENABLE_GUI`
 
+### 6. 索引头文件（§3.1.1）
+
+模板里原来只有"数据模型 / 常量 / 接口"三个分区，缺了图 2 要求的**索引**：
+打开文件先看到"它导出什么"，而不是滚到底部才知道。
+
+- `docs/wiki/CODE_STYLE.md` 新增 §3.1.1（索引写法与六条规则）与 §3.1.2
+  （自动检查说明）。族函数（`canvas_*` 7 个）允许按族合并成一行。
+- 已在 `src/app/api/gui_service.h`、`src/core/pmm.h`、`src/core/vmm.h` 落地。
+  `src/user/libc/dlfcn.h` 作为"兼容头也需要索引"的示例。
+- 新增 `scripts/check_headers.sh` + `make check-headers`：查①缺模板头
+  ②缺索引 ③索引点名的标识符在文件里不存在。**不**查"是否列全"（需 C
+  语法分析，且短头文件允许并入 `@brief`，硬比对必误报）。
+- 两级豁免：`third_party/` 完全不查；`src/user/libc/` 下的 Linux ABI
+  兼容头（`ln.h` `wd.h` `init.h` `dlfcn.h` `link.h`）只查索引不查模板头。
+
 ## 未完成 / 已知坑
 
+- [ ] **169 个头文件尚未套模板**（`make check-headers` 当前全量报错）。
+      建议按依赖顺序推进：`src/core/`（8）→ `src/types/`（2）→
+      `src/lib/` + `src/libc/` → `src/sys/`（6）→ 驱动（`src/` 根 54）→
+      `src/gui/`（20）→ `src/net/`（6）→ `src/user/libc/`（24）。
+      全部补齐后再把 `check-headers` 接进 `make test`。
 - [ ] `browser/chromium/` 仍是 `src/` 的兄弟目录，未并入新树。理由：
       它是移植工作区不是内核源码，物理合并会污染 GN 构建。等移植稳定后
       单独决定（见 `docs/wiki/REPOSITORY_SPLIT_BOUNDARIES.md`）。
@@ -96,6 +116,7 @@ src/
 | 日期 | 改动 | 验证 |
 |---|---|---|
 | 2026-11-08 | 源码树分层 + 文档收敛 + 头文件注释模板 + files/ + 修 no-GUI 断链 | `make`（BIOS+UEFI ISO）、`make test`、`make nogui` 全通过 |
+| 2026-11-08 | 补"索引头文件"§3.1.1 + `make check-headers` + 4 个示范围落地 | `make check-headers` 索引 0 错；`make` 构建通过 |
 
 ## 本机构建注意
 
