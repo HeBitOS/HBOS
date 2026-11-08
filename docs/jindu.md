@@ -1220,3 +1220,47 @@ XDG_DATA_HOME=/tmp/.local/share
 等于开关失效。现在 `setenv tracepid all` 会匹配所有任务（`hbos_trace_pid` 置
 `0xFFFFFFFF`），`[T]`（全量）和 `[E]`（只报失败）两个通道都认这个值。
 这条修完，之前 R46/R49 那些"没有其它失败 syscall"的空结论才能重新取证。
+
+#### R53：1001 = `chrome::DIR_USER_DATA`（已证实），下一个真阻塞是 `/dev/shm` 不可写
+
+**① 1001 定死了。** 直接拉 Chromium 的 `chrome/common/chrome_paths.h`，
+枚举从 `PATH_START = 1000` 起：
+
+```
+1000 DIR_LOGS
+1001 DIR_USER_DATA      ← 就是它
+1002 DIR_CRASH_METRICS
+```
+
+所以 R49 那条 `path_service.cc:264] Failed to get the path for 1001`
+= **拿不到用户数据目录**。`DIR_USER_DATA` 的 provider 要 `--user-data-dir`
+或 `base::DIR_APP_DATA`（`$XDG_CONFIG_HOME` / `$HOME/.config`）。
+补 XDG 变量没解决（实测仍报），但显式传 `--user-data-dir=/tmp/udd` 之后
+**该 FATAL 消失** —— 归因确认，同时得到一条可用的绕过参数。
+
+**② 下一个阻塞已经抓到原文：**
+
+```
+ERROR:base/memory/platform_shared_memory_region_posix.cc:335]
+  Creating shared memory in /dev/shm/.org.chromium.Chromium.B3ccYR failed:
+  No space left on device (28)
+```
+
+这就是"渲染端不交帧"的直接原因：Chromium 建不出共享内存，
+就没有 SoftwareOutputDevice 的位图，也就不会有 `wl_shm` buffer、
+不会有 `attach`、不会有带 buffer 的 `commit`。
+
+**③ 排除了 memfd 这条路**：给 `linux_compat_memfd_create` 加了失败诊断
+（预算 8 条），跑一遍日志里**一条 `[MEMFD]` 都没有** —— 说明 Chromium 156
+根本不调 `memfd_create`，直接走 `/dev/shm` 文件。所以"用好 memfd"救不了它。
+
+**④ `/dev/shm` 在本镜像里是 ext2 上的普通目录**（inode 4186），而 ext2 是
+只读挂载，创建文件失败后把 ENOSPC 报给 Chromium。要修必须给 `/dev/shm`
+一条真·内存后备的写路径。
+
+**验证过的与没验证的**：
+- 已验证：1001 归因、`--user-data-dir` 消除该 FATAL、`/dev/shm` ENOSPC、
+  memfd 未被调用
+- 未验证（本轮改了但没跑）：`task_kill` 对默认动作为"终止"的信号
+  （SIGABRT/SIGSEGV/SIGILL/SIGBUS/SIGFPE/SIGTRAP/SIGSYS…）在 SIG_DFL 下
+  当场终止 —— 这是 Linux 语义修正，但不解决本条

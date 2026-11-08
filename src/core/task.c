@@ -1401,11 +1401,22 @@ int task_kill(uint32_t id, int sig) {
     }
     if (!target || target->state == TASK_TERMINATED) return -1;
 
-    if (sig == SIGKILL ||
-        (sig == SIGTERM &&
-         (target->sig_handler[sig] == SIG_DFL ||
-          target->sig_handler[sig] == NULL))) {
-        target->sig_exit_code = (sig == SIGKILL) ? 9 : 15;
+    /* 默认动作是"终止进程"的那些信号，在 SIG_DFL/NULL 下必须**当场杀掉**，
+     * 不能只挂成 pending。原来只有 SIGTERM 走这里，SIGABRT/SIGSEGV 之类
+     * 全部落到下面"挂 pending"的通用分支 —— 结果是 glibc 的 abort() 变成
+     * 空操作：__stack_chk_fail → __libc_message → abort → raise(SIGABRT)
+     * 什么都没发生，函数照常"返回"，于是执行流落进编译器排在 noreturn
+     * 调用后面的 `int3; ud2`，对外表现就是莫名其妙的 SIGILL。
+     * Chromium 上已经撞到三次（0xa90c46a / 0x9cfa0dd / 0x9bf1914），
+     * 全是 `call __stack_chk_fail@plt` 后面那条 int3。 */
+    int fatal_default = (target->sig_handler[sig] == SIG_DFL ||
+                         target->sig_handler[sig] == NULL) &&
+                        (sig == SIGTERM || sig == SIGABRT || sig == SIGSEGV ||
+                         sig == SIGILL || sig == SIGFPE || sig == SIGBUS ||
+                         sig == SIGTRAP || sig == SIGSYS || sig == SIGXCPU ||
+                         sig == SIGXFSZ);
+    if (sig == SIGKILL || fatal_default) {
+        target->sig_exit_code = sig;
         if (target == current_task) {
             task_exit();
             return 0;

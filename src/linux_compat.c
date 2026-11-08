@@ -106,7 +106,7 @@
  * 上限 4 容易在传 fd 数组时被截断，放宽到 16。 */
 #define UNIX_RIGHTS_MAX_FDS 16
 
-#define LINUX_MEMFD_SLOTS 64
+#define LINUX_MEMFD_SLOTS 256
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
 #define LINUX_MFD_CLOEXEC 0x0001
 #define LINUX_MFD_ALLOW_SEALING 0x0002
@@ -246,6 +246,16 @@ static epoll_slot_t epoll_slots[LINUX_EPOLL_SLOTS];
 static futex_slot_t futex_slots[LINUX_FUTEX_SLOTS];
 static unix_socket_slot_t unix_socket_slots[UNIX_SOCKET_SLOTS];
 static memfd_slot_t memfd_slots[LINUX_MEMFD_SLOTS];
+/* memfd_create 失败诊断预算（默认开 8 条：Chromium 建 shm 失败时会静默
+ * 退回 /dev/shm，而 /dev/shm 在本镜像里不可写，于是报 ENOSPC 掩盖真因）。 */
+static int g_memfd_dbg = 8;
+static void compat_put_dec(unsigned int value) {
+    char buf[12];
+    int n = 0;
+    if (!value) buf[n++] = '0';
+    while (value) { buf[n++] = (char)('0' + value % 10); value /= 10; }
+    while (n) console_putchar(buf[--n]);
+}
 static inotify_slot_t inotify_slots[LINUX_INOTIFY_SLOTS];
 static volatile uint32_t inotify_active_slots;
 static volatile uint32_t inotify_next_cookie;
@@ -2365,8 +2375,22 @@ int linux_compat_memfd_create(const char *name, unsigned int flags) {
         int fd = compat_fd_alloc(
             compat_task(), FD_MEMFD, i,
             O_RDWR | ((flags & LINUX_MFD_CLOEXEC) ? O_CLOEXEC : 0));
-        if (fd < 0) memset(&memfd_slots[i], 0, sizeof(memfd_slots[i]));
+        if (fd < 0) {
+            memset(&memfd_slots[i], 0, sizeof(memfd_slots[i]));
+            if (g_memfd_dbg > 0) {
+                g_memfd_dbg--;
+                console_puts("[MEMFD] fd_alloc failed slot=");
+                compat_put_dec(i);
+                console_puts("\n");
+            }
+        }
         return fd;
+    }
+    if (g_memfd_dbg > 0) {
+        g_memfd_dbg--;
+        console_puts("[MEMFD] out of slots (ENFILE), slots=");
+        compat_put_dec(LINUX_MEMFD_SLOTS);
+        console_puts("\n");
     }
     return compat_set_errno(ENFILE);
 }
