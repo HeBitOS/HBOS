@@ -71,6 +71,22 @@
  * 就返回 EOPNOTSUPP —— 表现是 zygote 启动消息根本发不出去，父进程随即
  * 报 "Cannot communicate with zygote"。 */
 #define LINUX_MSG_IGNORED (LINUX_MSG_NOSIGNAL)
+/* libwayland / Chromium 的 socket 收发还常用这些标志。它们对"字节流语义"
+ * 没有影响，但以前不在白名单里就直接 -EOPNOTSUPP(95)，表现是
+ * "Fatal Wayland communication error: Operation not supported"：
+ * 客户端 connect + sendmsg 都成功，第一条 recvmsg(MSG_CMSG_CLOEXEC)
+ * 就被判不支持，整个 wayland 初始化失败、浏览器直接退出。
+ *
+ * MSG_PEEK 有真实语义（不消费），单独实现。 */
+#define LINUX_MSG_CMSG_CLOEXEC 0x40000000
+#define LINUX_MSG_WAITALL      0x100
+#define LINUX_MSG_PEEK         0x02
+#define LINUX_MSG_TRUNC        0x20
+#define LINUX_MSG_MORE         0x8000
+#define LINUX_MSG_EOR          0x80
+#define LINUX_MSG_IGNORABLE_FLAGS \
+    (LINUX_MSG_DONTWAIT | LINUX_MSG_NOSIGNAL | LINUX_MSG_CMSG_CLOEXEC | \
+     LINUX_MSG_WAITALL | LINUX_MSG_TRUNC | LINUX_MSG_MORE | LINUX_MSG_EOR)
 /* 其它"语义上无副作用"的标志：DONTWAIT 必须识别（非阻塞），其余忽略。 */
 
 /* 每个 socketpair 占 2 个 slot。Chromium 的进程模型同时开着：
@@ -2110,7 +2126,7 @@ long linux_compat_unix_send(int fd, const void *buffer, size_t count,
     if (!slot) return -EBADF;
     if (slot->listening) return -ENOTCONN;
     if (slot->write_shutdown) return -EPIPE;
-    if (flags & ~(LINUX_MSG_DONTWAIT | LINUX_MSG_IGNORED))
+    if (flags & ~(LINUX_MSG_IGNORABLE_FLAGS | LINUX_MSG_IGNORED))
         return -EOPNOTSUPP;
     if (!count) return 0;
 
@@ -2146,7 +2162,7 @@ long linux_compat_unix_recv(int fd, void *buffer, size_t count, int flags) {
     if (!slot) return -EBADF;
     if (slot->listening) return -ENOTCONN;
     if (slot->read_shutdown) return 0;
-    if (flags & ~(LINUX_MSG_DONTWAIT | LINUX_MSG_IGNORED))
+    if (flags & ~(LINUX_MSG_IGNORABLE_FLAGS | LINUX_MSG_IGNORED))
         return -EOPNOTSUPP;
     if (!count) return 0;
 
@@ -2161,6 +2177,16 @@ long linux_compat_unix_recv(int fd, void *buffer, size_t count, int flags) {
             (flags & LINUX_MSG_DONTWAIT))
             return -EAGAIN;
         task_yield();
+    }
+
+    if (flags & LINUX_MSG_PEEK) {
+        size_t peeked = 0;
+        uint32_t position = slot->read_position;
+        while (peeked < count && peeked < slot->receive_count) {
+            ((uint8_t *)buffer)[peeked++] = slot->receive[position];
+            position = (position + 1) % UNIX_SOCKET_BUFFER;
+        }
+        return (long)peeked;
     }
 
     size_t received = 0;
