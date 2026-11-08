@@ -1196,3 +1196,27 @@ provider 注册处（`PathService::RegisterProvider` 的调用点），别再猜
 
 > 本轮没有跑 QEMU、没有改内核代码，只做静态定位，避免在余额见底时
 > 引入未验证的改动。
+
+#### R52：补 XDG 目录 + 修好 tracepid 的匹配（都是零 QEMU 的静态改动）
+
+两条改动都**未在 QEMU 里验证**（余额不允许再跑），但都是明确正确性修复：
+
+**① 子进程环境补上三个 XDG 目录。** 之前只给了 `HOME=/root`，而镜像里
+`/root` 未必存在、也不保证可写。Chromium / Electron 的 profile、缓存、配置全走
+XDG 目录，`PathService` 拿不到 `DIR_USER_CACHE` 这类 key 时直接
+`LOG(FATAL) "Failed to get the path for N"` —— 和 R49/R50 看到的
+`path_service.cc:264] Failed to get the path for 1001` 是同一个报法。
+统一指到 `/tmp` 下的可写位置：
+
+```
+XDG_CACHE_HOME=/tmp/.cache
+XDG_CONFIG_HOME=/tmp/.config
+XDG_DATA_HOME=/tmp/.local/share
+```
+`app_envp[]` 从 16 扩到 24。这条**可能就是 1001 的真因**，但没验证，不下结论。
+
+**② `setenv tracepid` 从"精确 pid"改成可选 `all`。** 实测
+`setenv tracepid 2` 之后 `[T]` 一条都没打出来 —— pid 每次启动都会变，精确匹配
+等于开关失效。现在 `setenv tracepid all` 会匹配所有任务（`hbos_trace_pid` 置
+`0xFFFFFFFF`），`[T]`（全量）和 `[E]`（只报失败）两个通道都认这个值。
+这条修完，之前 R46/R49 那些"没有其它失败 syscall"的空结论才能重新取证。

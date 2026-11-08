@@ -5578,7 +5578,8 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
     if ((int64_t)result < 0 && (int64_t)result != -2 && g_syserr_budget > 0 &&
         hbos_trace_pid &&
         task_current() &&
-        (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
+        (uint32_t)hbos_trace_pid == 0xFFFFFFFFu ||
+         (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
         g_syserr_budget--;
         console_puts("[E] nr=");
         trace_put_udec(number);
@@ -5593,7 +5594,8 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
         console_putchar('\n');
     }
     if (hbos_trace_pid && task_current() &&
-        (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
+        ((uint32_t)hbos_trace_pid == 0xFFFFFFFFu ||
+         (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid)) {
         console_puts("[T] nr=");
         trace_put_udec(number);
         console_puts(" a0=0x");

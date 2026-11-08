@@ -168,7 +168,7 @@ static void cmd_apps(int argc, char **argv) {
 #define APP_LIB_PATH_MAX 16384
 static char app_lib_path[APP_LIB_PATH_MAX];
 static char app_env_ld_path[APP_LIB_PATH_MAX + 32];
-static char *app_envp[16];
+static char *app_envp[24];
 /* 透传给 Linux 子进程的额外环境变量（"NAME=value" 字符串，指向静态区）。 */
 #define APP_ENV_EXTRA_MAX 8
 #define APP_ENV_EXTRA_LEN 192
@@ -266,6 +266,13 @@ static char **build_linux_env(void) {
      * 其实是环境变量缺了。 */
     static char env_xdg_runtime[] = "XDG_RUNTIME_DIR=/tmp";
     static char env_wayland_display[] = "WAYLAND_DISPLAY=wayland-0";
+    /* Chromium/Electron 的 profile、缓存、配置都走 XDG 目录，而且**必须可写**。
+     * 只给 HOME=/root 时它们会往 /root 下写，而镜像里 /root 未必存在、
+     * 也不保证可写；PathService 拿不到 DIR_USER_CACHE 这类 key 时直接
+     * LOG(FATAL) "Failed to get the path for N"。统一指到 /tmp 下的可写目录。 */
+    static char env_xdg_cache[] = "XDG_CACHE_HOME=/tmp/.cache";
+    static char env_xdg_config[] = "XDG_CONFIG_HOME=/tmp/.config";
+    static char env_xdg_data[] = "XDG_DATA_HOME=/tmp/.local/share";
     app_envp[0] = app_env_ld_path;
     app_envp[1] = env_path;
     app_envp[2] = env_home;
@@ -273,7 +280,10 @@ static char **build_linux_env(void) {
     app_envp[4] = env_lang;
     app_envp[5] = env_xdg_runtime;
     app_envp[6] = env_wayland_display;
-    int slot = 7;
+    app_envp[7] = env_xdg_cache;
+    app_envp[8] = env_xdg_config;
+    app_envp[9] = env_xdg_data;
+    int slot = 10;
     /* 追加透传变量。此前这里是写死的 7 项 + NULL，用户 `export`/命令行前缀
      * 设的变量根本进不了子进程 —— 表现是 `WAYLAND_DEBUG=1 chromium` 无效，
      * 容易误判成"Chromium 把环境清掉了"。要调试 libwayland 必须能透传。 */
@@ -677,8 +687,14 @@ static void cmd_setenv(int argc, char **argv) {
     if (strcmp(argv[1], "tracepid") == 0) {
         int pid = 0;
         if (argc >= 3) {
-            for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++)
-                pid = pid * 10 + (*p - '0');
+            /* `setenv tracepid all` = 盯所有任务。pid 每次启动都会变，
+             * 之前的精确匹配实测一条都没打出来过 —— 诊断开关形同虚设。 */
+            if (argv[2][0] == 'a' || argv[2][0] == 'A') {
+                pid = -1;
+            } else {
+                for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++)
+                    pid = pid * 10 + (*p - '0');
+            }
         }
         linux_debug_set_trace_pid(pid);
         console_puts("tracepid = ");
