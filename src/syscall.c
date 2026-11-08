@@ -587,15 +587,13 @@ static uint64_t linux_madvise(uint64_t address, uint64_t length, int advice) {
         return (uint64_t)(-EINVAL);
     uint64_t rounded = (length + PAGE_SIZE - 1) &
                        ~(uint64_t)(PAGE_SIZE - 1);
-    switch (advice) {
-        case 0: case 1: case 2: case 3: case 14: case 15:
-        case 16: case 17: case 20: case 21: case 22: case 23:
-            break;
-        case 4:  /* MADV_DONTNEED */
-        case 8:  /* MADV_FREE */
-            break;
-        default:
-            return (uint64_t)(-EINVAL);
+    /* madvise 是**建议性**调用：不能因为 advice 不认识就返回 EINVAL。
+     * 实测 Chromium 156 会带 0x66/0xffffffff 这种非标准值过来，还会用
+     * MADV_WIPEONFORK(18)（PartitionAlloc 给元数据区用），原来一律 EINVAL，
+     * 拿到非 0 返回的调用方直接走 CHECK。认识的那几个照旧处理，其余当
+     * no-op 返回成功。 */
+    if (advice != 4 /* MADV_DONTNEED */ && advice != 8 /* MADV_FREE */) {
+        return 0;
     }
     /* 不能因为区间里有"没提交的页"就返回 ENOMEM：Linux 的 madvise 允许
      * 区间里有洞(未映射页)，只是忽略它们。PartitionAlloc 的
@@ -975,6 +973,8 @@ static int hbos_debug_trace_resume;
 static int linux_debug_stderr_echo;
 /* 用户态 TRAP 时是否 dump 最近 syscall 环形缓冲（`setenv syscdump 1`）。 */
 int linux_debug_syscall_dump;
+/* tracepid 模式下"只报失败 syscall"的预算，见 linux_syscall_dispatch_frame。 */
+static int g_syserr_budget = 200;
 /* 按 pid 实时追踪 syscall（`setenv tracepid <pid>`），0 = 关闭。 */
 static int hbos_trace_pid;
 
@@ -5557,6 +5557,25 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
      * "跑了几步就停住"的时候，环形缓冲要被 dump 才能看，而它停住时
      * 往往没有异常可 dump。这里直接把它每一条调用打到串口上，代价大，
      * 所以默认关闭、且只对指定 pid 生效。 */
+    /* tracepid 的"只报错误"模式：全量打每条 syscall 在串口上跑不动
+     * （客户端一秒钟几万条），但"哪条返回了负值"才是查"某个功能没生效"
+     * 时真正要的信息。预算有限，够看清一次失败序列即可。 */
+    if ((int64_t)result < 0 && g_syserr_budget > 0 && hbos_trace_pid &&
+        task_current() &&
+        (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
+        g_syserr_budget--;
+        console_puts("[E] nr=");
+        trace_put_udec(number);
+        console_puts(" a0=0x");
+        trace_put_hex(linux_frame->a0);
+        console_puts(" a1=0x");
+        trace_put_hex(linux_frame->a1);
+        console_puts(" a2=0x");
+        trace_put_hex(linux_frame->a2);
+        console_puts(" ret=0x");
+        trace_put_hex(result);
+        console_putchar('\n');
+    }
     if (hbos_trace_pid && task_current() &&
         (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
         console_puts("[T] nr=");

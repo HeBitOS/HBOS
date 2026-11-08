@@ -1024,3 +1024,26 @@ xdg 握手全通，**只差 attach + 带 buffer 的 commit**。
 下一步是**明确二选一**：要么把 SwiftShader（`libvk_swiftshader.so` +
 `libvulkan.so.1` + `vk_swiftshader_icd.json`，这三样 app-tree 里都有）跑起来，
 要么把 shm 软件合成的 `create_buffer` 路径接上。两条都不需要再猜协议。
+
+#### R46：`madvise` 不该因为 advice 不认识就 EINVAL
+
+给 `setenv tracepid <pid>` 加了一个"只报失败 syscall"的模式（全量每条都打，串口根本跑不动），
+把浏览器进程的负返回抓出来看。绝大多数是正常的 ENOENT 探测
+（`openat`/`newfstatat`/`access`/`readlink` 在找不存在的文件），但有一条一直在报：
+
+```
+[E] nr=28 (madvise) a2=0x66 / 0xffffffff / 0x12  ret=-22 (EINVAL)
+```
+
+`madvise` 是**建议性**调用，advice 不认识应当当 no-op 成功返回。原来的白名单只放到
+0..3/14..17/20..23，于是 `MADV_WIPEONFORK(18)`（PartitionAlloc 给元数据区用的）、
+以及 Chromium 实际会带的非标准值全被 EINVAL 掉 —— 拿到非 0 返回的调用方直接走 CHECK。
+改成：只特殊处理 `MADV_DONTNEED(4)` / `MADV_FREE(8)`，其余一律成功返回。
+
+修完之后同样参数跑一遍：**没有 PANIC、没有新的致命 trap**，客户端稳定停在
+"xdg 握手完成但渲染端不交帧"这个状态（上一轮 R45 描述的同一个卡点），
+中间只有早已存在的 pid=4 辅助进程 SIGSEGV 和几次干净 exit。
+
+顺带把上一轮那个 `int3; ud2`（`exit 132`）重新定位了一次：冷块前面的
+`call 0x2d94c50` 返回了，而调用方是按"不返回"编排的 —— 和 R42 的
+`__stack_chk_fail` 同一个形状。这条线索还没走完。
