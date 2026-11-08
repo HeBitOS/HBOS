@@ -2506,6 +2506,37 @@ int linux_compat_overlay_is_path(const char *path) {
     return memfile_prefix(path, NULL) || tmp_memfile_prefix(path, NULL);
 }
 
+/* 从 open flags 里取真正的访问模式（O_RDONLY / O_WRONLY / O_RDWR）。
+ *
+ * 覆盖层的 fd 必须按**调用方请求的模式**记账，不能一律 O_RDWR。
+ *
+ * 为什么：Chromium 的 base::File::Open 在打开成功之后还会
+ * fcntl(fd, F_GETFL) 把返回值的低 2 位（O_ACCMODE）跟它请求的模式
+ * 比对，不一致就判定"打开失败"并 CHECK 崩溃。反汇编确认这条路径：
+ *   0x1109cd4cd0: mov $0x3,%esi        ; F_GETFL
+ *                  and $0x3,%eax        ; O_ACCMODE
+ *                  cmp  %r15d,%eax      ; 与期望模式比
+ *                  cmovne ...           ; 不等 → 返回值高 32 位 = 1
+ *
+ * 覆盖层原来一律记 O_RDWR，于是 Chromium 以 O_RDONLY(0) 重开
+ * /dev/shm/.org.chromium.Chromium.* 时，拿到的是 O_RDWR(2)，
+ * 比对失败 → "打开失败" → CHECK 崩溃（int3）。
+ *
+ * O_ACCMODE 只有 3 个合法值，3 本身是非法的，兜底当 O_RDWR。 */
+static int overlay_access_mode(int flags) {
+    switch (flags & O_ACCMODE) {
+    case O_RDONLY: return O_RDONLY;
+    case O_WRONLY: return O_WRONLY;
+    case O_RDWR:   return O_RDWR;
+    default:       return O_RDWR;
+    }
+}
+
+/* 覆盖层 fd 的完整 flags：访问模式 + 请求了 O_CLOEXEC 才带上它。 */
+static int overlay_fd_flags(int flags) {
+    return overlay_access_mode(flags) | ((flags & 0x80000) ? O_CLOEXEC : 0);
+}
+
 static int overlay_prefix(const char *path, const char **suffix) {
     if (memfile_prefix(path, suffix)) return 1;
     return tmp_memfile_prefix(path, suffix);
@@ -2569,7 +2600,7 @@ int linux_compat_shm_open(const char *path, int flags) {
             slot_ptr->size = 0;
         }
         int fd = compat_fd_alloc(compat_task(), FD_MEMFD, slot,
-                                 O_RDWR | ((flags & 0x80000) ? O_CLOEXEC : 0));
+                                 overlay_fd_flags(flags));
         if (fd < 0) memfd_slots[slot].refs--;
         return fd;
     }
@@ -2615,6 +2646,12 @@ int linux_compat_shm_open(const char *path, int flags) {
     int fd = linux_compat_memfd_create(name,
              (flags & 0x80000) ? LINUX_MFD_CLOEXEC : 0);
     if (fd < 0) return fd;
+    /* memfd_create 本身在 Linux 上恒为 O_RDWR，但 shm_open 走的是
+     * open(2) 语义 —— 用 O_RDONLY|O_CREAT 新建的文件，读回来的 fd
+     * 就该是 O_RDONLY。这里按调用方的请求模式改写记账，
+     * 否则 Chromium 的 base::File::Open 校验 F_GETFL 时会判失败。 */
+    fd_entry_t *created = compat_fd(compat_task(), fd);
+    if (created) created->flags = overlay_fd_flags(flags);
     int slot = memfd_slot_index(memfd_for_fd(compat_task(), fd));
     if (slot >= 0) {
         shm_names[free_index].used = 1;

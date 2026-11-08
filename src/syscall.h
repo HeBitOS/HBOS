@@ -9,8 +9,32 @@
  * 参考 CoolPotOS 和 Linux x86_64 系统调用表，当前实现了 62 个系统调用，
  * 涵盖文件 I/O、进程控制、内存管理、信号处理、网络套接字、
  * 时间操作和系统信息查询。
+ *
+ * @layer   user
+ * @owner   src/
+ * @stable  internal
+ *
+ * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
+ * 被依赖  见 docs/agents/ 对应子系统地图
+ *
+ * 索引头文件
+ *   类型  hbos_web_fetch_request_t  结构体 / 类型别名
+ *         hbos_syscall_no_t         结构体 / 类型别名
+ *         hbos_syscall_frame_t      结构体 / 类型别名
+ *   宏    HBOS_SYSCALL_VECTOR     常量 / 特性宏
+ *         HBOS_WEB_FETCH_VERSION  HBOSWEBFETCH版本
+ *         HBOS_WEB_FETCH_HTTPS    常量 / 特性宏
+ *   函数  syscall_dispatch_frame        系统调用分发入口
+ *         linux_syscall_dispatch_frame  （待补）
+ *         linux_syscall_trace_dump      打印最近 128 条 Linux 系统调用…
+ *         linux_open_trace_dump         打印最近 16 次 open/openat 的…
+ *         linux_debug_set_flag          （待补）
+ *         linux_debug_set_trace_pid     只对指定 pid 实时打印每条 Linux…
+ *         linux_syscall_prof_set        按 nr 聚合的 syscall 计数 +…
+ *         linux_syscall_prof_enabled    （待补）
+ *         linux_syscall_prof_reset      （待补）
+ *         linux_syscall_prof_dump       打印累计耗时最高的 top 个 nr（含次…
  */
-
 #ifndef HBOS_SYSCALL_H
 #define HBOS_SYSCALL_H
 
@@ -264,6 +288,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *frame);
 /** 打印最近 128 条 Linux 系统调用（用户态异常时调用）。 */
 void linux_syscall_trace_dump(void);
+/** 打印最近 16 次 open/openat 的路径与结果（用户态异常时调用）。 */
+void linux_open_trace_dump(void);
 
 /** 排错开关（shell `setenv` 命令用），见 linux_debug_set_flag 定义处。 */
 enum {

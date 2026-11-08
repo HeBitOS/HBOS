@@ -692,6 +692,15 @@ typedef struct {
 #define LINUX_SEGV_MAPERR  1
 #define LINUX_SEGV_ACCERR  2
 
+/* F_GETFL 返回的状态位掩码：访问模式 + O_APPEND / O_NONBLOCK。
+ * O_CREAT / O_EXCL / O_TRUNC 属于"创建期"标志，Linux 不在 F_GETFL 里
+ * 返回它们。 */
+#define LINUX_F_GETFL_MASK (O_ACCMODE | O_APPEND | O_NONBLOCK)
+
+/* F_SETFL 允许修改的状态位：O_APPEND / O_NONBLOCK。
+ * 访问模式与 O_CREAT/O_EXCL 等创建期标志都不在内。 */
+#define LINUX_F_SETFL_MASK (O_APPEND | O_NONBLOCK)
+
 /* mcontext.gregs[] indices, matching glibc's REG_* enum. */
 #define LINUX_REG_R8       0
 #define LINUX_REG_R9       1
@@ -1131,6 +1140,71 @@ static uint64_t linux_clone3(linux_x86_syscall_return_frame_t *frame,
                             args.flags | (args.exit_signal & 0xffULL),
                             stack_top, args.parent_tid, args.child_tid,
                             args.tls);
+}
+
+/* rt_sigtimedwait(set, info, timeout, sigsetsize)。
+ *
+ * Chromium 的 base::Watchdog / MessagePump 用它等 SIGCHLD（单进程模式下
+ * 还要等内部线程死亡）。HBOS 的信号模型是 task_t.sig_pending 的位图，
+ * 没有 sigqueue 排队，所以这里就是"扫一遍位图，命中就摘掉并返回"。
+ * timeout 为 NULL 时阻塞等待（用 task_yield 让出 CPU）；有 timeout 时
+ * 轮询到截止时刻返回 -EAGAIN —— 协作式调度下轮询是唯一不引入新宿主的
+ * 办法，而调用方本来就准备好了超时分支。 */
+static uint64_t linux_sigset_has(const void *set, int sig) {
+    if (!set) return 0;
+    const uint64_t *bits = (const uint64_t *)set;
+    unsigned int index = (unsigned int)(sig - 1);
+    return (bits[index / 64] >> (index % 64)) & 1ULL;
+}
+
+static uint64_t linux_rt_sigtimedwait(const void *set, void *info,
+                                      const linux_x86_timespec_t *timeout) {
+    if (!set) return (uint64_t)(-EFAULT);
+    task_t *current = task_current();
+    if (!current) return (uint64_t)(-EINVAL);
+
+    uint64_t deadline_ms = 0;
+    int has_deadline = 0;
+    if (timeout) {
+        linux_x86_timespec_t now;
+        if (linux_clock_now(0, &now) == 0) {
+            int64_t ms = (int64_t)timeout->seconds * 1000 +
+                         (int64_t)timeout->nanoseconds / 1000000;
+            if (ms < 0) ms = 0;
+            deadline_ms = (uint64_t)((int64_t)(now.seconds * 1000 +
+                                               now.nanoseconds / 1000000) + ms);
+            has_deadline = 1;
+        }
+    }
+
+    for (;;) {
+        for (int sig = 1; sig < _NSIG; sig++) {
+            if (!linux_sigset_has(set, sig)) continue;
+            unsigned int index = (unsigned int)(sig - 1);
+            if (!(current->sig_pending.sig[index / 64] &
+                  (1ULL << (index % 64))))
+                continue;
+            current->sig_pending.sig[index / 64] &= ~(1ULL << (index % 64));
+            if (info) {
+                /* Linux 的 siginfo_t 前三个 4 字节是 si_signo/si_errno/si_code。 */
+                uint32_t *raw = (uint32_t *)info;
+                memset(info, 0, 128);
+                raw[0] = (uint32_t)sig;
+                raw[1] = 0;
+                raw[2] = 0;                       /* SI_USER */
+            }
+            return (uint64_t)sig;
+        }
+        if (has_deadline) {
+            linux_x86_timespec_t now;
+            if (linux_clock_now(0, &now) == 0) {
+                uint64_t now_ms = (uint64_t)(now.seconds * 1000 +
+                                             now.nanoseconds / 1000000);
+                if (now_ms >= deadline_ms) return (uint64_t)(-EAGAIN);
+            }
+        }
+        task_yield();
+    }
 }
 
 static uint64_t linux_rt_sigaction(int signal_number,
@@ -1760,6 +1834,89 @@ static int64_t linux_native_call(uint64_t number, uint64_t a0, uint64_t a1,
     return (int64_t)syscall_dispatch_frame(&native);
 }
 
+/* 最近若干次 open/openat 的环形缓冲（成功与失败都记）。
+ *
+ * 为什么需要：Chromium 里 base::File::Open 失败会走 CHECK() 直接 int3，
+ * 串口上只看到断点地址。而 Chromium 启动时 dlopen 会**成百上千次**探测
+ * 不存在的库路径（全是 ENOENT，正常现象），把真正失败的那次淹没在
+ * 噪音里。所以这里保留最近 N 条 open 记录，崩溃时一次性倒出来 ——
+ * 最后一条就是肇事的那个。
+ *
+ * 存的是"路径 + 结果"，不存别的：路径要能看出是 /tmp、/dev/shm 还是
+ * /proc/self/fd 这类特殊位置。 */
+#define LINUX_OPEN_TRACE_SLOTS 16
+
+typedef struct {
+    int used;
+    int ok;
+    int error;
+    uint32_t flags;
+    char path[192];
+} linux_open_trace_t;
+
+static linux_open_trace_t linux_open_trace[LINUX_OPEN_TRACE_SLOTS];
+static uint32_t linux_open_trace_next;
+
+static void linux_open_trace_record(const char *path, int flags, int ok,
+                                    int error) {
+    linux_open_trace_t *slot =
+        &linux_open_trace[linux_open_trace_next % LINUX_OPEN_TRACE_SLOTS];
+    linux_open_trace_next++;
+    slot->used = 1;
+    slot->ok = ok;
+    slot->error = error;
+    slot->flags = (uint32_t)flags;
+    slot->path[0] = '\0';
+    if (path) {
+        size_t i = 0;
+        while (path[i] && i < sizeof(slot->path) - 1) {
+            slot->path[i] = path[i];
+            i++;
+        }
+        slot->path[i] = '\0';
+    }
+}
+
+/** 打印最近的 open 记录（按时间顺序，从旧到新）。 */
+void linux_open_trace_dump(void) {
+    console_puts("[OPEN-TRACE] last opens:\n");
+    uint32_t total = linux_open_trace_next;
+    uint32_t count = total < LINUX_OPEN_TRACE_SLOTS ? total
+                                                     : LINUX_OPEN_TRACE_SLOTS;
+    uint32_t start = total - count;
+    for (uint32_t i = 0; i < count; i++) {
+        const linux_open_trace_t *slot =
+            &linux_open_trace[(start + i) % LINUX_OPEN_TRACE_SLOTS];
+        console_puts("[OPEN-TRACE] ");
+        console_puts(slot->ok ? "ok   " : "FAIL ");
+        console_puts(slot->path);
+        console_puts(" flags=0x");
+        trace_put_hex(slot->flags);
+        if (!slot->ok) {
+            console_puts(" errno=");
+            trace_put_udec((uint64_t)slot->error);
+        }
+        console_putchar('\n');
+    }
+}
+
+/* 记录 open/openat 的失败（路径 + flags + errno）。
+ *
+ * Chromium 里 base::File::Open 失败会走 CHECK() 直接 int3 崩掉，串口上
+ * 只看得到一个断点地址，看不出是哪个路径没打开。把这行打进日志才能把
+ * "崩溃点" 翻译成 "哪个文件没找到"。
+ *
+ * 只记失败，不记成功 —— 成功路径太吵，会把关键行冲掉。 */
+static void linux_open_fail_log(const char *path, int flags, int error) {
+    console_puts("[OPEN-FAIL] path=");
+    console_puts(path ? path : "(null)");
+    console_puts(" flags=0x");
+    trace_put_hex((uint64_t)flags);
+    console_puts(" errno=");
+    trace_put_udec((uint64_t)error);
+    console_putchar('\n');
+}
+
 /* Resolve a Linux *at pathname without adding a second VFS path model.
  * Absolute paths intentionally ignore dirfd, matching Linux.  Relative
  * paths reuse the canonical path already retained by HBOS directory fds. */
@@ -2332,10 +2489,19 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
         case 2:                                       /* F_SETFD */
             return 0;                                 /* 未跟踪 FD_CLOEXEC */
         case 3:                                       /* F_GETFL */
-            return (uint64_t)(unsigned)entry->flags;
+            /* Linux 的 F_GETFL 只返回**状态位**：访问模式 + O_APPEND /
+             * O_NONBLOCK 之类；O_CREAT / O_EXCL / O_TRUNC 这些"创建期"
+             * 标志不返回。我们内部 entry->flags 记的是 open 时的原始
+             * flags，直接透出去会让调用方看到 Linux 上看不到的位。
+             *
+             * Chromium 的 base::File::Open 打开后会
+             * fcntl(fd, F_GETFL) 并把低 2 位（O_ACCMODE）跟它请求的
+             * 访问模式比对，不一致就判定打开失败并 CHECK 崩溃。 */
+            return (uint64_t)(unsigned)(entry->flags & LINUX_F_GETFL_MASK);
         case 4:                                       /* F_SETFL */
-            entry->flags = (entry->flags & ~O_NONBLOCK) |
-                           ((int)argument & O_NONBLOCK);
+            /* 只改可改的状态位，访问模式保持不变。 */
+            entry->flags = (entry->flags & ~LINUX_F_SETFL_MASK) |
+                           ((int)argument & LINUX_F_SETFL_MASK);
             return 0;
         /* 记录锁：sqlite（Chromium 的 History/UKM/Cookies 全是 sqlite）在
          * xLock 里必须拿到 F_SETLK 的成功返回，否则 unixError 把 EINVAL
@@ -2474,12 +2640,26 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             if (resolved < 0) return (uint64_t)(int64_t)resolved;
             if (linux_compat_overlay_is_path(path)) {
                 int fd = linux_compat_shm_open(path, (int)linux_frame->a1);
-                return fd < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO))
-                              : (uint64_t)fd;
+                if (fd < 0) {
+                    linux_open_trace_record(path, (int)linux_frame->a1, 0,
+                                            errno);
+                    linux_open_fail_log(path, (int)linux_frame->a1, errno);
+                    return (uint64_t)(-(errno > 0 ? errno : EIO));
+                }
+                linux_open_trace_record(path, (int)linux_frame->a1, 1, 0);
+                return (uint64_t)fd;
             }
-            return (uint64_t)linux_native_call(
+            int64_t open_rc = linux_native_call(
                 HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a1,
                 linux_frame->a2, 0, 0, 0);
+            if (open_rc < 0) {
+                int err = errno > 0 ? errno : (int)-open_rc;
+                linux_open_trace_record(path, (int)linux_frame->a1, 0, err);
+                linux_open_fail_log(path, (int)linux_frame->a1, err);
+            } else {
+                linux_open_trace_record(path, (int)linux_frame->a1, 1, 0);
+            }
+            return (uint64_t)open_rc;
         }
         case 3:   native.nr = HBOS_SYS_CLOSE; break;
         case 4:
@@ -2517,6 +2697,16 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         case 10:  native.nr = HBOS_SYS_MPROTECT; break;
         case 11:  native.nr = HBOS_SYS_MUNMAP; break;
         case 12:  native.nr = HBOS_SYS_BRK; break;
+        case 128: {                                   /* rt_sigtimedwait */
+            if (linux_frame->a3 != sizeof(uint64_t))
+                return (uint64_t)(-EINVAL);
+            return linux_rt_sigtimedwait(
+                (const void *)(uintptr_t)linux_frame->a0,
+                (void *)(uintptr_t)linux_frame->a1,
+                (const linux_x86_timespec_t *)(uintptr_t)linux_frame->a2);
+        }
+        case 130:                                     /* rt_sigsuspend */
+            return (uint64_t)(-EINTR);
         case 13:
             return linux_rt_sigaction(
                 (int)linux_frame->a0,
@@ -2745,12 +2935,26 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             /* /dev/shm 下的文件走内存后备（memfd slot）。 */
             if (linux_compat_overlay_is_path(path)) {
                 int fd = linux_compat_shm_open(path, (int)linux_frame->a2);
-                return fd < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO))
-                              : (uint64_t)fd;
+                if (fd < 0) {
+                    linux_open_trace_record(path, (int)linux_frame->a2, 0,
+                                            errno);
+                    linux_open_fail_log(path, (int)linux_frame->a2, errno);
+                    return (uint64_t)(-(errno > 0 ? errno : EIO));
+                }
+                linux_open_trace_record(path, (int)linux_frame->a2, 1, 0);
+                return (uint64_t)fd;
             }
-            return (uint64_t)linux_native_call(
+            int64_t openat_rc = linux_native_call(
                 HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a2,
                 linux_frame->a3, 0, 0, 0);
+            if (openat_rc < 0) {
+                int err = errno > 0 ? errno : (int)-openat_rc;
+                linux_open_trace_record(path, (int)linux_frame->a2, 0, err);
+                linux_open_fail_log(path, (int)linux_frame->a2, err);
+            } else {
+                linux_open_trace_record(path, (int)linux_frame->a2, 1, 0);
+            }
+            return (uint64_t)openat_rc;
         }
         case 258: {                                   /* mkdirat */
             char path[VFS_MAX_NAME];
@@ -3857,8 +4061,18 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (!cur || !cur->fd_table->entries[fd].used)
                 return (uint64_t)(-EBADF);
             switch (cmd) {
-                case 0:   return cur->fd_table->entries[fd].flags;
-                case 1:   cur->fd_table->entries[fd].flags = (int)arg; return 0;
+                case 0:   /* F_GETFL：只返回状态位，语义与 linux_fcntl 一致 */
+                    return (uint64_t)(unsigned)(
+                        cur->fd_table->entries[fd].flags & LINUX_F_GETFL_MASK);
+                case 1:   /* F_SETFL：只改可改的状态位，**不能动访问模式**。
+                          * Linux 的 F_SETFL 不允许改 O_RDONLY/O_WRONLY/
+                          * O_RDWR；原来这里整个 flags 被替换，调用方
+                          * 传 O_NONBLOCK 就把访问模式抹成 0，
+                          * 后续 base::File 再校验 F_GETFL 就对不上了。 */
+                    cur->fd_table->entries[fd].flags =
+                        (cur->fd_table->entries[fd].flags & ~LINUX_F_SETFL_MASK) |
+                        ((int)arg & LINUX_F_SETFL_MASK);
+                    return 0;
                 case 2:   cur->fd_table->entries[fd].flags |= (int)arg; return 0;
                 case 3:   cur->fd_table->entries[fd].flags &= ~(int)arg; return 0;
                 default:  return (uint64_t)(-EINVAL);
@@ -5455,9 +5669,18 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         case HBOS_SYS_MEMFD_CREATE: {
             int fd = linux_compat_memfd_create(
                 (const char *)f->a0, (unsigned int)f->a1);
-            return fd < 0
-                ? (uint64_t)(-(errno > 0 ? errno : EINVAL))
-                : (uint64_t)fd;
+            if (fd < 0) {
+                console_puts("[MEMFD-FAIL] name=");
+                console_puts(f->a0 ? (const char *)(uintptr_t)f->a0
+                                   : "(null)");
+                console_puts(" flags=0x");
+                trace_put_hex(f->a1);
+                console_puts(" errno=");
+                trace_put_udec((uint64_t)(errno > 0 ? errno : EINVAL));
+                console_putchar('\n');
+                return (uint64_t)(-(errno > 0 ? errno : EINVAL));
+            }
+            return (uint64_t)fd;
         }
 
         case HBOS_SYS_SENDMSG:

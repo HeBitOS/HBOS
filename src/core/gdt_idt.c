@@ -1003,6 +1003,7 @@ void isr_handler(isr_regs_t *regs) {
         dump_user_trap_regs(regs);
         dump_user_vma_for(regs->rip);
         dump_user_canary(regs->rbp);
+        linux_open_trace_dump();
         dump_user_tail(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);
@@ -1042,6 +1043,10 @@ void isr_handler(isr_regs_t *regs) {
         }
         dump_user_trap_regs(regs);
         dump_user_canary(regs->rbp);
+        /* 最近 16 次 open/openat 的路径与结果。Chromium 的
+         * base::File::Open 失败会走 CHECK() 直接 int3，只看断点地址
+         * 不知道是哪个文件没打开；这一段能直接把崩溃翻译成路径。 */
+        linux_open_trace_dump();
         /* 打印 rip 处的指令字节：GP/UD 只看 rip 查不出原因 —— 得知道到底是
          * 哪条指令非法（rdmsr？特权指令？SIMD？还是取指越界）。Chromium
          * 每次 exec 子进程都在 ld.so 同一个地址上 GP Fault，没有这条只能猜。 */
