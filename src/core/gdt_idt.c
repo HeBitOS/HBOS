@@ -436,6 +436,77 @@ static int decode_user_insn(uint64_t va, user_insn_t *out) {
     return 4;
 }
 
+/** 读一段用户内存（诊断用）。
+ *
+ * 不变量：成功返回 1 并把 length 字节拷进 dst；任一页未映射则返回 0
+ * 且 dst 内容不可信。
+ * 前置条件：dst 可为 NULL 吗？不能 —— 调用方要读值。
+ * 说明：直接走 vmm_get_phys 逐页拷，不做权限检查：这是内核自己的诊断
+ * 路径，用户态已经死了，读不出东西就返回 0，不会有安全后果。 */
+static int gdt_peek_user(uint64_t address, void *dst, size_t length) {
+    uint8_t *out = (uint8_t *)dst;
+    while (length) {
+        uint64_t page = address & ~(uint64_t)0xfffULL;
+        uint64_t offset = address - page;
+        uint64_t chunk = 0x1000ULL - offset;
+        if (chunk > length) chunk = length;
+        uint64_t phys = vmm_get_phys(page);
+        if (!phys) return 0;
+        const uint8_t *in = (const uint8_t *)(uintptr_t)(phys + offset);
+        for (uint64_t i = 0; i < chunk; i++) out[i] = in[i];
+        out += chunk;
+        address += chunk;
+        length -= chunk;
+    }
+    return 1;
+}
+
+/** 打印 stack canary 的三方对照：%fs:0x28 vs 栈上保存值。
+ *
+ * 为什么需要：Chromium 的 `__stack_chk_fail` 路径长这样——
+ *   mov  %fs:0x28,%rax
+ *   cmp  -0x30(%rbp),%rax
+ *   jne  __stack_chk_fail
+ * 两者不等就说明"栈被写坏"或者"canary 根本没初始化"。这两种情况的
+ * 修法完全不同：前者是内存越界，后者是内核没给对 AT_RANDOM / TLS，
+ * 光看崩溃地址分不出来。
+ *
+ * 栈上 canary 的位置依赖被调用函数自己的帧布局，这里把 rbp 往下扫
+ * 一段，把所有看起来像 canary（低位非零、且与 %fs:0x28 有交集）的
+ * 候选都列出来对比。
+ *
+ * 不变量：无返回值；只往串口写，不改任何状态。
+ * 前置条件：regs 必须有效（指向真实的 trap 现场）。 */
+static void dump_user_canary(uint64_t rbp) {
+    task_t *current = task_current();
+    if (!current) return;
+    uint64_t fs_base = current->fs_base;
+    console_puts("  canary: fs_base=0x");
+    print_hex64(fs_base);
+    uint64_t fs28 = 0;
+    if (gdt_peek_user(fs_base + 0x28, &fs28, sizeof(fs28))) {
+        console_puts(" fs:0x28=0x");
+        print_hex64(fs28);
+    } else {
+        console_puts(" fs:0x28=UNMAPPED");
+    }
+    console_puts(" rbp=0x");
+    print_hex64(rbp);
+    /* 精确打印几个"像 canary"的位置：Chromium 各函数把 canary 存放在
+     * 自己的 rbp-N（N 因帧大小而异）。失配的那个位置被写坏 = 栈溢出；
+     * 全部一致 = 不是 canary 的问题，得另找。 */
+    for (uint64_t off = 0x08; off <= 0x40; off += 8) {
+        uint64_t v = 0;
+        if (!gdt_peek_user(rbp - off, &v, sizeof(v))) break;
+        console_puts(" -");
+        print_hex64(off);
+        console_puts("=0x");
+        print_hex64(v);
+        if (v == fs28) console_puts("(CANARY)");
+    }
+    console_puts("\n");
+}
+
 /** 打印 rip 前 16 条 / 后 4 条指令。
  *
  * 前 16 条是为了回溯"崩之前调用了谁"——Chromium 的 crash handler 一进来
@@ -931,6 +1002,7 @@ void isr_handler(isr_regs_t *regs) {
          * 定位 load/store 的源/目的）和最近系统调用轨迹，和 #BP 路径对齐。 */
         dump_user_trap_regs(regs);
         dump_user_vma_for(regs->rip);
+        dump_user_canary(regs->rbp);
         dump_user_tail(regs->rip);
         dump_user_backtrace(regs->rip, regs->rbp);
         dump_user_stack_window(regs->rsp);
@@ -969,6 +1041,7 @@ void isr_handler(isr_regs_t *regs) {
             console_putchar('\n');
         }
         dump_user_trap_regs(regs);
+        dump_user_canary(regs->rbp);
         /* 打印 rip 处的指令字节：GP/UD 只看 rip 查不出原因 —— 得知道到底是
          * 哪条指令非法（rdmsr？特权指令？SIMD？还是取指越界）。Chromium
          * 每次 exec 子进程都在 ld.so 同一个地址上 GP Fault，没有这条只能猜。 */

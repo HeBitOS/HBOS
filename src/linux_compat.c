@@ -107,7 +107,7 @@
  * 上限 4 容易在传 fd 数组时被截断，放宽到 16。 */
 #define UNIX_RIGHTS_MAX_FDS 16
 
-#define LINUX_MEMFD_SLOTS 256
+#define LINUX_MEMFD_SLOTS 1024
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
 #define LINUX_MFD_CLOEXEC 0x0001
 #define LINUX_MFD_ALLOW_SEALING 0x0002
@@ -205,8 +205,24 @@ typedef struct {
 
 typedef struct {
     int used;
-    uint32_t refs;
-    uint32_t map_refs;
+    uint32_t refs;      /* 打开的 fd 数 */
+    uint32_t map_refs;  /* mmap 映射数 */
+    /* 名字表（shm_names[]）持有的引用数。
+     *
+     * 为什么要有它：/tmp 下的"普通文件"语义是 **close 之后内容仍在**，
+     * 而 memfd 的语义是最后一个 fd 关掉就消失。原来两者共用一张 slot
+     * 表，close 时 memfd_maybe_reset 把 slot 整个回收掉，可名字表还指
+     * 着它 —— 于是：
+     *   1) 下次 open 同一路径命中名字表，但 slot 已 used==0，直接
+     *      ENOENT 早退（crashpad 报 "settings.dat: No such file or
+     *      directory" 就是这条）；
+     *   2) 或者 slot 被别的文件复用 → 读回的是别人的数据
+     *      （crashpad "Settings magic is not 1129342067"）。
+     * 现在名字表自己算一个引用，只有 unlink 才把它释放，slot 才会
+     * 真正回收。 */
+    uint32_t name_refs;
+    /* LRU 序号：名字表/slot 满时用来挑最久没碰过的那个先回收。 */
+    uint64_t lru;
     unsigned int flags;
     uint64_t size;
     uint32_t page_count;
@@ -695,7 +711,10 @@ static long inotify_read(int fd, void *buffer, size_t count) {
 }
 
 static void memfd_maybe_reset(memfd_slot_t *slot) {
-    if (!slot || !slot->used || slot->refs || slot->map_refs) return;
+    /* name_refs：名字表还挂着这个 slot —— 文件"还存在"，内容必须留着。
+     * 只有 unlink 把名字摘掉之后，slot 才真的可以被回收。 */
+    if (!slot || !slot->used || slot->refs || slot->map_refs || slot->name_refs)
+        return;
     for (uint32_t i = 0; i < slot->page_count; i++) {
         if (slot->pages[i]) pmm_free_page(slot->pages[i]);
     }
@@ -2405,18 +2424,37 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
  * 这里把 /dev/shm/<name> 落到 memfd slot 上：open 建 slot、ftruncate/mmap/read/
  * write 全部走已有的 FD_MEMFD 分支（syscall.c 里那些分支都是现成的），unlink
  * 只是把名字解绑（Chromium 是 open 完立刻 unlink、只留 fd）。 */
-#define LINUX_SHM_NAME_MAX 96
-#define LINUX_SHM_NAMES    64
+/* 名字表容量。
+ *
+ * 这张表同时装两类条目：
+ *   /dev/shm/<name>  —— 名字是去掉前缀的短名（Chromium open 完立刻 unlink）
+ *   /tmp/<全路径>    —— 普通文件语义，名字是**完整路径**
+ *
+ * 原来的 64 项 / 96 字节太小：
+ *   - Chromium 的 user-data-dir 会在 /tmp 下建几十上百个文件（Cookies、
+ *     History、Preferences、Cache、Service Worker …），64 项很快用完；
+ *   - 名字按全路径存，"/tmp/udd3/Default/Service Worker/CacheStorage/…"
+ *     轻松超过 96 字节 → ENAMETOOLONG，文件根本建不出来。
+ *
+ * 名字表满的时候不能静默丢名字：丢了名字，下次 open 同一路径就会另建
+ * 一个 slot，写进去的数据再也读不回来（crashpad 的 settings.dat 就是
+ * 这样变成"magic 不对"的）。所以满了要按 LRU 回收一条"没有 fd、也没有
+ * 映射"的旧条目 —— 相当于 tmpfs 在内存压力下丢掉最久没用的文件。 */
+#define LINUX_SHM_NAME_MAX 256
+#define LINUX_SHM_NAMES    512
 #define LINUX_O_CREAT      0x40
 #define LINUX_O_EXCL       0x80
+#define LINUX_O_TRUNC      0x200
 
 typedef struct {
     int used;
     int slot;
+    uint64_t lru;                  /* 最近一次被 open 的序号 */
     char name[LINUX_SHM_NAME_MAX];
 } shm_name_t;
 
 static shm_name_t shm_names[LINUX_SHM_NAMES];
+static uint64_t shm_lru_clock;
 
 /* 只认 /dev/shm：Chromium 的共享内存与 wl_shm 缓冲都经由
  * /dev/shm/.org.chromium.Chromium.XXXXXX 创建，而 wl_buffer_read 依赖
@@ -2499,9 +2537,37 @@ int linux_compat_shm_open(const char *path, int flags) {
         if (!shm_names[i].used || strcmp(shm_names[i].name, name) != 0) continue;
         if (flags & LINUX_O_EXCL) return compat_set_errno(EEXIST);
         int slot = shm_names[i].slot;
-        if (slot < 0 || slot >= LINUX_MEMFD_SLOTS || !memfd_slots[slot].used)
-            return compat_set_errno(ENOENT);
+        if (slot < 0 || slot >= LINUX_MEMFD_SLOTS || !memfd_slots[slot].used) {
+            /* 名字还挂着但 slot 已经没了 —— 这是**不一致状态**，不是
+             * "文件不存在"。
+             *
+             * 以前这里直接 ENOENT 早退，后果是 Chromium 写完 crashpad 的
+             * settings.dat（fd 一 close，slot 就被 memfd_maybe_reset 回收）
+             * 之后再打开同一个路径必然 ENOENT，日志里就是：
+             *   open /tmp/.config/chromium/Crash Reports/settings.dat:
+             *   No such file or directory (2)
+             * 于是 crashpad 读到空/残缺内容 →
+             *   "Settings magic is not 1129342067"
+             *
+             * 现在 slot 靠 name_refs 保活（名字在，内容就在），这个分支
+             * 理论上不该再发生；但万一发生，要按"重建这个文件"处理，
+             * 而不是报 ENOENT。 */
+            shm_names[i].used = 0;
+            shm_names[i].name[0] = '\0';
+            shm_names[i].slot = -1;
+            break;
+        }
         memfd_slots[slot].refs++;
+        memfd_slots[slot].lru = ++shm_lru_clock;
+        if (flags & LINUX_O_TRUNC) {
+            /* O_TRUNC：把内容清零但保留名字条目。
+             * ftruncate 到 0 会走 shrink 路径（有映射时只改 size），
+             * 这里直接清页更干净：文件立刻变空，且映射方看到的是零。 */
+            memfd_slot_t *slot_ptr = &memfd_slots[slot];
+            for (uint32_t p = 0; p < slot_ptr->page_count; p++)
+                memset((void *)(uintptr_t)slot_ptr->pages[p], 0, PAGE_SIZE);
+            slot_ptr->size = 0;
+        }
         int fd = compat_fd_alloc(compat_task(), FD_MEMFD, slot,
                                  O_RDWR | ((flags & 0x80000) ? O_CLOEXEC : 0));
         if (fd < 0) memfd_slots[slot].refs--;
@@ -2510,23 +2576,60 @@ int linux_compat_shm_open(const char *path, int flags) {
 
     if (!(flags & LINUX_O_CREAT)) return compat_set_errno(ENOENT);
 
+    /* 名字表满了：按 LRU 回收一条"没有 fd、也没有映射"的旧条目。
+     *
+     * 原来的代码是**静默丢掉名字**（for 循环找不到空位就 break，什么都
+     * 不做），后果极其隐蔽：名字没登记 → 下次 open 同一路径会另建一个
+     * slot → 上次写进去的数据再也读不回来。Chromium 的 user-data-dir
+     * 文件数轻松过百，64 项的名字表必然被撑爆，于是 crashpad 的
+     * settings.dat 写完就读不回来。 */
+    int free_index = -1;
+    for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+        if (!shm_names[i].used) { free_index = i; break; }
+    }
+    if (free_index < 0) {
+        uint64_t oldest = UINT64_MAX;
+        for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+            if (!shm_names[i].used) continue;
+            int s = shm_names[i].slot;
+            if (s < 0 || s >= LINUX_MEMFD_SLOTS) continue;
+            memfd_slot_t *slot_ptr = &memfd_slots[s];
+            /* 只回收没人用的：既没有 fd，也没有 mmap */
+            if (slot_ptr->refs || slot_ptr->map_refs) continue;
+            if (slot_ptr->lru < oldest) { oldest = slot_ptr->lru; free_index = i; }
+        }
+        if (free_index < 0)
+            return compat_set_errno(ENFILE); /* 全都是活的：只能报满 */
+        /* 回收这一条：摘名字 + 放掉 slot */
+        int s = shm_names[free_index].slot;
+        if (s >= 0 && s < LINUX_MEMFD_SLOTS) {
+            memfd_slot_t *slot_ptr = &memfd_slots[s];
+            if (slot_ptr->name_refs) slot_ptr->name_refs--;
+            memfd_maybe_reset(slot_ptr);
+        }
+        shm_names[free_index].used = 0;
+        shm_names[free_index].name[0] = '\0';
+        shm_names[free_index].slot = -1;
+    }
+
     int fd = linux_compat_memfd_create(name,
              (flags & 0x80000) ? LINUX_MFD_CLOEXEC : 0);
     if (fd < 0) return fd;
     int slot = memfd_slot_index(memfd_for_fd(compat_task(), fd));
     if (slot >= 0) {
-        for (int i = 0; i < LINUX_SHM_NAMES; i++) {
-            if (shm_names[i].used) continue;
-            shm_names[i].used = 1;
-            shm_names[i].slot = slot;
-            size_t n = 0;
-            while (name[n] && n + 1 < LINUX_SHM_NAME_MAX) {
-                shm_names[i].name[n] = name[n];
-                n++;
-            }
-            shm_names[i].name[n] = '\0';
-            break;
+        shm_names[free_index].used = 1;
+        shm_names[free_index].slot = slot;
+        shm_names[free_index].lru = ++shm_lru_clock;
+        size_t n = 0;
+        while (name[n] && n + 1 < LINUX_SHM_NAME_MAX) {
+            shm_names[free_index].name[n] = name[n];
+            n++;
         }
+        shm_names[free_index].name[n] = '\0';
+        /* 名字表持有 slot 一个引用：文件在名字还在期间不能被回收。
+         * 这就是"普通文件 close 后内容仍在"的实现。 */
+        memfd_slots[slot].name_refs++;
+        memfd_slots[slot].lru = shm_lru_clock;
     }
     return fd;
 }
@@ -2560,9 +2663,18 @@ int linux_compat_shm_unlink(const char *path) {
     if (!overlay_prefix(path, &name) || !name) return compat_set_errno(EINVAL);
     for (int i = 0; i < LINUX_SHM_NAMES; i++) {
         if (!shm_names[i].used || strcmp(shm_names[i].name, name) != 0) continue;
+        /* 名字没了 → 文件"被删除"。但**只要还有 fd 或 mmap，
+         * 内容就得留着**（POSIX 语义：unlink 只是摘名字）。
+         * 名字表这一个引用同时要放掉，slot 才可能被真正回收。 */
+        int slot = shm_names[i].slot;
         shm_names[i].used = 0;
         shm_names[i].name[0] = '\0';
         shm_names[i].slot = -1;
+        if (slot >= 0 && slot < LINUX_MEMFD_SLOTS) {
+            memfd_slot_t *slot_ptr = &memfd_slots[slot];
+            if (slot_ptr->name_refs) slot_ptr->name_refs--;
+            memfd_maybe_reset(slot_ptr);
+        }
         return 0;
     }
     return compat_set_errno(ENOENT);
