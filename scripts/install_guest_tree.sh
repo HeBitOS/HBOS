@@ -44,6 +44,11 @@ trap 'rm -f "$cmds"' EXIT
             rel="${f#./}"
             echo "rm $DEST/$rel"
             echo "write $SRC/$rel $DEST/$rel"
+            # debugfs write 建出来的是 0644：可执行文件必须补上 x 位，
+            # 否则 guest 里 `run` 直接报 "app not found"（实测 bilibili
+            # 的 electron 就是这样）。
+            mode=$(stat -c '%a' "$SRC/$rel")
+            echo "sif $DEST/$rel mode 0100$mode"
         done
 } >"$cmds"
 

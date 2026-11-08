@@ -1047,3 +1047,38 @@ xdg 握手全通，**只差 attach + 带 buffer 的 commit**。
 顺带把上一轮那个 `int3; ud2`（`exit 132`）重新定位了一次：冷块前面的
 `call 0x2d94c50` 返回了，而调用方是按"不返回"编排的 —— 和 R42 的
 `__stack_chk_fail` 同一个形状。这条线索还没走完。
+
+#### R47：扩镜像失败 —— HBOS 挂不上更大的 ext2（这是个真 bug）
+
+bilibili 解开要 465 MB，镜像只剩 356 MB，只能扩。结果扩完**必定内核 panic**，
+而且连 `[PANIC] vec=` 都打不出来（panic 发生在控制台还不可用的阶段）。
+一路二分下来：
+
+| 镜像 | 块数 | 块组 | 结果 |
+|---|---|---|---|
+| 1 887 436 800（原） | 460 544 | 15 | 正常 |
+| 2 056 257 536 | 501 760 | 16 | **panic** |
+| 2 937 061 376 | 716 800 | 22 | **panic** |
+
+排除了"磁盘写满"这条路：把 chromium-headless-shell 的 219 MB 二进制删掉
+（空闲块 447 → 56 407）之后 1.96 GB 那份**照样 panic**。所以不是 ENOSPC，
+是 ext2/AHCI 侧对大文件系统的处理问题。这条没修完 —— 是下一轮的第一优先级。
+
+**代价**：原镜像被覆盖过一次，已按原尺寸（1 887 436 800 字节 / 460 544 块）
+重建并用 e2fsck 修好，启动验证 `Shell ready`、PANIC 计数 0。
+
+#### bilibili 装进去了，但 guest 里看不见
+
+`dpkg-deb -x` 出 7 925 个文件 / 487 MB，用新的 `scripts/install_guest_tree.sh`
+写进镜像 `/opt/apps/io.github.msojocs.bilibili/`（electron 二进制 219 MB）。
+装完的问题：
+
+- `debugfs` 能看到 `/opt/apps/io.github.msojocs.bilibili/files/bin/electron` 及其内容；
+- guest 里 `ls /opt/apps` 输出为空，`cd` 该路径报 `not found`，`run` 报
+  `run: app not found`（= `open()` 返回 ENOENT）。
+
+也就是说**目录项写进去了、HBOS 的 VFS 却解析不到**。这条只到定位，没修完。
+
+另外 `debugfs write` 建出来的文件是 0644，可执行文件必须补 x 位，
+`install_guest_tree.sh` 已改成按源文件 mode 写 `sif ... mode 0100xxx`
+（bilibili 里 7 个可执行文件已修）。
