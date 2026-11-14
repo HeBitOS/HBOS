@@ -325,6 +325,7 @@ static int compat_fd_alloc(task_t *task, int type, uint32_t slot, int flags) {
         task->fd_table->entries[fd].type = type;
         task->fd_table->entries[fd].compat_id = slot;
         task->fd_table->entries[fd].flags = flags;
+        linux_fdid_record(fd, "compat");
         return fd;
     }
     return compat_set_errno(EMFILE);
@@ -1320,6 +1321,93 @@ long linux_compat_write(int fd, const void *buffer, size_t count) {
     }
     slot->value += value;
     return (long)sizeof(value);
+}
+
+/* ── fd 身份溯源（诊断） ────────────────────────────────────────
+ *
+ * 目的：Chromium 的 base::File 对"已有 fd"做 F_GETFL 访问模式校验，
+ * 失败即 int3。日志里只有一个 rip，必须能回答"这个 fd 是哪条路径造出来
+ * 的、当时记的 flags 是什么"。这里给每次 fd 物化留一条记录：
+ *   compat_fd_alloc   → eventfd/timerfd/epoll/unix/memfd/signalfd/inotify
+ *   SCM_RIGHTS 接收   → scm
+ *   syscall.c         → open / shm-open / dup2 / fdup（各自调用本函数）
+ * 环形覆盖，只在崩溃 dump 时读取，功能路径零影响。 */
+#define LINUX_FDID_SLOTS 48
+typedef struct {
+    int used;
+    int pid;
+    int fd;
+    int type;
+    int flags;
+    char event[12];
+    char path[48];
+} linux_fdid_t;
+static linux_fdid_t fdid_ring[LINUX_FDID_SLOTS];
+static uint32_t fdid_next;
+
+static void fdid_copy(char *dst, size_t cap, const char *src) {
+    size_t i = 0;
+    if (!dst || !cap) return;
+    if (src) { while (src[i] && i + 1 < cap) { dst[i] = src[i]; i++; } }
+    dst[i] = '\0';
+}
+
+/** 记录 fd 的一次"物化"。前置条件：fd 当前在本进程表里有效；否则忽略。 */
+void linux_fdid_record(int fd, const char *event) {
+    task_t *task = compat_task();
+    fd_entry_t *entry = compat_fd(task, fd);
+    if (!task || !entry) return;
+    linux_fdid_t *slot = &fdid_ring[fdid_next % LINUX_FDID_SLOTS];
+    fdid_next++;
+    slot->used = 1;
+    slot->pid = task_get_process_id();
+    slot->fd = fd;
+    slot->type = entry->type;
+    slot->flags = entry->flags;
+    fdid_copy(slot->event, sizeof(slot->event), event ? event : "?");
+    fdid_copy(slot->path, sizeof(slot->path), entry->path);
+}
+
+/** 反查本进程某 fd 最近一次物化事件名（找不到返回 "?"）。 */
+const char *linux_fdid_event_of(int fd, int *owner_pid) {
+    int pid = task_get_process_id();
+    for (uint32_t i = 0; i < LINUX_FDID_SLOTS; i++) {
+        uint32_t index = (fdid_next + LINUX_FDID_SLOTS - 1 - i) %
+                         LINUX_FDID_SLOTS;
+        const linux_fdid_t *slot = &fdid_ring[index];
+        if (!slot->used || slot->fd != fd || slot->pid != pid) continue;
+        if (owner_pid) *owner_pid = slot->pid;
+        return slot->event;
+    }
+    if (owner_pid) *owner_pid = 0;
+    return "?";
+}
+
+/** 打印 fd 溯源环形缓冲（最旧在前），由 linux_fd_table_dump() 调用。 */
+void linux_fdid_dump(void) {
+    if (!fdid_next) return;
+    uint32_t total = fdid_next;
+    uint32_t count = total < LINUX_FDID_SLOTS ? total : LINUX_FDID_SLOTS;
+    uint32_t start = total - count;
+    console_puts("[FDID] provenance (oldest first):\n");
+    for (uint32_t i = 0; i < count; i++) {
+        const linux_fdid_t *slot = &fdid_ring[(start + i) % LINUX_FDID_SLOTS];
+        console_puts("[FDID] pid=");
+        compat_put_dec((unsigned int)slot->pid);
+        console_puts(" fd=");
+        compat_put_dec((unsigned int)slot->fd);
+        console_puts(" via=");
+        console_puts(slot->event);
+        console_puts(" type=");
+        compat_put_dec((unsigned int)slot->type);
+        console_puts(" flags=0x");
+        linux_ipc_put_hex((uint64_t)(unsigned)slot->flags);
+        if (slot->path[0]) {
+            console_puts(" path=");
+            console_puts(slot->path);
+        }
+        console_putchar('\n');
+    }
 }
 
 int linux_compat_close(int fd) {
@@ -2402,6 +2490,7 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
         }
         task->fd_table->entries[new_fd] = message->entries[i];
         task->fd_table->entries[new_fd].used = true;
+        linux_fdid_record(new_fd, "scm");
         fds[(*received)++] = new_fd;
         /* The queue's retained reference is transferred to the new fd. */
     }

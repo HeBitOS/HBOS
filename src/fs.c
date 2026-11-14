@@ -5,6 +5,7 @@
  */
 #include "block.h"
 #include "core/heap.h"
+#include "errno.h"
 #include "ext2.h"
 #include "fat32.h"
 #include "fs.h"
@@ -2254,6 +2255,22 @@ file_t *fs_create_symlink(const char *name, const char *target) {
     return link;
 }
 
+/** 把 ext2 返回的 -errno 翻成一句可读的错误（fs_last_error 用）。 */
+static const char *ext2_errno_text(int err) {
+    switch (-err) {
+    case ENOENT:    return "源文件或目录不存在";
+    case EEXIST:    return "目标已存在";
+    case ENOTEMPTY: return "目录非空";
+    case EISDIR:    return "目标是目录";
+    case ENOTDIR:   return "不是目录";
+    case EROFS:     return "文件系统只读";
+    case ENOSPC:    return "磁盘空间不足";
+    case EINVAL:    return "参数非法（目录不能移进自身子树）";
+    case EBUSY:     return "设备或资源忙";
+    default:        return "ext2 重命名失败";
+    }
+}
+
 /** 删除指定名称的文件 */
 int fs_delete_file(const char *name) {
     file_t *f = fs_find_file(name);
@@ -2393,7 +2410,39 @@ int fs_rename_file(const char *old_name, const char *new_name) {
     file_t *f = fs_find_file(old_norm);
     if (!f) return fs_fail("源文件不存在");
 
-    if (fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_FAT32) {
+    if (fs_backend == FS_BACKEND_EXT2) {
+        /* ext2 支持真正的 rename：改目录项即可，不必 copy+delete
+         * （后者会换 inode 号、丢权限，且目录根本无法 copy）。 */
+        char old_base[MAX_FILENAME], new_base[MAX_FILENAME];
+        uint32_t old_parent = ext2_resolve_parent(old_norm, old_base);
+        uint32_t new_parent = ext2_resolve_parent(new_norm, new_base);
+        if (!old_parent || !new_parent) return fs_fail("父目录不存在");
+        int r = ext2_rename(&ext2_fs, old_parent, old_base, new_parent,
+                            new_base, 0);
+        if (r < 0) return fs_fail(ext2_errno_text(r));
+
+        /* 内存表同步：文件只改一项；目录要改整棵子树的名字前缀，
+         * 否则 fs_find_file 再也找不到 /dir/file。 */
+        size_t old_length = strlen(old_norm);
+        size_t new_length = strlen(new_norm);
+        for (uint32_t i = 0; i < fs_high_water; i++) {
+            file_t *entry = &fs.files[i];
+            if (!entry->used) continue;
+            if (!fs_path_in_tree(entry->name, old_norm)) continue;
+            const char *suffix = entry->name + old_length;
+            if (new_length + strlen(suffix) >= MAX_FILENAME)
+                return fs_fail("重命名后的后代路径过长");
+            char updated[MAX_FILENAME];
+            strcpy(updated, new_norm);
+            strcat(updated, suffix);
+            strcpy(entry->name, updated);
+            strcpy(entry->node.name, updated);
+        }
+        fs_error = "ok";
+        return 0;
+    }
+
+    if (fs_backend == FS_BACKEND_FAT32) {
         if (f->type != 0)
             return fs_fail("当前磁盘后端暂不支持重命名目录");
         if (fs_copy_file(old_norm, new_norm) < 0) return -1;
@@ -2592,84 +2641,20 @@ static int ramfs_vfs_unlink(vfs_node_t *node) {
     return fs_delete_file(node->name);
 }
 
-/* ── 只读后端上的"内存目录"旁路 ──────────────────────────────
- *
- * ext2 镜像带 ext4 特性（extents/64bit），src/ext2.c:117 因此把整盘标成
- * read_only，ext2_mkdir 恒返 -1。而 Chromium/Electron 一启动就要在 /tmp
- * 下建 0700 私有目录（ProcessSingleton 的 socket 目录、crashpad 的
- * database 目录、profile 缓存），建不出来直接 exit 21。
- *
- * 做法：/tmp 子树下的目录只在内存表里登记（node.ops = &ramfs_ops），
- * 不落盘。对客户端完全透明 —— stat 看到 S_IFDIR，readdir 能看到子项，
- * 里面建的文件走 linux_compat 的 /tmp memfd 覆盖层。重启就没了，这对
- * 临时目录本来就是正确语义。
- *
- * 只接管 /tmp：/etc /usr 这些必须保持只读，免得误以为能改系统文件。 */
-static int tmp_ramdir_path(const char *norm) {
-    return norm && strncmp(norm, "tmp", 3) == 0 && (norm[3] == '\0' || norm[3] == '/');
-}
-
-/** 在只读后端上以纯内存语义创建一个目录条目 */
-static int fs_mkdir_ramdir(const char *norm) {
-    file_t *f = fs_claim_slot(0);
-    if (!f) return -1;
-    uint32_t slot = (uint32_t)(f - fs.files);
-    strcpy(f->name, norm);
-    f->size = 0;
-    f->capacity = 0;
-    f->data = NULL;
-    f->node.type = VFS_NODE_DIR;
-    f->node.size = 0;
-    f->node.capacity = 0;
-    f->node.private_data = f;
-    f->node.ops = &ramfs_ops;
-    strcpy(f->node.name, norm);
-    f->disk_slot = slot;
-    f->used = 1;
-    f->type = 1;
-    f->node.uid = 0;
-    f->node.gid = 0;
-    f->node.mode = S_IFDIR | 0700;
-    fs.file_count++;
-    return 0;
-}
-
 int fs_mkdir(const char *name) {
     char norm[MAX_FILENAME];
     if (!normalize_path(name, norm)) return -1;
     file_t *existing = fs_find_file(norm);
     if (existing) return -1;
 
-    /* 只读后端 + /tmp 子树 → 内存目录。
-     *
-     * 这里带 mkdir -p 语义：Chromium 会直接 mkdir("/tmp/.config/chromium/
-     * Crash Reports/database")，中间几层它并不保证先建。以前只在最末一级
-     * 建目录、父级不存在就失败，于是 crashpad 报
-     *   open /tmp/.config/chromium/Crash Reports/settings.dat: ENOENT
-     * 然后整个崩溃上报链断掉。逐级补建的成本只是几次查表。 */
-    if (tmp_ramdir_path(norm) &&
-        (fs_backend == FS_BACKEND_EXT2 || fs_backend == FS_BACKEND_EXFAT)) {
-        char partial[MAX_FILENAME];
-        size_t plen = strlen(norm);
-        if (plen >= sizeof(partial)) return -1;
-        memcpy(partial, norm, plen + 1);
-        for (size_t i = 4; i <= plen; i++) {          /* 跳过 "tmp/" */
-            if (partial[i] != '/' && partial[i] != '\0') continue;
-            char saved = partial[i];
-            partial[i] = '\0';
-            if (!fs_find_file(partial) && fs_mkdir_ramdir(partial) < 0)
-                return -1;
-            partial[i] = saved;
-        }
-        return 0;
-    }
-
     if (fs_backend == FS_BACKEND_EXT2) {
         char basename[MAX_FILENAME];
         uint32_t parent = ext2_resolve_parent(norm, basename);
-        if (!parent) return -1;
+        if (!parent) return -ENOENT;
+        /* ext2_mkdir 返回 -errno（-EEXIST/-ENOSPC/-EROFS/-ENOTDIR），
+         * 原样往上传，别折成 -1 —— 上层要拿它区分"没空间"和"只读"。 */
         int ino = ext2_mkdir(&ext2_fs, parent, basename);
-        if (ino < 0) return -1;
+        if (ino < 0) return ino;
         file_t *f = fs_claim_slot(0);
         if (f) {
             strcpy(f->name, norm);
@@ -2767,7 +2752,21 @@ int fs_rmdir(const char *name) {
         size_t dlen = strlen(f->name);
         if (strncmp(fs.files[i].name, f->name, dlen) == 0 &&
             fs.files[i].name[dlen] == '/')
-            return -1;
+            return -ENOTEMPTY;
+    }
+
+    if (fs_backend == FS_BACKEND_EXT2) {
+        char basename[MAX_FILENAME];
+        uint32_t parent = ext2_resolve_parent(f->name, basename);
+        if (!parent) return -1;
+        int ret = ext2_rmdir(&ext2_fs, parent, basename);
+        if (ret < 0) return ret;      /* -ENOTEMPTY / -ENOTDIR / -EROFS */
+        f->used = 0;
+        f->name[0] = '\0';
+        f->node.name[0] = '\0';
+        f->node.size = 0;
+        if (fs.file_count > 0) fs.file_count--;
+        return 0;
     }
 
     if (fs_backend == FS_BACKEND_FAT32) {

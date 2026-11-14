@@ -25,12 +25,65 @@
  *         FD_TIMER       常量 / 特性宏
  *         FD_SIGNALFD    常量 / 特性宏
  *         PIPE_BUF_SIZE  PIPE缓冲区
+ *         FD_ACC_MASK          访问模式掩码（O_ACCMODE 的数值）
+ *         FD_GETFL_MASK        F_GETFL 允许返回的状态位
+ *         FD_SETFL_MASK        F_SETFL 允许修改的状态位
+ *         FD_O_APPEND/FD_O_NONBLOCK/FD_O_CLOEXEC  Linux ABI 标志数值
+ *   函数  fd_accmode_of         取条目 flags 的访问模式
+ *         fd_getfl_flags        flags → F_GETFL 返回值
+ *         fd_setfl_apply        F_SETFL 只改 APPEND/NONBLOCK，保留访问模式
+ *         fd_accmode_normalize  O_ACCMODE==3 兜底为 O_RDWR
  */
 #ifndef HBOS_FD_H
 #define HBOS_FD_H
 
 #include <stdbool.h>
 #include <stdint.h>
+
+/* ═══ 访问模式记账规则（纯逻辑，宿主单测可直接包含） ═══════════════════
+ *
+ * Chromium 的 base::File 打开一个 fd 之后会
+ *   fcntl(fd, F_GETFL) & O_ACCMODE  ==  它请求的访问模式
+ * 不相等就判定"打开失败"并 IMMEDIATE_CRASH（int3;ud2）。
+ * 所以条目里的 flags 必须**原样**记住 open 时的访问模式，F_GETFL 只吐
+ * 状态位，F_SETFL 不许动访问模式 —— 这三条规则以前在 linux_fcntl 与
+ * HBOS_SYS_FCNTL 两处各抄一份，抄错一次就崩一个进程。现在只在这里定义
+ * 一次，宿主单测（tests/host/test_fd_accmode.c）用
+ * -DHBOS_FD_FLAGS_ONLY 包含本头文件即可验证。
+ *
+ * 掩码取 Linux ABI 数值（与 src/fcntl.h 一致）：访问模式 0x3、
+ * O_APPEND 0x400、O_NONBLOCK 0x800、O_CLOEXEC 0x80000。 */
+#define FD_ACC_MASK      0x3
+#define FD_O_APPEND      0x400
+#define FD_O_NONBLOCK    0x800
+#define FD_O_CLOEXEC     0x80000
+#define FD_GETFL_MASK    (FD_ACC_MASK | FD_O_APPEND | FD_O_NONBLOCK)
+#define FD_SETFL_MASK    (FD_O_APPEND | FD_O_NONBLOCK)
+
+/** 取条目 flags 里的访问模式（0=只读 1=只写 2=读写）。 */
+static inline int fd_accmode_of(int flags) {
+    return flags & FD_ACC_MASK;
+}
+
+/** 把 open 期 flags 折算成 fcntl(F_GETFL) 该返回的状态位。
+ *  O_CREAT / O_EXCL / O_TRUNC / O_CLOEXEC 属创建期标志，Linux 不在
+ *  F_GETFL 里返回它们。 */
+static inline int fd_getfl_flags(int flags) {
+    return flags & FD_GETFL_MASK;
+}
+
+/** fcntl(F_SETFL, arg)：只替换 O_APPEND / O_NONBLOCK，访问模式原样保留。 */
+static inline int fd_setfl_apply(int flags, int arg) {
+    return (flags & ~FD_SETFL_MASK) | (arg & FD_SETFL_MASK);
+}
+
+/** O_ACCMODE==3 是非法值，按 O_RDWR 兜底（与 overlay 记账规则一致）。 */
+static inline int fd_accmode_normalize(int flags) {
+    int mode = fd_accmode_of(flags);
+    return mode == FD_ACC_MASK ? 2 : mode;
+}
+
+#ifndef HBOS_FD_FLAGS_ONLY
 #include "vfs.h"
 
 /* 每个进程的 fd 表容量。
@@ -85,4 +138,5 @@ typedef struct {
     uint32_t refs;
 } fd_table_t;
 
+#endif /* HBOS_FD_FLAGS_ONLY */
 #endif

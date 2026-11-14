@@ -692,14 +692,12 @@ typedef struct {
 #define LINUX_SEGV_MAPERR  1
 #define LINUX_SEGV_ACCERR  2
 
-/* F_GETFL 返回的状态位掩码：访问模式 + O_APPEND / O_NONBLOCK。
- * O_CREAT / O_EXCL / O_TRUNC 属于"创建期"标志，Linux 不在 F_GETFL 里
- * 返回它们。 */
-#define LINUX_F_GETFL_MASK (O_ACCMODE | O_APPEND | O_NONBLOCK)
-
-/* F_SETFL 允许修改的状态位：O_APPEND / O_NONBLOCK。
- * 访问模式与 O_CREAT/O_EXCL 等创建期标志都不在内。 */
-#define LINUX_F_SETFL_MASK (O_APPEND | O_NONBLOCK)
+/* F_GETFL / F_SETFL 的状态位规则统一定义在 src/fd.h（fd_getfl_flags /
+ * fd_setfl_apply / fd_accmode_of）：那里是唯一实现，宿主单测
+ * tests/host/test_fd_accmode.c 直接验证同一份代码。这里保留旧名字只为
+ * 少改调用点。 */
+#define LINUX_F_GETFL_MASK FD_GETFL_MASK
+#define LINUX_F_SETFL_MASK FD_SETFL_MASK
 
 /* mcontext.gregs[] indices, matching glibc's REG_* enum. */
 #define LINUX_REG_R8       0
@@ -1850,6 +1848,7 @@ typedef struct {
     int used;
     int ok;
     int error;
+    int pid;                     /**< 发起 open 的进程号 */
     int fd;                      /**< 成功时的 fd 号（失败为 -1） */
     uint32_t flags;
     char path[192];
@@ -1866,6 +1865,7 @@ static void linux_open_trace_record(const char *path, int flags, int ok,
     slot->used = 1;
     slot->ok = ok;
     slot->error = error;
+    slot->pid = task_get_process_id();
     slot->fd = fd;
     slot->flags = (uint32_t)flags;
     slot->path[0] = '\0';
@@ -1889,7 +1889,9 @@ void linux_open_trace_dump(void) {
     for (uint32_t i = 0; i < count; i++) {
         const linux_open_trace_t *slot =
             &linux_open_trace[(start + i) % LINUX_OPEN_TRACE_SLOTS];
-        console_puts("[OPEN-TRACE] ");
+        console_puts("[OPEN-TRACE] pid=");
+        trace_put_udec((uint64_t)slot->pid);
+        console_putchar(' ');
         console_puts(slot->ok ? "ok   " : "FAIL ");
         console_puts(slot->path);
         console_puts(" flags=0x");
@@ -1907,37 +1909,63 @@ void linux_open_trace_dump(void) {
 
 /* ── fcntl(F_GETFL) 追踪 ────────────────────────────────────────
  *
- * Chromium 的 base::File::Open 打开成功之后，会 fcntl(fd, F_GETFL)
- * 把返回值的低 2 位（O_ACCMODE）跟它请求的访问模式比对，不一致就判定
- * "打开失败"并 CHECK 崩溃。崩溃现场只剩一个 int3 地址，看不出是哪个
- * fd、期望什么模式。
+ * Chromium 的 base::File 在接管一个 fd 之后会
+ *   fcntl(fd, F_GETFL) & O_ACCMODE  ==  它以为的访问模式
+ * 不一致就判定"打开失败"并 IMMEDIATE_CRASH（int3;ud2）。
  *
- * 这里保留最近 N 次 F_GETFL 的 (fd, 返回值, 期望模式)，崩溃时倒出来。
- * "期望模式" 由调用方传进来（-1 = 未知）。 */
-#define LINUX_GETFL_TRACE_SLOTS 8
+ * 崩溃现场只剩一个 int3 地址，所以每条记录必须自带**身份**：
+ *   pid        —— 环形缓冲是全局的。不记 pid 就会把别的进程的 fd 当成
+ *                 肇事者（实测 r85：renderer 的 fd 7 是 /dev/null，
+ *                 browser 的 fd 7 是 BrowserMetrics 文件）。
+ *   type/path  —— 同一个号码在不同进程里是完全不同的东西。
+ * 排查顺序：最后一条 F_GETFL 的 fd → 它的 type/path → 再看 [FD-TABLE]
+ * 与 [FDID] 判断这个 fd 是 open 造的还是 dup2/SCM_RIGHTS 搬过来的。 */
+#define LINUX_GETFL_TRACE_SLOTS 16
 
 typedef struct {
     int used;
+    int pid;                     /**< 发起调用的进程号 */
     int fd;
     int returned;                /**< F_GETFL 的返回值 */
     int expected;                /**< 调用方期望的 O_ACCMODE，-1 = 未知 */
+    int type;                    /**< 调用瞬间该 fd 的条目类型 */
+    char path[48];               /**< 调用瞬间该 fd 的路径（身份） */
 } linux_getfl_trace_t;
 
 static linux_getfl_trace_t linux_getfl_trace[LINUX_GETFL_TRACE_SLOTS];
 static uint32_t linux_getfl_trace_next;
 
+static void trace_copy_str(char *dst, uint32_t capacity, const char *src) {
+    uint32_t i = 0;
+    if (!dst || !capacity) return;
+    if (src) {
+        while (src[i] && i + 1 < capacity) { dst[i] = src[i]; i++; }
+    }
+    dst[i] = '\0';
+}
+
 static void linux_getfl_trace_record(int fd, int returned, int expected) {
     linux_getfl_trace_t *slot =
         &linux_getfl_trace[linux_getfl_trace_next % LINUX_GETFL_TRACE_SLOTS];
     linux_getfl_trace_next++;
+    memset(slot, 0, sizeof(*slot));
     slot->used = 1;
+    slot->pid = task_get_process_id();
     slot->fd = fd;
     slot->returned = returned;
     slot->expected = expected;
+    task_t *cur = task_current();
+    if (cur && cur->fd_table && fd >= 0 && fd < POSIX_MAX_FDS &&
+        cur->fd_table->entries[fd].used) {
+        slot->type = cur->fd_table->entries[fd].type;
+        trace_copy_str(slot->path, sizeof(slot->path),
+                       cur->fd_table->entries[fd].path);
+    }
 }
 
-/** 打印最近的 F_GETFL 记录。 */
+/** 打印最近的 F_GETFL 记录（最旧在前，最后一条即肇事者）。 */
 void linux_getfl_trace_dump(void) {
+    if (!linux_getfl_trace_next) return;
     console_puts("[GETFL-TRACE] last F_GETFL:\n");
     uint32_t total = linux_getfl_trace_next;
     uint32_t count = total < LINUX_GETFL_TRACE_SLOTS ? total
@@ -1946,18 +1974,29 @@ void linux_getfl_trace_dump(void) {
     for (uint32_t i = 0; i < count; i++) {
         const linux_getfl_trace_t *slot =
             &linux_getfl_trace[(start + i) % LINUX_GETFL_TRACE_SLOTS];
-        console_puts("[GETFL-TRACE] fd=");
+        console_puts("[GETFL-TRACE] pid=");
+        trace_put_udec((uint64_t)slot->pid);
+        console_puts(" fd=");
         trace_put_udec((uint64_t)slot->fd);
+        console_puts(" type=");
+        trace_put_udec((uint64_t)slot->type);
         console_puts(" ret=0x");
         trace_put_hex((uint64_t)(unsigned)slot->returned);
         console_puts(" accmode=");
         trace_put_udec((uint64_t)(slot->returned & O_ACCMODE));
         console_puts(" expected=");
-        trace_put_udec((uint64_t)slot->expected);
-        console_puts(slot->expected >= 0 &&
-                             (slot->returned & O_ACCMODE) != slot->expected
-                         ? "  <-- MISMATCH\n"
-                         : "\n");
+        if (slot->expected < 0) console_putchar('-');
+        trace_put_udec((uint64_t)(slot->expected < 0 ? 1 : slot->expected));
+        if (slot->path[0]) {
+            console_puts(" path=");
+            console_puts(slot->path);
+        }
+        if (slot->expected >= 0 &&
+            (slot->returned & O_ACCMODE) != slot->expected)
+            console_puts("  <-- MISMATCH");
+        else if (i + 1 == count)
+            console_puts("  <-- last before trap");
+        console_putchar('\n');
     }
 }
 
@@ -2023,12 +2062,18 @@ void linux_fd_table_dump(void) {
         trace_put_hex((uint64_t)(unsigned)e->flags);
         console_puts(" accmode=");
         trace_put_udec((uint64_t)(e->flags & O_ACCMODE));
+        {
+            int owner = 0;
+            console_puts(" via=");
+            console_puts(linux_fdid_event_of(fd, &owner));
+        }
         if (e->path[0]) {
             console_puts(" path=");
             console_puts(e->path);
         }
         console_putchar('\n');
     }
+    linux_fdid_dump();
 }
 
 /* Resolve a Linux *at pathname without adding a second VFS path model.
@@ -2580,6 +2625,7 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
                 if (!cur->fd_table->entries[i].used) {
                     cur->fd_table->entries[i] = *entry;
                     linux_compat_retain(i);
+                    linux_fdid_record(i, "fdup");
                     return (uint64_t)i;
                 }
             }
@@ -2594,6 +2640,7 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
                 if (!cur->fd_table->entries[i].used) {
                     cur->fd_table->entries[i] = *entry;
                     linux_compat_retain(i);
+                    linux_fdid_record(i, "fdup");
                     return (uint64_t)i;
                 }
             }
@@ -2614,14 +2661,13 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
              * 这里把 (fd, 返回值) 记进环形缓冲，崩溃时能直接看到
              * "哪个 fd 返回了什么模式"。 */
             {
-                int fl = (int)(entry->flags & LINUX_F_GETFL_MASK);
+                int fl = fd_getfl_flags(entry->flags);
                 linux_getfl_trace_record(fd, fl, -1);
                 return (uint64_t)(unsigned)fl;
             }
         case 4:                                       /* F_SETFL */
             /* 只改可改的状态位，访问模式保持不变。 */
-            entry->flags = (entry->flags & ~LINUX_F_SETFL_MASK) |
-                           ((int)argument & LINUX_F_SETFL_MASK);
+            entry->flags = fd_setfl_apply(entry->flags, (int)argument);
             return 0;
         /* 记录锁：sqlite（Chromium 的 History/UKM/Cookies 全是 sqlite）在
          * xLock 里必须拿到 F_SETLK 的成功返回，否则 unixError 把 EINVAL
@@ -2729,6 +2775,57 @@ static uint64_t linux_statx_impl(int dirfd, const char *path, int flags,
     return 0;
 }
 
+/* ── write(2)/read(2) 打在 socket fd 上 ─────────────────────────
+ *
+ * 为什么要有这条分支：AF_INET socket 的 fd 条目里 node 指向
+ * net_tcp_conn_t（不是 vfs_node_t），落到 posix write()/read() 会执行
+ * vfs_write(node->ops) —— node->ops 是垃圾指针。轻则把 ENOSPC/EFAULT 之类
+ * 无关 errno 甩给调用方，重则内核取指跑飞。
+ *
+ * 为什么一定是 EPIPE / ECONNRESET：Chromium 的 socket 写失败处理只接受
+ * 这两个 errno（ZeroStateSuggestionsPageData 的超时分支对其它 errno 直接
+ * `__builtin_trap()` → ud2）。Linux 语义：对端已关闭时 write() → EPIPE，
+ * read() 在连接被重置时 → ECONNRESET。照抄即可，不需要新状态机。
+ *
+ * 不变量：只读 fd 条目与连接状态，不改任何字段；失败返回负 errno。 */
+static int64_t linux_socket_io_write(int fd, const void *buffer,
+                                     size_t count) {
+    task_t *cur = task_current();
+    if (!cur || !cur->fd_table || fd < 0 || fd >= POSIX_MAX_FDS ||
+        !cur->fd_table->entries[fd].used)
+        return -EBADF;
+    if (!buffer && count) return -EFAULT;
+    if (!count) return 0;
+    fd_entry_t *entry = &cur->fd_table->entries[fd];
+    if (entry->type == FD_UNIX)
+        return linux_compat_unix_send(fd, buffer, count, 0);
+    net_tcp_conn_t *conn = (net_tcp_conn_t *)entry->node;
+    if (!conn) return -EPIPE;
+    if (net_tcp_finish_connect(conn) == 1) return -EAGAIN;
+    int ret = net_tcp_send(conn, (const uint8_t *)buffer, (uint32_t)count);
+    if (ret < 0) return -EPIPE;
+    return (int64_t)count;
+}
+
+static int64_t linux_socket_io_read(int fd, void *buffer, size_t count) {
+    task_t *cur = task_current();
+    if (!cur || !cur->fd_table || fd < 0 || fd >= POSIX_MAX_FDS ||
+        !cur->fd_table->entries[fd].used)
+        return -EBADF;
+    if (!buffer && count) return -EFAULT;
+    if (!count) return 0;
+    fd_entry_t *entry = &cur->fd_table->entries[fd];
+    if (entry->type == FD_UNIX)
+        return linux_compat_unix_recv(fd, buffer, count, 0);
+    net_tcp_conn_t *conn = (net_tcp_conn_t *)entry->node;
+    if (!conn) return -ECONNRESET;
+    if (net_tcp_finish_connect(conn) == 1) return -EAGAIN;
+    uint32_t got = 0;
+    int ret = net_tcp_recv(conn, (uint8_t *)buffer, (uint32_t)count, &got, 10);
+    if (ret < 0) return -ECONNRESET;
+    return (int64_t)got;
+}
+
 static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
     if (!linux_frame) return (uint64_t)(-EFAULT);
     hbos_syscall_frame_t native = *linux_frame;
@@ -2767,6 +2864,7 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                     return (uint64_t)(-(errno > 0 ? errno : EIO));
                 }
                 linux_open_trace_record(path, (int)linux_frame->a1, 1, 0, fd);
+                linux_fdid_record(fd, "shm-open");
                 return (uint64_t)fd;
             }
             int64_t open_rc = linux_native_call(
@@ -2779,6 +2877,7 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             } else {
                 linux_open_trace_record(path, (int)linux_frame->a1, 1, 0,
                                         (int)open_rc);
+                linux_fdid_record((int)open_rc, "open");
             }
             return (uint64_t)open_rc;
         }
@@ -3846,6 +3945,15 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
         // 文件 I/O (0-11)
         // ============================================================
         case HBOS_SYS_READ:
+            /* socket 必须先分流：node 是 net_tcp_conn_t*，
+             * 落到 posix write()/read() 会走 vfs_write(node->ops)。 */
+            if (task_current() && (int)f->a0 >= 0 &&
+                (int)f->a0 < POSIX_MAX_FDS &&
+                task_current()->fd_table->entries[(int)f->a0].used &&
+                task_current()->fd_table->entries[(int)f->a0].type ==
+                    FD_SOCKET)
+                return (uint64_t)linux_socket_io_read(
+                    (int)f->a0, (void *)f->a1, (size_t)f->a2);
             if (task_current() && (int)f->a0 >= 0 &&
                 (int)f->a0 < POSIX_MAX_FDS &&
                 task_current()->fd_table->entries[(int)f->a0].used &&
@@ -3860,6 +3968,15 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return finish_syscall((long)read((int)f->a0, (void *)f->a1, (size_t)f->a2));
 
         case HBOS_SYS_WRITE:
+            /* socket 必须先分流：node 是 net_tcp_conn_t*，
+             * 落到 posix write()/read() 会走 vfs_write(node->ops)。 */
+            if (task_current() && (int)f->a0 >= 0 &&
+                (int)f->a0 < POSIX_MAX_FDS &&
+                task_current()->fd_table->entries[(int)f->a0].used &&
+                task_current()->fd_table->entries[(int)f->a0].type ==
+                    FD_SOCKET)
+                return (uint64_t)linux_socket_io_write(
+                    (int)f->a0, (void *)f->a1, (size_t)f->a2);
             if (task_current() && (int)f->a0 >= 0 &&
                 (int)f->a0 < POSIX_MAX_FDS &&
                 task_current()->fd_table->entries[(int)f->a0].used &&
@@ -4130,6 +4247,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (newfd < 0) return (uint64_t)(-EMFILE);
             cur->fd_table->entries[newfd] = cur->fd_table->entries[oldfd];
             linux_compat_retain(newfd);
+            linux_fdid_record(newfd, "dup2");
             return (uint64_t)newfd;
         }
 
@@ -4185,8 +4303,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             switch (cmd) {
                 case 0:   /* F_GETFL：只返回状态位，语义与 linux_fcntl 一致 */
                     {
-                        int fl = (int)(cur->fd_table->entries[fd].flags &
-                                       LINUX_F_GETFL_MASK);
+                        int fl = fd_getfl_flags(
+                            cur->fd_table->entries[fd].flags);
                         linux_getfl_trace_record(fd, fl, -1);
                         return (uint64_t)(unsigned)fl;
                     }
@@ -4196,8 +4314,8 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                           * 传 O_NONBLOCK 就把访问模式抹成 0，
                           * 后续 base::File 再校验 F_GETFL 就对不上了。 */
                     cur->fd_table->entries[fd].flags =
-                        (cur->fd_table->entries[fd].flags & ~LINUX_F_SETFL_MASK) |
-                        ((int)arg & LINUX_F_SETFL_MASK);
+                        fd_setfl_apply(cur->fd_table->entries[fd].flags,
+                                       (int)arg);
                     return 0;
                 case 2:   cur->fd_table->entries[fd].flags |= (int)arg; return 0;
                 case 3:   cur->fd_table->entries[fd].flags &= ~(int)arg; return 0;

@@ -62,3 +62,10 @@ int rtc_read_time(rtc_time_t *time) {
     time->century = 20; time->weekday = 6;
     return 0;
 }
+
+/* 与上面固定的 2026-01-02 03:04:05 对应的 Unix 时间戳（UTC）。写路径用它
+ * 给 inode 打时间戳：必须是**确定值**，否则两次运行写出的镜像无法逐字节
+ * 比较；同时它远早于宿主当前时间，e2fsck 不会报"时间戳在未来"。 */
+uint64_t rtc_timestamp(void) {
+    return 1767323045ULL;
+}

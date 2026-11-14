@@ -1094,6 +1094,22 @@ utf8-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/test_utf8
 
 # 多语言核心：严格/容错解码、字素簇、wcwidth、字体回退链、locale 契约。
+# 文件系统真写/真读：用真实 mkfs 镜像驱动同一份源码，e2fsck -fn 作独立裁判
+ext2-write-test: | $(BUILD_DIR)
+	BUILD_DIR=$(BUILD_DIR) bash tests/host/run_ext2_write.sh
+
+ext4-read-test: | $(BUILD_DIR)
+	BUILD_DIR=$(BUILD_DIR) bash tests/host/run_ext4_read.sh
+
+tmpfs-test: | $(BUILD_DIR)
+	BUILD_DIR=$(BUILD_DIR) bash tests/host/run_tmpfs.sh
+
+# fd 访问模式规则（F_GETFL/F_SETFL/O_ACCMODE 的单一实现，src/fd.h）
+fd-accmode-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc -DHBOS_FD_FLAGS_ONLY \
+		tests/host/test_fd_accmode.c -o $(BUILD_DIR)/test_fd_accmode
+	$(BUILD_DIR)/test_fd_accmode
+
 i18n-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_i18n.c \
 		src/i18n/utf8.c src/i18n/wcwidth.c src/i18n/font_fallback.c \
@@ -1109,7 +1125,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: check-headers ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test i18n-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test
+test: check-headers ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test i18n-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test fd-accmode-test ext2-write-test ext4-read-test tmpfs-test
 	@echo "✓ 宿主机测试全部通过"
 
 # 真实鼠标移动：QEMU monitor 注入 mouse_move，验证 QEMU → PS/2 → 内核

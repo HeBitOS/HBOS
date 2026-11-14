@@ -1,6 +1,6 @@
 /**
  * @file    ext2.h
- * @brief   导出 40 个接口（1 类型 / 17 宏 / 22 函数）
+ * @brief   导出 52 个接口（1 类型 / 27 宏 / 24 函数）
  *
  * @layer   drivers
  * @owner   src/
@@ -16,6 +16,14 @@
  *         EXT2_INCOMPAT_EXTENTS   常量 / 特性宏
  *         EXT2_INCOMPAT_64BIT     常量 / 特性宏
  *         EXT2_INCOMPAT_FLEX_BG   常量 / 特性宏
+ *         EXT2_INCOMPAT_FILETYPE  目录项带 file_type 字段
+ *         EXT2_INCOMPAT_META_BG   组描述符搬进元块组（本驱动不支持）
+ *         EXT2_RO_COMPAT_GDT_CSUM 组描述符带校验和
+ *         EXT2_RO_COMPAT_METADATA_CSUM 位图/inode/目录块带校验和
+ *         EXT2_INCOMPAT_INLINE_DATA 小文件/目录内联在 inode 里（读不了）
+ *         EXT2_INCOMPAT_ENCRYPT   文件名/内容加密（读不了）
+ *         EXT2_INCOMPAT_EA_INODE  xattr 值存在独立 inode 里
+ *         EXT2_INCOMPAT_DIRDATA   目录数据在独立文件里（实验特性）
  *         EXT2_EXTENTS_FL         常量 / 特性宏
  *         EXT2_SUPERBLOCK_OFFSET  常量 / 特性宏
  *         EXT2_SUPERBLOCK_SIZE    常量 / 特性宏
@@ -28,6 +36,9 @@
  *         EXT2_IND_BLOCK          EXT2IND块
  *         EXT2_DIND_BLOCK         EXT2DIND块
  *         EXT2_TIND_BLOCK         EXT2TIND块
+ *         EXT2_FT_REG_FILE        目录项 file_type：普通文件
+ *         EXT2_FT_DIR             目录项 file_type：目录
+ *         EXT2_FT_SYMLINK         目录项 file_type：符号链接
  *   函数  ext2_mount          Read
  *         ext2_last_error     最近一次挂载失败原因（静态字符串），成功时…
  *         ext2_read_inode     （待补）
@@ -43,7 +54,9 @@
  *         ext2_create_file    （待补）
  *         ext2_unlink         （待补）
  *         ext2_truncate       （待补）
- *         ext2_mkdir          （待补）
+ *         ext2_mkdir          在 parent 下建子目录
+ *         ext2_rmdir          删除空目录（非空返 -ENOTEMPTY）
+ *         ext2_rename         改名/移动目录项（-EEXIST/-ENOTEMPTY/-EISDIR）
  */
 #ifndef HBOS_EXT2_H
 #define HBOS_EXT2_H
@@ -59,6 +72,16 @@
 #define EXT2_INCOMPAT_EXTENTS   0x0040u
 #define EXT2_INCOMPAT_64BIT     0x0080u
 #define EXT2_INCOMPAT_FLEX_BG   0x0200u
+#define EXT2_INCOMPAT_FILETYPE  0x0002u  /* 目录项第 7 字节是 file_type */
+#define EXT2_INCOMPAT_META_BG   0x0010u  /* 组描述符在元块组里，read_bgd 不适用 */
+/* RO_COMPAT：只影响"能不能安全写"，读路径不受影响 */
+#define EXT2_RO_COMPAT_GDT_CSUM      0x0010u
+#define EXT2_RO_COMPAT_METADATA_CSUM 0x0400u
+/* INCOMPAT：改变"数据放在哪"或"目录项怎么编码"，读不了就必须拒绝挂载 */
+#define EXT2_INCOMPAT_EA_INODE     0x0400u
+#define EXT2_INCOMPAT_DIRDATA      0x1000u
+#define EXT2_INCOMPAT_INLINE_DATA  0x8000u
+#define EXT2_INCOMPAT_ENCRYPT      0x10000u
 #define EXT2_EXTENTS_FL         0x00080000u  /* inode i_flags: i_block 是 extent 树 */
 
 #define EXT2_SUPERBLOCK_OFFSET 1024
@@ -70,6 +93,12 @@
 #define EXT2_S_IFREG  0x8000
 #define EXT2_S_IFDIR  0x4000
 #define EXT2_S_IFLNK  0xA000
+
+/* 目录项 file_type（ext2 的 EXT2_FT_*；只有超级块 INCOMPAT_FILETYPE
+ * 置位时该字段才有意义，否则该 16 位是 name_len 的高 8 位） */
+#define EXT2_FT_REG_FILE 1
+#define EXT2_FT_DIR      2
+#define EXT2_FT_SYMLINK  7
 
 #define EXT2_NDIR_BLOCKS 12
 #define EXT2_IND_BLOCK   12
@@ -175,6 +204,7 @@ typedef struct {
     uint32_t feature_incompat;   /* 用于判断 extent / 64bit 布局 */
     uint32_t desc_size;          /* 组描述符大小：32 或 64 */
     int      read_only;          /* ext4 布局：只允许读，写入会破坏 extent */
+    int      has_filetype;       /* INCOMPAT_FILETYPE：目录项第 7 字节是 file_type */
     int mounted;
 } ext2_fs_t;
 
@@ -219,5 +249,22 @@ int ext2_readlink(ext2_fs_t *fs, const ext2_inode_t *inode, char *buf,
 int ext2_unlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name);
 int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num, uint32_t new_size);
 int ext2_mkdir(ext2_fs_t *fs, uint32_t parent_ino, const char *name);
+/** 删除空目录；非空返回 -ENOTEMPTY，目标是普通文件返回 -ENOTDIR。 */
+int ext2_rmdir(ext2_fs_t *fs, uint32_t dir_ino, const char *name);
+/**
+ * @brief 重命名/移动一个目录项。
+ *
+ * @param fs        已挂载实例
+ * @param old_dir   源父目录 inode
+ * @param old_name  源名字
+ * @param new_dir   目标父目录 inode
+ * @param new_name  目标名字
+ * @param replace   非 0 时允许覆盖已存在的普通文件/空目录（rename(2) 语义）
+ * @return 0 成功；失败返回 -errno（-ENOENT/-EEXIST/-ENOTEMPTY/-EISDIR/-ENOTDIR/-EROFS）
+ *
+ * 不变量：旧目录项在新目录项落盘之后才被移除，中途失败不会丢名字。
+ */
+int ext2_rename(ext2_fs_t *fs, uint32_t old_dir, const char *old_name,
+                uint32_t new_dir, const char *new_name, int replace);
 
 #endif

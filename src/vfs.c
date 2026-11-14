@@ -3,12 +3,15 @@
  * @brief 虚拟文件系统（VFS）实现，提供统一的文件操作接口
  */
 #include "vfs.h"
-#include "fs.h"
+#include "core/heap.h"
 #include "devfs.h"
+#include "errno.h"
+#include "fd.h"
+#include "fs.h"
+#include "fs/tmpfs.h"
 #include "linux_compat.h"
 #include "string.h"
 #include "core/task.h"
-#include "fd.h"
 #include "sys/stat.h"
 
 static vfs_node_t vfs_root_node = {
@@ -32,6 +35,9 @@ static vfs_node_t vfs_virtual_dirs[] = {
     {.name = "/tmp",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0777},
 };
 static uint32_t vfs_root_readdir_pos;
+/* tmpfs 的顺序 readdir 游标：vfs_readdir 的调用方（getdents）按"每轮取一项"
+ * 推进，而 tmpfs 只有按索引取项的接口。每次 opendir/closedir 重置。 */
+static uint32_t vfs_tmpfs_readdir_pos;
 static uint32_t vfs_symlink_count;
 
 static int vfs_path_in_tree(const char *path, const char *root) {
@@ -199,11 +205,37 @@ int vfs_resolve_path(const char *cwd, const char *path, char *out, uint32_t cap)
     return 0;
 }
 
+/*
+ * tmpfs 的挂载点与配额
+ * ═══════════════════
+ * 内核堆只有 2 MiB（core/heap.c: HEAP_POOL_SIZE），tmpfs 直接建在 kmalloc
+ * 上，所以配额必须远小于虚拟内存的想象力：这里是**上限**不是预留，超了
+ * 就返回 -ENOSPC（sqlite/Chromium 能正确回滚），而不是把内核 OOM 掉。
+ * 等 /dev/shm 要真正承载 Chromium 的共享内存时，得先把 tmpfs 换成按页
+ * 向 PMM 申请的后端（kmalloc 池太小），这一点写在任务回报里。
+ */
+#define VFS_TMPFS_TMP_BYTES     (1024u * 1024u)
+#define VFS_TMPFS_RUN_BYTES     (256u * 1024u)
+#define VFS_TMPFS_SHM_BYTES     (512u * 1024u)
+
+static void *vfs_tmpfs_alloc(uint32_t bytes) { return kmalloc(bytes); }
+static void vfs_tmpfs_free(void *ptr) { kfree(ptr); }
+
+/** 挂载 /tmp、/run、/dev/shm。失败不致命（退回只读/内存旁路路径）。 */
+static void vfs_tmpfs_init(void) {
+    tmpfs_alloc_t alloc = {vfs_tmpfs_alloc, vfs_tmpfs_free};
+    tmpfs_set_allocator(&alloc);
+    (void)tmpfs_mount("/tmp", VFS_TMPFS_TMP_BYTES);
+    (void)tmpfs_mount("/run", VFS_TMPFS_RUN_BYTES);
+    (void)tmpfs_mount("/dev/shm", VFS_TMPFS_SHM_BYTES);
+}
+
 /** 初始化 VFS 层，委托给底层文件系统初始化 */
 int vfs_init(void) {
     vfs_static_file_count = 0;
     vfs_symlink_count = 0;
     memset(vfs_static_files, 0, sizeof(vfs_static_files));
+    vfs_tmpfs_init();
     devfs_init();
     int result = fs_init();
     if (result < 0) return result;
@@ -251,6 +283,14 @@ static vfs_node_t *vfs_lookup_raw(const char *path) {
     for (uint32_t i = 0; i < vfs_static_file_count; i++) {
         if (strcmp(path, vfs_static_files[i].node.name) == 0)
             return &vfs_static_files[i].node;
+    }
+    /* tmpfs 先于虚拟目录：/tmp 在 vfs_virtual_dirs 里还有一个空的占位项，
+     * 若让占位项胜出，readdir /tmp 会落到平铺文件表而不是 tmpfs 树。 */
+    {
+        /* 挂载点拥有自己的命名空间：在 tmpfs 下面查不到就是真不存在，
+         * 不能再回落到 devfs/平铺文件表（否则磁盘根上残留的 "tmp/xxx"
+         * 会在 /tmp 挂载后"幽灵可见"）。 */
+        if (tmpfs_is_mounted(path)) return tmpfs_lookup(path);
     }
     for (uint32_t i = 0; i < sizeof(vfs_virtual_dirs) / sizeof(vfs_virtual_dirs[0]); i++) {
         if (strcmp(path, vfs_virtual_dirs[i].name) == 0)
@@ -309,12 +349,13 @@ static int vfs_expand_symlinks(const char *path, int follow_final,
             if (!node || node->type != VFS_NODE_SYMLINK) continue;
             if (depth == 8) return -1;
 
-            file_t *link = (file_t *)node->private_data;
-            if (!link || link->type != 2 || link->size >= VFS_MAX_NAME)
+            /* 用 ops->read 取链接目标：private_data 在 ramfs 上是 file_t、
+             * 在 tmpfs 上是 tmpfs 节点，直接强转会读错结构。 */
+            if (!node->ops || !node->ops->read || node->size >= VFS_MAX_NAME)
                 return -1;
             char target[VFS_MAX_NAME];
-            uint32_t got = fs_read_file_data(link, 0, target, link->size);
-            if (got != link->size) return -1;
+            int got = node->ops->read(node, 0, target, node->size);
+            if (got != (int)node->size) return -1;
             target[got] = '\0';
 
             char parent[VFS_MAX_NAME];
@@ -370,6 +411,12 @@ vfs_node_t *vfs_lookup_nofollow(const char *path) {
 /** 按路径创建 VFS 节点，若已存在则返回已有节点 */
 vfs_node_t *vfs_create(const char *path) {
     int existed = vfs_lookup_nofollow(path) != NULL;
+    if (tmpfs_is_mounted(path)) {
+        vfs_node_t *node = tmpfs_create(path, VFS_NODE_FILE, S_IFREG | 0644);
+        if (node && !existed)
+            linux_compat_inotify_notify(path, LINUX_IN_CREATE, 0);
+        return node;
+    }
     file_t *file = fs_create_file(path);
     if (file && !existed)
         linux_compat_inotify_notify(path, LINUX_IN_CREATE, 0);
@@ -377,6 +424,14 @@ vfs_node_t *vfs_create(const char *path) {
 }
 
 vfs_node_t *vfs_symlink(const char *path, const char *target) {
+    if (tmpfs_is_mounted(path)) {
+        vfs_node_t *node = tmpfs_symlink(path, target);
+        if (node) {
+            vfs_symlink_count++;
+            linux_compat_inotify_notify(path, LINUX_IN_CREATE, 0);
+        }
+        return node;
+    }
     file_t *link = fs_create_symlink(path, target);
     if (link) {
         vfs_symlink_count++;
@@ -400,6 +455,18 @@ int vfs_unlink(const char *path) {
 
 int vfs_rename(const char *old_path, const char *new_path, int replace) {
     if (!old_path || !new_path) return -1;
+    if (tmpfs_is_mounted(old_path) || tmpfs_is_mounted(new_path)) {
+        vfs_node_t *src = vfs_lookup_nofollow(old_path);
+        if (!src) return -ENOENT;
+        if (!tmpfs_is_mounted(old_path) || !tmpfs_is_mounted(new_path))
+            return -EXDEV;   /* 跨文件系统（tmpfs ↔ 磁盘）不支持 */
+        int r = tmpfs_rename(old_path, new_path, replace);
+        if (r < 0) return r;
+        int is_dir = (src->type == VFS_NODE_DIR);
+        vfs_rewrite_open_paths(old_path, new_path, is_dir);
+        linux_compat_inotify_move(old_path, new_path, is_dir);
+        return 0;
+    }
     vfs_node_t *source = vfs_lookup_nofollow(old_path);
     if (!source || (source->type != VFS_NODE_FILE &&
                     source->type != VFS_NODE_DIR &&
@@ -474,6 +541,12 @@ vfs_node_t *vfs_get(uint32_t index) {
 
 int vfs_mkdir(const char *path) {
     if (!path) return -1;
+    if (tmpfs_is_mounted(path)) {
+        int result = tmpfs_mkdir(path);
+        if (result == 0)
+            linux_compat_inotify_notify(path, LINUX_IN_CREATE, 1);
+        return result;
+    }
     int result = fs_mkdir(path);
     if (result == 0)
         linux_compat_inotify_notify(path, LINUX_IN_CREATE, 1);
@@ -482,6 +555,12 @@ int vfs_mkdir(const char *path) {
 
 int vfs_rmdir(const char *path) {
     if (!path) return -1;
+    if (tmpfs_is_mounted(path)) {
+        int result = tmpfs_rmdir(path);
+        if (result == 0)
+            linux_compat_inotify_notify(path, LINUX_IN_DELETE_SELF, 1);
+        return result;
+    }
     int result = fs_rmdir(path);
     if (result == 0)
         linux_compat_inotify_notify(path, LINUX_IN_DELETE_SELF, 1);
@@ -490,6 +569,12 @@ int vfs_rmdir(const char *path) {
 
 int vfs_opendir(const char *path) {
     if (!path) return -1;
+    if (tmpfs_is_mounted(path)) {
+        vfs_node_t *node = tmpfs_lookup(path);
+        if (!node || node->type != VFS_NODE_DIR) return -1;
+        vfs_tmpfs_readdir_pos = 0;
+        return 0;
+    }
     if (strcmp(path, "/") == 0) {
         vfs_root_readdir_pos = 0;
         fs_closedir("/");
@@ -519,6 +604,11 @@ int vfs_readdir(const char *path, char *name, uint32_t *type) {
         if (ret == 0) vfs_root_readdir_pos++;
         return ret;
     }
+    if (tmpfs_is_mounted(path)) {
+        int ret = tmpfs_readdir_at(path, vfs_tmpfs_readdir_pos, name, type);
+        if (ret == 0) vfs_tmpfs_readdir_pos++;
+        return ret;
+    }
     return fs_readdir(path, name, type);
 }
 
@@ -532,7 +622,8 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
      * 属于"能读不能列"的割裂。现在先给合成的顶层目录，再继续走真实 fs 枚举，
      * 由调用方按 index 顺序取，两段都覆盖到。 */
     if (strcmp(path, "/") == 0) {
-        static const char *roots[] = {"home", "bin", "tmp", "dev", "proc", "sys"};
+        static const char *roots[] = {"home", "bin", "tmp", "dev", "proc",
+                                      "sys", "run"};
         uint32_t root_count = sizeof(roots) / sizeof(roots[0]);
         if (index < root_count) {
             strncpy(name, roots[index], VFS_MAX_NAME);
@@ -551,6 +642,19 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
         }
         fs_closedir("/");
         return 0;
+    }
+    /* tmpfs 挂载点：目录内容全部来自内存树 */
+    if (tmpfs_is_mounted(path))
+        return tmpfs_readdir_at(path, index, name, type);
+    /* /dev 下挂载了 /dev/shm：devfs 不知道它，先给挂载点再列 devfs */
+    if (strcmp(path, "/dev") == 0) {
+        if (index == 0) {
+            strncpy(name, "shm", VFS_MAX_NAME);
+            name[VFS_MAX_NAME - 1] = '\0';
+            *type = VFS_NODE_DIR;
+            return 0;
+        }
+        return devfs_readdir(path, index - 1, name, type);
     }
     if (strcmp(path, "/dev") == 0 ||
         strcmp(path, "/proc") == 0 ||
@@ -608,5 +712,9 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
 
 int vfs_closedir(const char *path) {
     if (path && strcmp(path, "/") == 0) vfs_root_readdir_pos = 0;
+    if (path && tmpfs_is_mounted(path)) {
+        vfs_tmpfs_readdir_pos = 0;
+        return 0;
+    }
     return fs_closedir(path);
 }

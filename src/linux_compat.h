@@ -44,7 +44,10 @@
  *         LINUX_IN_Q_OVERFLOW     常量 / 特性宏
  *         LINUX_IN_IGNORED        常量 / 特性宏
  *         LINUX_IN_ISDIR          常量 / 特性宏
- *   函数  linux_compat_read             （待补）
+ *   函数  linux_fdid_record             记录一次 fd 物化（open/dup/scm…）
+ *         linux_fdid_event_of           反查某 fd 最近一次物化事件
+ *         linux_fdid_dump               打印 fd 溯源环形缓冲
+ *         linux_compat_read             （待补）
  *         linux_compat_write            （待补）
  *         linux_compat_close            （待补）
  *         linux_compat_retain           （待补）
@@ -206,6 +209,18 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
                                   size_t *received, int *truncated);
 
 /* /dev/shm 内存后备（见 linux_compat.c 的实现注释）。 */
+/* ── fd 身份溯源（诊断，不参与功能） ──────────────────────────────
+ *
+ * Chromium 的 base::File 会对"手上已有的 fd"做
+ *   fcntl(fd, F_GETFL) & O_ACCMODE == 它以为的访问模式
+ * 校验（不相等即 IMMEDIATE_CRASH）。而这个 fd 可能是 open / dup2 /
+ * fcntl(F_DUPFD) / SCM_RIGHTS 任一条路径造出来的 —— 崩溃现场只剩一个
+ * int3 地址，必须能反查"这个 fd 是谁、从哪来"。每次 fd 条目被"物化"
+ * 时在这里留一条溯源记录，用户态异常时随 fd 表一起打印。 */
+void linux_fdid_record(int fd, const char *event);
+const char *linux_fdid_event_of(int fd, int *owner_pid);
+void linux_fdid_dump(void);
+
 int linux_compat_shm_is_path(const char *path);
 /* 可写覆盖层统一判断：/dev/shm 下的条目，以及 /tmp 下的普通文件
  * （目录、符号链接、socket 不算）。syscall.c 里所有 open/unlink/stat/mkdir
