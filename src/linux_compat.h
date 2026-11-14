@@ -82,6 +82,7 @@
  *         linux_compat_shm_open         按名字打开或创建内存后备文件
  *         linux_compat_shm_stat         回填内存后备文件字节数
  *         linux_compat_shm_unlink       摘掉名字到内存槽的登记
+ *         linux_compat_shm_rename       覆盖层文件重命名
  *         linux_compat_memfd_create     （待补）
  *         linux_compat_memfd_truncate   （待补）
  *         linux_compat_memfd_size       （待补）
@@ -240,6 +241,7 @@ int linux_compat_overlay_is_path(const char *path);
 int linux_compat_shm_open(const char *path, int flags);
 int linux_compat_shm_stat(const char *path, uint64_t *size);
 int linux_compat_shm_unlink(const char *path);
+int linux_compat_shm_rename(const char *oldpath, const char *newpath);
 int linux_compat_memfd_create(const char *name, unsigned int flags);
 int linux_compat_memfd_truncate(int fd, uint64_t size);
 int linux_compat_memfd_size(int fd, uint64_t *size);

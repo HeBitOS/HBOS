@@ -3210,6 +3210,45 @@ int linux_compat_shm_unlink(const char *path) {
     return compat_set_errno(ENOENT);
 }
 
+int linux_compat_shm_rename(const char *oldpath, const char *newpath) {
+    const char *oldname = NULL, *newname = NULL;
+    if (!overlay_prefix(oldpath, &oldname) || !oldname ||
+        !overlay_prefix(newpath, &newname) || !newname) {
+        return compat_set_errno(EINVAL);
+    }
+    int old_idx = -1;
+    for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+        if (shm_names[i].used && strcmp(shm_names[i].name, oldname) == 0) {
+            old_idx = i;
+            break;
+        }
+    }
+    if (old_idx < 0) return compat_set_errno(ENOENT);
+    if (strcmp(oldname, newname) == 0) return 0;
+    size_t nlen = strlen(newname);
+    if (nlen >= sizeof(shm_names[old_idx].name)) {
+        return compat_set_errno(36 /* ENAMETOOLONG */);
+    }
+    /* 若目标已存在，先按 POSIX 语义摘掉旧目标的名字引用。 */
+    for (int i = 0; i < LINUX_SHM_NAMES; i++) {
+        if (i == old_idx || !shm_names[i].used) continue;
+        if (strcmp(shm_names[i].name, newname) == 0) {
+            int slot = shm_names[i].slot;
+            shm_names[i].used = 0;
+            shm_names[i].name[0] = '\0';
+            shm_names[i].slot = -1;
+            if (slot >= 0 && slot < LINUX_MEMFD_SLOTS) {
+                memfd_slot_t *slot_ptr = &memfd_slots[slot];
+                if (slot_ptr->name_refs) slot_ptr->name_refs--;
+                memfd_maybe_reset(slot_ptr);
+            }
+            break;
+        }
+    }
+    memcpy(shm_names[old_idx].name, newname, nlen + 1);
+    return 0;
+}
+
 static int linux_compat_memfd_create_impl(const char *name, unsigned int flags) {
     if (!name) return compat_set_errno(EFAULT);
     if (flags & ~(LINUX_MFD_CLOEXEC | LINUX_MFD_ALLOW_SEALING |

@@ -3476,6 +3476,19 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         case 77:  native.nr = HBOS_SYS_FTRUNCATE; break;
         case 79:  native.nr = HBOS_SYS_GETCWD; break;
         case 80:  native.nr = HBOS_SYS_CHDIR; break;
+        case 81: {                                    /* fchdir(fd) */
+            int fd = (int)linux_frame->a0;
+            task_t *cur = task_current();
+            if (fd < 0 || fd >= POSIX_MAX_FDS || !cur ||
+                !cur->fd_table->entries[fd].used) {
+                return (uint64_t)(-EBADF);
+            }
+            if (cur->fd_table->entries[fd].type != FD_FILE ||
+                !cur->fd_table->entries[fd].path[0]) {
+                return (uint64_t)(-ENOTDIR);
+            }
+            return finish_syscall((long)chdir(cur->fd_table->entries[fd].path));
+        }
         case 82: {                                    /* rename */
             native.nr = HBOS_SYS_RENAME;
             native.a2 = 0;
@@ -4702,9 +4715,9 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             memset(buf, 0, 128);
             buf[0] = 0x01021994L;      /* RAMFS_MAGIC */
             buf[1] = 4096;             /* f_bsize */
-            buf[2] = 1;                /* f_blocks */
-            buf[3] = 1;                /* f_bfree */
-            buf[4] = 1;                /* f_bavail */
+            buf[2] = 65536;            /* f_blocks (256MB) */
+            buf[3] = 65536;            /* f_bfree */
+            buf[4] = 65536;            /* f_bavail */
             buf[8] = 255;              /* f_namelen */
             return 0;
         }
@@ -6137,10 +6150,16 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             return (uint64_t)(long)ldso_ifunc_apply(
                 (void *)f->a0, f->a1, (uintptr_t)f->a2);
 
-        case HBOS_SYS_RENAME:
+        case HBOS_SYS_RENAME: {
+            const char *oldp = (const char *)f->a0;
+            const char *newp = (const char *)f->a1;
+            if (oldp && newp && linux_compat_overlay_is_path(oldp) &&
+                linux_compat_overlay_is_path(newp)) {
+                return finish_syscall(linux_compat_shm_rename(oldp, newp));
+            }
             return finish_syscall(posix_rename(
-                (const char *)f->a0, (const char *)f->a1,
-                (unsigned int)f->a2));
+                oldp, newp, (unsigned int)f->a2));
+        }
 
         case HBOS_SYS_HAX_EXISTS: {
             const char *name = (const char *)f->a0;

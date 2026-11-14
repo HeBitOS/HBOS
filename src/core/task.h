@@ -174,7 +174,7 @@ typedef struct {
  * 表现为"切换帧内容变成 {0,3,8,...}"、iret 到 RIP=0x3 的 #UD 整机
  * panic。64 任务 x 32KB = 2MB，代价可接受。 */
 #define TASK_STACK_SIZE (32 * 1024)
-#define MAX_TASKS 64
+#define MAX_TASKS 128
 #define PIT_DEFAULT_FREQUENCY_HZ 100U
 #define TASK_USER_HEAP_START 0x0000002000000000ULL
 /* 用户态 brk 堆上限。原来 64 MiB：Chromium 这类程序的主 arena 会超出，
