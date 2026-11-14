@@ -440,3 +440,70 @@ Wayland 请求数 51→51 基本不变（还没到合成阶段，正常）。
    是子代理产出，**已纳入构建但没有挂进启动流程**，未提交。要先定方向：
    它是 legacy KMS ioctl 集（20 个），而 `KWIN-PLAN.md` 结论是 KWin 6.5
    只走 atomic → 需要 `/dev/fb0` shim 或补 atomic。
+
+## 崩溃 2 定位（2026-11-14 第二轮）
+
+### 判定式核对（反汇编）
+
+`0x110392892d` 那处不是"err∉{EPIPE,ECONNRESET}"这么含糊，实际是：
+
+```asm
+3928916: mov rdi,[rbx+0x20]     ; 通道对象
+392891a: test rdi,rdi / je ok   ; 没有通道就直接过
+392891f: mov eax,[rbp-0x94]     ; 缓存的错误码
+3928925: cmp eax,0x20           ; EPIPE
+392892a: cmp eax,0x68           ; ECONNRESET
+392892d: jne 3928a68            ; 其它一律 FATAL
+```
+
+同一个函数里 `0x224cb50` 处的 rodata 是 **"XDG_CURRENT_DESKTOP"**（19 字节，
+正好对上 `mov ecx,0x13` + 虚表调用），说明这条崩溃在 **Ozone/Wayland 初始化**
+里：读桌面名 → 建通道 → 通道报错不是"对端走了"就 FATAL。
+
+### memfd_create 的 flag 缺口（已修）
+
+`[MEMFD-CREATE] pid=2 fd=-1 ev=memfd req=0x0xb path=shared-memory-region`
+
+`0xB = MFD_NOEXEC_SEAL(0x8) | MFD_ALLOW_SEALING(0x2) | MFD_CLOEXEC(0x1)`。
+Linux 6.3 起的新 flag，HBOS 不认就 EINVAL。Chromium 自带 fallback（退回 0x3
+重试，日志里紧接着就有成功的 `req=0x3`），所以不致命，但错误码留在 errno 里
+污染后续判断。已在 `linux_compat.c` 接受 `MFD_NOEXEC_SEAL` / `MFD_EXEC` 并对
+两者同时出现返回 EINVAL；**"不可 exec"的语义没有强制**（需要 mmap 的
+PROT_EXEC 检查配合），属已知缺口。
+
+### `[ERRNO]` 环的噪声过滤（新增）
+
+24 槽的环被 futex 的 ETIMEDOUT、recvmsg 的 EAGAIN、ioctl 的 ENOTTY、
+readlink 的 EINVAL 刷满，真正想看的那条 EINVAL 反而被挤掉（崩溃 2 就是这么丢的）。
+新增 `linux_errno_is_noise()`：只滤已确认语义正确的 (nr, errno) 组合，
+没查清的一条都不滤。
+
+### dup2 源 fd 可见后的事实
+
+每个 Chromium 子进程启动时固定 6 步 remap，**目标号固定、源号随进程变**：
+
+```
+[DUP2] pid=28 fd=0  src=37 /dev/null      stdin
+[DUP2] pid=28 fd=5  src=36 (socket)        mojo 通道；fd5 原本是 shm，被顶掉
+[DUP2] pid=28 fd=7  src=0  /dev/null   ★  就是这一条
+[DUP2] pid=28 fd=6  src=1  /dev/shm/...
+[DUP2] pid=28 fd=10 src=2  /dev/shm/...
+```
+
+命令行里三个句柄的号码是**写死的 3 / 4 / 7**（`--field-trial-handle=3`、
+`--metrics-shmem-handle=4`、`--pseudonymization-salt-handle=7`），实际搬运靠
+dup2。而 `fd=7` 的源是 `0` —— 即上一步刚装成 /dev/null 的 stdin。
+
+结论：**父进程把 pseudonymization salt 用 /dev/null 占了位**（salt region
+没建出来，或者建出来又丢了），子进程按命令行取 fd 7 去做
+`PlatformSharedMemoryRegion::Take()`，`F_GETFL&3 != O_RDWR` → 崩溃 1。
+这也解释了为什么崩溃 1 变成偶发：只有走到 `/dev/null → 7` 这一步的子进程才炸
+（p4 只剩崩溃 2，崩溃 1 一次没出现）。
+
+### 下一步
+
+父进程为什么拿 /dev/null 当 salt。salt 只有 4 字节，走
+`UnsafeSharedMemoryRegion::Create(4)` → `memfd_create("shared-memory-region")`，
+实测这条**能成功**，所以丢的可能在"取只读句柄 / DuplicateHandle"那一段。
+需要观察父进程 fd 3 / 4 / 7 何时被别的东西抢占（现在只有 crash dump 才 print
+fd 表，运行期看不到）。

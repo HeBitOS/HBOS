@@ -111,6 +111,18 @@
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
 #define LINUX_MFD_CLOEXEC 0x0001
 #define LINUX_MFD_ALLOW_SEALING 0x0002
+/* Linux 6.3 起新增的两个 flag，Chromium 100+ 会带 MFD_NOEXEC_SEAL 过来：
+ *
+ *   MFD_NOEXEC_SEAL 0x0008 —— 建出来的 memfd 不可 exec，且自动加 F_SEAL_EXEC
+ *   MFD_EXEC        0x0010 —— 显式声明"允许 exec"（老行为的 opt-in）
+ *
+ * 不认识就返回 EINVAL 的话，Chromium 会退回 0x3 重试（它自己防了这一手），
+ * 但错误码留在 errno 里污染后续判断，而且别家程序不一定有 fallback。
+ * HBOS 的 memfd 只是匿名页，用户态拿到后本来就只当数据用，这里接受并
+ * 忽略这两个 flag —— 真正的"不可 exec"约束没有强制（需要 mmap 的
+ * PROT_EXEC 检查配合），属已知语义缺口，记在这里别当实现了。 */
+#define LINUX_MFD_NOEXEC_SEAL 0x0008
+#define LINUX_MFD_EXEC 0x0010
 //Linux memfd_create() 兼容
 
 #define LINUX_INOTIFY_SLOTS 32
@@ -1600,7 +1612,7 @@ void linux_fdid_dump(void) {
 }
 
 static void shm_trace_push(const char *event, const char *path, int fd,
-                           int req_flags, int accmode);
+                           int req_flags, int accmode, int aux);
 
 int linux_compat_close(int fd) {
     task_t *task = compat_task();
@@ -1618,7 +1630,7 @@ int linux_compat_close(int fd) {
             !strcmp(entry->path, "/dev/null");
         if (interesting)
             shm_trace_push("close", entry->path, fd, entry->flags,
-                           entry->flags & 3);
+                           entry->flags & 3, 0);
     }
 
     if (entry->type == FD_EVENT && entry->compat_id < LINUX_EVENT_SLOTS) {
@@ -2711,7 +2723,7 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
          * 一个 /dev/null 上失败 —— 这条记录是判"顶掉"还是"从未到达"的唯一依据。 */
         if (!strncmp(task->fd_table->entries[new_fd].path, "/dev/shm/", 9))
             shm_trace_push("scm", task->fd_table->entries[new_fd].path, new_fd,
-                           task->fd_table->entries[new_fd].flags, 0);
+                           task->fd_table->entries[new_fd].flags, 0, 0);
         fds[(*received)++] = new_fd;
         /* The queue's retained reference is transferred to the new fd. */
     }
@@ -2885,6 +2897,7 @@ typedef struct {
     int fd;
     int req_flags;
     int accmode;
+    int aux;            /* 事件附加数据：dup2 记源 fd，其余为 0 */
     char event[12];
     char path[72];
 } linux_shm_trace_t;
@@ -2892,7 +2905,7 @@ static linux_shm_trace_t g_shm_trace[LINUX_SHM_TRACE_SLOTS];
 static uint32_t g_shm_trace_next;
 
 static void shm_trace_push(const char *event, const char *path, int fd,
-                           int req_flags, int accmode) {
+                           int req_flags, int accmode, int aux) {
     linux_shm_trace_t *slot =
         &g_shm_trace[g_shm_trace_next % LINUX_SHM_TRACE_SLOTS];
     g_shm_trace_next++;
@@ -2901,6 +2914,7 @@ static void shm_trace_push(const char *event, const char *path, int fd,
     slot->fd = fd;
     slot->req_flags = req_flags;
     slot->accmode = accmode;
+    slot->aux = aux;
     fdid_copy(slot->event, sizeof(slot->event), event ? event : "?");
     fdid_copy(slot->path, sizeof(slot->path), path);
 }
@@ -2938,6 +2952,12 @@ void linux_shm_trace_dump(void) {
         linux_ipc_put_hex((uint64_t)(unsigned)slot->req_flags);
         console_puts(" accmode=");
         compat_put_dec((unsigned int)slot->accmode);
+        if (!strcmp(slot->event, "dup2")) {
+            console_puts(" src=");
+            if (slot->aux < 0) console_putchar('-');
+            compat_put_dec((unsigned int)(slot->aux < 0 ? -slot->aux
+                                                        : slot->aux));
+        }
         if (slot->path[0]) {
             console_puts(" path=");
             console_puts(slot->path);
@@ -2956,7 +2976,17 @@ void linux_shm_trace_dump(void) {
  * 不变量：path 可为 NULL；fd 允许 <0（表示失败，dump 时会带负号打印）。 */
 void linux_shm_trace_note(const char *event, const char *path, int fd,
                           int flags) {
-    shm_trace_push(event, path, fd, flags, flags & 3);
+    shm_trace_push(event, path, fd, flags, flags & 3, 0);
+}
+
+/** 记一次 dup2：源 fd 号单独存进 aux。
+ *
+ * 为什么非要源号码：Chromium 把共享内存句柄的**目标** fd 号写死在命令行里
+ * （3/4/7），实际搬运靠 dup2。看到 `dup2(?, 7)` 时，源到底是共享内存还是
+ * /dev/null，直接决定"是 remap 顺序错了"还是"父进程压根没建出 region"。 */
+void linux_shm_trace_dup2(int oldfd, int newfd, const char *src_path,
+                          int flags) {
+    shm_trace_push("dup2", src_path, newfd, flags, flags & 3, oldfd);
 }
 
 static int linux_compat_shm_open_impl(const char *path, int flags) {
@@ -3105,12 +3135,12 @@ int linux_compat_shm_open(const char *path, int flags) {
     int traced = path && !strncmp(path, "/dev/shm/", 9);
     int fd = linux_compat_shm_open_impl(path, flags);
     if (fd < 0) {
-        if (traced) shm_trace_push("shm-fail", path, -1, flags, 0);
+        if (traced) shm_trace_push("shm-fail", path, -1, flags, 0, 0);
         return fd;
     }
     fd_entry_t *entry = compat_fd(compat_task(), fd);
     int accmode = entry ? (entry->flags & 3) : 0;
-    if (traced) shm_trace_push("shm-open", path, fd, flags, accmode);
+    if (traced) shm_trace_push("shm-open", path, fd, flags, accmode, 0);
     if ((flags & 3) != 3 && accmode != (flags & 3)) {
         console_puts("[SHM-OPEN] ACCOUNT-MISMATCH fd=");
         compat_put_dec((unsigned int)fd);
@@ -3173,7 +3203,12 @@ int linux_compat_shm_unlink(const char *path) {
 
 static int linux_compat_memfd_create_impl(const char *name, unsigned int flags) {
     if (!name) return compat_set_errno(EFAULT);
-    if (flags & ~(LINUX_MFD_CLOEXEC | LINUX_MFD_ALLOW_SEALING))
+    if (flags & ~(LINUX_MFD_CLOEXEC | LINUX_MFD_ALLOW_SEALING |
+                  LINUX_MFD_NOEXEC_SEAL | LINUX_MFD_EXEC))
+        return compat_set_errno(EINVAL);
+    /* Linux：两个互斥的 exec 语义同时给就是 EINVAL。 */
+    if ((flags & (LINUX_MFD_NOEXEC_SEAL | LINUX_MFD_EXEC)) ==
+        (LINUX_MFD_NOEXEC_SEAL | LINUX_MFD_EXEC))
         return compat_set_errno(EINVAL);
     /* Linux limits the debug name to 249 bytes.  No pathname is created. */
     size_t length = 0;
@@ -3213,7 +3248,7 @@ static int linux_compat_memfd_create_impl(const char *name, unsigned int flags) 
  * 被 Chromium 用到 —— 历史日志里 [MEMFD] 一条都没有）。 */
 int linux_compat_memfd_create(const char *name, unsigned int flags) {
     int fd = linux_compat_memfd_create_impl(name, flags);
-    shm_trace_push("memfd", name, fd, (int)flags, fd >= 0 ? 2 : 0);
+    shm_trace_push("memfd", name, fd, (int)flags, fd >= 0 ? 2 : 0, 0);
     return fd;
 }
 

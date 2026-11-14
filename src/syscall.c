@@ -2006,9 +2006,40 @@ static void linux_errno_copy_path(uint64_t pointer, char *out, uint32_t capacity
     out[i] = '\0';
 }
 
+/** 这些 (syscall, errno) 组合是**正常现象**，不是线索，别占用环。
+ *
+ * 这张表是踩出来的：24 槽的环里，Chromium 一条启动就能塞进几十条
+ * futex 的 ETIMEDOUT（正常超时）、recvmsg 的 EAGAIN（非阻塞空读）、
+ * ioctl 的 ENOTTY（能力探测）、readlink 打在普通文件上的 EINVAL ——
+ * 真正想看的那条 EINVAL 反而被挤掉了（实测崩溃 2 就是这样丢的）。
+ *
+ * 注意只滤"已经确认过语义正确"的组合，不要因为吵就滤掉没查清的。 */
+static int linux_errno_is_noise(uint64_t number, int64_t result) {
+    int err = (int)-result;
+    switch (number) {
+        case 202:                        /* futex：超时 / 被唤醒 */
+            return err == 110 || err == 11 || err == 4;
+        case 0: case 1:                  /* read / write */
+        case 45: case 46: case 47:       /* recvfrom / sendmsg / recvmsg */
+            return err == 11 || err == 4;
+        case 7: case 232:                /* poll / epoll_wait */
+            return err == 4;
+        case 16:                         /* ioctl 能力探测 */
+            return err == 25;            /* ENOTTY */
+        case 13:                         /* rt_sigaction：未实现的信号 */
+        case 89: case 267:               /* readlink(at) 打在普通文件上 */
+            return err == 22;            /* EINVAL，Linux 同样这么报 */
+        case 334:                        /* rseq 能力探测 */
+            return err == 38;            /* ENOSYS */
+        default:
+            return 0;
+    }
+}
+
 static void linux_errno_trace_record(uint64_t number, uint64_t a0,
                                      uint64_t a1, int64_t result) {
     if (result >= 0 || result == -ENOENT) return;
+    if (linux_errno_is_noise(number, result)) return;
     linux_errno_trace_t *slot =
         &linux_errno_trace[linux_errno_trace_next % LINUX_ERRNO_TRACE_SLOTS];
     linux_errno_trace_next++;
@@ -4742,10 +4773,10 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 int dst_interesting =
                     dst->used && !strncmp(dst->path, "/dev/shm/", 9);
                 if (dst_interesting || (src_interesting && newfd < 16)) {
-                    linux_shm_trace_note("dup2-src", src->path, newfd,
-                                         src->flags);
+                    linux_shm_trace_dup2(oldfd, newfd, src->path, src->flags);
+                    /* 被顶掉的是谁，单独记一条。 */
                     if (dst_interesting)
-                        linux_shm_trace_note("dup2-hit", dst->path, newfd,
+                        linux_shm_trace_note("dup2hit", dst->path, newfd,
                                              src->flags);
                 }
             }

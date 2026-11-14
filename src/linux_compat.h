@@ -224,6 +224,8 @@ void linux_fdid_record(int fd, const char *event);
 void linux_shm_trace_dump(void);
 void linux_shm_trace_note(const char *event, const char *path, int fd,
                           int flags);
+void linux_shm_trace_dup2(int oldfd, int newfd, const char *src_path,
+                          int flags);
 void linux_fdid_close(int fd);
 void linux_fdid_record_inherit(struct task *child, int parent_pid);
 void linux_fdid_chain_dump(int fd, int max_hops);

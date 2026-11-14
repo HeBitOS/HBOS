@@ -1300,7 +1300,7 @@ task_t *task_lookup(uint32_t id) {
 }
 
 void task_set_exe_path(uint32_t id, const char *path) {
-    task_t *task = task_get_by_id(id);
+    task_t *task = task_lookup(id);
     if (!task || !path) return;
     size_t n = 0;
     while (path[n] && n + 1 < sizeof(task->exe_path)) {
@@ -2218,7 +2218,7 @@ int task_getsid(uint32_t pid) {
  *   - clear_child_tid / robust_list 清空（exec 后由 libc 重新注册）。 */
 void task_exec_inherit(int new_id) {
     task_t *old = current_task;
-    task_t *fresh = task_get_by_id((uint32_t)new_id);
+    task_t *fresh = task_lookup((uint32_t)new_id);
     if (!old || !fresh || fresh == old) return;
 
     /* 父进程与进程组：新任务继承老任务的"位置"，而不是认老任务当爹。 */
