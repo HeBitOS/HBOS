@@ -393,6 +393,10 @@ else
 C_SRCS += $(SRC_GUI_DIR)/nogui.c
 endif
 
+# 按子目录自动纳入新增源文件（无匹配时为空，安全）。
+# 这样往 src/fs/ 或 src/i18n/ 里加新模块不必每加一个文件就改一次 Makefile。
+C_SRCS += $(wildcard $(SRC_DIR)/fs/*.c) $(wildcard $(SRC_DIR)/i18n/*.c)
+
 C_OBJS = $(C_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
 # 内核核心的 CPU/内存/调度层（含启动期用的核心内存管理）
