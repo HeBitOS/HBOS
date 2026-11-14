@@ -533,3 +533,29 @@ fd 表，运行期看不到）。
 `GetReadOnlyHandle`/`dup`——如果 HBOS 的 `dup()` 返回了 0（它从 0 号开始找空位，
 而 Linux 的 dup 也允许低号，但 Chromium 侧显然按"≥3"在记账），
 就会出现"Chromium 认为 salt 在 0 号"这种局面。
+
+## zygote 路径：`/proc/self/task` 的 nlink（2026-11-14 第三轮）
+
+去掉 `--no-zygote` 后崩在 `0x110BB27BEE`，反汇编（`0xbb27b63`）：
+
+```asm
+rbx = [rbp-0x90]      ; struct stat +0x10 = st_nlink
+cmp rbx,2 / jbe crash ; nlink <= 2 直接 int3
+cmp rbx,3 / sete al   ; 返回值 = (nlink == 3)
+```
+
+`fstatat(fd, "self/task/")`，fd 是 `open("/proc")`。**Chromium 拿目录的
+st_nlink 数线程**：`/proc/self/task` 里每个线程是一个子目录，所以
+nlink = 2 + 线程数；单线程进程 = 3，`<= 2` 是"不可能状态"→ 直接崩。
+
+HBOS 的 `stat/lstat/fstat` 一律 `st_nlink = 1`（`src/lib/posix.c`）。
+已改成 `vfs_dir_nlink()`：目录按 readdir 数子目录，返回 2 + 子目录数，
+非目录仍为 1。
+
+**但这还不够**：HBOS 的 `/proc` 是合成树，`/proc/self/task` 的 readdir
+不列举线程目录 → 数出来还是 2 → 仍然崩（实测 z2 里同一处照崩）。
+下一步要么让 procfs 真的按 tid 列举 `/proc/<pid>/task/<tid>`，
+要么在 procfs 的 task 节点上直接报 2+线程数。这是个真功能缺口，不是补丁。
+
+顺带：这一轮 Wayland 侧已经走到 **`xdg_toplevel`（对象 20/21 创建成功）**，
+说明浏览器主进程的 Ozone 初始化正在推进，卡点是 zygote 里的线程计数。
