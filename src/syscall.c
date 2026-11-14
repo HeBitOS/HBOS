@@ -425,6 +425,16 @@ static uint64_t linux_prctl(uint64_t option, uint64_t argument2,
             if (argument2 || argument3 || argument4 || argument5)
                 return (uint64_t)(-EINVAL);
             return task->no_new_privs ? 1 : 0;
+        /* PR_SET_VMA = 0x53564d41（连字符构成 "VM A" 的 ASCII 拼法）。
+         * Chromium 的 PartitionAlloc 每次建池都会
+         *   prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, len, name)
+         * 给匿名映射起名字（Linux 5.17+）。原来落到 default 返回 EINVAL，
+         * 实测 r85 里 renderer/utility 每轮刷一串
+         *   [ERRNO] nr=157 ... EINVAL      (a0=0x53564D41, a1=0)
+         * 命名是纯诊断功能，接受并忽略即可；拒绝反而让上层把这条路径
+         * 当成"prctl 不可用"而降级。 */
+        case 0x53564d41ULL: /* PR_SET_VMA */
+            return 0;
         default:
             return (uint64_t)(-EINVAL);
     }
@@ -1907,6 +1917,214 @@ void linux_open_trace_dump(void) {
     }
 }
 
+/* ── 失败 syscall 的 errno 环形缓冲 ─────────────────────────────
+ *
+ * 为什么需要它：Chromium 的 browser 进程在 0x1103928A69 处
+ *   cmp $0x20,%eax   ; EPIPE
+ *   je  ok
+ *   cmp $0x68,%eax   ; ECONNRESET
+ *   jne int3;ud2     ; IMMEDIATE_CRASH
+ * 只放行 EPIPE(32) / ECONNRESET(104) 两个 errno。要修它就必须知道
+ * **HBOS 那条路径实际返回了哪个 errno**，而现有 [FDERR] 只覆盖固定的
+ * 十几个 nr、预算 80 条，早就被启动期噪声吃光了（r85/base-r1 日志里
+ * 一条都没有）。
+ *
+ * 这里改成：所有返回负值的 Linux syscall 都进环形缓冲（跳过 ENOENT，
+ * 那是"库路径探测"的噪声），**不往串口写任何东西**，只在用户态异常时
+ * 随 fd 表一起 dump。所以对时间线没有影响，也不需要额外开关。
+ * 前置条件：只在 linux_syscall_dispatch_frame 的出口调用一次。 */
+#define LINUX_ERRNO_TRACE_SLOTS 24
+
+typedef struct {
+    int used;
+    int pid;
+    uint64_t number;
+    uint64_t a0;
+    uint64_t a1;
+    int64_t result;
+    char path[40];      /**< 路径类 syscall 的路径快照（调用当场复制） */
+} linux_errno_trace_t;
+
+static linux_errno_trace_t linux_errno_trace[LINUX_ERRNO_TRACE_SLOTS];
+static uint32_t linux_errno_trace_next;
+/* 按 errno 值留"最后一次"——环形缓冲会被别的进程挤掉，而 Chromium 崩溃时
+ * 读的往往是对象里**缓存**的错误码（见 0x1103518850：加锁读 this+0x68）。
+ * 于是"最后一次 EINVAL 是哪条 syscall"比"最近 24 条失败"更可能命中。 */
+#define LINUX_ERRNO_LAST_SLOTS 8
+static linux_errno_trace_t linux_errno_last[LINUX_ERRNO_LAST_SLOTS];
+
+static const char *linux_errno_name(int64_t error) {
+    switch ((int)-error) {
+    case 1:   return "EPERM";
+    case 2:   return "ENOENT";
+    case 5:   return "EIO";
+    case 9:   return "EBADF";
+    case 11:  return "EAGAIN";
+    case 13:  return "EACCES";
+    case 14:  return "EFAULT";
+    case 16:  return "EBUSY";
+    case 19:  return "ENODEV";
+    case 22:  return "EINVAL";
+    case 32:  return "EPIPE";
+    case 38:  return "ENOSYS";
+    case 88:  return "ENOTSOCK";
+    case 95:  return "EOPNOTSUPP";
+    case 104: return "ECONNRESET";
+    case 107: return "ENOTCONN";
+    case 110: return "ETIMEDOUT";
+    case 111: return "ECONNREFUSED";
+    default:  return "?";
+    }
+}
+
+/* 路径类 syscall 的路径参数在哪个寄存器。只登记真正需要的几个：
+ * 记录发生在 syscall 退出的那一刻，用户缓冲还可能已经被释放，所以必须
+ * 当场复制（和 [OPEN-TRACE] 同一套理由）。 */
+static uint64_t linux_errno_path_argument(uint64_t number, uint64_t a0,
+                                          uint64_t a1) {
+    switch (number) {
+    case 2:  case 4:  case 21: case 80: case 89: case 90:
+        return a0;                       /* open/stat/access/chdir/readlink/chmod */
+    case 257: case 259: case 267:        /* openat/newfstatat/readlinkat */
+        return a1;
+    default:
+        return 0;
+    }
+}
+
+static void linux_errno_copy_path(uint64_t pointer, char *out, uint32_t capacity) {
+    uint32_t i = 0;
+    if (!out || !capacity) return;
+    out[0] = '\0';
+    if (!pointer || pointer >= 0x0000800000000000ULL) return;
+    if (!vmm_get_phys(pointer & ~(uint64_t)(PAGE_SIZE - 1))) return;
+    while (i + 1 < capacity) {
+        char c = *(volatile char *)(uintptr_t)(pointer + i);
+        if (!c) break;
+        out[i++] = c;
+    }
+    out[i] = '\0';
+}
+
+static void linux_errno_trace_record(uint64_t number, uint64_t a0,
+                                     uint64_t a1, int64_t result) {
+    if (result >= 0 || result == -ENOENT) return;
+    linux_errno_trace_t *slot =
+        &linux_errno_trace[linux_errno_trace_next % LINUX_ERRNO_TRACE_SLOTS];
+    linux_errno_trace_next++;
+    slot->used = 1;
+    slot->pid = task_get_process_id();
+    slot->number = number;
+    slot->a0 = a0;
+    slot->a1 = a1;
+    slot->result = result;
+    linux_errno_copy_path(linux_errno_path_argument(number, a0, a1),
+                          slot->path, sizeof(slot->path));
+    /* 按 (pid, errno) 双键留存：不同进程的 EINVAL 不能互相覆盖 ——
+     * 实测 renderer 的 prctl/readlink 噪声会把 browser 的 EINVAL 顶掉。 */
+    {
+        uint32_t base = ((uint32_t)(-result) * 31u +
+                         (uint32_t)slot->pid) % LINUX_ERRNO_LAST_SLOTS;
+        linux_errno_trace_t *target = &linux_errno_last[base];
+        for (uint32_t i = 0; i < LINUX_ERRNO_LAST_SLOTS; i++) {
+            linux_errno_trace_t *candidate =
+                &linux_errno_last[(base + i) % LINUX_ERRNO_LAST_SLOTS];
+            if (!candidate->used ||
+                (candidate->pid == slot->pid &&
+                 candidate->result == slot->result)) {
+                target = candidate;
+                break;
+            }
+        }
+        *target = *slot;
+    }
+}
+
+/** 打印最近的失败 syscall（最旧在前，最后一条即崩溃前那一次）。 */
+void linux_errno_trace_dump(void) {
+    if (!linux_errno_trace_next) {
+        console_puts("[ERRNO] no failed syscall recorded\n");
+        return;
+    }
+    console_puts("[ERRNO] last failed syscalls (oldest first):\n");
+    uint32_t total = linux_errno_trace_next;
+    uint32_t count = total < LINUX_ERRNO_TRACE_SLOTS ? total
+                                                     : LINUX_ERRNO_TRACE_SLOTS;
+    uint32_t start = total - count;
+    for (uint32_t i = 0; i < count; i++) {
+        const linux_errno_trace_t *slot =
+            &linux_errno_trace[(start + i) % LINUX_ERRNO_TRACE_SLOTS];
+        int self_pid = task_get_process_id();
+        console_puts("[ERRNO] pid=");
+        trace_put_udec((uint64_t)slot->pid);
+        if (slot->pid == self_pid) console_putchar('*');  /* 崩溃进程自己的 */
+        console_puts(" nr=");
+        trace_put_udec(slot->number);
+        console_puts(slot->number == 157 ? " opt=0x" : " a0=0x");
+        trace_put_hex(slot->a0);
+        console_puts(" a1=0x");
+        trace_put_hex(slot->a1);
+        if (slot->path[0]) {
+            console_puts(" path=\"");
+            console_puts(slot->path);
+            console_putchar('"');
+        }
+        console_puts(" errno=");
+        trace_put_udec((uint64_t)(-slot->result));
+        console_putchar(' ');
+        console_puts(linux_errno_name(slot->result));
+        if (i + 1 == count) console_puts("  <-- last before trap");
+        console_putchar('\n');
+    }
+    /* Chromium 那条判定读的是对象里的**缓存错误码**（不是紧跟的这次
+     * syscall），所以把崩溃进程自己的历史单独再列一遍：环形缓冲是全局
+     * 的，别的进程一吵就把它挤掉了。 */
+    console_puts("[ERRNO] last failure per (pid, errno):\n");
+    for (uint32_t i = 0; i < LINUX_ERRNO_LAST_SLOTS; i++) {
+        const linux_errno_trace_t *last = &linux_errno_last[i];
+        if (!last->used) continue;
+        console_puts("[ERRNO]  errno=");
+        trace_put_udec((uint64_t)(-last->result));
+        console_putchar(' ');
+        console_puts(linux_errno_name(last->result));
+        console_puts(" pid=");
+        trace_put_udec((uint64_t)last->pid);
+        console_puts(" nr=");
+        trace_put_udec(last->number);
+        console_puts(" a0=0x");
+        trace_put_hex(last->a0);
+        if (last->path[0]) {
+            console_puts(" path=\"");
+            console_puts(last->path);
+            console_putchar('"');
+        }
+        console_putchar('\n');
+    }
+    int self_pid = task_get_process_id();
+    uint32_t shown = 0;
+    console_puts("[ERRNO] failures of the trapping pid only (newest first):\n");
+    for (uint32_t i = 0; i < count && shown < 6; i++) {
+        const linux_errno_trace_t *slot =
+            &linux_errno_trace[(start + count - 1 - i) % LINUX_ERRNO_TRACE_SLOTS];
+        if (slot->pid != self_pid) continue;
+        console_puts("[ERRNO]  pid=");
+        trace_put_udec((uint64_t)slot->pid);
+        console_puts(" nr=");
+        trace_put_udec(slot->number);
+        console_puts(" errno=");
+        trace_put_udec((uint64_t)(-slot->result));
+        console_putchar(' ');
+        console_puts(linux_errno_name(slot->result));
+        if (slot->path[0]) {
+            console_puts(" path=\"");
+            console_puts(slot->path);
+            console_putchar('"');
+        }
+        console_putchar('\n');
+        shown++;
+    }
+}
+
 /* ── fcntl(F_GETFL) 追踪 ────────────────────────────────────────
  *
  * Chromium 的 base::File 在接管一个 fd 之后会
@@ -2074,6 +2292,7 @@ void linux_fd_table_dump(void) {
         console_putchar('\n');
     }
     linux_fdid_dump();
+    linux_errno_trace_dump();
 }
 
 /* Resolve a Linux *at pathname without adding a second VFS path model.
@@ -6234,6 +6453,8 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
     uint64_t result = linux_dispatch_body(linux_frame);
     if (g_linux_prof_on) linux_prof_record(number, prof_t0);
     linux_trace_fd_error(number, linux_frame, (int64_t)result);
+    linux_errno_trace_record(number, linux_frame->a0, linux_frame->a1,
+                             (int64_t)result);
     linux_trace_push(number, linux_frame->a0, linux_frame->a1,
                      (int64_t)result);
     /* 按 pid 实时追踪（`setenv tracepid <pid>`）：fork 出来的子进程在
