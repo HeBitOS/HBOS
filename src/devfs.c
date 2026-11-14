@@ -582,6 +582,10 @@ void devfs_init(void) {
     n->mode = S_IFCHR | 0666;
     tty_register_vfs(0, n);
     n = devfs_alloc_node();
+    set_name(n, "/dev/tty0");
+    n->mode = S_IFCHR | 0666;
+    tty_register_vfs(0, n);
+    n = devfs_alloc_node();
     set_name(n, "/dev/ptmx");
     n->type = VFS_NODE_CHARDEV;
     n->mode = S_IFCHR | 0666;
