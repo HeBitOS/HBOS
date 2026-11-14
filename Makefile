@@ -287,6 +287,7 @@ C_SRCS = \
 	$(SRC_DIR)/ac97.c \
 	$(SRC_DIR)/tty.c \
 	$(SRC_DIR)/graphics/graphics.c \
+	$(SRC_DIR)/graphics/fbdev.c \
 	$(SRC_DIR)/graphics/font_cjk.c \
 	$(SRC_DIR)/input/mouse.c \
 	$(SRC_DIR)/shell/shell.c \

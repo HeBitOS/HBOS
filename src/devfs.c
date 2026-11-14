@@ -23,6 +23,7 @@
 #include "string.h"
 #include "unistd.h"
 #include "shell/shell.h"
+#include "graphics/fbdev.h"
 #include "crypto/chacha20_poly1305.h"
 
 #define DEVFS_MAX_NODES 192
@@ -684,6 +685,7 @@ void devfs_init(void) {
     for (uint32_t i = 0; i < sizeof(sysfs_files) / sizeof(sysfs_files[0]); i++)
         devfs_register_sysfs_file(sysfs_files[i].path,
                                   sysfs_files[i].content);
+    fbdev_init();
 }
 
 /** 按路径查找伪文件系统节点 */

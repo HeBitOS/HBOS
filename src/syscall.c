@@ -4040,6 +4040,16 @@ __attribute__((weak)) uint64_t drm_card_page_phys(vfs_node_t *node,
     (void)page_index;
     return 0;
 }
+__attribute__((weak)) int fbdev_is_node(vfs_node_t *node) {
+    (void)node;
+    return 0;
+}
+__attribute__((weak)) uint64_t fbdev_page_phys(vfs_node_t *node,
+                                               uint64_t page_index) {
+    (void)node;
+    (void)page_index;
+    return 0;
+}
 
 static void vm_area_drop_backing(vm_area_t *area) {
     if (!area) return;
@@ -5315,12 +5325,16 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 vma->backing_offset = (uint64_t)off;
             } else if (!anonymous && mapping_entry->type == FD_FILE &&
                        mapping_entry->node &&
-                       drm_card_is_node(mapping_entry->node)) {
-                /* DRM dumb buffer：直接把驱动持有的物理页映射进用户态。 */
+                       (drm_card_is_node(mapping_entry->node) ||
+                        fbdev_is_node(mapping_entry->node))) {
+                /* 设备帧缓冲（DRM dumb / /dev/fb0）：直接把驱动持有的物理页映射进用户态。 */
+                int is_fbdev = fbdev_is_node(mapping_entry->node);
                 size_t mapped = 0;
                 for (; mapped < pages; mapped++) {
-                    uint64_t phys = drm_card_page_phys(
-                        mapping_entry->node, (uint64_t)off / PAGE_SIZE + mapped);
+                    uint64_t page_idx = (uint64_t)off / PAGE_SIZE + mapped;
+                    uint64_t phys = is_fbdev
+                        ? fbdev_page_phys(mapping_entry->node, page_idx)
+                        : drm_card_page_phys(mapping_entry->node, page_idx);
                     if (!phys) break;
                     if (vmm_map_page((uint64_t)p + mapped * PAGE_SIZE, phys,
                                      VMM_P | VMM_U |
