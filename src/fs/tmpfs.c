@@ -201,8 +201,35 @@ static int tmpfs_ensure_pages(tmpfs_node_t *n, uint32_t need_pages) {
     return 0;
 }
 
-/** 把数据页收缩到 keep 页（尾部页归还分配器）。 */
+/**
+ * @brief 把数据页收缩到 keep 页（尾部页归还分配器）。
+ *
+ * keep == 0 时连**指针表**一起归还：一个 512 MiB 文件缩到 0 后如果留着
+ * 1 MiB 的指针表，空文件仍长期占 256 个物理页 —— 实测压测里 512 MiB
+ * 释放后还挂着 260 页，就是这个原因。truncate(0) 之后再来写会重新扩容，
+ * 代价只是一次分配，换回的是"空闲即真归还"。
+ */
 static void tmpfs_shrink_pages(tmpfs_node_t *n, uint32_t keep) {
+    if (keep == 0 && n->pages) {
+        uint32_t bytes = n->index_slots * (uint32_t)sizeof(uint8_t *);
+        uint32_t count = (bytes + TMPFS_PAGE_BYTES - 1) / TMPFS_PAGE_BYTES;
+        for (uint32_t i = 0; i < n->page_count; i++) {
+            if (!n->pages[i]) continue;
+            g_alloc.free_pages(n->pages[i], 1);
+            n->pages[i] = 0;
+        }
+        if (n->mount) {
+            uint32_t used = n->page_count * TMPFS_PAGE_BYTES;
+            if (n->mount->used_bytes >= used) n->mount->used_bytes -= used;
+            else n->mount->used_bytes = 0;
+        }
+        n->page_count = 0;
+        n->node.capacity = 0;
+        g_alloc.free_pages(n->pages, count);
+        n->pages = 0;
+        n->index_slots = 0;
+        return;
+    }
     if (keep >= n->page_count) return;
     uint32_t freed = n->page_count - keep;
     for (uint32_t i = keep; i < n->page_count; i++) {
@@ -640,6 +667,52 @@ int tmpfs_rename(const char *old_path, const char *new_path, int replace) {
             c->node.name[sizeof(c->node.name) - 1] = '\0';
             if (depth < sizeof(stack) / sizeof(stack[0])) stack[depth++] = c;
         }
+    }
+    return 0;
+}
+
+/* ── 全局枚举 ──────────────────────────────────────────────────
+ *
+ * vfs_count()/vfs_get()/fs_list() 需要一个"整个命名空间"的线性视图。
+ * 平铺文件表天然线性，而 tmpfs 是树，所以这里做深度优先展开：index 从 0
+ * 开始，按挂载点顺序、每个挂载点先根后子。O(n) 一次遍历，节点数在临时
+ * 文件目录规模（几千）下完全够用；没有维护第二份索引，也就不会和树脱节。
+ */
+static uint32_t tmpfs_walk_count(tmpfs_node_t *n, int depth) {
+    if (!n || depth > 64) return 0;
+    uint32_t total = 1;
+    for (tmpfs_node_t *c = n->children; c; c = c->next)
+        total += tmpfs_walk_count(c, depth + 1);
+    return total;
+}
+
+static vfs_node_t *tmpfs_walk_at(tmpfs_node_t *n, uint32_t *cursor,
+                                 uint32_t target, int depth) {
+    if (!n || depth > 64) return 0;
+    if (*cursor == target) return &n->node;
+    (*cursor)++;
+    for (tmpfs_node_t *c = n->children; c; c = c->next) {
+        vfs_node_t *hit = tmpfs_walk_at(c, cursor, target, depth + 1);
+        if (hit) return hit;
+    }
+    return 0;
+}
+
+uint32_t tmpfs_node_count(void) {
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < TMPFS_MAX_MOUNTS; i++) {
+        if (!g_mounts[i].used) continue;
+        total += tmpfs_walk_count(g_mounts[i].root, 0);
+    }
+    return total;
+}
+
+vfs_node_t *tmpfs_node_at(uint32_t index) {
+    uint32_t cursor = 0;
+    for (uint32_t i = 0; i < TMPFS_MAX_MOUNTS; i++) {
+        if (!g_mounts[i].used) continue;
+        vfs_node_t *hit = tmpfs_walk_at(g_mounts[i].root, &cursor, index, 0);
+        if (hit) return hit;
     }
     return 0;
 }

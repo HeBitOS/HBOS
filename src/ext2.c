@@ -16,6 +16,20 @@
  * 无效块号/inode 号，比负值更贴合契约；写路径在调用点翻译成 -ENOSPC。
  */
 
+/**
+ * @brief 任何块写入前把"干净卸载"标记清掉。
+ *
+ * 必须是**写块**（而非写超级块）时执行：ext2_write_superblock 也被
+ * ext2_sync 用来置位，如果在写超级块时统一清位就永远同步不成 clean。
+ * 只读卷不碰（ext4 布局一个字节都不写）。
+ */
+static void ext2_mark_dirty(ext2_fs_t *fs) {
+    if (fs && !fs->read_only) fs->sb.s_state &= (uint16_t)~EXT2_VALID_FS;
+}
+
+/* 挂载收尾要写超级块（置脏），实现文件末尾才有定义，先声明。 */
+static int ext2_write_superblock(ext2_fs_t *fs);
+
 /** 参数/状态检查：非只读且已挂载返回 0，否则返回 -EINVAL / -EROFS。 */
 static int ext2_writable(ext2_fs_t *fs) {
     if (!fs || !fs->mounted) return -EINVAL;
@@ -215,6 +229,21 @@ int ext2_mount(uint32_t partition_lba, ext2_fs_t *fs)
                     / fs->sb.s_inodes_per_group;
     fs->partition_lba = partition_lba;
     fs->mounted = 1;
+
+    /* 挂载即置脏：核心里没有任何"写回缓存"，但多步写（目录项→inode→位图）
+     * 不是原子的，崩溃后必须让 e2fsck 做全检。只读卷（ext4 布局）不写。 */
+    if (!fs->read_only) {
+        fs->sb.s_state &= (uint16_t)~EXT2_VALID_FS;
+        fs->sb.s_mtime = ext2_now();
+        fs->sb.s_wtime = fs->sb.s_mtime;
+        if (ext2_write_superblock(fs) < 0) {
+            /* 只读介质（写保护块设备 / 只读镜像）：标脏失败不是致命错误，
+             * 降级为只读挂载 —— 读路径完全可用，写路径返回 -EROFS，比
+             * "整盘挂不上"更符合用户预期。 */
+            fs->read_only = 1;
+            g_ext2_error = "read-only medium (cannot mark dirty)";
+        }
+    }
     return 0;
 }
 
@@ -561,6 +590,7 @@ int ext2_write_block(ext2_fs_t *fs, uint32_t block, const uint8_t *buf)
 {
     if (fs && fs->read_only) return -1;   /* ext4 布局：拒绝一切写入 */
     if (!fs || !fs->mounted || !buf || !block) return -1;
+    ext2_mark_dirty(fs);
     for (int s = 0; s < EXT2_IND_SLOTS; s++) {
         if (g_ind_slot_block[s] == block)
             g_ind_slot_block[s] = 0;
@@ -599,6 +629,14 @@ static int ext2_write_superblock(ext2_fs_t *fs)
     if (copy_sz > EXT2_SUPERBLOCK_SIZE) copy_sz = EXT2_SUPERBLOCK_SIZE;
     memcpy(sb_raw, &fs->sb, copy_sz);
     return block_write_sectors(fs->partition_lba + sb_lba, sb_raw, sectors) == 0 ? 0 : -1;
+}
+
+int ext2_sync(ext2_fs_t *fs) {
+    if (!fs || !fs->mounted) return -EINVAL;
+    if (fs->read_only) return 0;              /* 只读卷：不写超级块 */
+    fs->sb.s_state |= EXT2_VALID_FS;
+    fs->sb.s_wtime = ext2_now();
+    return ext2_write_superblock(fs) < 0 ? -EIO : 0;
 }
 
 int ext2_write_inode(ext2_fs_t *fs, uint32_t inode_num, const ext2_inode_t *inode)

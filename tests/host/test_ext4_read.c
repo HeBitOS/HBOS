@@ -42,6 +42,10 @@ int main(int argc, char **argv) {
            fs.block_size, fs.inode_size, fs.block_group_count, fs.desc_size,
            fs.feature_incompat, fs.read_only);
     CHECK(fs.read_only == 1, "ext4 must be mounted read-only");
+    /* 只读挂载不得改动超级块状态：mkfs 留下的"干净"必须原样保留 */
+    CHECK((fs.sb.s_state & EXT2_VALID_FS) != 0,
+          "read-only mount must not dirty the superblock (s_state=0x%x)",
+          fs.sb.s_state);
     CHECK(fs.block_size == 4096, "expected 4K blocks, got %u", fs.block_size);
     CHECK(fs.inode_size == 256, "ext4 inode size %u", fs.inode_size);
     CHECK(fs.desc_size == 64, "64bit 组描述符步长 %u", fs.desc_size);

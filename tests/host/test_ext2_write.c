@@ -55,8 +55,14 @@ static int read_back(uint32_t ino, uint32_t off, uint8_t *buf, uint32_t n) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <ext2-image> [stop-phase]\n", argv[0]); return 2; }
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <ext2-image> [stop-phase] [--no-sync]\n", argv[0]);
+        return 2;
+    }
     const int stop_phase = argc > 2 ? atoi(argv[2]) : 99;
+    int no_sync = 0;
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "--no-sync") == 0) no_sync = 1;
     hbostest_open(argv[1], 0);
 
     if (ext2_mount(0, &fs) < 0) {
@@ -456,7 +462,26 @@ int main(int argc, char **argv) {
            fs.sb.s_free_blocks_count - free_before_cleanup,
            free_before_cleanup, fs.sb.s_free_blocks_count);
 
-    printf("%s (%d failures), free_blocks=%u\n",
-           failures ? "FAILED" : "OK", failures, fs.sb.s_free_blocks_count);
+    /* ── 11. 超级块干净/脏标记 ─────────────────────────────────── */
+    /* 收尾的写操作之后必须又是脏的 */
+    CHECK((fs.sb.s_state & EXT2_VALID_FS) == 0,
+          "writes after mount must keep fs dirty (s_state=0x%x)", fs.sb.s_state);
+    if (!no_sync) {
+        CHECK(ext2_sync(&fs) == 0, "ext2_sync");
+        CHECK((fs.sb.s_state & EXT2_VALID_FS) != 0,
+              "sync must set EXT2_VALID_FS (s_state=0x%x)", fs.sb.s_state);
+        /* 同步之后再写，必须重新变脏；再同步回来，留给脚本跑 e2fsck */
+        int st = ext2_create_file(&fs, EXT2_ROOT_INO, "state.tmp", 1);
+        CHECK(st > 0, "create state.tmp");
+        CHECK((fs.sb.s_state & EXT2_VALID_FS) == 0,
+              "write after sync must clear clean flag");
+        CHECK(ext2_unlink(&fs, EXT2_ROOT_INO, "state.tmp") == 0, "unlink state.tmp");
+        CHECK(ext2_sync(&fs) == 0, "sync after cleanup");
+        CHECK((fs.sb.s_state & EXT2_VALID_FS) != 0, "final state must be clean");
+    }
+
+    printf("%s (%d failures), free_blocks=%u, state=0x%x\n",
+           failures ? "FAILED" : "OK", failures, fs.sb.s_free_blocks_count,
+           fs.sb.s_state);
     return failures ? 1 : 0;
 }

@@ -71,11 +71,24 @@ int main(int argc, char **argv) {
     CHECK(tmpfs_is_mounted("/tmp/a") == 1, "is_mounted /tmp/a");
     CHECK(tmpfs_is_mounted("/tmpfoo") == 0, "prefix must respect '/' boundary");
     CHECK(tmpfs_is_mounted("/var") == 0, "is_mounted /var");
+    /* 枚举视图：两个挂载根，深度优先、无重复 */
+    CHECK(tmpfs_node_count() == 2, "node_count at mount %u", tmpfs_node_count());
+    CHECK(tmpfs_node_at(0) && strcmp(tmpfs_node_at(0)->name, "/tmp") == 0,
+          "node_at(0)=%s", tmpfs_node_at(0) ? tmpfs_node_at(0)->name : "(null)");
+    CHECK(tmpfs_node_at(1) && strcmp(tmpfs_node_at(1)->name, "/dev/shm") == 0,
+          "node_at(1)");
+    CHECK(tmpfs_node_at(2) == 0, "node_at past end");
 
     /* ── 1. 创建 / 写 / 读 / 空洞 ─────────────────────────────── */
     vfs_node_t *a = tmpfs_create("/tmp/a", VFS_NODE_FILE, 0644);
     CHECK(a != 0, "create /tmp/a");
     CHECK(tmpfs_create("/tmp/a", VFS_NODE_FILE, 0644) == 0, "EEXIST must fail");
+    /* 深度优先：/tmp 根 → /tmp/a → /dev/shm 根 */
+    CHECK(tmpfs_node_count() == 3, "node_count after create %u", tmpfs_node_count());
+    CHECK(tmpfs_node_at(1) && strcmp(tmpfs_node_at(1)->name, "/tmp/a") == 0,
+          "node_at(1)=%s", tmpfs_node_at(1) ? tmpfs_node_at(1)->name : "(null)");
+    CHECK(tmpfs_node_at(2) && strcmp(tmpfs_node_at(2)->name, "/dev/shm") == 0,
+          "node_at(2)=%s", tmpfs_node_at(2) ? tmpfs_node_at(2)->name : "(null)");
     uint8_t data[200], got[200], hole[6000];
     pattern(data, sizeof data, 3);
     CHECK(a->ops->write(a, 0, data, sizeof data) == (int)sizeof data, "write 200");
@@ -324,6 +337,8 @@ int main(int argc, char **argv) {
     CHECK(tmpfs_unlink("/dev/shm/s") == 0, "unlink shm file");
     CHECK(tmpfs_bytes_used("/tmp") == 0, "quota must return to 0 (got %u)",
           tmpfs_bytes_used("/tmp"));
+    /* 目录树清空后枚举视图只剩两个挂载根 */
+    CHECK(tmpfs_node_count() == 2, "node_count after cleanup %u", tmpfs_node_count());
 
     /* ── 8. 可选：N MiB 压测（证明 512 MiB 级配额） ───────────── */
     uint32_t expected_roots = 2;
@@ -355,6 +370,11 @@ int main(int argc, char **argv) {
         CHECK(sf->ops->truncate(sf, 0) == 0, "stress release");
         CHECK(tmpfs_bytes_used("/stress") == 0, "stress quota back to 0 (%u)",
               tmpfs_bytes_used("/stress"));
+        /* truncate(0) 必须连指针表一起归还：只剩挂载根 + 这个节点自身 */
+        CHECK(g_pages_in_use == expected_roots + 1,
+              "index table must be released (in_use=%llu, expect %u)",
+              (unsigned long long)g_pages_in_use, expected_roots + 1);
+        CHECK(tmpfs_unlink("/stress/big") == 0, "unlink stress file");
         printf("stress: %u MiB written/read/released on /stress\n", stress_mib);
     }
 

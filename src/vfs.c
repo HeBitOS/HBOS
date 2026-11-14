@@ -35,6 +35,44 @@ static vfs_node_t vfs_virtual_dirs[] = {
     {.name = "/tmp",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0777},
 };
 static uint32_t vfs_root_readdir_pos;
+
+/**
+ * @brief 直接挂在 dir 下的一级 tmpfs 挂载点（/dev → shm，/ → run...）。
+ *
+ * 挂载点不是目录项，平铺表与 devfs 都不知道它；但 `ls` 必须看得见。
+ * 这里从挂载表反推，而不是在 roots[]/devfs 里硬编码名字 —— 否则以后
+ * 再挂 /mnt/x 或 /dev/mqueue 又要改两处。
+ *
+ * @return 命中的名字长度（>0）写入 name；没有则 -1
+ */
+static int vfs_mount_child_at(const char *dir, uint32_t index, char *name) {
+    uint32_t seen = 0;
+    size_t dlen = strlen(dir);
+    for (uint32_t i = 0; i < tmpfs_mount_count(); i++) {
+        const char *mp = tmpfs_mount_path(i);
+        if (!mp) continue;
+        const char *leaf = 0;
+        if (dlen == 1 && dir[0] == '/') {
+            if (mp[0] == '/' && mp[1] && !strchr(mp + 1, '/')) leaf = mp + 1;
+        } else if (strncmp(mp, dir, dlen) == 0 && mp[dlen] == '/' &&
+                   mp[dlen + 1] && !strchr(mp + dlen + 1, '/')) {
+            leaf = mp + dlen + 1;
+        }
+        if (!leaf) continue;
+        if (seen++ != index) continue;
+        strncpy(name, leaf, VFS_MAX_NAME);
+        name[VFS_MAX_NAME - 1] = '\0';
+        return 0;
+    }
+    return -1;
+}
+
+static uint32_t vfs_mount_child_count(const char *dir) {
+    uint32_t count = 0;
+    char scratch[VFS_MAX_NAME];
+    while (vfs_mount_child_at(dir, count, scratch) == 0) count++;
+    return count;
+}
 /* tmpfs 的顺序 readdir 游标：vfs_readdir 的调用方（getdents）按"每轮取一项"
  * 推进，而 tmpfs 只有按索引取项的接口。每次 opendir/closedir 重置。 */
 static uint32_t vfs_tmpfs_readdir_pos;
@@ -541,14 +579,24 @@ int vfs_truncate(vfs_node_t *node, uint32_t size) {
     return result;
 }
 
-/** 获取 VFS 节点数量 */
+/**
+ * @brief 获取整个命名空间的节点数：平铺文件表 + 所有 tmpfs 挂载点。
+ *
+ * 为什么不能只返回 fs_get_count()：tmpfs 是独立内存树，不在平铺表里。
+ * 以前 `fsinfo` 数文件、`find/du` 类工具遍历时都看不到 /tmp /run /dev/shm
+ * 里的东西 —— "ls /tmp 有、全盘列举没有" 的割裂。这里做统一视图：
+ * 前 fs_get_count() 项是平铺表（与旧行为完全一致），后面按挂载点顺序
+ * 深度优先追加 tmpfs 节点。
+ */
 uint32_t vfs_count(void) {
-    return fs_get_count();
+    return fs_get_count() + tmpfs_node_count();
 }
 
-/** 按索引获取 VFS 节点 */
+/** 按索引获取 VFS 节点（索引语义与 vfs_count 一致） */
 vfs_node_t *vfs_get(uint32_t index) {
-    return fs_get_node(index);
+    uint32_t flat = fs_get_count();
+    if (index < flat) return fs_get_node(index);
+    return tmpfs_node_at(index - flat);
 }
 
 int vfs_mkdir(const char *path) {
@@ -634,8 +682,7 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
      * 属于"能读不能列"的割裂。现在先给合成的顶层目录，再继续走真实 fs 枚举，
      * 由调用方按 index 顺序取，两段都覆盖到。 */
     if (strcmp(path, "/") == 0) {
-        static const char *roots[] = {"home", "bin", "tmp", "dev", "proc",
-                                      "sys", "run"};
+        static const char *roots[] = {"home", "bin", "tmp", "dev", "proc", "sys"};
         uint32_t root_count = sizeof(roots) / sizeof(roots[0]);
         if (index < root_count) {
             strncpy(name, roots[index], VFS_MAX_NAME);
@@ -643,8 +690,27 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
             *type = VFS_NODE_DIR;
             return 0;
         }
-        /* 越过合成项后，从真实 fs 的第 0 项开始补齐（index - root_count） */
+        /* 越过合成项后先列"直接挂在 / 下的挂载点"（/tmp /run …），
+         * 再补真实 fs 的条目 —— 两段都不漏，顺序也稳定。 */
         uint32_t want = index - root_count;
+        uint32_t mounts = vfs_mount_child_count("/");
+        uint32_t seen_mounts = 0;
+        for (uint32_t m = 0; m < mounts; m++) {
+            char mount_name[VFS_MAX_NAME];
+            if (vfs_mount_child_at("/", m, mount_name) < 0) continue;
+            int duplicate = 0;
+            for (uint32_t r = 0; r < root_count; r++)
+                if (strcmp(mount_name, roots[r]) == 0) duplicate = 1;
+            if (duplicate) continue;      /* /tmp 既是合成项又是挂载点：只列一次 */
+            if (seen_mounts == want) {
+                strncpy(name, mount_name, VFS_MAX_NAME);
+                name[VFS_MAX_NAME - 1] = '\0';
+                *type = VFS_NODE_DIR;
+                return 0;
+            }
+            seen_mounts++;
+        }
+        want -= seen_mounts;
         fs_closedir("/");
         for (uint32_t i = 0; i <= want; i++) {
             if (fs_readdir("/", name, type) < 0) {
@@ -658,23 +724,21 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
     /* tmpfs 挂载点：目录内容全部来自内存树 */
     if (tmpfs_is_mounted(path))
         return tmpfs_readdir_at(path, index, name, type);
-    /* /dev 下挂载了 /dev/shm：devfs 不知道它，先给挂载点再列 devfs */
-    if (strcmp(path, "/dev") == 0) {
-        if (index == 0) {
-            strncpy(name, "shm", VFS_MAX_NAME);
-            name[VFS_MAX_NAME - 1] = '\0';
-            *type = VFS_NODE_DIR;
-            return 0;
-        }
-        return devfs_readdir(path, index - 1, name, type);
-    }
+    /* devfs 目录（/dev、/proc/...）：先列直接挂载点（/dev → shm），再列 devfs */
     if (strcmp(path, "/dev") == 0 ||
         strcmp(path, "/proc") == 0 ||
         strcmp(path, "/sys") == 0 ||
         (path[0] == '/' && path[1] == 'p' && path[2] == 'r' &&
          path[3] == 'o' && path[4] == 'c' && path[5] == '/') ||
-        strncmp(path, "/sys/", 5) == 0)
-        return devfs_readdir(path, index, name, type);
+        strncmp(path, "/sys/", 5) == 0) {
+        uint32_t mounts = vfs_mount_child_count(path);
+        if (index < mounts) {
+            if (vfs_mount_child_at(path, index, name) < 0) return -1;
+            *type = VFS_NODE_DIR;
+            return 0;
+        }
+        return devfs_readdir(path, index - mounts, name, type);
+    }
     /* 非根路径：先列出 vfs_register_static_file 注册的条目，再补真实 fs 的。
      *
      * 为什么必须处理静态表：静态文件存在**独立于 ramfs 的另一个表**里
@@ -709,8 +773,16 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
          * 这里显式挡住，而不是依赖"上面一定 return"这个隐含前提。 */
         if (listed > index) return -1;
 
+        uint32_t mounts = vfs_mount_child_count(path);
+        uint32_t after_static = index - listed;
+        if (after_static < mounts) {
+            if (vfs_mount_child_at(path, after_static, name) < 0) return -1;
+            *type = VFS_NODE_DIR;
+            return 0;
+        }
+
         if (vfs_opendir(path) < 0) return -1;
-        uint32_t want = index - listed;
+        uint32_t want = after_static - mounts;
         for (uint32_t i = 0; i <= want; i++) {
             if (vfs_readdir(path, name, type) < 0) {
                 vfs_closedir(path);

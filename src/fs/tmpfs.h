@@ -39,6 +39,8 @@
  *         tmpfs_rename         改名/移动（目录项级，不搬数据页）
  *         tmpfs_readdir_at     按索引列目录
  *         tmpfs_bytes_used     某挂载点已用字节数（配额诊断）
+ *         tmpfs_node_count     所有挂载点合计节点数（含挂载根）
+ *         tmpfs_node_at        深度优先第 index 个节点（给 vfs_get 用）
  */
 #ifndef HBOS_FS_TMPFS_H
 #define HBOS_FS_TMPFS_H
@@ -76,5 +78,7 @@ int tmpfs_rmdir(const char *path);
 int tmpfs_unlink(const char *path);
 int tmpfs_rename(const char *old_path, const char *new_path, int replace);
 int tmpfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type);
+uint32_t tmpfs_node_count(void);
+vfs_node_t *tmpfs_node_at(uint32_t index);
 
 #endif /* HBOS_FS_TMPFS_H */

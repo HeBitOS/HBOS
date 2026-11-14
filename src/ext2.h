@@ -1,6 +1,6 @@
 /**
  * @file    ext2.h
- * @brief   导出 52 个接口（1 类型 / 27 宏 / 24 函数）
+ * @brief   导出 55 个接口（1 类型 / 29 宏 / 25 函数）
  *
  * @layer   drivers
  * @owner   src/
@@ -57,6 +57,7 @@
  *         ext2_mkdir          在 parent 下建子目录
  *         ext2_rmdir          删除空目录（非空返 -ENOTEMPTY）
  *         ext2_rename         改名/移动目录项（-EEXIST/-ENOTEMPTY/-EISDIR）
+ *         ext2_sync           同步并置"干净卸载"标记（只读卷为 no-op）
  */
 #ifndef HBOS_EXT2_H
 #define HBOS_EXT2_H
@@ -86,6 +87,11 @@
 
 #define EXT2_SUPERBLOCK_OFFSET 1024
 #define EXT2_SUPERBLOCK_SIZE   1024
+
+/* 超级块 s_state 位：VALID 表示上次是干净卸载；挂载期间必须清掉，
+ * 否则断电后 e2fsck 会误以为卷是干净的。 */
+#define EXT2_VALID_FS  0x0001u
+#define EXT2_ERROR_FS  0x0002u
 
 #define EXT2_ROOT_INO 2
 
@@ -249,6 +255,15 @@ int ext2_readlink(ext2_fs_t *fs, const ext2_inode_t *inode, char *buf,
 int ext2_unlink(ext2_fs_t *fs, uint32_t dir_ino, const char *name);
 int ext2_truncate(ext2_fs_t *fs, uint32_t inode_num, uint32_t new_size);
 int ext2_mkdir(ext2_fs_t *fs, uint32_t parent_ino, const char *name);
+/**
+ * @brief 把卷标记为"干净卸载"并回写超级块（fs_sync 的落点）。
+ *
+ * 挂载时清 EXT2_VALID_FS，之后任何块写入又会清一次；只有显式 sync/卸载
+ * 才重新置位。于是断电/崩溃后 e2fsck 一定看到"未干净卸载"并做全检。
+ * 只读卷（ext4 布局）不写任何东西，直接返回 0。
+ */
+int ext2_sync(ext2_fs_t *fs);
+
 /** 删除空目录；非空返回 -ENOTEMPTY，目标是普通文件返回 -ENOTDIR。 */
 int ext2_rmdir(ext2_fs_t *fs, uint32_t dir_ino, const char *name);
 /**

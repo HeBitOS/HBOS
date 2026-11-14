@@ -1912,6 +1912,9 @@ static int ext2_try_mount(void) {
 
 /** 将文件表同步到磁盘（仅 HBFS 模式有效） */
 int fs_sync(void) {
+    /* ext2：把"已同步"落成超级块的 EXT2_VALID_FS，断电后 e2fsck 才不会
+     * 把脏卷当成干净卷跳过检查。只读 ext4 在 ext2_sync 内部直接 no-op。 */
+    if (fs_backend == FS_BACKEND_EXT2) return ext2_sync(&ext2_fs);
     if (fs_backend != FS_BACKEND_HBFS) return 0;
     return hbfs_sync_table();
 }
@@ -1991,8 +1994,24 @@ uint32_t fs_used_bytes(void) {
 }
 
 // 列出文件
+/**
+ * @brief 列出整个命名空间（平铺文件表 + tmpfs 树）的绝对路径。
+ *
+ * 以前是空实现（注释说"shell 用 fs_get_count 自己渲染"），于是 /tmp
+ * /run /dev/shm 这些 tmpfs 节点在任何全盘列举里都缺席。改为走
+ * vfs_count/vfs_get 的统一视图：平铺表里的名字不带前导 '/'，这里补上，
+ * 保证输出与 stat/open 用的路径一致。
+ */
 void fs_list(void) {
-    // Shell commands use fs_get_count/fs_get_file to render lists.
+    uint32_t total = vfs_count();
+    for (uint32_t i = 0; i < total; i++) {
+        vfs_node_t *node = vfs_get(i);
+        if (!node || !node->name[0]) continue;
+        if (node->name[0] != '/') console_putchar('/');
+        console_puts(node->name);
+        if (node->type == VFS_NODE_DIR) console_putchar('/');
+        console_putchar('\n');
+    }
 }
 
 // 查找文件
