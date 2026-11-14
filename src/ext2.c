@@ -14,6 +14,12 @@
  *
  * 分配器（ext2_alloc_block/inode）仍然用 0 表示"分配不到"：0 本身就是
  * 无效块号/inode 号，比负值更贴合契约；写路径在调用点翻译成 -ENOSPC。
+ *
+ * 并发契约：本文件**不是**可重入的 —— g_io_buf / g_map_buf / g_free_buf /
+ * g_ind_slot 都是文件级静态状态，且位图/inode 表是 read-modify-write。
+ * 内核侧由 vfs.c 的全局文件系统锁（vfs_fs_lock，经 vfs 与 fs 的公开入口
+ * 自动持有）串行化；宿主单测是单线程，天然满足。新增入口时不要把这条契约
+ * 绕过去（绕过 vfs/fs 直接调 ext2_* 的代码必须自己持锁）。
  */
 
 /**
