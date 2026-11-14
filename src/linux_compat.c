@@ -1173,6 +1173,15 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
         return ready;
     }
 
+    if (entry->node) {
+        __attribute__((weak)) int evdev_is_node(const vfs_node_t *node);
+        __attribute__((weak)) int evdev_event_pending(const vfs_node_t *node);
+        if (evdev_is_node && evdev_is_node(entry->node)) {
+            return (evdev_event_pending && evdev_event_pending(entry->node))
+                ? LINUX_POLLIN : 0;
+        }
+    }
+
     /*
      * Regular files are always immediately ready.
      */

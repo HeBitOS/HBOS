@@ -24,6 +24,7 @@
 #include "unistd.h"
 #include "shell/shell.h"
 #include "graphics/fbdev.h"
+#include "graphics/drm/evdev.h"
 #include "crypto/chacha20_poly1305.h"
 
 #define DEVFS_MAX_NODES 192
@@ -690,6 +691,17 @@ void devfs_init(void) {
         devfs_register_sysfs_file(sysfs_files[i].path,
                                   sysfs_files[i].content);
     fbdev_init();
+
+    devfs_register_sysfs_dir("/dev/input");
+    vfs_node_t *ev0 = devfs_alloc_node();
+    set_name(ev0, "/dev/input/event0");
+    ev0->type = VFS_NODE_CHARDEV;
+    ev0->mode = S_IFCHR | 0666;
+    vfs_node_t *ev1 = devfs_alloc_node();
+    set_name(ev1, "/dev/input/event1");
+    ev1->type = VFS_NODE_CHARDEV;
+    ev1->mode = S_IFCHR | 0666;
+    evdev_register_nodes(ev0, ev1);
 }
 
 /** 按路径查找伪文件系统节点 */
