@@ -2262,6 +2262,57 @@ static const char *linux_fd_type_name(int type) {
  *
  * 不变量：无返回值；只往串口写，不改任何状态。
  * 前置条件：当前任务存在（有 fd 表）。 */
+/* fd 出处标签的短名，只用于 [TRAP-CTX]/[FD-TABLE] 诊断。 */
+static const char *fd_origin_name(uint8_t origin) {
+    switch (origin) {
+        case FD_ORIGIN_OPEN:    return "open";
+        case FD_ORIGIN_COMPAT:  return "compat";
+        case FD_ORIGIN_DUP:     return "dup";
+        case FD_ORIGIN_SCM:     return "scm";
+        case FD_ORIGIN_INHERIT: return "inherit";
+        case FD_ORIGIN_SHM:     return "shm-open";
+        default:                return "none";
+    }
+}
+
+/**
+ * 用户态陷阱时打印"肇事 fd"的上下文。
+ *
+ * 为什么需要：renderer 的 base::File::Open 校验失败是 int3，现场唯一能
+ * 指认"哪个 fd、什么访问模式"的线索在 rdi —— Chromium 的 fcntl 包装只把
+ * F_GETFL 写进 esi，rdi 保留被检查的 fd 号（r85 现场已证 rdi=7、
+ * F_GETFL 返回 O_RDONLY 而期望 O_RDWR）。但并非所有 int3 的 rdi 都是 fd
+ * （0x1103928A69 那条的 rdi 是缓存的 errno），所以 fd 号不合法时明确打印
+ * fd=invalid，避免把无关的寄存器值误读成 fd。
+ */
+void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate) {
+    console_puts("[TRAP-CTX] rip=0x");
+    trace_put_hex(rip);
+    task_t *cur = task_current();
+    if (!cur || !cur->fd_table || fd_candidate >= POSIX_MAX_FDS) {
+        console_puts(" fd=invalid\n");
+        return;
+    }
+    const fd_entry_t *e = &cur->fd_table->entries[fd_candidate];
+    if (!e->used) {
+        console_puts(" fd=invalid\n");
+        return;
+    }
+    console_puts(" fd=");
+    trace_put_udec(fd_candidate);
+    console_puts(" accmode=");
+    trace_put_udec((uint64_t)(e->flags & O_ACCMODE));
+    console_puts(" type=");
+    console_puts(linux_fd_type_name(e->type));
+    console_puts(" via=");
+    console_puts(fd_origin_name(e->origin));
+    if (e->path[0]) {
+        console_puts(" path=");
+        console_puts(e->path);
+    }
+    console_putchar('\n');
+}
+
 void linux_fd_table_dump(void) {
     task_t *cur = task_current();
     if (!cur || !cur->fd_table) {

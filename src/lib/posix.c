@@ -36,6 +36,24 @@ static fd_entry_t *fd_table(void) {
     return task ? task->fd_table->entries : NULL;
 }
 
+/* [DEVNULL] 诊断预算（见 open 尾部）。 */
+static int g_devnull_dbg = 12;
+
+/* 本文件没有 print_uint，诊断用最小十进制打印。 */
+static void dbg_u32(uint32_t value) {
+    char buf[12];
+    int n = 0;
+    if (!value) buf[n++] = '0';
+    while (value) { buf[n++] = (char)('0' + value % 10); value /= 10; }
+    while (n) console_putchar(buf[--n]);
+}
+
+static fd_entry_t *fds_of(int fd) {
+    fd_entry_t *fds = fd_table();
+    if (!fds || fd < 0 || fd >= POSIX_MAX_FDS) return NULL;
+    return &fds[fd];
+}
+
 static int fd_alloc(vfs_node_t *node, int flags, const char *path) {
     fd_entry_t *fds = fd_table();
     if (!fds) return set_errno(EBADF);
@@ -417,7 +435,27 @@ int open(const char *path, int flags, ...) {
         if (vfs_truncate(node, 0) < 0) return set_errno(EIO);
     }
 
-    return fd_alloc(node, flags, full);
+    int opened = fd_alloc(node, flags, full);
+    /* 一次性诊断（12 条）：Chromium 的 renderer 在 base::File 校验里
+     * 期望 /dev/null 是 O_RDWR，但 fd 表里记的是 O_RDONLY。要判"是
+     * Chromium 只读开的"还是"HBOS 把 O_RDWR 丢了"，必须看请求侧的原始
+     * flags —— 请求与记账同时打在一行，一眼可判。 */
+    if (g_devnull_dbg > 0 && strcmp(full, "/dev/null") == 0) {
+        g_devnull_dbg--;
+        fd_entry_t *e = fds_of(opened);
+        console_puts("[DEVNULL] fd=");
+        dbg_u32((uint32_t)opened);
+        console_puts(" req_flags=");
+        dbg_u32((uint32_t)flags);
+        console_puts(" req_accmode=");
+        dbg_u32((uint32_t)(flags & O_ACCMODE));
+        console_puts(" got_accmode=");
+        dbg_u32(e ? (uint32_t)(e->flags & O_ACCMODE) : 99u);
+        console_puts(" pid=");
+        dbg_u32(task_current() ? task_current()->id : 0);
+        console_putchar('\n');
+    }
+    return opened;
 }
 
 int fstat(int fd, struct stat *st) {
