@@ -2426,6 +2426,40 @@ void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate,
     console_putchar('\n');
 }
 
+/** 打印 exec 现场的低号 fd（3..12）。
+ *
+ * 存在的理由：Chromium 把共享内存句柄的号码写死在子进程命令行里
+ * （--pseudonymization-salt-handle=7 之类），撞了就会在子进程里拿到
+ * 完全不相干的东西。只有"父进程 spawn 那一刻 fd 3..12 是什么"能判定
+ * 是号码被抢了还是压根没建出来 —— crash dump 里的 fd 表是**事后**的，
+ * 答不了这个问题。 */
+void linux_exec_fd_snapshot(void) {
+    static unsigned budget = 12;
+    task_t *cur = task_current();
+    if (!cur || !cur->fd_table || !budget) return;
+    budget--;
+    console_puts("[EXEC-FD]");
+    for (int fd = 3; fd <= 12; fd++) {
+        const fd_entry_t *e = &cur->fd_table->entries[fd];
+        console_puts(" ");
+        trace_put_udec((uint64_t)fd);
+        console_puts(":");
+        if (!e->used) {
+            console_putchar('-');
+            continue;
+        }
+        console_puts(linux_fd_type_name(e->type));
+        console_puts("/");
+        trace_put_udec((uint64_t)(e->flags & O_ACCMODE));
+        if (e->path[0]) {
+            console_puts("=");
+            for (int i = 0; e->path[i] && i < 48; i++)
+                console_putchar(e->path[i]);
+        }
+    }
+    console_putchar('\n');
+}
+
 void linux_fd_table_dump(void) {
     task_t *cur = task_current();
     if (!cur || !cur->fd_table) {

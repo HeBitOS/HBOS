@@ -507,3 +507,29 @@ dup2。而 `fd=7` 的源是 `0` —— 即上一步刚装成 /dev/null 的 stdin
 实测这条**能成功**，所以丢的可能在"取只读句柄 / DuplicateHandle"那一段。
 需要观察父进程 fd 3 / 4 / 7 何时被别的东西抢占（现在只有 crash dump 才 print
 fd 表，运行期看不到）。
+
+### spawn 现场（`[EXEC-FD]`，新增，12 次预算）
+
+在 `elf64_load_vfs_and_exec` 里、`[EXEC-ARGV]` 之后打父进程 fd 3..12。
+实测同一轮里前后两种形态：
+
+```
+前三次 exec: 3:UNIX/2 4:- 5:UNIX/2 6:MEMFD/0=/dev/shm/... 7:FILE/0=/dev/null
+后三次 exec: 3:UNIX/2 4:UNIX/2 5:UNIX/2 6:MEMFD/0=/dev/shm/... 7:MEMFD/2
+```
+
+即：**早启动的那几个子进程 spawn 时，7 号位上根本没有可写共享内存**，
+晚启动的才有（`MEMFD/2`，没有路径 = 裸 memfd_create，正是 salt 的样子）。
+六个子进程都带着 `--pseudonymization-salt-handle=7`，所以早期那几个
+必然在 `Take()` 里炸 —— 这就是崩溃 1 "偶发"的全部来源。
+
+顺带确认：命令行里的 `3 / 4 / 7` 在父进程里也都**不是**共享内存
+（3 是 socket、4 有时是空的、7 如上），说明这三个号码是"子进程目标号"，
+实际搬运靠 remap，而 remap 出现在早期进程里的是 `dup2(0 → 7)`
+（源是刚装好的 /dev/null）。
+
+下一步只剩一个问题：**salt region 什么时候建、它的真实 fd 是多少**。
+建议直接盯 `memfd_create("shared-memory-region")` 之后的那次
+`GetReadOnlyHandle`/`dup`——如果 HBOS 的 `dup()` 返回了 0（它从 0 号开始找空位，
+而 Linux 的 dup 也允许低号，但 Chromium 侧显然按"≥3"在记账），
+就会出现"Chromium 认为 salt 在 0 号"这种局面。

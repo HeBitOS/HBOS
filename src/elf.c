@@ -16,6 +16,7 @@
 #include "string.h"
 #include "vfs.h"
 #include "user/ldso.h"
+#include "syscall.h"
 #include "graphics/graphics.h"
 
 #define ELF_MAG0  0x7f
@@ -1002,6 +1003,7 @@ int elf64_load_vfs_and_exec(struct vfs_node *node,
             console_putchar('\n');
         }
     }
+    linux_exec_fd_snapshot();
     elf_image_source_t source;
     if (prepare_vfs_source((vfs_node_t *)node, &source) < 0) {
         kfree(snapshot);

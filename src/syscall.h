@@ -295,6 +295,9 @@ void linux_open_trace_dump(void);
 void linux_getfl_trace_dump(void);
 /** 打印当前进程的 fd 表（fd 号 / 类型 / flags / 路径，用户态异常时调用）。 */
 void linux_fd_table_dump(void);
+/** 打印 exec 那一刻父进程的低号 fd（3..12），用于判断子进程命令行里
+ *  写死的句柄号码是否已被别的东西占用。有 12 次预算。 */
+void linux_exec_fd_snapshot(void);
 /** 用户态陷阱时打印肇事 fd（rip + rdi 候选）的访问模式/类型/出处/路径。
  *  rdi 不是合法 fd 时打印 fd=invalid，避免误读无关寄存器。 */
 void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate,
