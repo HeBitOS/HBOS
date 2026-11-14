@@ -47,6 +47,9 @@
  *   函数  linux_fdid_record             记录一次 fd 物化（open/dup/scm…）
  *         linux_fdid_event_of           反查某 fd 最近一次物化事件
  *         linux_fdid_dump               打印 fd 溯源环形缓冲
+ *         linux_fdid_close              记录 close（fd 复用/身份漂移证据）
+ *         linux_fdid_record_inherit     登记 fork 继承来的 FD_FILE fd
+ *         linux_fdid_chain_dump         打印某 fd 的出身链（← parent_pid）
  *         linux_compat_read             （待补）
  *         linux_compat_write            （待补）
  *         linux_compat_close            （待补）
@@ -218,6 +221,9 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
  * int3 地址，必须能反查"这个 fd 是谁、从哪来"。每次 fd 条目被"物化"
  * 时在这里留一条溯源记录，用户态异常时随 fd 表一起打印。 */
 void linux_fdid_record(int fd, const char *event);
+void linux_fdid_close(int fd);
+void linux_fdid_record_inherit(struct task *child, int parent_pid);
+void linux_fdid_chain_dump(int fd, int max_hops);
 const char *linux_fdid_event_of(int fd, int *owner_pid);
 void linux_fdid_dump(void);
 

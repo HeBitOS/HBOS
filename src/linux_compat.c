@@ -1332,10 +1332,11 @@ long linux_compat_write(int fd, const void *buffer, size_t count) {
  *   SCM_RIGHTS 接收   → scm
  *   syscall.c         → open / shm-open / dup2 / fdup（各自调用本函数）
  * 环形覆盖，只在崩溃 dump 时读取，功能路径零影响。 */
-#define LINUX_FDID_SLOTS 48
+#define LINUX_FDID_SLOTS 64
 typedef struct {
     int used;
     int pid;
+    int parent_pid;   /* !=0 表示这一条是 fork 继承来的，源在 parent_pid */
     int fd;
     int type;
     int flags;
@@ -1345,6 +1346,64 @@ typedef struct {
 static linux_fdid_t fdid_ring[LINUX_FDID_SLOTS];
 static uint32_t fdid_next;
 
+/* 按 (pid, fd) 索引的"当前身份"表。
+ *
+ * 为什么不能只靠环形缓冲：环是全局时间线，Chromium 一个启动过程里 close
+ * 就能把 64 条冲干净（实测 cf4 的 [FDID-CHAIN] 全是 (no record)，唯一有
+ * 记录的那条还是 close）。链查询要的是"这个 fd 现在是谁"，而"谁"是**每
+ * 个 fd 一份**的稳定状态，不是时间线。这里用 128 个槽按 (pid,fd) 覆盖
+ * 写，满了就淘汰最旧的一格。 */
+static void fdid_copy(char *dst, size_t cap, const char *src);
+
+#define LINUX_FDID_KEY_SLOTS 128
+typedef struct {
+    int used;
+    int pid;
+    int fd;
+    int parent_pid;      /* !=0：这一格是 fork 继承来的，源在 parent_pid */
+    int type;
+    int flags;
+    int reuses;          /* 同一号码先 close 再物化的次数（身份漂移信号） */
+    uint32_t seq;
+    char event[12];
+    char path[48];
+} fdid_key_t;
+static fdid_key_t fdid_keys[LINUX_FDID_KEY_SLOTS];
+static uint32_t fdid_seq;
+
+static fdid_key_t *fdid_key_slot(int pid, int fd, int create) {
+    fdid_key_t *free_slot = NULL;
+    fdid_key_t *oldest = NULL;
+    for (uint32_t i = 0; i < LINUX_FDID_KEY_SLOTS; i++) {
+        fdid_key_t *slot = &fdid_keys[i];
+        if (slot->used && slot->pid == pid && slot->fd == fd) return slot;
+        if (!slot->used && !free_slot) free_slot = slot;
+        if (slot->used && (!oldest || slot->seq < oldest->seq)) oldest = slot;
+    }
+    if (!create) return NULL;
+    if (free_slot) return free_slot;
+    return oldest;
+}
+
+/** 更新 (pid,fd) 的当前身份。event 为 NULL 时只刷新 flags/path。 */
+static void fdid_key_update(int pid, int fd, int parent_pid,
+                            const fd_entry_t *entry, const char *event) {
+    fdid_key_t *slot = fdid_key_slot(pid, fd, 1);
+    if (!slot) return;
+    if (slot->used && slot->pid == pid && slot->fd == fd &&
+        event && strcmp(event, "close") != 0 && strcmp(slot->event, "close") == 0)
+        slot->reuses++;
+    slot->used = 1;
+    slot->pid = pid;
+    slot->fd = fd;
+    slot->parent_pid = parent_pid;
+    slot->type = entry->type;
+    slot->flags = entry->flags;
+    slot->seq = ++fdid_seq;
+    fdid_copy(slot->event, sizeof(slot->event), event ? event : "?");
+    fdid_copy(slot->path, sizeof(slot->path), entry->path);
+}
+
 static void fdid_copy(char *dst, size_t cap, const char *src) {
     size_t i = 0;
     if (!dst || !cap) return;
@@ -1352,38 +1411,110 @@ static void fdid_copy(char *dst, size_t cap, const char *src) {
     dst[i] = '\0';
 }
 
-/** 记录 fd 的一次"物化"。前置条件：fd 当前在本进程表里有效；否则忽略。 */
-void linux_fdid_record(int fd, const char *event) {
-    task_t *task = compat_task();
+/** 记录 fd 的一次"物化"（内部核心，允许指定 task/pid/parent）。 */
+static void fdid_record_full(task_t *task, int pid, int parent_pid, int fd,
+                             const char *event) {
     fd_entry_t *entry = compat_fd(task, fd);
     if (!task || !entry) return;
     linux_fdid_t *slot = &fdid_ring[fdid_next % LINUX_FDID_SLOTS];
     fdid_next++;
     slot->used = 1;
-    slot->pid = task_get_process_id();
+    slot->pid = pid;
+    slot->parent_pid = parent_pid;
     slot->fd = fd;
     slot->type = entry->type;
     slot->flags = entry->flags;
     fdid_copy(slot->event, sizeof(slot->event), event ? event : "?");
     fdid_copy(slot->path, sizeof(slot->path), entry->path);
+    fdid_key_update(pid, fd, parent_pid, entry, event);
 }
 
-/** 反查本进程某 fd 最近一次物化事件名（找不到返回 "?"）。 */
+/** 记录当前进程某 fd 的一次"物化"。前置条件：fd 在表里有效；否则忽略。 */
+void linux_fdid_record(int fd, const char *event) {
+    task_t *task = compat_task();
+    if (!task) return;
+    fdid_record_full(task, (int)task->thread_group_id, 0, fd, event);
+}
+
+/** 记录一次 close。fd 号会被复用，"关闭后又被别人占用"是身份漂移的
+ *  唯一证据；必须在条目被清空之前调用。 */
+void linux_fdid_close(int fd) {
+    task_t *task = compat_task();
+    if (!task) return;
+    fdid_record_full(task, (int)task->thread_group_id, 0, fd, "close");
+}
+
+/** fork 之后登记子进程从父进程继承来的 fd（只登 FD_FILE —— 文件类 fd 才是
+ *  File::Open 校验的对象；把所有类型都登进去会把环形缓冲冲爆）。 */
+void linux_fdid_record_inherit(struct task *opaque_child, int parent_pid) {
+    task_t *child = (task_t *)opaque_child;
+    if (!child || !child->fd_table) return;
+    for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
+        const fd_entry_t *entry = &child->fd_table->entries[fd];
+        if (!entry->used) continue;
+        if (entry->type != FD_FILE && entry->type != FD_MEMFD &&
+            entry->type != FD_UNIX)
+            continue;
+        fdid_record_full(child, (int)child->thread_group_id, parent_pid, fd,
+                         "inherit");
+    }
+}
+
+/** 打印某个 fd 的出身链（最多 max_hops 跳）。
+ *  跳与跳之间通过 parent_pid 串起来：child fd 7 ← inherit ← parent pid / fd 7
+ *  ← open|dup2|shm-open。找不到记录就停，不猜。 */
+void linux_fdid_chain_dump(int fd, int max_hops) {
+    int cur_fd = fd;
+    int cur_pid = task_get_process_id();
+    console_puts("[FDID-CHAIN] fd=");
+    compat_put_dec((unsigned int)fd);
+    console_putchar('\n');
+    for (int hop = 1; hop <= max_hops; hop++) {
+        const fdid_key_t *found = fdid_key_slot(cur_pid, cur_fd, 0);
+        console_puts("[FDID-CHAIN]  hop=");
+        compat_put_dec((unsigned int)hop);
+        console_puts(" pid=");
+        compat_put_dec((unsigned int)cur_pid);
+        console_puts(" fd=");
+        compat_put_dec((unsigned int)cur_fd);
+        if (!found) {
+            console_puts(" via=(no record)\n");
+            return;
+        }
+        console_puts(" via=");
+        console_puts(found->event);
+        console_puts(" type=");
+        compat_put_dec((unsigned int)found->type);
+        console_puts(" flags=0x");
+        linux_ipc_put_hex((uint64_t)(unsigned)found->flags);
+        console_puts(" accmode=");
+        compat_put_dec((unsigned int)(found->flags & 3));
+        if (found->reuses) {
+            console_puts(" reuses=");
+            compat_put_dec((unsigned int)found->reuses);
+        }
+        if (found->path[0]) {
+            console_puts(" path=");
+            console_puts(found->path);
+        }
+        console_putchar('\n');
+        if (found->parent_pid <= 0 || found->parent_pid == cur_pid) return;
+        cur_pid = found->parent_pid;
+    }
+}
+
+/** 反查本进程某 fd 当前的身份事件名（读 (pid,fd) 表，找不到返回 "?"）。 */
 const char *linux_fdid_event_of(int fd, int *owner_pid) {
     int pid = task_get_process_id();
-    for (uint32_t i = 0; i < LINUX_FDID_SLOTS; i++) {
-        uint32_t index = (fdid_next + LINUX_FDID_SLOTS - 1 - i) %
-                         LINUX_FDID_SLOTS;
-        const linux_fdid_t *slot = &fdid_ring[index];
-        if (!slot->used || slot->fd != fd || slot->pid != pid) continue;
-        if (owner_pid) *owner_pid = slot->pid;
-        return slot->event;
+    const fdid_key_t *slot = fdid_key_slot(pid, fd, 0);
+    if (!slot) {
+        if (owner_pid) *owner_pid = 0;
+        return "?";
     }
-    if (owner_pid) *owner_pid = 0;
-    return "?";
+    if (owner_pid) *owner_pid = slot->pid;
+    return slot->event;
 }
 
-/** 打印 fd 溯源环形缓冲（最旧在前），由 linux_fd_table_dump() 调用。 */
 void linux_fdid_dump(void) {
     if (!fdid_next) return;
     uint32_t total = fdid_next;
@@ -1526,6 +1657,14 @@ void linux_compat_retain(int fd) {
 void linux_compat_retain_task(struct task *opaque_task) {
     task_t *task = (task_t *)opaque_task;
     if (!task) return;
+    /* fork 出来的子进程 fd 表是 memcpy 复制过来的：从这一刻起这些 fd 的
+     * "身份"就换了个进程。登记 inherit（源 = 当前进程），否则崩溃现场只能
+     * 看到一个无出处的 fd 号。只登 FD_FILE，避免把环形缓冲冲爆。 */
+    {
+        task_t *parent = task_current();
+        linux_fdid_record_inherit(task,
+            parent ? (int)parent->thread_group_id : 0);
+    }
     for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
         fd_entry_t *entry = compat_fd(task, fd);
         if (!entry) continue;

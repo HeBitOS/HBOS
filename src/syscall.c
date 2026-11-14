@@ -2292,6 +2292,14 @@ void linux_fd_table_dump(void) {
         console_putchar('\n');
     }
     linux_fdid_dump();
+    /* 文件类 fd 各打一条出身链：Chromium 的 base::File 校验针对的就是这些
+     * fd（实测肇事者是 /dev/null），而 open trace 只有 16 条、早被 dlopen
+     * 探测冲掉了。链最多 8 跳，靠 inherit 的 parent_pid 串起来。 */
+    for (int fd = 0; fd < POSIX_MAX_FDS; fd++) {
+        if (!cur->fd_table->entries[fd].used) continue;
+        if (cur->fd_table->entries[fd].type != FD_FILE) continue;
+        linux_fdid_chain_dump(fd, 8);
+    }
     linux_errno_trace_dump();
 }
 
@@ -3096,7 +3104,6 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             } else {
                 linux_open_trace_record(path, (int)linux_frame->a1, 1, 0,
                                         (int)open_rc);
-                linux_fdid_record((int)open_rc, "open");
             }
             return (uint64_t)open_rc;
         }
@@ -4207,10 +4214,22 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                     (int)f->a0, (const void *)f->a1, (size_t)f->a2);
             return finish_syscall((long)write((int)f->a0, (const void *)f->a1, (size_t)f->a2));
 
-        case HBOS_SYS_OPEN:
-            return finish_syscall((long)open((const char *)f->a0, (int)f->a1, (int)f->a2));
+        case HBOS_SYS_OPEN: {
+            /* fd 分配的**唯一出口**：open(2)、openat(257)、creat(85) 以及
+             * 内核内部那些 linux_native_call(HBOS_SYS_OPEN, ...) 全都从这里
+             * 出去。fd 出身记录必须挂在这里 —— 挂在某个 nr 的入口只能覆盖
+             * 那一个 nr（实测 cf4：glibc 走 openat，open(2) 的记录点一次都
+             * 没命中，导致 [FDID-CHAIN] 全是 (no record)）。 */
+            int64_t opened = (int64_t)open((const char *)f->a0, (int)f->a1,
+                                          (int)f->a2);
+            if (opened >= 0) linux_fdid_record((int)opened, "open");
+            return finish_syscall((long)opened);
+        }
 
         case HBOS_SYS_CLOSE:
+            /* close 记录必须在条目被清空之前：fd 号会被复用，
+             * "关掉之后又被别人占用"是身份漂移的唯一证据。 */
+            linux_fdid_close((int)f->a0);
             (void)linux_compat_close((int)f->a0);
             return finish_syscall((long)close((int)f->a0));
 
