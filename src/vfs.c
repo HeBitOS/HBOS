@@ -3,7 +3,7 @@
  * @brief 虚拟文件系统（VFS）实现，提供统一的文件操作接口
  */
 #include "vfs.h"
-#include "core/heap.h"
+#include "core/pmm.h"
 #include "devfs.h"
 #include "errno.h"
 #include "fd.h"
@@ -208,22 +208,34 @@ int vfs_resolve_path(const char *cwd, const char *path, char *out, uint32_t cap)
 /*
  * tmpfs 的挂载点与配额
  * ═══════════════════
- * 内核堆只有 2 MiB（core/heap.c: HEAP_POOL_SIZE），tmpfs 直接建在 kmalloc
- * 上，所以配额必须远小于虚拟内存的想象力：这里是**上限**不是预留，超了
- * 就返回 -ENOSPC（sqlite/Chromium 能正确回滚），而不是把内核 OOM 掉。
- * 等 /dev/shm 要真正承载 Chromium 的共享内存时，得先把 tmpfs 换成按页
- * 向 PMM 申请的后端（kmalloc 池太小），这一点写在任务回报里。
+ * 配额是**上限**不是预留：超了返回 -ENOSPC（sqlite/Chromium 能正确回滚），
+ * 而不是把内核 OOM 掉。数据页从 PMM 逐页申请（见 alloc_pages），因此这些
+ * 数字不再受 2 MiB kmalloc 堆限制，只受物理内存与 PMM 剩余量约束：
+ *   /dev/shm 512 MiB —— Chromium/Electron 的共享内存主战场
+ *   /tmp     256 MiB —— profile、crashpad、缓存
+ *   /run     256 MiB —— wayland socket 目录与运行时状态
+ * 数值集中在这里，vfs_init 传参；要调只改这三个宏。
  */
-#define VFS_TMPFS_TMP_BYTES     (1024u * 1024u)
-#define VFS_TMPFS_RUN_BYTES     (256u * 1024u)
-#define VFS_TMPFS_SHM_BYTES     (512u * 1024u)
+#define VFS_TMPFS_TMP_BYTES     (256u * 1024u * 1024u)
+#define VFS_TMPFS_RUN_BYTES     (256u * 1024u * 1024u)
+#define VFS_TMPFS_SHM_BYTES     (512u * 1024u * 1024u)
 
-static void *vfs_tmpfs_alloc(uint32_t bytes) { return kmalloc(bytes); }
-static void vfs_tmpfs_free(void *ptr) { kfree(ptr); }
+/* 数据页直接向 PMM 要：pmm_alloc_blocks 返回**连续**物理页，内核在
+ * PMM_LOW_LIMIT 以下恒等映射，所以物理地址可直接当指针用。 */
+static void *vfs_tmpfs_alloc_pages(uint32_t count) {
+    if (!count) return NULL;
+    uint64_t phys = pmm_alloc_blocks(count);
+    return (void *)(uintptr_t)phys;
+}
+
+static void vfs_tmpfs_free_pages(void *ptr, uint32_t count) {
+    if (!ptr || !count) return;
+    pmm_free_blocks((uint64_t)(uintptr_t)ptr, count);
+}
 
 /** 挂载 /tmp、/run、/dev/shm。失败不致命（退回只读/内存旁路路径）。 */
 static void vfs_tmpfs_init(void) {
-    tmpfs_alloc_t alloc = {vfs_tmpfs_alloc, vfs_tmpfs_free};
+    tmpfs_alloc_t alloc = {vfs_tmpfs_alloc_pages, vfs_tmpfs_free_pages};
     tmpfs_set_allocator(&alloc);
     (void)tmpfs_mount("/tmp", VFS_TMPFS_TMP_BYTES);
     (void)tmpfs_mount("/run", VFS_TMPFS_RUN_BYTES);

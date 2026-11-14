@@ -1,24 +1,31 @@
 /**
  * @file    tmpfs.c
- * @brief   真 tmpfs：内存 inode 树 + 按页分配的动态容量
+ * @brief   真 tmpfs：内存 inode 树 + **按 4 KiB 页**动态分配的容量
  *
  * 设计要点（为什么不是"再写一个 ramfs"）
  * ══════════════════════════════════
  * 1. 节点是一棵树，不是平铺的文件名表。目录/文件/符号链接都是节点，因此
  *    lookup/readdir/rename/unlink 只有一套语义；旧方案里"父目录在内存表、
  *    文件在 memfd 覆盖层"的割裂正是 Chromium 建完目录却 rename 不到的原因。
- * 2. 容量按 4096 字节页增长，`size` 与 `capacity` 分离：稀疏写（sqlite 写到
- *    4 KiB 边界、Chromium 把文件 preallocate 到几 MB）不会立刻吃满配额。
+ * 2. 数据以 4 KiB 页为单位、逐页向分配器申请，指针表按需增长：
+ *      · 内核后端 = PMM（pmm_alloc_blocks / pmm_free_blocks），恒等映射，
+ *        因此可以撑 512 MiB 级 /dev/shm，而不再受 2 MiB kmalloc 堆限制；
+ *      · 宿主后端 = malloc/free，便于完整单测。
+ *    不用"一整块连续内存"表示一个文件：那需要一次拿到几百 MiB 连续物理页，
+ *    碎片化后必然失败。逐页分配 + 指针表是 ext2 数据块映射的同构做法。
  * 3. 每个挂载点有 max_bytes 配额，超了返回 -ENOSPC —— 内存文件系统也必须
  *    有上限，否则一个 bug 就是 OOM panic。
- * 4. 分配器由外部注入：内核给 kmalloc/kfree，宿主单测给 malloc/free。
- *    这让整个模块可以在 tests/host 里被完整覆盖，不需要启动内核。
+ * 4. 分配器由外部注入，本模块不 include core/pmm.h，因此可以在 tests/host
+ *    里被完整覆盖，不需要启动内核。
  *
  * 不变量：
  *  - 每个节点的 node.name 是**绝对路径**（与 VFS/stat/inotify 的口径一致），
  *    leaf 单独存一份用于兄弟匹配；rename 目录时必须递归刷新两者。
- *  - node.size ≤ node.capacity，且 data 覆盖 [0, capacity) 全部可读字节。
- *  - freed 掉的页立刻从 mount->used_bytes 扣除，配额不得漂移。
+ *  - node.size ≤ node.capacity == page_count * TMPFS_PAGE_BYTES；
+ *    pages[0 .. ceil(size/页)] 全部非空且已清零（空洞读出来必须是 0）。
+ *  - 数据页计入 mount->used_bytes；指针表（元数据）不计入配额，但同样
+ *    来自分配器，节点释放时必须一并归还。
+ *  - free 掉的页立刻从 used_bytes 扣除，配额不得漂移。
  */
 #include "fs/tmpfs.h"
 
@@ -32,7 +39,9 @@ typedef struct tmpfs_node {
     struct tmpfs_node *children;  /**< 子节点单链表（无序，readdir 顺序稳定） */
     struct tmpfs_node *next;      /**< 兄弟链 */
     struct tmpfs_mount *mount;
-    uint8_t *data;                /**< 数据页（容量按 TMPFS_PAGE_BYTES 对齐） */
+    uint8_t **pages;              /**< 数据页指针表（每项 4 KiB，已清零） */
+    uint32_t page_count;          /**< 已分配数据页数 = capacity / 页大小 */
+    uint32_t index_slots;         /**< pages[] 的容量（元素数） */
     char leaf[VFS_MAX_NAME];      /**< 本节点的名字（不含父路径） */
 } tmpfs_node_t;
 
@@ -65,16 +74,12 @@ static const vfs_ops_t tmpfs_ops = {
     .readdir = tmpfs_op_readdir,
 };
 
-static uint32_t tmpfs_round_up(uint32_t bytes) {
-    return (bytes + TMPFS_PAGE_BYTES - 1u) & ~(TMPFS_PAGE_BYTES - 1u);
-}
-
 void tmpfs_set_allocator(const tmpfs_alloc_t *alloc) {
     if (alloc) g_alloc = *alloc;
 }
 
 static int tmpfs_ready(void) {
-    return g_alloc.alloc != 0 && g_alloc.free != 0;
+    return g_alloc.alloc_pages != 0 && g_alloc.free_pages != 0;
 }
 
 /**
@@ -128,13 +133,114 @@ uint32_t tmpfs_bytes_used(const char *path) {
     return m ? m->used_bytes : 0;
 }
 
+/* ── 页管理 ─────────────────────────────────────────────────── */
+
+/** 取一页（已清零）；失败返回 0。 */
+static uint8_t *tmpfs_page_alloc(void) {
+    uint8_t *page = (uint8_t *)g_alloc.alloc_pages(1);
+    if (!page) return 0;
+    memset(page, 0, TMPFS_PAGE_BYTES);
+    return page;
+}
+
+/** 指针表扩容（元数据，不占配额）：按 2 倍增长后整块拷贝。 */
+static int tmpfs_index_reserve(tmpfs_node_t *n, uint32_t need_pages) {
+    if (need_pages <= n->index_slots) return 0;
+    uint32_t slots = n->index_slots ? n->index_slots : 512u;
+    while (slots < need_pages) slots *= 2u;
+    uint32_t bytes = slots * (uint32_t)sizeof(uint8_t *);
+    uint32_t count = (bytes + TMPFS_PAGE_BYTES - 1) / TMPFS_PAGE_BYTES;
+    uint8_t **table = (uint8_t **)g_alloc.alloc_pages(count);
+    if (!table) return -ENOSPC;
+    memset(table, 0, (size_t)count * TMPFS_PAGE_BYTES);
+    if (n->pages) {
+        memcpy(table, n->pages, n->page_count * sizeof(uint8_t *));
+        uint32_t old_bytes = n->index_slots * (uint32_t)sizeof(uint8_t *);
+        uint32_t old_count = (old_bytes + TMPFS_PAGE_BYTES - 1) / TMPFS_PAGE_BYTES;
+        g_alloc.free_pages(n->pages, old_count);
+    }
+    n->pages = table;
+    n->index_slots = slots;
+    return 0;
+}
+
+/**
+ * @brief 保证节点有 ≥ need_pages 个数据页（新页清零）。
+ *
+ * 原子性：配额不足或分配失败时**不改变**节点（已分配到一半的页会回滚），
+ * 这样 write 返回 -ENOSPC 时文件长度与内容都没变。
+ */
+static int tmpfs_ensure_pages(tmpfs_node_t *n, uint32_t need_pages) {
+    if (need_pages <= n->page_count) return 0;
+    /* add * 页大小 用 32 位算：页数超过 1M（=4 GiB）会回绕成小值，绕过配额
+     * 检查后一次性申请巨量内存。文件长度本来就是 32 位的，超过即 EFBIG。 */
+    if (need_pages > 0xFFFFFFFFu / TMPFS_PAGE_BYTES) return -EFBIG;
+    uint32_t add = need_pages - n->page_count;
+    uint32_t add_bytes = add * TMPFS_PAGE_BYTES;
+    if (n->mount && n->mount->used_bytes + add_bytes > n->mount->max_bytes)
+        return -ENOSPC;
+    if (tmpfs_index_reserve(n, need_pages) < 0) return -ENOSPC;
+
+    uint32_t allocated = 0;
+    while (allocated < add) {
+        uint8_t *page = tmpfs_page_alloc();
+        if (!page) break;
+        n->pages[n->page_count + allocated] = page;
+        allocated++;
+    }
+    if (allocated < add) {                      /* 物理内存不足：回滚 */
+        for (uint32_t i = 0; i < allocated; i++) {
+            g_alloc.free_pages(n->pages[n->page_count + i], 1);
+            n->pages[n->page_count + i] = 0;
+        }
+        return -ENOSPC;
+    }
+    n->page_count = need_pages;
+    n->node.capacity = n->page_count * TMPFS_PAGE_BYTES;
+    if (n->mount) n->mount->used_bytes += add_bytes;
+    return 0;
+}
+
+/** 把数据页收缩到 keep 页（尾部页归还分配器）。 */
+static void tmpfs_shrink_pages(tmpfs_node_t *n, uint32_t keep) {
+    if (keep >= n->page_count) return;
+    uint32_t freed = n->page_count - keep;
+    for (uint32_t i = keep; i < n->page_count; i++) {
+        if (!n->pages[i]) continue;
+        g_alloc.free_pages(n->pages[i], 1);
+        n->pages[i] = 0;
+    }
+    n->page_count = keep;
+    n->node.capacity = keep * TMPFS_PAGE_BYTES;
+    if (n->mount) {
+        uint32_t bytes = freed * TMPFS_PAGE_BYTES;
+        if (n->mount->used_bytes >= bytes) n->mount->used_bytes -= bytes;
+        else n->mount->used_bytes = 0;
+    }
+}
+
+/** 释放节点的全部数据页与指针表。 */
+static void tmpfs_release_all(tmpfs_node_t *n) {
+    if (!n) return;
+    tmpfs_shrink_pages(n, 0);
+    if (n->pages) {
+        uint32_t bytes = n->index_slots * (uint32_t)sizeof(uint8_t *);
+        uint32_t count = (bytes + TMPFS_PAGE_BYTES - 1) / TMPFS_PAGE_BYTES;
+        g_alloc.free_pages(n->pages, count);
+        n->pages = 0;
+        n->index_slots = 0;
+    }
+}
+
+/* ── 节点 ───────────────────────────────────────────────────── */
+
 static tmpfs_node_t *tmpfs_node_alloc(tmpfs_mount_t *m, tmpfs_node_t *parent,
                                       const char *leaf, const char *abs_path,
                                       int type, uint32_t mode) {
     if (!tmpfs_ready()) return 0;
-    tmpfs_node_t *n = (tmpfs_node_t *)g_alloc.alloc((uint32_t)sizeof(*n));
+    tmpfs_node_t *n = (tmpfs_node_t *)g_alloc.alloc_pages(1);
     if (!n) return 0;
-    memset(n, 0, sizeof(*n));
+    memset(n, 0, TMPFS_PAGE_BYTES);            /* 结构体小于一页，够用 */
     strncpy(n->leaf, leaf, sizeof(n->leaf) - 1);
     strncpy(n->node.name, abs_path, sizeof(n->node.name) - 1);
     n->node.type = (vfs_node_type_t)type;
@@ -150,6 +256,12 @@ static tmpfs_node_t *tmpfs_node_alloc(tmpfs_mount_t *m, tmpfs_node_t *parent,
     n->node.private_data = n;
     n->node.ops = &tmpfs_ops;
     return n;
+}
+
+static void tmpfs_node_free(tmpfs_node_t *n) {
+    if (!n) return;
+    tmpfs_release_all(n);
+    g_alloc.free_pages(n, 1);
 }
 
 static int tmpfs_attach(tmpfs_node_t *parent, tmpfs_node_t *child) {
@@ -176,73 +288,6 @@ static int tmpfs_has_children(const tmpfs_node_t *dir) {
     return dir && dir->children != 0;
 }
 
-/** 释放数据页并同步配额。 */
-static void tmpfs_release_data(tmpfs_node_t *n) {
-    if (!n || !n->data) return;
-    if (n->mount && n->mount->used_bytes >= n->node.capacity)
-        n->mount->used_bytes -= n->node.capacity;
-    g_alloc.free(n->data);
-    n->data = 0;
-    n->node.capacity = 0;
-    n->node.size = 0;
-}
-
-/**
- * @brief 确保节点容量 ≥ need，按页增长；新增页清零。
- *
- * @return 0 成功；-ENOSPC 配额不足或分配失败（不改动节点）
- */
-static int tmpfs_reserve(tmpfs_node_t *n, uint32_t need) {
-    if (need <= n->node.capacity) return 0;
-    tmpfs_mount_t *m = n->mount;
-    uint32_t cap = tmpfs_round_up(need);
-    if (m) {
-        uint32_t accounted = m->used_bytes - n->node.capacity;
-        if (accounted + cap > m->max_bytes) return -ENOSPC;
-    }
-    uint8_t *data = (uint8_t *)g_alloc.alloc(cap);
-    if (!data) return -ENOSPC;
-    memset(data, 0, cap);
-    if (n->data && n->node.size)
-        memcpy(data, n->data, n->node.size < n->node.capacity
-                                  ? n->node.size : n->node.capacity);
-    if (n->data) {
-        if (m && m->used_bytes >= n->node.capacity)
-            m->used_bytes -= n->node.capacity;
-        g_alloc.free(n->data);
-    }
-    n->data = data;
-    n->node.capacity = cap;
-    if (m) m->used_bytes += cap;
-    return 0;
-}
-
-/** 把容量收缩到 round_up(size)，释放尾部空闲页。 */
-static void tmpfs_trim(tmpfs_node_t *n) {
-    if (!n->data) return;
-    uint32_t cap = tmpfs_round_up(n->node.size);
-    if (cap >= n->node.capacity) return;
-    if (cap == 0) { tmpfs_release_data(n); return; }
-    /* 不需要搬数据：只是把尾部页还给分配器，但分配器没有 realloc，
-     * 所以新开一块、拷贝、释放旧块。 */
-    uint8_t *data = (uint8_t *)g_alloc.alloc(cap);
-    if (!data) return;
-    memset(data, 0, cap);
-    memcpy(data, n->data, n->node.size);
-    if (n->mount && n->mount->used_bytes >= n->node.capacity)
-        n->mount->used_bytes -= n->node.capacity;
-    g_alloc.free(n->data);
-    n->data = data;
-    n->node.capacity = cap;
-    if (n->mount) n->mount->used_bytes += cap;
-}
-
-static void tmpfs_node_free(tmpfs_node_t *n) {
-    if (!n) return;
-    tmpfs_release_data(n);
-    g_alloc.free(n);
-}
-
 /* ── vfs_ops ─────────────────────────────────────────────────── */
 
 static int tmpfs_op_read(vfs_node_t *node, uint32_t offset, void *buf,
@@ -252,11 +297,23 @@ static int tmpfs_op_read(vfs_node_t *node, uint32_t offset, void *buf,
     if (node->type == VFS_NODE_DIR) return -EISDIR;
     if (offset >= node->size) return 0;
     if (count > node->size - offset) count = node->size - offset;
-    if (count) {
-        if (n->data) memcpy(buf, n->data + offset, count);
-        else memset(buf, 0, count);
+
+    uint8_t *out = (uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t abs = offset + done;
+        uint32_t page = abs / TMPFS_PAGE_BYTES;
+        uint32_t off = abs % TMPFS_PAGE_BYTES;
+        uint32_t chunk = TMPFS_PAGE_BYTES - off;
+        if (chunk > count - done) chunk = count - done;
+        if (page >= n->page_count || !n->pages[page]) {
+            memset(out + done, 0, chunk);       /* 空洞/缺页一律读 0 */
+        } else {
+            memcpy(out + done, n->pages[page] + off, chunk);
+        }
+        done += chunk;
     }
-    return (int)count;
+    return (int)done;
 }
 
 static int tmpfs_op_write(vfs_node_t *node, uint32_t offset, const void *buf,
@@ -266,11 +323,24 @@ static int tmpfs_op_write(vfs_node_t *node, uint32_t offset, const void *buf,
     if (node->type == VFS_NODE_DIR) return -EISDIR;
     if (node->type == VFS_NODE_SYMLINK) return -EINVAL;
     if (count > 0xFFFFFFFFu - offset) return -EFBIG;
-    int r = tmpfs_reserve(n, offset + count);
+
+    uint32_t end = offset + count;
+    uint32_t need_pages = (end + TMPFS_PAGE_BYTES - 1) / TMPFS_PAGE_BYTES;
+    int r = tmpfs_ensure_pages(n, need_pages);
     if (r < 0) return r;
-    if (offset > node->size) memset(n->data + node->size, 0, offset - node->size);
-    memcpy(n->data + offset, buf, count);
-    if (offset + count > node->size) node->size = offset + count;
+
+    const uint8_t *in = (const uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t abs = offset + done;
+        uint32_t page = abs / TMPFS_PAGE_BYTES;
+        uint32_t off = abs % TMPFS_PAGE_BYTES;
+        uint32_t chunk = TMPFS_PAGE_BYTES - off;
+        if (chunk > count - done) chunk = count - done;
+        memcpy(n->pages[page] + off, in + done, chunk);
+        done += chunk;
+    }
+    if (end > node->size) node->size = end;
     return (int)count;
 }
 
@@ -279,16 +349,40 @@ static int tmpfs_op_truncate(vfs_node_t *node, uint32_t size) {
     if (!n) return -EINVAL;
     if (node->type == VFS_NODE_DIR) return -EISDIR;
     if (size == node->size) return 0;
+
     if (size < node->size) {
-        /* 缩小时把尾部清零：之后再扩回来必须读到 0，而不是旧数据 */
-        if (n->data) memset(n->data + size, 0, node->size - size);
+        /* 缩小时把尾部清零：之后再扩回来必须读到 0，而不是旧数据。
+         * 只清 [size, 对齐到页尾) —— 整页回收由 tmpfs_shrink_pages 负责。 */
+        uint32_t clear_end = (size + TMPFS_PAGE_BYTES - 1) &
+                             ~(TMPFS_PAGE_BYTES - 1u);
+        if (clear_end > node->size) clear_end = node->size;
+        for (uint32_t abs = size; abs < clear_end; ) {
+            uint32_t page = abs / TMPFS_PAGE_BYTES;
+            uint32_t off = abs % TMPFS_PAGE_BYTES;
+            uint32_t chunk = TMPFS_PAGE_BYTES - off;
+            if (chunk > clear_end - abs) chunk = clear_end - abs;
+            if (page < n->page_count && n->pages[page])
+                memset(n->pages[page] + off, 0, chunk);
+            abs += chunk;
+        }
         node->size = size;
-        tmpfs_trim(n);
+        tmpfs_shrink_pages(n, (size + TMPFS_PAGE_BYTES - 1) / TMPFS_PAGE_BYTES);
         return 0;
     }
-    int r = tmpfs_reserve(n, size);
+
+    uint32_t need_pages = (size + TMPFS_PAGE_BYTES - 1) / TMPFS_PAGE_BYTES;
+    int r = tmpfs_ensure_pages(n, need_pages);
     if (r < 0) return r;
-    if (n->data) memset(n->data + node->size, 0, size - node->size);
+    /* 新页已清零；旧页里 [old_size, size) 在缩容时清过，这里再保险清一次 */
+    for (uint32_t abs = node->size; abs < size; ) {
+        uint32_t page = abs / TMPFS_PAGE_BYTES;
+        uint32_t off = abs % TMPFS_PAGE_BYTES;
+        uint32_t chunk = TMPFS_PAGE_BYTES - off;
+        if (chunk > size - abs) chunk = size - abs;
+        if (page < n->page_count && n->pages[page])
+            memset(n->pages[page] + off, 0, chunk);
+        abs += chunk;
+    }
     node->size = size;
     return 0;
 }
@@ -316,9 +410,7 @@ static int tmpfs_op_readdir(vfs_node_t *node, uint32_t index, char *name,
 static int tmpfs_op_unlink(vfs_node_t *node) {
     tmpfs_node_t *n = (tmpfs_node_t *)node;
     if (!n || !n->parent) return -EINVAL;
-    if (node->type == VFS_NODE_DIR) {
-        if (tmpfs_has_children(n)) return -ENOTEMPTY;
-    }
+    if (node->type == VFS_NODE_DIR && tmpfs_has_children(n)) return -ENOTEMPTY;
     tmpfs_detach(n);
     tmpfs_node_free(n);
     return 0;
@@ -358,7 +450,7 @@ vfs_node_t *tmpfs_lookup(const char *path) {
             len++;
         }
         name[len] = '\0';
-        while (rel[len] == '/') len++;           /* 不移动 rel 指针，下面统一推进 */
+        while (rel[len] == '/') len++;
         if (cur->node.type != VFS_NODE_DIR) return 0;
         tmpfs_node_t *child = cur->children;
         while (child && strcmp(child->leaf, name) != 0) child = child->next;
@@ -380,9 +472,8 @@ static int tmpfs_add(const char *parent_path, const char *leaf, int type,
     if (pv->type != VFS_NODE_DIR) return -ENOTDIR;
     tmpfs_node_t *parent = (tmpfs_node_t *)pv;
 
-    tmpfs_node_t *probe = parent->children;
-    while (probe && strcmp(probe->leaf, leaf) != 0) probe = probe->next;
-    if (probe) return -EEXIST;
+    for (tmpfs_node_t *probe = parent->children; probe; probe = probe->next)
+        if (strcmp(probe->leaf, leaf) == 0) return -EEXIST;
 
     char abs[VFS_MAX_NAME];
     size_t plen = strlen(parent_path);
@@ -416,12 +507,15 @@ vfs_node_t *tmpfs_symlink(const char *path, const char *target) {
     tmpfs_node_t *n = 0;
     if (tmpfs_add(parent, leaf, VFS_NODE_SYMLINK, 0777, &n) < 0) return 0;
     uint32_t len = (uint32_t)strlen(target);
-    if (tmpfs_reserve(n, len) < 0) {          /* 目标文本就是链接的数据 */
+    /* 链接目标就是链接的"数据"，但 tmpfs_op_write 拒绝写符号链接（POSIX
+     * 不允许 write(2) 写链接），所以这里直接走页分配。目标 < VFS_MAX_NAME
+     * ≤ 一页，只需一页。 */
+    if (tmpfs_ensure_pages(n, 1) < 0 || !n->pages[0]) {
         tmpfs_detach(n);
         tmpfs_node_free(n);
         return 0;
     }
-    memcpy(n->data, target, len);
+    memcpy(n->pages[0], target, len);
     n->node.size = len;
     return &n->node;
 }
@@ -502,10 +596,9 @@ int tmpfs_rename(const char *old_path, const char *new_path, int replace) {
     if (pv->type != VFS_NODE_DIR) return -ENOTDIR;
     tmpfs_node_t *new_parent = (tmpfs_node_t *)pv;
 
-    /* 目录不能搬进自己的子树 */
     if (src_v->type == VFS_NODE_DIR) {
         for (tmpfs_node_t *p = new_parent; p; p = p->parent)
-            if (p == src) return -EINVAL;
+            if (p == src) return -EINVAL;       /* 不能搬进自己的子树 */
     }
 
     vfs_node_t *tgt_v = tmpfs_lookup(new_path);
