@@ -229,6 +229,14 @@ static void lib_path_scan_opt(char **cursor) {
     }
 }
 
+/* 两个 "NAME=value" 是否同一个变量名。用于让用户 export 的变量覆盖
+ * HBOS 的默认值：envp 里同名变量 getenv() 只认第一个，默认值排在前面
+ * 会把用户的 LANG/XDG_* 静默吃掉。 */
+static int app_env_same_name(const char *a, const char *b) {
+    while (*a && *b && *a == *b && *a != '=') { a++; b++; }
+    return *a == '=' && *b == '=';
+}
+
 static char **build_linux_env(void) {
     static const char *const system_dirs[] = {
         "/lib64",
@@ -292,8 +300,21 @@ static char **build_linux_env(void) {
      * 设的变量根本进不了子进程 —— 表现是 `WAYLAND_DEBUG=1 chromium` 无效，
      * 容易误判成"Chromium 把环境清掉了"。要调试 libwayland 必须能透传。 */
     for (int i = 0; i < app_env_extra_count && slot < (int)(sizeof(app_envp) /
-             sizeof(app_envp[0])) - 1; i++)
-        app_envp[slot++] = app_env_extra[i];
+             sizeof(app_envp[0])) - 1; i++) {
+        /* 同名覆盖默认槽位，而不是追加：追加会让默认值先被 getenv 命中，
+         * 用户 `LANG=zh_CN.UTF-8 chromium` 就永远不生效（locale 契约要求
+         * LANG/LC_* 可由用户选择）。LD_LIBRARY_PATH（slot 0）例外：那是
+         * HBOS 计算好的库搜索路径，覆盖它会把 glibc 自己弄丢。 */
+        int replaced = 0;
+        for (int s = 1; s < slot; s++) {
+            if (app_env_same_name(app_envp[s], app_env_extra[i])) {
+                app_envp[s] = app_env_extra[i];
+                replaced = 1;
+                break;
+            }
+        }
+        if (!replaced) app_envp[slot++] = app_env_extra[i];
+    }
     app_envp[slot] = NULL;
     return app_envp;
 }

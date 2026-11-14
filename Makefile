@@ -648,6 +648,10 @@ $(BUILD_DIR)/lib/%.o: $(SRC_DIR)/lib/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
 
+$(BUILD_DIR)/i18n/%.o: $(SRC_DIR)/i18n/%.c | $(BUILD_DIR)
+	@mkdir -p $(@D)
+	$(CC) -c $(CFLAGS) $< -o $@
+
 $(BUILD_DIR)/user/%.o: $(SRC_USER_DIR)/%.c | $(BUILD_DIR)
 	@mkdir -p $(@D)
 	$(CC) -c $(CFLAGS) $< -o $@
@@ -992,7 +996,8 @@ hive-test: | $(BUILD_DIR)
 # exFAT 只读解析：合成卷 + （可选）真实 mkfs.exfat 镜像。
 exfat-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_exfat.c src/exfat.c \
-		src/lib/utf8.c -o $(BUILD_DIR)/test_exfat
+		src/lib/utf8.c src/i18n/utf8.c src/i18n/wcwidth.c \
+		-o $(BUILD_DIR)/test_exfat
 	$(BUILD_DIR)/test_exfat
 	@if command -v mkfs.exfat >/dev/null 2>&1; then \
 		img=$(BUILD_DIR)/test_exfat.img; \
@@ -1085,8 +1090,15 @@ ext4-test: | $(BUILD_DIR)
 # UTF-8 严格解码：超长编码/代理区/越界/截断 必须拒绝。
 utf8-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_utf8.c src/lib/utf8.c \
-		-o $(BUILD_DIR)/test_utf8
+		src/i18n/utf8.c src/i18n/wcwidth.c -o $(BUILD_DIR)/test_utf8
 	$(BUILD_DIR)/test_utf8
+
+# 多语言核心：严格/容错解码、字素簇、wcwidth、字体回退链、locale 契约。
+i18n-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc tests/host/test_i18n.c \
+		src/i18n/utf8.c src/i18n/wcwidth.c src/i18n/font_fallback.c \
+		src/i18n/locale.c -o $(BUILD_DIR)/test_i18n
+	$(BUILD_DIR)/test_i18n
 
 # 分区表解析（MBR / EBR / GPT，含 CRC 负例）。
 partition-test: | $(BUILD_DIR)
@@ -1097,7 +1109,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: check-headers ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test
+test: check-headers ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test i18n-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test
 	@echo "✓ 宿主机测试全部通过"
 
 # 真实鼠标移动：QEMU monitor 注入 mouse_move，验证 QEMU → PS/2 → 内核

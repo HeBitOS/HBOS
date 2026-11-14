@@ -1,59 +1,26 @@
 /**
  * @file    utf8.h
- * @brief   严格 UTF-8 编解码
+ * @brief   严格 UTF-8 编解码（兼容入口，实现已迁到 src/i18n/utf8.h）
  *
- * 为什么单独做一个：目前 UTF-8 解码散在 graphics.c / gui_draw_impl.c /
- * app_notes.c 各自实现，规则还不一致（有的接受超长编码）。多语言要落地，
- * 先得有一个"唯一正确的解码器"，再由各处调用。
- *
- * 严格性（与 Unicode 标准一致）：
- *   - 拒绝超长编码（overlong，如 C0 80）
- *   - 拒绝代理区 U+D800..U+DFFF
- *   - 拒绝 > U+10FFFF
- *   - 拒绝截断的多字节序列与孤立续字节
+ * 保留这个头是为了不打断已有的 `#include "lib/utf8.h"`（exfat.c、宿主
+ * 单测）。**新代码请直接 include "i18n/utf8.h"**，那里才有容错解码和
+ * 字素簇迭代。这里只做符号转发，避免两套实现再次分叉。
  *
  * @layer   lib
- * @owner   src/lib/
+ * @owner   src/i18n/
  * @stable  internal
  *
- * 依赖    见文件正文 #include；本文件刻意不引入更高层的头
- * 被依赖  见 docs/agents/ 对应子系统地图
+ * 依赖    src/i18n/utf8.h
+ * 被依赖  src/exfat.c、tests/host/test_utf8.c
  *
  * 索引头文件
- *   宏    UTF8_INVALID  常量 / 特性宏
- *   函数  utf8_decode  解码一个码点
- *         utf8_encode  编码一个码点
- *         utf8_valid   校验整段是否为合法 UTF-8
- *         utf8_length  码点个数（非法序列按 1 个"替换字符"计）
+ *   宏    UTF8_INVALID      解码失败哨兵（见 i18n/utf8.h）
+ *   函数  utf8_decode / utf8_encode / utf8_valid / utf8_length
+ *         实现均在 src/i18n/utf8.c
  */
 #ifndef HBOS_UTF8_H
 #define HBOS_UTF8_H
 
-#include <stdint.h>
-
-#define UTF8_INVALID  0xFFFFFFFFu   /* 解码失败（合法码点最大 0x10FFFF） */
-
-/**
- * @brief 解码一个码点。
- * @param s      输入
- * @param len    可读字节数
- * @param cp     输出码点（可为 NULL）
- * @return 消耗的字节数（>=1）；非法序列返回 0
- */
-int utf8_decode(const char *s, uint32_t len, uint32_t *cp);
-
-/**
- * @brief 编码一个码点。
- * @param cp   码点
- * @param out  输出缓冲（至少 4 字节）
- * @return 写入字节数；非法码点返回 0
- */
-int utf8_encode(uint32_t cp, char *out);
-
-/** 校验整段是否为合法 UTF-8；合法返回 1。 */
-int utf8_valid(const char *s, uint32_t len);
-
-/** 码点个数（非法序列按 1 个"替换字符"计）。 */
-uint32_t utf8_length(const char *s, uint32_t len);
+#include "i18n/utf8.h"
 
 #endif /* HBOS_UTF8_H */

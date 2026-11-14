@@ -9,6 +9,8 @@
 #include "core/task.h"
 #include "core/heap.h"
 #include "graphics/graphics.h"
+#include "i18n/utf8.h"
+#include "i18n/wcwidth.h"
 
 static tty_t ttys[TTY_MAX];
 static pty_t ptys[PTY_MAX];
@@ -64,6 +66,29 @@ static void ld_str(emit_fn emit, void *ctx, const char *s)
     while (*s) emit(ctx, (uint8_t)*s++);
 }
 
+/* 行编辑的删格单位是字素簇，不是字节也不是码点：
+ *   · 删掉一个 UTF-8 字节只会留下非法序列（旧的 edit_len-- 就这么干）；
+ *   · 删掉一个码点会把 "e" + U+0301 拆开，组合符失去基字符；
+ *   · 宽字符（CJK/Emoji）在屏幕上占两列，ECHOE 必须退两格再擦两格。
+ * 返回被删簇的显示列数；调用方据此决定发几次 "\b \b"。 */
+static int ld_erase_cluster(ldisc_t *ld)
+{
+    if (!ld->edit_len) return 0;
+    uint32_t start = utf8_cluster_prev((const char *)ld->edit, ld->edit_len,
+                                       ld->edit_len);
+    if (start >= ld->edit_len) start = ld->edit_len - 1;   /* 防御：必须前进 */
+    int cols = utf8_cluster_width((const char *)ld->edit + start,
+                                  ld->edit_len - start);
+    if (cols < 1) cols = 1;      /* 控制字符/异常簇在屏上至少占一格 */
+    ld->edit_len = start;
+    return cols;
+}
+
+static void ld_echo_erase(emit_fn emit, void *ctx, int cols)
+{
+    for (int i = 0; i < cols; i++) ld_str(emit, ctx, "\b \b");
+}
+
 static void ld_commit(ldisc_t *ld)
 {
     rb_put(&ld->input, ld->edit, ld->edit_len);
@@ -102,16 +127,14 @@ static void ld_input(ldisc_t *ld, emit_fn emit, void *ctx, uint8_t c)
 
     if (lf & ICANON) {
         if (c == t->c_cc[VERASE] || c == 8) {
-            if (ld->edit_len) {
-                ld->edit_len--;
-                if (lf & ECHOE) ld_str(emit, ctx, "\b \b");
-            }
+            int cols = ld_erase_cluster(ld);
+            if ((lf & ECHOE) && cols) ld_echo_erase(emit, ctx, cols);
             return;
         }
         if (c == t->c_cc[VKILL]) {
             while (ld->edit_len) {
-                ld->edit_len--;
-                if (lf & ECHOE) ld_str(emit, ctx, "\b \b");
+                int cols = ld_erase_cluster(ld);
+                if ((lf & ECHOE) && cols) ld_echo_erase(emit, ctx, cols);
             }
             if ((lf & ECHOK) && !(lf & ECHOE)) ld_out(ld, emit, ctx, '\n');
             return;
