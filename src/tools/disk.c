@@ -2,6 +2,7 @@
 #include "../partition.h"
 #include "../fs.h"
 #include "../graphics/graphics.h"
+#include "../vfs.h"
 #include "tool.h"
 
 static void print_uint(uint32_t v) {
@@ -116,19 +117,22 @@ static void print_partitions(uint32_t disk_sectors) {
 
 static void print_file_usage(void) {
     console_puts("files:\n");
-    if (fs_get_count() == 0) {
+    /* 统一枚举：平铺表 + tmpfs。只用 fs_get_* 会漏掉 /tmp /run /dev/shm。 */
+    uint32_t count = vfs_count();
+    if (count == 0) {
         console_puts("  \x1b[90mempty\x1b[0m\n");
         return;
     }
-    for (uint32_t i = 0; i < fs_get_count(); i++) {
-        file_t *f = fs_get_file(i);
-        if (!f) continue;
+    for (uint32_t i = 0; i < count; i++) {
+        vfs_node_t *node = vfs_get(i);
+        if (!node || !node->name[0]) continue;
         console_puts("  ");
-        console_puts(f->name);
+        if (node->name[0] != '/') console_putchar('/');
+        console_puts(node->name);
         console_puts(" ");
-        usage_bar(f->size, RAMFS_MAX_FILE_SIZE, 18);
+        usage_bar(node->size, RAMFS_MAX_FILE_SIZE, 18);
         console_puts(" ");
-        print_uint(f->size);
+        print_uint(node->size);
         console_puts(" B\n");
     }
 }

@@ -34,6 +34,66 @@ static vfs_node_t vfs_virtual_dirs[] = {
     {.name = "/bin",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0755},
     {.name = "/tmp",  .type = VFS_NODE_DIR, .uid = 0, .gid = 0, .mode = S_IFDIR | 0777},
 };
+/*
+ * 全局文件系统临界区
+ * ══════════════════
+ * 调度是抢占式的：PIT 每个 tick 在 gdt_idt.c:1262 直接调 task_schedule()，
+ * 而块 I/O 是**轮询**等待（ahci.c 的 ahci_cmd_once 用 cpu_relax 自旋，
+ * 中断保持开启）。因此一个任务的 ext2 写操作完全可能在
+ *   读位图 → 改位图 → 写位图
+ * 的中间被切走；此时另一个任务进入 ext2 会：
+ *   · 复用文件级静态缓冲（g_io_buf / g_map_buf / g_free_buf / g_ind_slot），
+ *     把前一个操作的数据覆盖掉；
+ *   · 对块位图/inode 位图/空闲计数做交错的 read-modify-write，直接丢分配；
+ *   · tmpfs 的页表扩容、配额计数（used_bytes += …）同样会丢更新或 UAF。
+ *
+ * 结论：**不能**靠"单核 + 不睡眠"隐式成立 —— 抢占正是单核上的并发来源。
+ * 正确性必须显式保证。这里用"整个文件系统一把锁"：
+ *   · 同一 task 重入只加深度（fs.c ↔ vfs.c 互相调用不会自锁死）；
+ *   · 持锁期间 task_preempt_disable()，同核定时器切不走临界区；
+ *   · 跨核用 __sync_lock_test_and_set 原子位互斥，等待方 task_yield()
+ *     让出 CPU（不烧核，也不会因为持有者在别的核上而饿死）。
+ * 不变量：持锁区间内只做块 I/O 与内存拷贝，不做阻塞等待。
+ */
+#define VFS_FS_LOCK_CHUNK (16u * 1024u)
+
+static volatile int vfs_fs_busy;
+static task_t *vfs_fs_owner;   /* 只由持有者读写（持锁期间禁止本核抢占） */
+static int vfs_fs_depth;
+
+void vfs_fs_lock(void) {
+    task_t *self = task_current();
+    if (!self) return;                 /* 调度器起来之前的单线程初始化 */
+    task_preempt_disable();
+    if (vfs_fs_owner == self) {        /* 可重入 */
+        vfs_fs_depth++;
+        return;
+    }
+    while (__sync_lock_test_and_set(&vfs_fs_busy, 1)) {
+        task_preempt_enable();         /* 等待期间必须可被调度，否则死等 */
+        task_yield();
+        task_preempt_disable();
+    }
+    vfs_fs_owner = self;
+    vfs_fs_depth = 1;
+}
+
+void vfs_fs_unlock(void) {
+    task_t *self = task_current();
+    if (!self) return;
+    if (vfs_fs_owner != self) {        /* 防御：未持锁的 unlock 不破坏计数 */
+        task_preempt_enable();
+        return;
+    }
+    if (--vfs_fs_depth > 0) {
+        task_preempt_enable();
+        return;
+    }
+    vfs_fs_owner = 0;
+    __sync_lock_release(&vfs_fs_busy);
+    task_preempt_enable();
+}
+
 static uint32_t vfs_root_readdir_pos;
 
 /**
@@ -441,8 +501,9 @@ static int vfs_expand_symlinks(const char *path, int follow_final,
     return -1;
 }
 
-/** 按路径查找 VFS 节点，默认遵循 POSIX 语义展开最终符号链接。 */
-vfs_node_t *vfs_lookup(const char *path) {
+/* 无锁实现：tmpfs 树遍历与平铺表查找本身不动磁盘，但别处可能正在
+ * unlink 并释放节点，所以公开入口统一加锁。 */
+static vfs_node_t *vfs_lookup_nolock(const char *path) {
     if (!path) return NULL;
     if (!vfs_symlink_count) return vfs_lookup_raw(path);
     char expanded[VFS_MAX_NAME];
@@ -450,7 +511,7 @@ vfs_node_t *vfs_lookup(const char *path) {
     return vfs_lookup_raw(expanded);
 }
 
-vfs_node_t *vfs_lookup_nofollow(const char *path) {
+static vfs_node_t *vfs_lookup_nofollow_nolock(const char *path) {
     if (!path) return NULL;
     if (!vfs_symlink_count) return vfs_lookup_raw(path);
     char expanded[VFS_MAX_NAME];
@@ -458,24 +519,44 @@ vfs_node_t *vfs_lookup_nofollow(const char *path) {
     return vfs_lookup_raw(expanded);
 }
 
+/** 按路径查找 VFS 节点，默认遵循 POSIX 语义展开最终符号链接。 */
+vfs_node_t *vfs_lookup(const char *path) {
+    vfs_fs_lock();
+    vfs_node_t *node = vfs_lookup_nolock(path);
+    vfs_fs_unlock();
+    return node;
+}
+
+vfs_node_t *vfs_lookup_nofollow(const char *path) {
+    vfs_fs_lock();
+    vfs_node_t *node = vfs_lookup_nofollow_nolock(path);
+    vfs_fs_unlock();
+    return node;
+}
+
 /** 按路径创建 VFS 节点，若已存在则返回已有节点 */
 vfs_node_t *vfs_create(const char *path) {
     int existed = vfs_lookup_nofollow(path) != NULL;
+    vfs_fs_lock();
     if (tmpfs_is_mounted(path)) {
         vfs_node_t *node = tmpfs_create(path, VFS_NODE_FILE, S_IFREG | 0644);
+        vfs_fs_unlock();
         if (node && !existed)
             linux_compat_inotify_notify(path, LINUX_IN_CREATE, 0);
         return node;
     }
     file_t *file = fs_create_file(path);
+    vfs_fs_unlock();
     if (file && !existed)
         linux_compat_inotify_notify(path, LINUX_IN_CREATE, 0);
     return file ? &file->node : NULL;
 }
 
 vfs_node_t *vfs_symlink(const char *path, const char *target) {
+    vfs_fs_lock();
     if (tmpfs_is_mounted(path)) {
         vfs_node_t *node = tmpfs_symlink(path, target);
+        vfs_fs_unlock();
         if (node) {
             vfs_symlink_count++;
             linux_compat_inotify_notify(path, LINUX_IN_CREATE, 0);
@@ -483,6 +564,7 @@ vfs_node_t *vfs_symlink(const char *path, const char *target) {
         return node;
     }
     file_t *link = fs_create_symlink(path, target);
+    vfs_fs_unlock();
     if (link) {
         vfs_symlink_count++;
         linux_compat_inotify_notify(path, LINUX_IN_CREATE, 0);
@@ -494,7 +576,9 @@ vfs_node_t *vfs_symlink(const char *path, const char *target) {
 int vfs_unlink(const char *path) {
     vfs_node_t *node = vfs_lookup_nofollow(path);
     if (!node || !node->ops || !node->ops->unlink) return -1;
+    vfs_fs_lock();
     int result = node->ops->unlink(node);
+    vfs_fs_unlock();
     if (result == 0) {
         if (node->type == VFS_NODE_SYMLINK && vfs_symlink_count)
             vfs_symlink_count--;
@@ -503,7 +587,8 @@ int vfs_unlink(const char *path) {
     return result;
 }
 
-int vfs_rename(const char *old_path, const char *new_path, int replace) {
+static int vfs_rename_nolock(const char *old_path, const char *new_path,
+                             int replace) {
     if (!old_path || !new_path) return -1;
     if (tmpfs_is_mounted(old_path) || tmpfs_is_mounted(new_path)) {
         vfs_node_t *src = vfs_lookup_nofollow(old_path);
@@ -546,24 +631,73 @@ int vfs_rename(const char *old_path, const char *new_path, int replace) {
     return 0;
 }
 
-/** 从 VFS 节点读取数据，通过节点操作接口调用底层 read */
-int vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count) {
-    if (!node || !node->ops || !node->ops->read) return -1;
-    return node->ops->read(node, offset, buf, count);
+int vfs_rename(const char *old_path, const char *new_path, int replace) {
+    vfs_fs_lock();
+    int r = vfs_rename_nolock(old_path, new_path, replace);
+    vfs_fs_unlock();
+    return r;
 }
 
-/** 向 VFS 节点写入数据，通过节点操作接口调用底层 write */
+/**
+ * @brief 从 VFS 节点读取数据（临界区保护，按 16 KiB 分块）。
+ *
+ * 分块的意义：块 I/O 同步轮询，一次持锁读 1 MiB 会让别的任务等几毫秒
+ * 到几十毫秒。按 16 KiB 分段后，单次持锁最多约 16 个 1 KiB 块，其他任务
+ * 可以在段与段之间排到锁。语义仍与 POSIX read 一致（返回已读字节数，
+ * 中途出错返回已读部分；一个块都没读才返回负错误码）。
+ */
+int vfs_read(vfs_node_t *node, uint32_t offset, void *buf, uint32_t count) {
+    if (!node || !node->ops || !node->ops->read) return -1;
+    if (!buf && count) return -EINVAL;
+    uint8_t *out = (uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t chunk = count - done;
+        if (chunk > VFS_FS_LOCK_CHUNK) chunk = VFS_FS_LOCK_CHUNK;
+        vfs_fs_lock();
+        int r = node->ops->read(node, offset + done, out + done, chunk);
+        vfs_fs_unlock();
+        if (r < 0) return done ? (int)done : r;
+        done += (uint32_t)r;
+        if ((uint32_t)r < chunk) break;   /* 短读（EOF/后端上限） */
+    }
+    return (int)done;
+}
+
+/**
+ * @brief 向 VFS 节点写入数据（临界区保护，按 16 KiB 分块）。
+ *
+ * 中途失败返回已写字节数（POSIX 语义）；一个字节都没写才返回负错误码
+ * （-ENOSPC/-EROFS/… 现在能从 ext2/tmpfs 一路传到这里）。
+ */
 int vfs_write(vfs_node_t *node, uint32_t offset, const void *buf, uint32_t count) {
     if (!node || !node->ops || !node->ops->write) return -1;
-    int result = node->ops->write(node, offset, buf, count);
-    if (result > 0) vfs_notify_node(node, LINUX_IN_MODIFY);
-    return result;
+    if (!buf && count) return -EINVAL;
+    const uint8_t *in = (const uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t chunk = count - done;
+        if (chunk > VFS_FS_LOCK_CHUNK) chunk = VFS_FS_LOCK_CHUNK;
+        vfs_fs_lock();
+        int r = node->ops->write(node, offset + done, in + done, chunk);
+        vfs_fs_unlock();
+        if (r < 0) {
+            if (done) break;
+            return r;
+        }
+        done += (uint32_t)r;
+        if ((uint32_t)r < chunk) break;
+    }
+    if (done > 0) vfs_notify_node(node, LINUX_IN_MODIFY);
+    return (int)done;
 }
 
 /** 把 VFS 节点截断/扩展到 size 字节，通过节点操作接口调用底层 truncate */
 int vfs_truncate(vfs_node_t *node, uint32_t size) {
     if (!node || !node->ops || !node->ops->truncate) return -1;
+    vfs_fs_lock();
     int result = node->ops->truncate(node, size);
+    vfs_fs_unlock();
     if (result == 0) {
         if (size == 0) {
             node->size = 0;
@@ -589,25 +723,36 @@ int vfs_truncate(vfs_node_t *node, uint32_t size) {
  * 深度优先追加 tmpfs 节点。
  */
 uint32_t vfs_count(void) {
-    return fs_get_count() + tmpfs_node_count();
+    /* 与枚举本身保持一致：并发 unlink 可能正在释放 tmpfs 节点，
+     * 遍历树必须和写路径互斥（否则会读到刚释放的节点）。 */
+    vfs_fs_lock();
+    uint32_t total = fs_get_count() + tmpfs_node_count();
+    vfs_fs_unlock();
+    return total;
 }
 
 /** 按索引获取 VFS 节点（索引语义与 vfs_count 一致） */
 vfs_node_t *vfs_get(uint32_t index) {
+    vfs_fs_lock();
     uint32_t flat = fs_get_count();
-    if (index < flat) return fs_get_node(index);
-    return tmpfs_node_at(index - flat);
+    vfs_node_t *node = index < flat ? fs_get_node(index)
+                                    : tmpfs_node_at(index - flat);
+    vfs_fs_unlock();
+    return node;
 }
 
 int vfs_mkdir(const char *path) {
     if (!path) return -1;
+    vfs_fs_lock();
     if (tmpfs_is_mounted(path)) {
         int result = tmpfs_mkdir(path);
+        vfs_fs_unlock();
         if (result == 0)
             linux_compat_inotify_notify(path, LINUX_IN_CREATE, 1);
         return result;
     }
     int result = fs_mkdir(path);
+    vfs_fs_unlock();
     if (result == 0)
         linux_compat_inotify_notify(path, LINUX_IN_CREATE, 1);
     return result;
@@ -615,19 +760,22 @@ int vfs_mkdir(const char *path) {
 
 int vfs_rmdir(const char *path) {
     if (!path) return -1;
+    vfs_fs_lock();
     if (tmpfs_is_mounted(path)) {
         int result = tmpfs_rmdir(path);
+        vfs_fs_unlock();
         if (result == 0)
             linux_compat_inotify_notify(path, LINUX_IN_DELETE_SELF, 1);
         return result;
     }
     int result = fs_rmdir(path);
+    vfs_fs_unlock();
     if (result == 0)
         linux_compat_inotify_notify(path, LINUX_IN_DELETE_SELF, 1);
     return result;
 }
 
-int vfs_opendir(const char *path) {
+static int vfs_opendir_nolock(const char *path) {
     if (!path) return -1;
     if (tmpfs_is_mounted(path)) {
         vfs_node_t *node = tmpfs_lookup(path);
@@ -657,22 +805,35 @@ int vfs_opendir(const char *path) {
     return fs_opendir(path);
 }
 
+int vfs_opendir(const char *path) {
+    vfs_fs_lock();
+    int r = vfs_opendir_nolock(path);
+    vfs_fs_unlock();
+    return r;
+}
+
 int vfs_readdir(const char *path, char *name, uint32_t *type) {
     if (!path || !name || !type) return -1;
+    vfs_fs_lock();
     if (strcmp(path, "/") == 0) {
         int ret = vfs_readdir_at("/", vfs_root_readdir_pos, name, type);
         if (ret == 0) vfs_root_readdir_pos++;
+        vfs_fs_unlock();
         return ret;
     }
     if (tmpfs_is_mounted(path)) {
         int ret = tmpfs_readdir_at(path, vfs_tmpfs_readdir_pos, name, type);
         if (ret == 0) vfs_tmpfs_readdir_pos++;
+        vfs_fs_unlock();
         return ret;
     }
-    return fs_readdir(path, name, type);
+    int ret = fs_readdir(path, name, type);
+    vfs_fs_unlock();
+    return ret;
 }
 
-int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type) {
+static int vfs_readdir_at_nolock(const char *path, uint32_t index, char *name,
+                                 uint32_t *type) {
     if (!path || !name || !type) return -1;
     /* 根目录：合成顶层目录 + 真实文件系统里的项。
      *
@@ -794,11 +955,23 @@ int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type)
     }
 }
 
+int vfs_readdir_at(const char *path, uint32_t index, char *name,
+                   uint32_t *type) {
+    vfs_fs_lock();
+    int r = vfs_readdir_at_nolock(path, index, name, type);
+    vfs_fs_unlock();
+    return r;
+}
+
 int vfs_closedir(const char *path) {
+    vfs_fs_lock();
+    int r = 0;
     if (path && strcmp(path, "/") == 0) vfs_root_readdir_pos = 0;
     if (path && tmpfs_is_mounted(path)) {
         vfs_tmpfs_readdir_pos = 0;
-        return 0;
+    } else {
+        r = fs_closedir(path);
     }
-    return fs_closedir(path);
+    vfs_fs_unlock();
+    return r;
 }

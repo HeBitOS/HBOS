@@ -1702,7 +1702,8 @@ static void draw_resource_panel(int tx, int ty, int win_w, int w, int h) {
     text(tx, ty + 110, line, UI_FG, 1);
     line_u32(line, sizeof(line), "应用数: ", hbos_app_count(), "");
     text(tx, ty + 132, line, UI_FG, 1);
-    line_u32(line, sizeof(line), "文件数: ", fs_get_count(), "");
+    /* 文件数 = 平铺表 + tmpfs 节点；这里只改统计口径，不碰绘制逻辑 */
+    line_u32(line, sizeof(line), "文件数: ", vfs_count(), "");
     text(tx, ty + 154, line, UI_FG, 1);
     line2(line, sizeof(line), "文件系统: ", fs_backend_name());
     text(tx, ty + 176, line, UI_FG, 1);

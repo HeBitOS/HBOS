@@ -35,6 +35,8 @@
  *         vfs_readdir          （待补）
  *         vfs_readdir_at       （待补）
  *         vfs_closedir         （待补）
+ *         vfs_fs_lock          进入全局文件系统临界区（可重入）
+ *         vfs_fs_unlock        离开临界区（与 vfs_fs_lock 配对）
  */
 #ifndef HBOS_VFS_H
 #define HBOS_VFS_H
@@ -106,5 +108,25 @@ int vfs_opendir(const char *path);
 int vfs_readdir(const char *path, char *name, uint32_t *type);
 int vfs_readdir_at(const char *path, uint32_t index, char *name, uint32_t *type);
 int vfs_closedir(const char *path);
+
+/**
+ * @brief 全局文件系统临界区（可重入，按 task 识别持有者）。
+ *
+ * 为什么需要：调度器是**抢占式**的（PIT 每个 tick 在 gdt_idt.c:1262 调
+ * task_schedule），而块 I/O 是轮询等待（ahci.c 的 ahci_cmd_once 用
+ * cpu_relax 自旋、中断始终开着）。也就是说：
+ *   · 一个任务可以在 ext2 的"读位图 → 改位图 → 写位图"中间被切走；
+ *   · ext2 的 g_io_buf/g_map_buf/g_free_buf/g_ind_slot 与 tmpfs 的
+ *     页表/配额都是文件级静态状态，两个任务同时进入必然互相踩。
+ * 所以这里提供一把"整个文件系统一把锁"的临界区：
+ *   · 同一个任务重入只加深度（fs.c/vfs.c 互相调用不会自锁死）；
+ *   · 持锁期间禁止本 CPU 抢占（临界区不会被同核定时器切走）；
+ *   · 换核/SMP 用原子位互斥，等待方 task_yield 让出 CPU 而不是烧核。
+ *
+ * 不变量：持锁期间不做阻塞等待（不 sleep、不等人）；只做块 I/O 与内存
+ * 拷贝。锁粒度由 vfs_read/vfs_write 的 16 KiB 分块限制。
+ */
+void vfs_fs_lock(void);
+void vfs_fs_unlock(void);
 
 #endif

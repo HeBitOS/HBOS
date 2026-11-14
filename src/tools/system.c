@@ -11,6 +11,7 @@
 #include "../shell/shell.h"
 #include "../net.h"
 #include "../rtc_tz.h"
+#include "../vfs.h"
 #include "../smp.h"
 #include "../string.h"
 #include "../unistd.h"
@@ -565,7 +566,7 @@ static void cmd_status(int argc, char **argv) {
     console_puts("\x1b[36mFS:\x1b[0m       ");
     console_puts(fs_backend_name());
     console_puts("  ");
-    print_uint(fs_get_count());
+    print_uint(vfs_count());
     console_puts(" files\n");
 
     /* Block device */

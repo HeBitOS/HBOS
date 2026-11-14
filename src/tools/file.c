@@ -1,6 +1,7 @@
 #include "../errno.h"
 #include "../fcntl.h"
 #include "../fs.h"
+#include "../fs/tmpfs.h"
 #include "../graphics/graphics.h"
 #include "../selftest.h"
 #include "../string.h"
@@ -347,7 +348,9 @@ static void cmd_df(int argc, char **argv) {
     extern const char *block_backend_name(void);
 
     uint32_t total_sectors = block_sector_count();
-    uint32_t file_count = fs_get_count();
+    /* 统一枚举视图：平铺表 + tmpfs 节点。只用 fs_get_count 会把
+     * /tmp /run /dev/shm 里的文件漏掉（它们不在平铺表里）。 */
+    uint32_t file_count = vfs_count();
 
     console_puts("\x1b[33mFilesystem      Size   Used  Avail  Use%  Files  Backend\x1b[0m\n");
     console_puts("hbos            ");
@@ -356,8 +359,12 @@ static void cmd_df(int argc, char **argv) {
     /* Estimate used from file sizes */
     uint32_t used_bytes = 0;
     for (uint32_t i = 0; i < file_count; i++) {
-        file_t *f = fs_get_file(i);
-        if (f && f->used) used_bytes += f->size;
+        vfs_node_t *node = vfs_get(i);
+        if (!node) continue;
+        /* tmpfs 的字节占的是内存，不是这块盘：算进 df 的 "Used" 会把
+         * 磁盘使用率虚报（/tmp 里几百 MiB 临时文件很常见）。 */
+        if (tmpfs_is_mounted(node->name)) continue;
+        used_bytes += node->size;
     }
     uint32_t used_mb = used_bytes / (1024 * 1024);
     uint32_t total_mb = total_sectors / 2048;
@@ -472,17 +479,19 @@ static void cmd_rmdir_cmd(int argc, char **argv) {
 
 static void cmd_find(int argc, char **argv) {
     const char *pattern = (argc >= 2) ? argv[1] : "";
-    uint32_t count = fs_get_count();
+    uint32_t count = vfs_count();
     for (uint32_t i = 0; i < count; i++) {
-        file_t *f = fs_get_file(i);
-        if (!f || !f->used || !f->name[0]) continue;
-        if (pattern[0] == '\0' || strstr(f->name, pattern)) {
-            if (f->type) console_puts("\x1b[34m");
-            console_puts(f->name);
-            if (f->type) console_puts("/");
-            console_puts("\x1b[0m");
-            console_putchar('\n');
-        }
+        vfs_node_t *node = vfs_get(i);
+        if (!node || !node->name[0]) continue;
+        if (pattern[0] != '\0' && !strstr(node->name, pattern)) continue;
+        /* 平铺表里的名字不带前导 '/'，tmpfs 的是绝对路径：统一补成绝对路径 */
+        int is_dir = node->type == VFS_NODE_DIR;
+        if (is_dir) console_puts("\x1b[34m");
+        if (node->name[0] != '/') console_putchar('/');
+        console_puts(node->name);
+        if (is_dir) console_puts("/");
+        console_puts("\x1b[0m");
+        console_putchar('\n');
     }
 }
 

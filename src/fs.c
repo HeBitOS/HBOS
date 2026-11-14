@@ -1911,7 +1911,7 @@ static int ext2_try_mount(void) {
 }
 
 /** 将文件表同步到磁盘（仅 HBFS 模式有效） */
-int fs_sync(void) {
+static int fs_sync_nolock(void) {
     /* ext2：把"已同步"落成超级块的 EXT2_VALID_FS，断电后 e2fsck 才不会
      * 把脏卷当成干净卷跳过检查。只读 ext4 在 ext2_sync 内部直接 no-op。 */
     if (fs_backend == FS_BACKEND_EXT2) return ext2_sync(&ext2_fs);
@@ -2076,7 +2076,7 @@ static uint32_t fat32_resolve_parent(const char *norm, char *basename_out) {
 }
 
 /** 创建文件（若同名文件已存在则返回已有文件） */
-file_t *fs_create_file(const char *name) {
+static file_t *fs_create_file_nolock(const char *name) {
     char norm[MAX_FILENAME];
     if (!normalize_path(name, norm)) return NULL;
     file_t *existing = fs_find_file(norm);
@@ -2210,7 +2210,7 @@ file_t *fs_create_file(const char *name) {
 /** 创建轻量符号链接。链接目标直接存放在文件槽的数据区，不新增 inode
  * 或动态分配；HBFS 会连同 type=2 一次同步。ext2/FAT32 需要各自的真实
  * inode/目录项实现，因此在对应后端明确拒绝，避免伪装成普通文件。 */
-file_t *fs_create_symlink(const char *name, const char *target) {
+static file_t *fs_create_symlink_nolock(const char *name, const char *target) {
     if (!name || !target || !target[0]) return NULL;
     size_t length = strlen(target);
     if (length >= VFS_MAX_NAME) return NULL;
@@ -2291,7 +2291,7 @@ static const char *ext2_errno_text(int err) {
 }
 
 /** 删除指定名称的文件 */
-int fs_delete_file(const char *name) {
+static int fs_delete_file_nolock(const char *name) {
     file_t *f = fs_find_file(name);
     if (!f) return -1;
     if (fs_backend == FS_BACKEND_EXT2) {
@@ -2418,7 +2418,7 @@ static int fs_path_in_tree(const char *path, const char *root) {
  * 内存和表项名称都会回滚。ext2/FAT32 尚无底层 rename primitive，普通文件
  * 保留 copy-delete 回退，目录则明确失败。
  */
-int fs_rename_file(const char *old_name, const char *new_name) {
+static int fs_rename_file_nolock(const char *old_name, const char *new_name) {
     char old_norm[MAX_FILENAME];
     char new_norm[MAX_FILENAME];
     if (!normalize_path(old_name, old_norm) || !normalize_path(new_name, new_norm))
@@ -2548,7 +2548,7 @@ int fs_rename_file(const char *old_name, const char *new_name) {
 }
 
 /** 截断文件，将大小清零 */
-int fs_truncate_file(file_t *f) {
+static int fs_truncate_file_nolock(file_t *f) {
     if (!f || !f->used) return -1;
     if (fs_backend == FS_BACKEND_EXT2) {
         return ext2_vfs_truncate(&f->node, 0);
@@ -2563,7 +2563,7 @@ int fs_truncate_file(file_t *f) {
 }
 
 /** 读取文件数据，根据后端类型分派到 ramfs 或 HBFS 读取 */
-uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count) {
+static uint32_t fs_read_file_data_nolock(file_t *f, uint32_t offset, void *buf, uint32_t count) {
     if (fs_backend == FS_BACKEND_HBFS)
         return hbfs_read_data(f, offset, buf, count);
     if (fs_backend == FS_BACKEND_EXT2)
@@ -2579,7 +2579,7 @@ uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count
 }
 
 /** 写入文件数据，根据后端类型分派到 ramfs 或 HBFS 写入 */
-int fs_write_file_data(file_t *f, uint32_t offset, const void *buf, uint32_t count) {
+static int fs_write_file_data_nolock(file_t *f, uint32_t offset, const void *buf, uint32_t count) {
     if (fs_backend == FS_BACKEND_HBFS)
         return hbfs_write_data(f, offset, buf, count);
     if (fs_backend == FS_BACKEND_EXT2)
@@ -2660,7 +2660,7 @@ static int ramfs_vfs_unlink(vfs_node_t *node) {
     return fs_delete_file(node->name);
 }
 
-int fs_mkdir(const char *name) {
+static int fs_mkdir_nolock(const char *name) {
     char norm[MAX_FILENAME];
     if (!normalize_path(name, norm)) return -1;
     file_t *existing = fs_find_file(norm);
@@ -2761,7 +2761,7 @@ int fs_mkdir(const char *name) {
     return -1;
 }
 
-int fs_rmdir(const char *name) {
+static int fs_rmdir_nolock(const char *name) {
     file_t *f = fs_find_file(name);
     if (!f || f->type != 1) return -1;
 
@@ -2859,4 +2859,85 @@ int fs_closedir(const char *name) {
 // 读取文件
 void fs_read_file(file_t *f) {
     (void)f;
+}
+
+/* ── 全局文件系统临界区的公开包装 ────────────────────────────────
+ *
+ * 为什么包在 fs.c 而不只在 vfs.c：GUI/工具里存在直接调 fs_* 的路径
+ * （app_notes 的便签保存、tools/gui.c 的删除、tools/file.c 的 mv），
+ * 它们不经过 vfs_*。锁是可重入的，vfs→fs 的嵌套调用只加深深度，
+ * 不会自锁死。
+ *
+ * 粒度：这些函数内部可能有多次块 I/O（如写入整个文件），但都是**同步**
+ * 完成的短路径；真正的大块数据由 vfs_read/vfs_write 的 16 KiB 分块
+ * 限制单次持锁时长，这里的调用一般只有几块元数据。
+ */
+int fs_sync(void) {
+    vfs_fs_lock();
+    int r = fs_sync_nolock();
+    vfs_fs_unlock();
+    return r;
+}
+
+file_t *fs_create_file(const char *name) {
+    vfs_fs_lock();
+    file_t *f = fs_create_file_nolock(name);
+    vfs_fs_unlock();
+    return f;
+}
+
+file_t *fs_create_symlink(const char *name, const char *target) {
+    vfs_fs_lock();
+    file_t *f = fs_create_symlink_nolock(name, target);
+    vfs_fs_unlock();
+    return f;
+}
+
+int fs_delete_file(const char *name) {
+    vfs_fs_lock();
+    int r = fs_delete_file_nolock(name);
+    vfs_fs_unlock();
+    return r;
+}
+
+int fs_rename_file(const char *old_name, const char *new_name) {
+    vfs_fs_lock();
+    int r = fs_rename_file_nolock(old_name, new_name);
+    vfs_fs_unlock();
+    return r;
+}
+
+int fs_truncate_file(file_t *f) {
+    vfs_fs_lock();
+    int r = fs_truncate_file_nolock(f);
+    vfs_fs_unlock();
+    return r;
+}
+
+uint32_t fs_read_file_data(file_t *f, uint32_t offset, void *buf, uint32_t count) {
+    vfs_fs_lock();
+    uint32_t r = fs_read_file_data_nolock(f, offset, buf, count);
+    vfs_fs_unlock();
+    return r;
+}
+
+int fs_write_file_data(file_t *f, uint32_t offset, const void *buf, uint32_t count) {
+    vfs_fs_lock();
+    int r = fs_write_file_data_nolock(f, offset, buf, count);
+    vfs_fs_unlock();
+    return r;
+}
+
+int fs_mkdir(const char *name) {
+    vfs_fs_lock();
+    int r = fs_mkdir_nolock(name);
+    vfs_fs_unlock();
+    return r;
+}
+
+int fs_rmdir(const char *name) {
+    vfs_fs_lock();
+    int r = fs_rmdir_nolock(name);
+    vfs_fs_unlock();
+    return r;
 }
