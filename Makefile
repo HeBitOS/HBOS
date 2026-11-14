@@ -1105,6 +1105,12 @@ ext4-read-test: | $(BUILD_DIR)
 tmpfs-test: | $(BUILD_DIR)
 	BUILD_DIR=$(BUILD_DIR) bash tests/host/run_tmpfs.sh
 
+# per-CPU 抢占计数（关 cpu0 不得影响其它核）
+preempt-test: | $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Isrc -Itests/host \
+		tests/host/test_preempt.c -o $(BUILD_DIR)/test_preempt
+	$(BUILD_DIR)/test_preempt
+
 # fd 访问模式规则（F_GETFL/F_SETFL/O_ACCMODE 的单一实现，src/fd.h）
 fd-accmode-test: | $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Isrc -DHBOS_FD_FLAGS_ONLY \
@@ -1126,7 +1132,7 @@ partition-test: | $(BUILD_DIR)
 # 宿主机测试总入口：CI 和本地都跑这一条。全部是宿主可执行测试，
 # 不需要 QEMU、不需要 root，秒级到分钟级。
 .PHONY: test
-test: check-headers ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test i18n-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test fd-accmode-test ext2-write-test ext4-read-test tmpfs-test
+test: check-headers ui-test de-test crypto-test hbfs-batch-test browser-test hive-test inflate-bench partition-test utf8-test i18n-test exfat-test ext4-test sched-test fx-test wm-geo-test wl-test ov-test dirty-test hax-anim-test fd-accmode-test preempt-test ext2-write-test ext4-read-test tmpfs-test
 	@echo "✓ 宿主机测试全部通过"
 
 # 真实鼠标移动：QEMU monitor 注入 mouse_move，验证 QEMU → PS/2 → 内核

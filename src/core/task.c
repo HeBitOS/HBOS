@@ -32,6 +32,7 @@
 #include "vmm.h"
 #include "cpu.h"
 #include "heap.h"
+#include "preempt.h"
 #include "../smp.h"
 #include "../linux_compat.h"
 #include "../fcntl.h"
@@ -2028,18 +2029,30 @@ void task_list_all(void) {
     console_puts("\n");
 }
 
-static volatile int preempt_count = 0;
+/*
+ * 每核抢占关断深度
+ * ══════════════════
+ * 旧实现是**一个全局** int：任一核 task_preempt_disable() 之后，所有核的
+ * task_schedule() 都会提前返回 —— vfs_fs_lock 持锁期间整机调度被冻结
+ * （安全，但把别的核一起拖住）。改为每核一份：
+ *   · 调度器只认本核计数（下面 task_schedule 的第一句）；
+ *   · 实例本身按 64 字节对齐（见 core/preempt.h），避免伪共享；
+ *   · 任务在"关抢占"期间不会迁移（迁移只发生在 task_schedule 里，
+ *     而它被本核计数挡住），所以 disable/enable 永远落在同一个核上。
+ * 计数器语义（含饱和/下溢保护）在 core/preempt.h，宿主单测覆盖。
+ */
+static preempt_state_t g_preempt[MAX_CPUS];
 
 void task_preempt_disable(void) {
-    preempt_count++;
+    preempt_state_disable(&g_preempt[my_cpu()]);
 }
 
 void task_preempt_enable(void) {
-    if (preempt_count > 0) preempt_count--;
+    preempt_state_enable(&g_preempt[my_cpu()]);
 }
 
 void task_schedule(void) {
-    if (preempt_count > 0) return;
+    if (!preempt_state_allows_schedule(&g_preempt[my_cpu()])) return;
     if (!current_task || current_task->state == TASK_TERMINATED) return;
     uint64_t irq_flags = task_irq_save();
     smp_sched_lock();
