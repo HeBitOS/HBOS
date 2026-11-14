@@ -559,3 +559,19 @@ HBOS 的 `stat/lstat/fstat` 一律 `st_nlink = 1`（`src/lib/posix.c`）。
 
 顺带：这一轮 Wayland 侧已经走到 **`xdg_toplevel`（对象 20/21 创建成功）**，
 说明浏览器主进程的 Ozone 初始化正在推进，卡点是 zygote 里的线程计数。
+
+## zygote 线程计数收口 + `SCM_RIGHTS` 上限对齐（2026-11-14 第四轮）
+
+1. **`/proc/self/task` `st_nlink` 修复（commit `95a5a1e`）**：
+   `devfs_readdir` 本来就已按 `thread_group_id` 列举 `/proc/<pid>/task/<tid>`
+   目录，但 `devfs` 目录节点的 `ops` 为 `NULL`，导致 `vfs_dir_nlink()` 直接
+   返回 `2`。已为 `vfs_dir_nlink(node, path)` 增加回退：当 `node->ops->readdir`
+   为空时改调 `vfs_readdir_at(path, ...)`。
+   **验证（`build/tmp/z3.log`）**：zygote 的 `0x110BB27BEE` 崩溃已完全消除。
+2. **`linux_message_io` `SCM_RIGHTS` 上限对齐（commit `d644f23`）**：
+   `linux_compat.c` 的 `UNIX_RIGHTS_MAX_FDS` 已是 `16`，但 `src/syscall.c`
+   的 `linux_message_io` 仍硬编码 `4`（`rights[4]` / `count > 4` / `fd_capacity > 4`），
+   导致主进程 `sendmsg(fd=13)` 连续返回 `EINVAL`。已同步放宽到 `16`。
+   **验证（`build/tmp/z4.log`）**：`sendmsg(fd=13)` 不再返回 `EINVAL`，
+   改为暴露 `EOPNOTSUPP`（95，待查 `flags`）；崩溃 2（`0x1103928A69`）仍以
+   `0x16` 触发，说明该处缓存错误码并非来自此次 `sendmsg(fd=13)`。
