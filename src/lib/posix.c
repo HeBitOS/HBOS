@@ -471,16 +471,19 @@ int open(const char *path, int flags, ...) {
  * @param node 目标节点（可为 NULL）
  * @return 目录返回 2 + 子目录数；非目录/空指针返回 1
  */
-static uint32_t vfs_dir_nlink(vfs_node_t *node) {
+static uint32_t vfs_dir_nlink(vfs_node_t *node, const char *path) {
     if (!node || node->type != VFS_NODE_DIR) return 1;
-    if (!node->ops || !node->ops->readdir) return 2;
+    bool has_node_readdir = (node->ops && node->ops->readdir);
+    if (!has_node_readdir && (!path || path[0] != '/')) return 2;
     uint32_t subdirs = 0;
     char name[VFS_MAX_NAME];
     for (uint32_t i = 0; i < 64; i++) {
         uint32_t type = 0;
         name[0] = '\0';
-        if (node->ops->readdir(node, i, name, &type) < 0) break;
-        if (!name[0]) break;
+        int rc = has_node_readdir
+            ? node->ops->readdir(node, i, name, &type)
+            : vfs_readdir_at(path, i, name, &type);
+        if (rc < 0 || !name[0]) break;
         if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
         if (type == VFS_NODE_DIR) subdirs++;
     }
@@ -506,7 +509,8 @@ int fstat(int fd, struct stat *st) {
     st->st_mode = ent->node->mode;
     st->st_uid = ent->node->uid;
     st->st_gid = ent->node->gid;
-    st->st_nlink = vfs_dir_nlink(ent->node);
+    const char *dir_path = ent->path[0] ? ent->path : ent->node->name;
+    st->st_nlink = vfs_dir_nlink(ent->node, dir_path);
     st->st_size = (off_t)ent->node->size;
     return 0;
 }
@@ -524,7 +528,7 @@ int stat(const char *path, struct stat *st) {
     st->st_mode = node->mode;
     st->st_uid = node->uid;
     st->st_gid = node->gid;
-    st->st_nlink = vfs_dir_nlink(node);
+    st->st_nlink = vfs_dir_nlink(node, full);
     st->st_size = (off_t)node->size;
     return 0;
 }
@@ -542,7 +546,7 @@ int lstat(const char *path, struct stat *st) {
     st->st_mode = node->mode;
     st->st_uid = node->uid;
     st->st_gid = node->gid;
-    st->st_nlink = vfs_dir_nlink(node);
+    st->st_nlink = vfs_dir_nlink(node, full);
     st->st_size = (off_t)node->size;
     return 0;
 }
