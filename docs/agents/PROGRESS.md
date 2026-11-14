@@ -345,3 +345,22 @@ vfs_node_t *vfs_lookup(const char *path);
 
 `/tmp` 只有约 10 MB 时 `grub-mkrescue` 会报"设备上没有空间"。构建前套
 `TMPDIR=$(pwd)/build/tmp make ...` 即可，不要为此改 Makefile。
+
+## 交接：Chromium 崩溃 1 的最后一步（2026-11-14 收口时未实施）
+
+`[TRAP-CTX]` 还没做，做完就能定死 renderer `File::Open`（`0x1109BF7006`）的肇事 fd：
+
+1. `src/syscall.c` 新增 `void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate);`
+   —— fd 在 `[0,POSIX_MAX_FDS)` 且条目 used 时打印
+   `[TRAP-CTX] rip=0x.. fd=N accmode=X type=Y via=<origin> path=".."`，否则 `fd=invalid`。
+2. `src/core/gdt_idt.c` 在 #BP/#UD/#GP 分支、`linux_fd_table_dump()` 之前加
+   `linux_trap_fd_context(regs->rip, regs->rdi);`
+   依据：这类 CHECK 的 fd 留在 `rdi`（fcntl 包装只改 `esi=3`，r85 现场已证）。
+   注意 `0x1103928A69` 那条的 rdi 不是 fd（是缓存的 errno），
+   可按 rip 是否落在 `0x1109bf6xxx / 0x1109cd3xxx` 区间决定是否打印，避免误导。
+
+已确认的语义（不用再查）：
+- 崩溃 1 = `fcntl(fd,F_GETFL)&3` 与 Chromium 期望模式不等即 `int3;ud2`；open() 记账本身正确。
+- 崩溃 2 = `0x1103928A69` 唯一入口 `0x110392892d jne`，判定式 `handle!=NULL && err∉{EPIPE,ECONNRESET}`，
+  实测 err=22 EINVAL（缓存于对象 +0x68，经 getter `0x1103518850` 读出）。
+- `prctl(PR_SET_VMA)` 已修，`nr=157` 清零；netlink(AF_NETLINK=16) 保持 EAFNOSUPPORT（有评估结论）。
