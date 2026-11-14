@@ -1412,10 +1412,28 @@ static void fdid_copy(char *dst, size_t cap, const char *src) {
 }
 
 /** 记录 fd 的一次"物化"（内部核心，允许指定 task/pid/parent）。 */
+/* event 名 → fd.h 里的来源标签。标签直接落在条目上，条目被复制（dup/fork）
+ * 时标签跟着走，所以任何 fd 都存在可读的出处。 */
+static uint8_t fdid_origin_of(const char *event) {
+    if (!event) return FD_ORIGIN_NONE;
+    if (!strcmp(event, "open")) return FD_ORIGIN_OPEN;
+    if (!strcmp(event, "shm-open")) return FD_ORIGIN_SHM;
+    if (!strcmp(event, "dup2") || !strcmp(event, "fdup")) return FD_ORIGIN_DUP;
+    if (!strcmp(event, "scm")) return FD_ORIGIN_SCM;
+    if (!strcmp(event, "inherit")) return FD_ORIGIN_INHERIT;
+    if (!strcmp(event, "close")) return FD_ORIGIN_NONE;   /* 不改标签 */
+    return FD_ORIGIN_COMPAT;
+}
+
 static void fdid_record_full(task_t *task, int pid, int parent_pid, int fd,
                              const char *event) {
     fd_entry_t *entry = compat_fd(task, fd);
     if (!task || !entry) return;
+    /* 出处标签写进条目本身（close 不覆盖，保留"上一个身份"）。 */
+    if (event && strcmp(event, "close") != 0) {
+        entry->origin = fdid_origin_of(event);
+        entry->origin_pid = parent_pid;
+    }
     linux_fdid_t *slot = &fdid_ring[fdid_next % LINUX_FDID_SLOTS];
     fdid_next++;
     slot->used = 1;
@@ -1463,49 +1481,89 @@ void linux_fdid_record_inherit(struct task *opaque_child, int parent_pid) {
 /** 打印某个 fd 的出身链（最多 max_hops 跳）。
  *  跳与跳之间通过 parent_pid 串起来：child fd 7 ← inherit ← parent pid / fd 7
  *  ← open|dup2|shm-open。找不到记录就停，不猜。 */
+static const char *fdid_origin_name(uint8_t origin) {
+    switch (origin) {
+    case FD_ORIGIN_OPEN:    return "open";
+    case FD_ORIGIN_COMPAT:  return "compat";
+    case FD_ORIGIN_DUP:     return "dup";
+    case FD_ORIGIN_SCM:     return "scm";
+    case FD_ORIGIN_INHERIT: return "inherit";
+    case FD_ORIGIN_SHM:     return "shm-open";
+    default:                return "none";
+    }
+}
+
 void linux_fdid_chain_dump(int fd, int max_hops) {
     int cur_fd = fd;
-    int cur_pid = task_get_process_id();
+    const task_t *task = task_current();
     console_puts("[FDID-CHAIN] fd=");
     compat_put_dec((unsigned int)fd);
     console_putchar('\n');
     for (int hop = 1; hop <= max_hops; hop++) {
-        const fdid_key_t *found = fdid_key_slot(cur_pid, cur_fd, 0);
+        int pid = task ? (int)task->thread_group_id : 0;
+        const fd_entry_t *entry = NULL;
+        if (task && task->fd_table && cur_fd >= 0 && cur_fd < POSIX_MAX_FDS &&
+            task->fd_table->entries[cur_fd].used)
+            entry = &task->fd_table->entries[cur_fd];
+        const fdid_key_t *history = fdid_key_slot(pid, cur_fd, 0);
         console_puts("[FDID-CHAIN]  hop=");
         compat_put_dec((unsigned int)hop);
         console_puts(" pid=");
-        compat_put_dec((unsigned int)cur_pid);
+        compat_put_dec((unsigned int)pid);
         console_puts(" fd=");
         compat_put_dec((unsigned int)cur_fd);
-        if (!found) {
-            console_puts(" via=(no record)\n");
+        if (!entry) {
+            console_puts(history ? " via=table-only" : " via=(no record)");
+            console_puts(" (fd not open in that process)\n");
             return;
         }
+        /* 出处优先读条目自带的 origin 标签：它随 dup2/fork 一起复制，
+         * 不会被别的进程的日志噪声冲掉（cf4/cf5 的教训）。 */
         console_puts(" via=");
-        console_puts(found->event);
+        console_puts(entry->origin != FD_ORIGIN_NONE
+                         ? fdid_origin_name(entry->origin)
+                         : (history ? history->event : "entry(untagged)"));
         console_puts(" type=");
-        compat_put_dec((unsigned int)found->type);
+        compat_put_dec((unsigned int)entry->type);
         console_puts(" flags=0x");
-        linux_ipc_put_hex((uint64_t)(unsigned)found->flags);
+        linux_ipc_put_hex((uint64_t)(unsigned)entry->flags);
         console_puts(" accmode=");
-        compat_put_dec((unsigned int)(found->flags & 3));
-        if (found->reuses) {
-            console_puts(" reuses=");
-            compat_put_dec((unsigned int)found->reuses);
+        compat_put_dec((unsigned int)(entry->flags & 3));
+        if (entry->origin_pid) {
+            console_puts(" from_pid=");
+            compat_put_dec((unsigned int)entry->origin_pid);
         }
-        if (found->path[0]) {
+        if (history && history->reuses) {
+            console_puts(" reuses=");
+            compat_put_dec((unsigned int)history->reuses);
+        }
+        if (entry->path[0]) {
             console_puts(" path=");
-            console_puts(found->path);
+            console_puts(entry->path);
         }
         console_putchar('\n');
-        if (found->parent_pid <= 0 || found->parent_pid == cur_pid) return;
-        cur_pid = found->parent_pid;
+        if (entry->origin == FD_ORIGIN_INHERIT && entry->origin_pid > 0 &&
+            entry->origin_pid != pid) {
+            task = task_get_by_id((uint32_t)entry->origin_pid);
+            continue;                       /* 跳到父进程的同一个 fd 号 */
+        }
+        if (history && history->parent_pid > 0 && history->parent_pid != pid) {
+            task = task_get_by_id((uint32_t)history->parent_pid);
+            continue;
+        }
+        return;
     }
 }
 
-/** 反查本进程某 fd 当前的身份事件名（读 (pid,fd) 表，找不到返回 "?"）。 */
 const char *linux_fdid_event_of(int fd, int *owner_pid) {
-    int pid = task_get_process_id();
+    task_t *task = compat_task();
+    int pid = task ? (int)task->thread_group_id : 0;
+    if (task && task->fd_table && fd >= 0 && fd < POSIX_MAX_FDS &&
+        task->fd_table->entries[fd].used &&
+        task->fd_table->entries[fd].origin != FD_ORIGIN_NONE) {
+        if (owner_pid) *owner_pid = pid;
+        return fdid_origin_name(task->fd_table->entries[fd].origin);
+    }
     const fdid_key_t *slot = fdid_key_slot(pid, fd, 0);
     if (!slot) {
         if (owner_pid) *owner_pid = 0;

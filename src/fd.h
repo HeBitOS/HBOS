@@ -13,7 +13,9 @@
  *   类型  pipe_t      结构体 / 类型别名
  *         fd_entry_t  结构体 / 类型别名
  *         fd_table_t  结构体 / 类型别名
+ *         fd_entry_t.origin  fd 来源标签（open/compat/dup/scm/inherit/shm）
  *   宏    POSIX_MAX_FDS  常量 / 特性宏
+ *         FD_ORIGIN_*    fd 来源标签取值（随条目复制，不靠全局日志）
  *         FD_FILE        常量 / 特性宏
  *         FD_SOCKET      FD套接字
  *         FD_PIPE        常量 / 特性宏
@@ -116,6 +118,17 @@ typedef struct {
     int ref_count;
 } pipe_t;
 
+/* 这个 fd 条目"最后是怎么来的"。它随条目一起被 dup2/F_DUPFD/fork 复制，
+ * 所以**只要 fd 存在就一定有出处** —— 不依赖任何全局环形缓冲（那玩意会被
+ * 别的进程的 close 冲掉，实测 cf4/cf5 的链全是 no record）。 */
+#define FD_ORIGIN_NONE    0
+#define FD_ORIGIN_OPEN    1   /* open(2)/openat/creat（HBOS_SYS_OPEN 出口） */
+#define FD_ORIGIN_COMPAT  2   /* eventfd/timerfd/epoll/unix/memfd/signalfd… */
+#define FD_ORIGIN_DUP     3   /* dup/dup2/fcntl(F_DUPFD) */
+#define FD_ORIGIN_SCM     4   /* SCM_RIGHTS 收到的 */
+#define FD_ORIGIN_INHERIT 5   /* fork 之后从父进程继承 */
+#define FD_ORIGIN_SHM     6   /* /dev/shm 或 /tmp 覆盖层 open */
+
 typedef struct {
     bool used;
     vfs_node_t *node;
@@ -124,6 +137,8 @@ typedef struct {
     int flags;
     int type;
     uint16_t local_port;
+    uint8_t origin;      /* FD_ORIGIN_*：条目来源标签 */
+    int32_t origin_pid;  /* FD_ORIGIN_INHERIT 时为父进程 pid */
     pipe_t *pipe;
     /* Resolved path this fd was opened with. vfs_node_t itself has no
      * parent/children links (see vfs.h) -- listing a directory's contents
