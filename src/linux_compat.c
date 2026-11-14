@@ -1599,10 +1599,27 @@ void linux_fdid_dump(void) {
     }
 }
 
+static void shm_trace_push(const char *event, const char *path, int fd,
+                           int req_flags, int accmode);
+
 int linux_compat_close(int fd) {
     task_t *task = compat_task();
     fd_entry_t *entry = compat_fd(task, fd);
     if (!entry) return 0;
+    /* fd 号复用的证据：只记 /dev/shm 与 /dev/null 这两类。
+     *
+     * 这里**不能按 entry->type 判**：/tmp 覆盖层的普通文件也是 FD_MEMFD，
+     * 实测一条 Chromium 启动会在 /tmp 下开合上百个文件，32 槽环被 close
+     * 冲刷得干干净净，一条 shm-open 都留不下来（第一版就是这样失效的）。
+     * 按路径前缀判才准。 */
+    {
+        int interesting =
+            !strncmp(entry->path, "/dev/shm/", 9) ||
+            !strcmp(entry->path, "/dev/null");
+        if (interesting)
+            shm_trace_push("close", entry->path, fd, entry->flags,
+                           entry->flags & 3);
+    }
 
     if (entry->type == FD_EVENT && entry->compat_id < LINUX_EVENT_SLOTS) {
         event_slot_t *slot = &event_slots[entry->compat_id];
@@ -2688,6 +2705,13 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
         task->fd_table->entries[new_fd] = message->entries[i];
         task->fd_table->entries[new_fd].used = true;
         linux_fdid_record(new_fd, "scm");
+        /* 收权也进同一条时间线：共享内存 fd 大多不是本进程 open 出来的，
+         * 而是 SCM_RIGHTS 从浏览器进程递过来的。它一旦被后面的
+         * dup2(/dev/null → 同号) 顶掉，Chromium 的 F_GETFL 校验就会在
+         * 一个 /dev/null 上失败 —— 这条记录是判"顶掉"还是"从未到达"的唯一依据。 */
+        if (!strncmp(task->fd_table->entries[new_fd].path, "/dev/shm/", 9))
+            shm_trace_push("scm", task->fd_table->entries[new_fd].path, new_fd,
+                           task->fd_table->entries[new_fd].flags, 0);
         fds[(*received)++] = new_fd;
         /* The queue's retained reference is transferred to the new fd. */
     }
@@ -2835,7 +2859,107 @@ static int memfd_slot_index(const memfd_slot_t *slot) {
     return -1;
 }
 
-int linux_compat_shm_open(const char *path, int flags) {
+/* ── 具名共享内存 / memfd 的 open 轨迹（诊断，不受预算限制） ────────
+ *
+ * 背景：Chromium 的 base::subtle::PlatformSharedMemoryRegion 在
+ * kReadWrite 模式下用
+ *     name = "metrics-shmem-handle"（实测 bt[4] 的 rodata 就是它）
+ * 打开/创建一个具名共享内存，然后**校验 fd 的 F_GETFL & O_ACCMODE 等于
+ * 它请求的模式**（不等即 int3;ud2）。HBOS 把 /dev/shm/<name> 截到 memfd slot
+ * 上，所以"它到底拿到什么 fd、记账成了什么模式、这个号码之前属于谁"
+ * 必须能一眼看到 —— 而 [OPEN-TRACE] 是 16 条的，早期事件早被刷掉。
+ *
+ * 这个环**不设预算**，把四类事件按时间顺序记在同一个 512 槽环里：
+ *   shm-open / shm-fail  —— 每次 open("/dev/shm/<name>")，**只有**这个前缀；
+ *                           /tmp、/run 的覆盖层文件也走同一个入口，不过滤
+ *                           一条 Chromium 启动就能把环冲垮（实测两轮）
+ *   memfd                —— 每次 linux_compat_memfd_create
+ *   devnull              —— 每次 open("/dev/null")（syscall.c 上报，见
+ *                           linux_shm_trace_note；fd 号复用的另一半证据）
+ *   close                —— 路径在 /dev/shm 或 /dev/null 的条目
+ * 只在崩溃 dump 时打印，运行期零串口输出。 */
+#define LINUX_SHM_TRACE_SLOTS 512
+typedef struct {
+    int used;
+    int pid;
+    int fd;
+    int req_flags;
+    int accmode;
+    char event[12];
+    char path[72];
+} linux_shm_trace_t;
+static linux_shm_trace_t g_shm_trace[LINUX_SHM_TRACE_SLOTS];
+static uint32_t g_shm_trace_next;
+
+static void shm_trace_push(const char *event, const char *path, int fd,
+                           int req_flags, int accmode) {
+    linux_shm_trace_t *slot =
+        &g_shm_trace[g_shm_trace_next % LINUX_SHM_TRACE_SLOTS];
+    g_shm_trace_next++;
+    slot->used = 1;
+    slot->pid = (int)task_get_process_id();
+    slot->fd = fd;
+    slot->req_flags = req_flags;
+    slot->accmode = accmode;
+    fdid_copy(slot->event, sizeof(slot->event), event ? event : "?");
+    fdid_copy(slot->path, sizeof(slot->path), path);
+}
+
+/** 打印具名共享内存 / memfd / 相关 close 的时间线（最旧在前）。 */
+void linux_shm_trace_dump(void) {
+    if (!g_shm_trace_next) {
+        console_puts("[SHM-OPEN] no named shared memory activity recorded\n");
+        return;
+    }
+    uint32_t total = g_shm_trace_next;
+    uint32_t count = total < LINUX_SHM_TRACE_SLOTS ? total
+                                                   : LINUX_SHM_TRACE_SLOTS;
+    uint32_t start = total - count;
+    for (uint32_t i = 0; i < count; i++) {
+        const linux_shm_trace_t *slot =
+            &g_shm_trace[(start + i) % LINUX_SHM_TRACE_SLOTS];
+        int is_memfd = !strcmp(slot->event, "memfd");
+        int is_close = !strcmp(slot->event, "close");
+        int is_devnull = !strcmp(slot->event, "devnull");
+        int is_dup2 = !strncmp(slot->event, "dup2", 4);
+        console_puts(is_memfd ? "[MEMFD-CREATE] "
+                              : (is_close ? "[SHM-CLOSE] "
+                                          : (is_devnull ? "[DEVNULL-OPEN] "
+                                                        : (is_dup2 ? "[DUP2] "
+                                                                   : "[SHM-OPEN] "))));
+        console_puts("pid=");
+        compat_put_dec((unsigned int)slot->pid);
+        console_puts(" fd=");
+        if (slot->fd < 0) console_putchar('-');
+        compat_put_dec((unsigned int)(slot->fd < 0 ? -slot->fd : slot->fd));
+        console_puts(" ev=");
+        console_puts(slot->event);
+        console_puts(" req=0x");
+        linux_ipc_put_hex((uint64_t)(unsigned)slot->req_flags);
+        console_puts(" accmode=");
+        compat_put_dec((unsigned int)slot->accmode);
+        if (slot->path[0]) {
+            console_puts(" path=");
+            console_puts(slot->path);
+        }
+        if (i + 1 == count) console_puts("  <-- last");
+        console_putchar('\n');
+    }
+}
+
+/** 把一条"值得追踪的 fd 生命周期"事件塞进 [SHM-OPEN] 环。
+ *
+ * 目前只有 open("/dev/null") 从 syscall.c 走这里：fd 号复用的完整证据需要
+ * "谁关掉了 shm、谁紧接着拿走了同一个号码"，缺了 /dev/null 的开点就只能看
+ * 到半条链。其它事件的入口各自在本文件里直接 push。
+ *
+ * 不变量：path 可为 NULL；fd 允许 <0（表示失败，dump 时会带负号打印）。 */
+void linux_shm_trace_note(const char *event, const char *path, int fd,
+                          int flags) {
+    shm_trace_push(event, path, fd, flags, flags & 3);
+}
+
+static int linux_compat_shm_open_impl(const char *path, int flags) {
     if (g_shm_dbg > 0) {
         g_shm_dbg--;
         console_puts("[SHM] open ");
@@ -2971,6 +3095,36 @@ int linux_compat_shm_open(const char *path, int flags) {
     return fd;
 }
 
+/* 覆盖层 open 的对外入口：只做"记录 + 记账校验"，实现仍在 _impl 里。
+ * 记账必须等于请求的访问模式（Chromium 用 F_GETFL 比对），不等就是
+ * overlay_fd_flags 的真 bug，直接打出来。 */
+int linux_compat_shm_open(const char *path, int flags) {
+    /* 只有 /dev/shm/<name> 才算"具名共享内存"：/tmp、/run 的覆盖层文件也走
+     * 这个入口（它们同样是 memfd 后端），但那些是普通文件开合，一条
+     * Chromium 启动就有上百个。不过滤的话环照样被冲垮。 */
+    int traced = path && !strncmp(path, "/dev/shm/", 9);
+    int fd = linux_compat_shm_open_impl(path, flags);
+    if (fd < 0) {
+        if (traced) shm_trace_push("shm-fail", path, -1, flags, 0);
+        return fd;
+    }
+    fd_entry_t *entry = compat_fd(compat_task(), fd);
+    int accmode = entry ? (entry->flags & 3) : 0;
+    if (traced) shm_trace_push("shm-open", path, fd, flags, accmode);
+    if ((flags & 3) != 3 && accmode != (flags & 3)) {
+        console_puts("[SHM-OPEN] ACCOUNT-MISMATCH fd=");
+        compat_put_dec((unsigned int)fd);
+        console_puts(" req=0x");
+        linux_ipc_put_hex((uint64_t)(unsigned)flags);
+        console_puts(" got_accmode=");
+        compat_put_dec((unsigned int)accmode);
+        console_puts(" path=");
+        console_puts(path ? path : "(null)");
+        console_putchar('\n');
+    }
+    return fd;
+}
+
 /* 查一个 /dev/shm 名字当前对应的内存槽大小。
  *
  * 不变量：成功返回 0 并（在 size 非 NULL 时）写出字节数；失败返回 -1
@@ -3017,7 +3171,7 @@ int linux_compat_shm_unlink(const char *path) {
     return compat_set_errno(ENOENT);
 }
 
-int linux_compat_memfd_create(const char *name, unsigned int flags) {
+static int linux_compat_memfd_create_impl(const char *name, unsigned int flags) {
     if (!name) return compat_set_errno(EFAULT);
     if (flags & ~(LINUX_MFD_CLOEXEC | LINUX_MFD_ALLOW_SEALING))
         return compat_set_errno(EINVAL);
@@ -3053,6 +3207,14 @@ int linux_compat_memfd_create(const char *name, unsigned int flags) {
         console_puts("\n");
     }
     return compat_set_errno(ENFILE);
+}
+
+/* memfd_create 的对外入口：记录 name/fd/flags（用来确认这条路径到底有没有
+ * 被 Chromium 用到 —— 历史日志里 [MEMFD] 一条都没有）。 */
+int linux_compat_memfd_create(const char *name, unsigned int flags) {
+    int fd = linux_compat_memfd_create_impl(name, flags);
+    shm_trace_push("memfd", name, fd, (int)flags, fd >= 0 ? 2 : 0);
+    return fd;
 }
 
 int linux_compat_memfd_truncate(int fd, uint64_t size) {

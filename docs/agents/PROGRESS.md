@@ -364,3 +364,79 @@ vfs_node_t *vfs_lookup(const char *path);
 - 崩溃 2 = `0x1103928A69` 唯一入口 `0x110392892d jne`，判定式 `handle!=NULL && err∉{EPIPE,ECONNRESET}`，
   实测 err=22 EINVAL（缓存于对象 +0x68，经 getter `0x1103518850` 读出）。
 - `prctl(PR_SET_VMA)` 已修，`nr=157` 清零；netlink(AF_NETLINK=16) 保持 EAFNOSUPPORT（有评估结论）。
+
+## 崩溃 1 根因收口（2026-11-14 接手后第一轮）
+
+### 结论：`fcntl(F_SETFD)` 是空实现，exec 把子进程要用的共享内存 fd 全关了
+
+Chromium 用**命令行**把共享内存句柄的 fd 号传给子进程，实测 `[EXEC-ARGV]`：
+
+```
+--metrics-shmem-handle=4,i,<guid_hi>,<guid_lo>,262144
+--field-trial-handle=3,i,<guid_hi>,<guid_lo>,262144
+--pseudonymization-salt-handle=7,i,<guid_hi>,<guid_lo>,4
+```
+
+这些 region 用 `O_CLOEXEC` 创建，spawn 前必须 `fcntl(fd, F_SETFD, 0)` 清掉
+FD_CLOEXEC 才能活过 exec。而 `src/syscall.c` 的 `linux_fcntl` 里：
+
+```c
+case 1:  /* F_GETFD */
+case 2:  /* F_SETFD */
+    return 0;   /* 未跟踪 FD_CLOEXEC */
+```
+
+`F_SETFD` 什么都没做，`flags` 里 `O_CLOEXEC` 还在，HBOS 的 exec 按它自己的
+规则（`entry->flags & O_CLOEXEC` 就关）把这三个 fd 全关了。号码随即被复用：
+实测子进程 **fd 3 = unix socket、fd 4 = icudtl.dat、fd 7 = /dev/null**，
+而命令行里写的是 3/4/7 的共享内存 → 子进程拿 `/dev/null` 去做
+`F_GETFL == O_RDWR` 校验 → `0x1109BF7006` 的 int3。
+
+修法（最小且符合 Linux 语义，`O_CLOEXEC` 本来就折在同一个 `flags` 字段里）：
+`src/fd.h` 新增 `fd_getfd_flags` / `fd_setfd_apply`，`linux_fcntl` 的
+case 1/2 真实现；顺带 `F_DUPFD_CLOEXEC(1030)` 给新 fd 补上 CLOEXEC 位。
+
+验证：同一 argv 跑两轮，修复前 `0x1109BF7006` 每次必崩，修复后**一次都没有**，
+进程能活到崩溃 2（`0x1103928A69`，本轮落在浏览器主进程 pid=2）。
+Wayland 请求数 51→51 基本不变（还没到合成阶段，正常）。
+
+### 顺带修的真 bug
+
+1. **`[E]` 错误追踪条件优先级错**：原写法
+   `A && B && C || D`，pid 命中时**绕过** `result<0` / 预算无条件打印，
+   且 `task_current()` 为 NULL 时会解引用。拆成显式 `pid_match`。
+2. **`[SHM-OPEN]` 环被冲垮两轮**：
+   - 第一版按 `entry->type == FD_MEMFD` 判"值得记"，但 `/tmp` 覆盖层文件
+     也是 `FD_MEMFD`，一条 Chromium 启动上百次开合 → 32 槽全是 close；
+   - 第二版按路径过滤写在了 close 一侧，忘了 shm-open 一侧：`/tmp`、`/run`
+     的覆盖层也走 `linux_compat_shm_open` → 96 槽全是 DawnGraphiteCache；
+   - 现在：**open 侧只认 `/dev/shm/` 前缀**，环扩到 512 槽，`/dev/null`
+     的开点、`dup2`（含"顶掉了谁"）、`SCM_RIGHTS` 收权都进同一条时间线。
+3. `-Wcomment`（注释里的 `/dev/shm/*`）与 `rights_count` 未使用，一并清掉。
+
+### 反汇编修正（推翻交接里的一处推断）
+
+`0x1109BF7006` 是 `cmp BYTE [rbp-0x78],0; jne int3`，即
+**"wrapper 返回错误码就 FATAL"**；wrapper `0x1109CD3810` 里
+`fcntl64(fd, F_GETFL)`，把 `ret&3` 与 `setne sil; add esi,esi` 算出的
+`(mode!=0)?O_RDWR:O_RDONLY` 比对。所以：
+
+- `rdi` 确实是被校验的 fd（与 `[GETFL-TRACE]` 一致），这点交接是对的；
+- 但 expected **不是调用点字面常量**，是运行期 mode 算出来的（本次 mode=2）。
+  交接里"`bt[3]` 处 `mov $0x2,%ecx`"看到的是另一处指令。
+
+另外两条与交接文档冲突的事实：
+
+- **`memfd_create` 确实被调用**：`[MEMFD-CREATE] pid=2 path=shared-memory-region
+  req=0x3`（CLOEXEC|ALLOW_SEALING）。"Chromium 不调 memfd_create"只适用于早期阶段。
+- **一次 `SCM_RIGHTS` 传共享内存都没有发生**（`ev=scm` 全程 0 条），
+  共享内存 fd 是靠 fork 继承 + 命令行号码传的，不走 unix socket。
+
+### 下一步
+
+1. 崩溃 2（`0x1103928A69`）现在落在浏览器主进程，err=22 EINVAL。修完 F_SETFD
+   之后 fd 布局变了，这条要重新取一次上下文再判断。
+2. `src/graphics/drm/`（`drm_card.c` 36K / `evdev.c` 21K / `EGL_DECISION.md`）
+   是子代理产出，**已纳入构建但没有挂进启动流程**，未提交。要先定方向：
+   它是 legacy KMS ioctl 集（20 个），而 `KWIN-PLAN.md` 结论是 KWin 6.5
+   只走 atomic → 需要 `/dev/fb0` shim 或补 atomic。

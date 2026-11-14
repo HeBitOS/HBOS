@@ -221,6 +221,9 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
  * int3 地址，必须能反查"这个 fd 是谁、从哪来"。每次 fd 条目被"物化"
  * 时在这里留一条溯源记录，用户态异常时随 fd 表一起打印。 */
 void linux_fdid_record(int fd, const char *event);
+void linux_shm_trace_dump(void);
+void linux_shm_trace_note(const char *event, const char *path, int fd,
+                          int flags);
 void linux_fdid_close(int fd);
 void linux_fdid_record_inherit(struct task *child, int parent_pid);
 void linux_fdid_chain_dump(int fd, int max_hops);

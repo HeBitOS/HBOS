@@ -34,6 +34,8 @@
  *   函数  fd_accmode_of         取条目 flags 的访问模式
  *         fd_getfl_flags        flags → F_GETFL 返回值
  *         fd_setfl_apply        F_SETFL 只改 APPEND/NONBLOCK，保留访问模式
+ *         fd_getfd_flags        flags → F_GETFD 返回值（只有 FD_CLOEXEC 一位）
+ *         fd_setfd_apply        F_SETFD 只改 FD_CLOEXEC，其它位保持
  *         fd_accmode_normalize  O_ACCMODE==3 兜底为 O_RDWR
  */
 #ifndef HBOS_FD_H
@@ -72,6 +74,28 @@ static inline int fd_accmode_of(int flags) {
  *  F_GETFL 里返回它们。 */
 static inline int fd_getfl_flags(int flags) {
     return flags & FD_GETFL_MASK;
+}
+
+/** fcntl(F_GETFD)：Linux 只报 FD_CLOEXEC 这**一**位（数值 1）。
+ *
+ * 为什么单独一个函数：O_CLOEXEC 是"创建期标志"，它既不能出现在
+ * F_GETFL 的返回值里（见 fd_getfl_flags），又必须能被 F_SETFD 单独
+ * 清掉。HBOS 把两者折进同一个 flags 字段，所以这两个方向都要显式折算，
+ * 不能让调用方直接把 flags 透出去。 */
+static inline int fd_getfd_flags(int flags) {
+    return (flags & FD_O_CLOEXEC) ? 1 : 0;
+}
+
+/** fcntl(F_SETFD, arg)：只改 FD_CLOEXEC，其它位一位都不动。
+ *
+ * 这条是 Chromium 子进程存活的硬依赖：共享内存 fd 用 O_CLOEXEC 创建，
+ * 传子进程之前必须 `fcntl(fd, F_SETFD, 0)` 把它清掉；清不掉的话 exec
+ * 就会把它们全关掉，而父进程**仍按号码**把这些 fd 写在命令行里
+ * （`--metrics-shmem-handle=4,...`），子进程拿到的就是被复用的别的东西
+ * ——实测 fd 4 变成了 icudtl.dat、fd 7 变成了 /dev/null。 */
+static inline int fd_setfd_apply(int flags, int arg) {
+    if (arg & 1) return flags | FD_O_CLOEXEC;
+    return flags & ~FD_O_CLOEXEC;
 }
 
 /** fcntl(F_SETFL, arg)：只替换 O_APPEND / O_NONBLOCK，访问模式原样保留。 */

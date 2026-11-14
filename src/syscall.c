@@ -2147,7 +2147,7 @@ static int g_open_entry_valid;
 static int g_open_entry_flags;
 static int g_openflags_budget = 8;
 
-#define LINUX_DEVNULL_SLOTS 8
+#define LINUX_DEVNULL_SLOTS 32
 static struct {
     int used;
     int pid;
@@ -2426,6 +2426,7 @@ void linux_fd_table_dump(void) {
     }
     linux_fdid_dump();
     linux_devnull_dump();
+    linux_shm_trace_dump();
     /* 文件类 fd 各打一条出身链：Chromium 的 base::File 校验针对的就是这些
      * fd（实测肇事者是 /dev/null），而 open trace 只有 16 条、早被 dlopen
      * 探测冲掉了。链最多 8 跳，靠 inherit 的 parent_pid 串起来。 */
@@ -2630,7 +2631,6 @@ static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
         return (uint64_t)(-EFAULT);
     if (message->vector_count > 1024) return (uint64_t)(-EINVAL);
     int rights[4];
-    size_t rights_count = 0;
     uint64_t control_capacity = message->control_length;
     task_t *current = task_current();
     int unix_fd = current && current->fd_table && fd >= 0 &&
@@ -2662,7 +2662,6 @@ static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
                 memcpy(rights, cursor + sizeof(*header), count * sizeof(int));
                 if (linux_compat_unix_send_rights(fd, rights, count) < 0)
                     return (uint64_t)(-(errno > 0 ? errno : EINVAL));
-                rights_count = count;
             } else {
                 /* 其它 cmsg（SCM_CREDENTIALS 等）：Linux 忽略，我们也忽略。 */
             }
@@ -2985,6 +2984,10 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
             for (int i = lowest; i < POSIX_MAX_FDS; i++) {
                 if (!cur->fd_table->entries[i].used) {
                     cur->fd_table->entries[i] = *entry;
+                    /* F_DUPFD_CLOEXEC：新 fd 必须带上 FD_CLOEXEC，
+                     * 否则 Chromium 的 IPC 通道会在 exec 后漏进子进程。 */
+                    if (cmd == 1030)
+                        cur->fd_table->entries[i].flags |= O_CLOEXEC;
                     linux_compat_retain(i);
                     linux_fdid_record(i, "fdup");
                     return (uint64_t)i;
@@ -3000,6 +3003,10 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
             for (int i = 3; i < lowest && i < POSIX_MAX_FDS; i++) {
                 if (!cur->fd_table->entries[i].used) {
                     cur->fd_table->entries[i] = *entry;
+                    /* F_DUPFD_CLOEXEC：新 fd 必须带上 FD_CLOEXEC，
+                     * 否则 Chromium 的 IPC 通道会在 exec 后漏进子进程。 */
+                    if (cmd == 1030)
+                        cur->fd_table->entries[i].flags |= O_CLOEXEC;
                     linux_compat_retain(i);
                     linux_fdid_record(i, "fdup");
                     return (uint64_t)i;
@@ -3008,8 +3015,14 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
             return (uint64_t)(-EMFILE);
         }
         case 1:                                       /* F_GETFD */
+            return (uint64_t)(unsigned)fd_getfd_flags(entry->flags);
         case 2:                                       /* F_SETFD */
-            return 0;                                 /* 未跟踪 FD_CLOEXEC */
+            /* 只改 FD_CLOEXEC。以前这里是 `return 0;`（"未跟踪"），于是
+             * Chromium 给共享内存 fd 清 CLOEXEC 的 fcntl 变成空操作，
+             * exec 时按 entry->flags 里的 O_CLOEXEC 把它们全关了 ——
+             * 而父进程是按号码把 fd 写进子进程命令行的。 */
+            entry->flags = fd_setfd_apply(entry->flags, (int)argument);
+            return 0;
         case 3:                                       /* F_GETFL */
             /* Linux 的 F_GETFL 只返回**状态位**：访问模式 + O_APPEND /
              * O_NONBLOCK 之类；O_CREAT / O_EXCL / O_TRUNC 这些"创建期"
@@ -4417,8 +4430,14 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                         console_putchar('\n');
                     }
                 }
-                if (open_path && !strcmp(open_path, "/dev/null"))
+                if (open_path && !strcmp(open_path, "/dev/null")) {
                     linux_devnull_record((int)opened, requested);
+                    /* 和 shm-open / shm-close 记进同一条时间线：判断"fd 号
+                     * 复用"有没有发生，必须看到 shm 的关点与 /dev/null 的
+                     * 开点紧挨着同一个号码。 */
+                    linux_shm_trace_note("devnull", open_path, (int)opened,
+                                         requested);
+                }
             }
             return finish_syscall((long)opened);
         }
@@ -4708,6 +4727,28 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             if (!cur || !cur->fd_table->entries[oldfd].used)
                 return (uint64_t)(-EBADF);
             if (oldfd == newfd) return (uint64_t)newfd;
+            /* dup2 是 fd 号码"被顶掉"的唯一途径：Chromium 建子进程时先按
+             * fds_to_remap 把要传的 fd 搬到目标号码，再把 /dev/null 铺到所有
+             * "多余"的号码上；两边顺序一乱，共享内存 fd 就被 /dev/null 顶掉，
+             * 但调用方手里还是那个号码 —— 这就是 renderer 里
+             * int3 的来源。把"源路径 / 目标路径 涉及 shm 或 /dev/null"的
+             * dup2 记进同一条时间线，好和 shm-open/close 对齐。 */
+            {
+                const fd_entry_t *src = &cur->fd_table->entries[oldfd];
+                const fd_entry_t *dst = &cur->fd_table->entries[newfd];
+                int src_interesting =
+                    !strncmp(src->path, "/dev/shm/", 9) ||
+                    !strcmp(src->path, "/dev/null");
+                int dst_interesting =
+                    dst->used && !strncmp(dst->path, "/dev/shm/", 9);
+                if (dst_interesting || (src_interesting && newfd < 16)) {
+                    linux_shm_trace_note("dup2-src", src->path, newfd,
+                                         src->flags);
+                    if (dst_interesting)
+                        linux_shm_trace_note("dup2-hit", dst->path, newfd,
+                                             src->flags);
+                }
+            }
             if (cur->fd_table->entries[newfd].used) {
                 (void)linux_compat_close(newfd);
                 close(newfd);
@@ -6705,11 +6746,14 @@ uint64_t linux_syscall_dispatch_frame(hbos_syscall_frame_t *linux_frame) {
      * 时真正要的信息。预算有限，够看清一次失败序列即可。 */
     /* ENOENT 是启动期最吵的一类（一堆"这个文件不存在就试下一个"的探测），
      * 把预算全吃掉反而看不见真正的失败。这里只过滤 ENOENT，别的照打。 */
+    /* 注意优先级：这里原本写成 `A && B && C || D`，于是只要 pid 命中就
+     * **绕过全部前置条件**（result<0 / result!=-2 / 预算）无条件打印，还会
+     * 在 task_current() 为 NULL 时解引用它。pid 判定单独算出来。 */
+    int pid_match = hbos_trace_pid && task_current() &&
+        ((uint32_t)hbos_trace_pid == 0xFFFFFFFFu ||
+         (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid);
     if ((int64_t)result < 0 && (int64_t)result != -2 && g_syserr_budget > 0 &&
-        hbos_trace_pid &&
-        task_current() &&
-        (uint32_t)hbos_trace_pid == 0xFFFFFFFFu ||
-         (uint32_t)task_current()->id == (uint32_t)hbos_trace_pid) {
+        pid_match) {
         g_syserr_budget--;
         console_puts("[E] nr=");
         trace_put_udec(number);
