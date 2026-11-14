@@ -102,7 +102,7 @@
 //HBOS 这套 Unix socket 实现自己的资源上限
 
 #define UNIX_PATH_MAX 108
-#define UNIX_RIGHTS_QUEUE 4
+#define UNIX_RIGHTS_QUEUE 64
 /* Chromium 的 IPC 会用 SCM_RIGHTS 一次传多个 fd（共享内存 + 管道）。
  * 上限 4 容易在传 fd 数组时被截断，放宽到 16。 */
 #define UNIX_RIGHTS_MAX_FDS 16

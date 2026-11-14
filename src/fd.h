@@ -119,7 +119,7 @@ static inline int fd_accmode_normalize(int flags) {
  * Chromium 子进程会 F_DUPFD_CLOEXEC(fd, 512) 想要一个高位 fd —— 那个 512
  * 只是"希望不小于"的偏好，不是容量要求。解法是在 fcntl 里回退到任意可用
  * fd（见 src/syscall.c 的 case 1030），而不是把表撑大。 */
-#define POSIX_MAX_FDS 128
+#define POSIX_MAX_FDS 256
 
 #define FD_FILE    1
 #define FD_SOCKET  2
