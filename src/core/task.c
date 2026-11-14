@@ -1345,6 +1345,50 @@ int task_wait(uint32_t id, int *status) {
     return 0;
 }
 
+int task_wait_child(int32_t pid, int options, int *out_wstatus,
+                    uint32_t *out_pid) {
+    if (!current_task) return -1;
+    uint32_t my_id = current_task->id;
+    uint32_t my_tgid = current_task->thread_group_id;
+
+    for (;;) {
+        int found = 0;
+        for (int i = 0; i < task_count; i++) {
+            task_t *t = &task_pool[i];
+            if (t == current_task || t->id == 0) continue;
+            if (pid > 0) {
+                if (t->id != (uint32_t)pid) continue;
+            } else {
+                if (t->parent_id != my_id &&
+                    (!my_tgid || t->parent_id != my_tgid))
+                    continue;
+                if (t->thread_group_id != t->id) continue;
+                if (pid == 0 && t->pgid != current_task->pgid) continue;
+                if (pid < -1 && t->pgid != (uint32_t)(-pid)) continue;
+            }
+            found = 1;
+            if (t->state == TASK_TERMINATED) {
+                t->parent_id = 0;
+                if (out_pid) *out_pid = t->id;
+                if (out_wstatus) *out_wstatus = ((t->exit_status & 0xff) << 8);
+                return 0;
+            }
+            if ((options & 2 /* WUNTRACED */) && t->stopped && !t->stop_reported) {
+                t->stop_reported = true;
+                if (out_pid) *out_pid = t->id;
+                if (out_wstatus) *out_wstatus = 0x7f | (t->stop_sig << 8);
+                return 0;
+            }
+        }
+        if (!found) return -1;
+        if (options & 1 /* WNOHANG */) {
+            if (out_pid) *out_pid = 0;
+            return 0;
+        }
+        task_yield();
+    }
+}
+
 /** 获取当前任务 ID */
 uint32_t task_get_id(void) {
     return current_task ? current_task->id : 0;
@@ -2223,6 +2267,7 @@ void task_exec_inherit(int new_id) {
 
     /* 父进程与进程组：新任务继承老任务的"位置"，而不是认老任务当爹。 */
     fresh->parent_id = old->parent_id;
+    old->parent_id = 0;
     fresh->pgid = old->pgid;
     fresh->sid = old->sid;
 

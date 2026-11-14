@@ -37,6 +37,7 @@
  *         task_exit                execve 语义：把当前任务"应当由 e…
  *         task_set_exit_status     （待补）
  *         task_wait                （待补）
+ *         task_wait_child          支持 pid<=0 与 WNOHANG 的子进程等待
  *         task_kill                （待补）
  *         task_kill_pgrp           （待补）
  *         task_setpgid             （待补）
@@ -350,6 +351,8 @@ void task_yield(void);
 void task_exit(void);
 void task_set_exit_status(int status);
 int task_wait(uint32_t id, int *status);
+int task_wait_child(int32_t pid, int options, int *out_wstatus,
+                    uint32_t *out_pid);
 int task_kill(uint32_t id, int sig);
 int task_kill_pgrp(uint32_t pgid, int sig);          /* 向进程组发信号；返回送达数 */
 int task_setpgid(uint32_t pid, uint32_t pgid);       /* 0/-errno */

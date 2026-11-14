@@ -3571,6 +3571,45 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             return linux_tgkill((int)linux_frame->a0,
                                 (int)linux_frame->a1,
                                 (int)linux_frame->a2);
+        case 247: {                                   /* waitid */
+            int idtype = (int)linux_frame->a0;
+            uint32_t id = (uint32_t)linux_frame->a1;
+            uint8_t *infop = (uint8_t *)(uintptr_t)linux_frame->a2;
+            int options = (int)linux_frame->a3;
+            int32_t target_pid = -1;
+            if (idtype == 0 /* P_ALL */) {
+                target_pid = -1;
+            } else if (idtype == 1 /* P_PID */) {
+                if (id == 0) return (uint64_t)(-EINVAL);
+                target_pid = (int32_t)id;
+            } else if (idtype == 2 /* P_PGID */) {
+                if (id == 0) return (uint64_t)(-EINVAL);
+                target_pid = -(int32_t)id;
+            } else {
+                return (uint64_t)(-EINVAL);
+            }
+            if (infop &&
+                !linux_user_range_writable((uint64_t)(uintptr_t)infop, 128))
+                return (uint64_t)(-EFAULT);
+            int wst = 0;
+            uint32_t reaped_pid = 0;
+            int wopts = (options & 1) | ((options & 2) ? 2 : 0);
+            int ret = task_wait_child(target_pid, wopts, &wst, &reaped_pid);
+            if (ret < 0) return (uint64_t)(-ECHILD);
+            if (infop) {
+                memset(infop, 0, 128);
+                if (reaped_pid != 0) {
+                    int32_t signo = 17; /* SIGCHLD */
+                    int32_t code = ((wst & 0xff) == 0x7f) ? 5 : 1;
+                    int32_t st = (wst >> 8) & 0xff;
+                    memcpy(infop + 0, &signo, 4);
+                    memcpy(infop + 8, &code, 4);
+                    memcpy(infop + 16, &reaped_pid, 4);
+                    memcpy(infop + 24, &st, 4);
+                }
+            }
+            return 0;
+        }
         case 253: {
             int result = linux_compat_inotify_init1(0);
             return result < 0 ? (uint64_t)(-(errno > 0 ? errno : EIO)) :
@@ -4975,7 +5014,6 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             pid_t pid = (pid_t)f->a0;
             int *status = (int *)f->a1;
             int options = (int)f->a2;
-            if (pid <= 0) return (uint64_t)(-ECHILD);
             /* 先把调用者的地址空间钉住：task_wait / task_yield 会让出 CPU，
              * 期间别的任务可能切过 CR3。回来时如果 CR3 不是发起者的，
              * 后面那几处 `*status = ...` 就会往别人的地址空间里写 —— 命中
@@ -4984,37 +5022,19 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             task_t *caller = task_current();
             uint64_t caller_pml4 =
                 caller && caller->mm ? caller->mm->pml4_phys : 0;
-            int st = 0;
             if (status && caller_pml4 &&
                 !linux_user_range_writable((uint64_t)(uintptr_t)status,
                                            sizeof(int)))
                 return (uint64_t)(-EFAULT);
-            if (options & 2 /* WUNTRACED */) {
-                task_t *wt = task_lookup((uint32_t)pid);
-                while (wt && wt->state != TASK_TERMINATED) {
-                    if (wt->stopped && !wt->stop_reported) {
-                        wt->stop_reported = true;
-                        if (caller_pml4 &&
-                            vmm_get_pml4() != caller_pml4)
-                            vmm_set_pml4(caller_pml4);
-                        if (status) *status = 0x7f | (wt->stop_sig << 8);
-                        return (uint64_t)pid;
-                    }
-                    if (options & WNOHANG) return 0;
-                    task_yield();
-                }
-            }
-            int ret = task_wait((uint32_t)pid, &st);
+            int wst = 0;
+            uint32_t reaped_pid = 0;
+            int ret = task_wait_child((int32_t)pid, options, &wst, &reaped_pid);
             if (ret < 0) return (uint64_t)(-ECHILD);
-            if (options & WNOHANG) {
-                const task_t *t = task_get_by_id((uint32_t)pid);
-                if (t && t->state != TASK_TERMINATED) return 0;
-            }
             if (caller_pml4 && vmm_get_pml4() != caller_pml4)
                 vmm_set_pml4(caller_pml4);
-            if (status)
-                *status = W_EXITCODE(st, 0);
-            return (uint64_t)pid;
+            if (reaped_pid == 0) return 0;
+            if (status) *status = wst;
+            return (uint64_t)reaped_pid;
         }
 
         case HBOS_SYS_KILL: {
