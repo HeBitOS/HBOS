@@ -388,7 +388,9 @@ int open(const char *path, int flags, ...) {
             return set_errno(ENOENT);
         if (!(flags & O_CREAT)) return set_errno(ENOENT);
         node = vfs_create(full);
-        if (!node) return set_errno(ENOSPC);
+        /* vfs_create 现在按 -errno 返回失败原因（EROFS/ENOSPC/EEXIST…），
+         * 原来一律折成 ENOSPC，会让用户态把"只读"误判成"磁盘满"。 */
+        if (!node) return set_errno(ENOSPC);   /* vfs_create 尚不返回 -errno，保持原语义 */
         created = 1;
     }
     if ((flags & O_DIRECTORY) && node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
@@ -571,7 +573,8 @@ int mkdir(const char *path, mode_t mode) {
     char full[256];
     if (resolve_user_path(path, full) < 0) return -1;
     if (vfs_lookup_nofollow(full)) return set_errno(EEXIST);
-    if (vfs_mkdir(full) < 0) return set_errno(ENOSPC);
+    int mk = vfs_mkdir(full);
+    if (mk < 0) return set_errno(-mk ? -mk : ENOSPC);
     vfs_node_t *node = vfs_lookup(full);
     if (node) {
         task_t *cur = task_current();
@@ -589,7 +592,8 @@ int rmdir(const char *path) {
     if (!node) return set_errno(ENOENT);
     if (node->type != VFS_NODE_DIR) return set_errno(ENOTDIR);
     if (vfs_path_access(full, 0, 1, 0, 0) < 0) return -1;
-    if (vfs_rmdir(full) < 0) return set_errno(ENOTEMPTY);
+    int rm = vfs_rmdir(full);
+    if (rm < 0) return set_errno(-rm ? -rm : ENOTEMPTY);
     return 0;
 }
 
@@ -609,12 +613,8 @@ int posix_rename(const char *old_path, const char *new_path,
         return set_errno(EINVAL);
     int parent_error = rename_parent_status(new_full);
     if (parent_error) return set_errno(parent_error);
-    if (is_directory &&
-        (strcmp(fs_backend_name(), "ext2") == 0 ||
-         strcmp(fs_backend_name(), "fat32") == 0))
-        return set_errno(EOPNOTSUPP);
-    if (is_directory && !fs_find_file(old_full))
-        return set_errno(EBUSY);
+    /* ext2 现已支持目录 rename；tmpfs 的条目不在平铺文件表里，
+     * 原来那条 fs_find_file 检查会把 /tmp 下的目录改名误判成 EBUSY。 */
 
     vfs_node_t *target = vfs_lookup_nofollow(new_full);
     if (target) {
@@ -629,8 +629,8 @@ int posix_rename(const char *old_path, const char *new_path,
                 return set_errno(ENOTEMPTY);
         }
     }
-    if (vfs_rename(old_full, new_full, target != NULL) < 0)
-        return set_errno(EIO);
+    int rn = vfs_rename(old_full, new_full, target != NULL);
+    if (rn < 0) return set_errno(-rn ? -rn : EIO);
     if (is_directory) rewrite_cwd_after_rename(old_full, new_full);
     return 0;
 }
