@@ -297,7 +297,10 @@ void linux_getfl_trace_dump(void);
 void linux_fd_table_dump(void);
 /** 用户态陷阱时打印肇事 fd（rip + rdi 候选）的访问模式/类型/出处/路径。
  *  rdi 不是合法 fd 时打印 fd=invalid，避免误读无关寄存器。 */
-void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate);
+void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate,
+                           uint64_t arg_rsi, uint64_t arg_rdx,
+                           uint64_t arg_rcx, uint64_t arg_r8,
+                           uint64_t arg_r9);
 
 /** 排错开关（shell `setenv` 命令用），见 linux_debug_set_flag 定义处。 */
 enum {

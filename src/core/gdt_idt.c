@@ -1057,7 +1057,8 @@ void isr_handler(isr_regs_t *regs) {
          * open trace 里没有这个 fd 的记录，只能靠 fd 表反查身份。 */
         /* 肇事 fd 单独一行：base::File::Open 的 CHECK 现场把 fd 留在 rdi
          * （fcntl 包装只改 esi），有了这一行不必再从 fd 表里猜是哪个。 */
-        linux_trap_fd_context(regs->rip, regs->rdi);
+        linux_trap_fd_context(regs->rip, regs->rdi, regs->rsi, regs->rdx,
+                              regs->rcx, regs->r8, regs->r9);
         linux_fd_table_dump();
         /* 打印 rip 处的指令字节：GP/UD 只看 rip 查不出原因 —— 得知道到底是
          * 哪条指令非法（rdmsr？特权指令？SIMD？还是取指越界）。Chromium

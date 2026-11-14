@@ -2350,9 +2350,26 @@ static const char *fd_origin_name(uint8_t origin) {
  * （0x1103928A69 那条的 rdi 是缓存的 errno），所以 fd 号不合法时明确打印
  * fd=invalid，避免把无关的寄存器值误读成 fd。
  */
-void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate) {
+void linux_trap_fd_context(uint64_t rip, uint64_t fd_candidate,
+                           uint64_t arg_rsi, uint64_t arg_rdx,
+                           uint64_t arg_rcx, uint64_t arg_r8,
+                           uint64_t arg_r9) {
     console_puts("[TRAP-CTX] rip=0x");
     trace_put_hex(rip);
+    /* rdi 未必就是 fd：把六个整数参数寄存器全打出来，避免再靠猜。
+     * （实测同一条 CHECK 两次落在 fd=7 与 fd=0，说明 rdi 的来源不稳定。） */
+    console_puts(" args rdi=0x");
+    trace_put_hex(fd_candidate);
+    console_puts(" rsi=0x");
+    trace_put_hex(arg_rsi);
+    console_puts(" rdx=0x");
+    trace_put_hex(arg_rdx);
+    console_puts(" rcx=0x");
+    trace_put_hex(arg_rcx);
+    console_puts(" r8=0x");
+    trace_put_hex(arg_r8);
+    console_puts(" r9=0x");
+    trace_put_hex(arg_r9);
     task_t *cur = task_current();
     if (!cur || !cur->fd_table || fd_candidate >= POSIX_MAX_FDS) {
         console_puts(" fd=invalid\n");
