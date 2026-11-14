@@ -48,3 +48,6 @@ int devfs_readdir(const char *path, uint32_t index, char *name, uint32_t *type);
 void devfs_register_nodes(void);
 
 #endif
+
+/** 分配一个待填写的 devfs 节点（供 DRM 等模块注册设备节点）。 */
+vfs_node_t *devfs_new_node(void);

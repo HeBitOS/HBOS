@@ -2125,6 +2125,71 @@ void linux_errno_trace_dump(void) {
     }
 }
 
+/* ── open 的 flags 传递链校验 + /dev/null 请求侧记录 ─────────────
+ *
+ * 为什么要有这两样：Chromium 的 base::File 在 open/接管 fd 之后做
+ *   fcntl(fd, F_GETFL) & O_ACCMODE  ==  它请求的访问模式
+ * 不等即 int3。已知现场（r85）：fd=7 是 /dev/null、账上 accmode=0，
+ * 而包装层的期望值来自调用点的**常量 2**（反汇编：0x1109cc3fc4
+ * `mov $0x2,%ecx` → 0x1109cc4110 的 `mov %ecx,%r14d` → 0x1109cd39d0
+ * 的 `mov %edx,%r12d` → 包装层 0x1109cd3810 的
+ * `test %r15d;setne sil;add esi,esi` = 期望 O_RDWR）。
+ *
+ * 于是只剩两种可能：(A) Chromium 自己把一个 O_RDONLY 的 /dev/null 当成
+ * 可写句柄；(B) flags 在到达 posix open() 之前被改写。这里把三处值都留下：
+ *   ① Linux syscall 入口的 flags（nr 2 的 a1 / nr 257 的 a2）
+ *   ② HBOS_SYS_OPEN 实际收到的 f->a1（就是交给 open() 的那一份）
+ *   ③ open 成功后 fd 条目里记下的 accmode
+ * ①②不等 = 传递链被改写；②③不等 = 记账被改写；都相等 = 客户端自己的预期问题。
+ * 同时把**每一次 /dev/null 的请求**（fd + flags + pid）记进 8 槽环，
+ * 因为肇事 fd 往往是祖先进程早期开的，普通的 open 环形缓冲早被刷掉了。 */
+static int g_open_entry_valid;
+static int g_open_entry_flags;
+static int g_openflags_budget = 8;
+
+#define LINUX_DEVNULL_SLOTS 8
+static struct {
+    int used;
+    int pid;
+    int fd;
+    int flags;
+} g_devnull_ring[LINUX_DEVNULL_SLOTS];
+static uint32_t g_devnull_next;
+
+static void linux_devnull_record(int fd, int flags) {
+    uint32_t index = g_devnull_next % LINUX_DEVNULL_SLOTS;
+    g_devnull_next++;
+    g_devnull_ring[index].used = 1;
+    g_devnull_ring[index].pid = task_get_process_id();
+    g_devnull_ring[index].fd = fd;
+    g_devnull_ring[index].flags = flags;
+}
+
+void linux_devnull_dump(void) {
+    if (!g_devnull_next) {
+        console_puts("[DEVNULL-REQ] no /dev/null open recorded\n");
+        return;
+    }
+    uint32_t total = g_devnull_next;
+    uint32_t count = total < LINUX_DEVNULL_SLOTS ? total : LINUX_DEVNULL_SLOTS;
+    uint32_t start = total - count;
+    console_puts("[DEVNULL-REQ] /dev/null opens (oldest first):\n");
+    for (uint32_t i = 0; i < count; i++) {
+        const typeof(g_devnull_ring[0]) *slot =
+            &g_devnull_ring[(start + i) % LINUX_DEVNULL_SLOTS];
+        console_puts("[DEVNULL-REQ] pid=");
+        trace_put_udec((uint64_t)slot->pid);
+        console_puts(" fd=");
+        trace_put_udec((uint64_t)slot->fd);
+        console_puts(" flags=0x");
+        trace_put_hex((uint64_t)(unsigned)slot->flags);
+        console_puts(" req_accmode=");
+        trace_put_udec((uint64_t)(slot->flags & O_ACCMODE));
+        if (i + 1 == count) console_puts("  <-- last");
+        console_putchar('\n');
+    }
+}
+
 /* ── fcntl(F_GETFL) 追踪 ────────────────────────────────────────
  *
  * Chromium 的 base::File 在接管一个 fd 之后会
@@ -2343,6 +2408,7 @@ void linux_fd_table_dump(void) {
         console_putchar('\n');
     }
     linux_fdid_dump();
+    linux_devnull_dump();
     /* 文件类 fd 各打一条出身链：Chromium 的 base::File 校验针对的就是这些
      * fd（实测肇事者是 /dev/null），而 open trace 只有 16 条、早被 dlopen
      * 探测冲掉了。链最多 8 跳，靠 inherit 的 parent_pid 串起来。 */
@@ -3134,6 +3200,7 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 -100, (const char *)(uintptr_t)linux_frame->a0, path);
             if (resolved < 0) return (uint64_t)(int64_t)resolved;
             if (linux_compat_overlay_is_path(path)) {
+                g_open_entry_valid = 0;
                 int fd = linux_compat_shm_open(path, (int)linux_frame->a1);
                 if (fd < 0) {
                     linux_open_trace_record(path, (int)linux_frame->a1, 0,
@@ -3141,10 +3208,13 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                     linux_open_fail_log(path, (int)linux_frame->a1, errno);
                     return (uint64_t)(-(errno > 0 ? errno : EIO));
                 }
+                g_open_entry_valid = 0;
                 linux_open_trace_record(path, (int)linux_frame->a1, 1, 0, fd);
                 linux_fdid_record(fd, "shm-open");
                 return (uint64_t)fd;
             }
+            g_open_entry_valid = 1;
+            g_open_entry_flags = (int)linux_frame->a1;
             int64_t open_rc = linux_native_call(
                 HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a1,
                 linux_frame->a2, 0, 0, 0);
@@ -3431,6 +3501,7 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             if (resolved < 0) return (uint64_t)(int64_t)resolved;
             /* /dev/shm 下的文件走内存后备（memfd slot）。 */
             if (linux_compat_overlay_is_path(path)) {
+                g_open_entry_valid = 0;
                 int fd = linux_compat_shm_open(path, (int)linux_frame->a2);
                 if (fd < 0) {
                     linux_open_trace_record(path, (int)linux_frame->a2, 0,
@@ -3441,6 +3512,8 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
                 linux_open_trace_record(path, (int)linux_frame->a2, 1, 0, fd);
                 return (uint64_t)fd;
             }
+            g_open_entry_valid = 1;
+            g_open_entry_flags = (int)linux_frame->a2;
             int64_t openat_rc = linux_native_call(
                 HBOS_SYS_OPEN, (uint64_t)path, linux_frame->a2,
                 linux_frame->a3, 0, 0, 0);
@@ -3857,6 +3930,22 @@ static uint64_t align_page_up(uint64_t value) {
     return (value + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 }
 
+/* ── DRM（/dev/dri/card0）弱接口 ────────────────────────────────
+ *
+ * dumb buffer 的 mmap 必须映射**驱动持有的物理页**，而不是给一叠匿名清零页
+ * —— 后者写上去永远到不了屏幕。这两个符号由 src/graphics/drm/ 提供强定义；
+ * 没链接那个模块时这里的弱定义保证内核照常编过。 */
+__attribute__((weak)) int drm_card_is_node(vfs_node_t *node) {
+    (void)node;
+    return 0;
+}
+__attribute__((weak)) uint64_t drm_card_page_phys(vfs_node_t *node,
+                                                  uint64_t page_index) {
+    (void)node;
+    (void)page_index;
+    return 0;
+}
+
 static void vm_area_drop_backing(vm_area_t *area) {
     if (!area) return;
     if (area->backing_type == VM_BACKING_MEMFD)
@@ -3864,6 +3953,7 @@ static void vm_area_drop_backing(vm_area_t *area) {
     else if (area->backing_type == VM_BACKING_VFS_SHARED && area->backing_node)
         linux_compat_shm_unmap(area->backing_node, area->backing_offset,
                                area->end - area->start);
+    /* VM_BACKING_DRM：页属于设备，故意什么都不做。 */
 }
 
 /* Remove every VMA fragment intersecting [start,end), splitting a VMA when
@@ -4271,9 +4361,48 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
              * 出去。fd 出身记录必须挂在这里 —— 挂在某个 nr 的入口只能覆盖
              * 那一个 nr（实测 cf4：glibc 走 openat，open(2) 的记录点一次都
              * 没命中，导致 [FDID-CHAIN] 全是 (no record)）。 */
-            int64_t opened = (int64_t)open((const char *)f->a0, (int)f->a1,
-                                          (int)f->a2);
-            if (opened >= 0) linux_fdid_record((int)opened, "open");
+            const char *open_path = (const char *)f->a0;
+            int requested = (int)f->a1;
+            /* ① → ② 传递链校验：syscall 入口与这里收到的 flags 必须一致。 */
+            if (g_open_entry_valid) {
+                if (g_open_entry_flags != requested &&
+                    g_openflags_budget > 0) {
+                    g_openflags_budget--;
+                    console_puts("[OPENFLAGS] REWRITTEN entry=0x");
+                    trace_put_hex((uint64_t)(unsigned)g_open_entry_flags);
+                    console_puts(" handed=0x");
+                    trace_put_hex((uint64_t)(unsigned)requested);
+                    console_puts(" path=");
+                    console_puts(open_path ? open_path : "(null)");
+                    console_putchar('\n');
+                }
+                g_open_entry_valid = 0;
+            }
+            int64_t opened = (int64_t)open(open_path, requested, (int)f->a2);
+            if (opened >= 0) {
+                linux_fdid_record((int)opened, "open");
+                /* ② → ③ 记账校验：条目里的访问模式必须等于请求。 */
+                task_t *cur = task_current();
+                if (cur && cur->fd_table && opened < POSIX_MAX_FDS &&
+                    cur->fd_table->entries[opened].used) {
+                    int got = cur->fd_table->entries[opened].flags & O_ACCMODE;
+                    if (got != (requested & O_ACCMODE) &&
+                        g_openflags_budget > 0) {
+                        g_openflags_budget--;
+                        console_puts("[OPENFLAGS] ACCOUNT-MISMATCH fd=");
+                        trace_put_udec((uint64_t)opened);
+                        console_puts(" req=0x");
+                        trace_put_hex((uint64_t)(unsigned)requested);
+                        console_puts(" got_accmode=");
+                        trace_put_udec((uint64_t)got);
+                        console_puts(" path=");
+                        console_puts(open_path ? open_path : "(null)");
+                        console_putchar('\n');
+                    }
+                }
+                if (open_path && !strcmp(open_path, "/dev/null"))
+                    linux_devnull_record((int)opened, requested);
+            }
             return finish_syscall((long)opened);
         }
 
@@ -5059,6 +5188,29 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                     return (uint64_t)(-ENOMEM);
                 }
                 vma->backing_type = VM_BACKING_VFS_SHARED;
+                vma->backing_node = mapping_entry->node;
+                vma->backing_offset = (uint64_t)off;
+            } else if (!anonymous && mapping_entry->type == FD_FILE &&
+                       mapping_entry->node &&
+                       drm_card_is_node(mapping_entry->node)) {
+                /* DRM dumb buffer：直接把驱动持有的物理页映射进用户态。 */
+                size_t mapped = 0;
+                for (; mapped < pages; mapped++) {
+                    uint64_t phys = drm_card_page_phys(
+                        mapping_entry->node, (uint64_t)off / PAGE_SIZE + mapped);
+                    if (!phys) break;
+                    if (vmm_map_page((uint64_t)p + mapped * PAGE_SIZE, phys,
+                                     VMM_P | VMM_U |
+                                     ((prot & 0x02) ? VMM_W : 0)) != 0)
+                        break;
+                }
+                if (mapped != pages) {
+                    for (size_t i = 0; i < mapped; i++)
+                        vmm_unmap_page((uint64_t)p + i * PAGE_SIZE);
+                    kfree(vma);
+                    return (uint64_t)(-ENOMEM);
+                }
+                vma->backing_type = VM_BACKING_DRM;
                 vma->backing_node = mapping_entry->node;
                 vma->backing_offset = (uint64_t)off;
             } else {

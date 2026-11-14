@@ -94,6 +94,9 @@
 #define VM_BACKING_MEMFD       1U
 #define VM_BACKING_VFS_PRIVATE 2U
 #define VM_BACKING_VFS_SHARED  3U
+/* DRM dumb buffer：物理页属于设备（驱动自己持有），munmap 时
+ * **不能** pmm_free_page，否则屏幕内容被回收 = 花屏/野指针。 */
+#define VM_BACKING_DRM         4U
 
 typedef struct vm_area {
     uint64_t start;

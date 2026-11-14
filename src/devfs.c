@@ -540,6 +540,10 @@ static void devfs_register_sysfs_dir(const char *path) {
     node->mode = S_IFDIR | 0555;
 }
 
+/** 给内核其它模块（如 DRM）分配一个待填的节点。
+ *  devfs_alloc_node 会自增节点计数，调用方填好 name/type/ops 即完成注册。 */
+vfs_node_t *devfs_new_node(void) { return devfs_alloc_node(); }
+
 static void devfs_register_sysfs_file(const char *path, const char *content) {
     vfs_node_t *node = devfs_alloc_node();
     if (!node) return;
