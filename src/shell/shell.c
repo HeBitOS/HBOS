@@ -1162,6 +1162,10 @@ void shell_run(void) {
     // Picking GUI also means a key is pressed before the GUI's mouse_init
     // runs, which keeps the PS/2 controller state clean.
 #if HBOS_ENABLE_GUI
+    if (vfs_lookup("/etc/hbos-autostart")) {
+        console_puts("\r\n\x1b[36m检测到 /etc/hbos-autostart，正在启动 KDE Plasma + Chromium...\x1b[0m\r\n");
+        cmd_execute("run /usr/bin/bash -c \"/usr/bin/start_kde_chromium.sh\"");
+    } else {
     int startup_pref = shell_get_startup_pref();
     if (startup_pref == 'g') {
         console_puts("\r\n\x1b[90m已记住启动选择：HIVE 桌面（用 startup 命令可修改）\x1b[0m\r\n");
@@ -1189,6 +1193,7 @@ void shell_run(void) {
                 break;
             }
         }
+    }
     }
 #else
     console_puts(

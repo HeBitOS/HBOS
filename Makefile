@@ -448,7 +448,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run vm mouse-test test-all run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps test
+.PHONY: all clean run run-kde vm mouse-test test-all run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps test
 
 # 全新 clone 的第一站：递归拉子模块（含 mbedtls 嵌套）+ 检查宿主机工具。
 # 幂等，不发 sudo、不装包，缺包时只打印安装命令。
@@ -473,6 +473,7 @@ help:
 	@echo "  make hive-sync  Export the transitional runtime/SDK mirror to HIVE_REPO"
 	@echo "  make linux-compat-lib  Build opt-in Linux source compatibility library"
 	@echo "  make nogui      Build BIOS/UEFI without desktop GUI or bundled apps"
+	@echo "  make run-kde    Boot HBOS with KDE Plasma + Chromium ext2 disk image in QEMU"
 	@echo "  make run-nogui  Build and boot the no-GUI BIOS ISO in QEMU"
 	@echo "  make run-nogui-uefi  Build and boot the no-GUI UEFI ISO in QEMU"
 	@echo "  make nogui-smoke  Boot-test no-GUI BIOS and UEFI ISOs"
@@ -1244,6 +1245,20 @@ run-bios-ahci: $(ISO_BIOS) $(DISK_IMG)
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device ide-hd,drive=hd0,bus=ahci.0 \
 		-netdev user,id=net0 -device e1000,netdev=net0 \
+		-cdrom $(ISO_BIOS) -boot d \
+		-serial stdio -vga std -monitor none
+
+KDE_IMG ?= $(BUILD_DIR)/hbos-kde-chromium.img
+run-kde: $(ISO_BIOS)
+	@if [ ! -f "$(KDE_IMG)" ]; then \
+		echo "错误: 未找到 $(KDE_IMG)，请先生成 KDE + Chromium 磁盘镜像"; \
+		exit 1; \
+	fi
+	$(QEMU_ENV) $(QEMU) -m 4096M -smp 1 -enable-kvm -cpu host \
+		-device ich9-ahci,id=ahci \
+		-drive id=disk0,file=$(KDE_IMG),format=raw,if=none \
+		-device ide-hd,drive=disk0,bus=ahci.0 \
+		-netdev user,id=hbosnet -device virtio-net-pci,netdev=hbosnet,disable-modern=on \
 		-cdrom $(ISO_BIOS) -boot d \
 		-serial stdio -vga std -monitor none
 

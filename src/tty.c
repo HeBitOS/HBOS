@@ -1,6 +1,7 @@
 #include "tty.h"
 #include "string.h"
 #include "vfs.h"
+#include "devfs.h"
 #include "errno.h"
 #include "signal.h"
 #include "unistd.h"
@@ -474,7 +475,15 @@ void *pty_open_master(void)
         path[l++] = (char)('0' + i % 10);
         path[l] = 0;
         vfs_node_t *s = vfs_lookup(path);
-        if (!s) s = vfs_create(path);
+        if (!s) {
+            s = devfs_new_node();
+            if (s) {
+                strncpy(s->name, path, VFS_MAX_NAME - 1);
+                s->name[VFS_MAX_NAME - 1] = '\0';
+            } else {
+                s = vfs_create(path);
+            }
+        }
         if (s) {
             s->type = VFS_NODE_CHARDEV; s->mode = S_IFCHR | 0620;
             s->ops = &pty_slave_ops; s->private_data = (void *)(uintptr_t)i;
