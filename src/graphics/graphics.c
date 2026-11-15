@@ -47,6 +47,7 @@ static uint64_t g_real_fb_pitch = 0;
 static uint64_t g_real_fb_width = 0, g_real_fb_height = 0;
 /* PgUp 历史预览期间，实时输出继续写离屏缓冲，但不得覆盖物理屏幕预览。 */
 static bool sb_active = false;
+static bool g_fb_suppressed = false;
 
 /* 64 位成对复制 framebuffer 像素。源/目标同为 8 字节对齐关系时使用
  * movq；否则安全回退到 32 位。真实 framebuffer 写入保持 volatile。 */
@@ -77,7 +78,7 @@ static inline void console_blit_pixels(const volatile uint32_t *src,
 // through fb_put_pixel/fb_fill_rect, now redirected at the back-buffer
 // too — can flush itself to the screen; see draw_gui_frame().
 void console_present(void) {
-    if (!g_backbuf_active || !g_term || sb_active) return;
+    if (!g_backbuf_active || !g_term || sb_active || g_fb_suppressed) return;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     uint64_t w = fc->width, h = fc->height;
     uint64_t src_pitch_px = fc->pitch / 4;
@@ -100,7 +101,7 @@ void console_present(void) {
 extern uint64_t g_flanterm_scroll_gen;
 
 static void console_present_rows(uint64_t row0, uint64_t row_count) {
-    if (!g_backbuf_active || !g_term || sb_active) return;
+    if (!g_backbuf_active || !g_term || sb_active || g_fb_suppressed) return;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     uint64_t y0 = fc->offset_y + row0 * fc->glyph_height;
     uint64_t y1 = y0 + row_count * fc->glyph_height;
@@ -119,7 +120,8 @@ static void console_present_rows(uint64_t row0, uint64_t row_count) {
 /* 只提交一行中的字符单元范围。交互输入时通常仅覆盖“旧光标、字符、新光标”
  * 2~3 个单元，比复制整条像素扫描行更便宜。 */
 static void console_present_cells(uint64_t row, uint64_t cell0, uint64_t cell1) {
-    if (!g_backbuf_active || !g_term || sb_active || row >= g_term->rows) return;
+    if (!g_backbuf_active || !g_term || sb_active || g_fb_suppressed ||
+        row >= g_term->rows) return;
     struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
     if (cell0 > cell1) {
         uint64_t tmp = cell0; cell0 = cell1; cell1 = tmp;
@@ -172,6 +174,7 @@ static void console_present_after_char(uint64_t old_cx, uint64_t old_cy,
 static void (*g_console_sink)(char) = NULL;
 void console_set_sink(void (*fn)(char)) { g_console_sink = fn; }
 bool console_has_sink(void) { return g_console_sink != NULL; }
+void console_set_fb_suppressed(bool suppressed) { g_fb_suppressed = suppressed; }
 
 #define VGA_MEM     ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH   80

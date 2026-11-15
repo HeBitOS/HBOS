@@ -207,6 +207,7 @@ int fbdev_is_node(vfs_node_t *node) {
 
 uint64_t fbdev_page_phys(vfs_node_t *node, uint64_t page_index) {
     if (!fbdev_is_node(node)) return 0;
+    console_set_fb_suppressed(true);
     fb_info_t info;
     if (fb_get_info(&info) < 0 || !info.addr) return 0;
     uint32_t total = fbdev_smem_len(&info);

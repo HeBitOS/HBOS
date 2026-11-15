@@ -1,6 +1,6 @@
 /**
  * @file    graphics.h
- * @brief   导出 27 个接口（1 类型 / 0 宏 / 26 函数）
+ * @brief   导出 28 个接口（1 类型 / 0 宏 / 27 函数）
  *
  * @layer   gui
  * @owner   src/graphics/
@@ -17,6 +17,7 @@
  *         console_putchar         输出一个字符
  *         console_putchar_raw     （待补）
  *         console_has_sink        （待补）
+ *         console_set_fb_suppressed 抑制控制台向物理帧缓冲刷屏
  *         console_clear           清屏
  *         console_reset_terminal  （待补）
  *         console_set_fg          设置前景色
@@ -78,6 +79,10 @@ void console_set_sink(void (*fn)(char));
 // 自己是否运行在“单线程阻塞式”环境中——此时不应进入自有的阻塞式按键循环
 // （kb_get_key 在紧循环中读键），否则会冻结整个 GUI 合成器且无任何画面反馈。
 bool console_has_sink(void);
+
+// Suppress flanterm blitting to the hardware framebuffer while keeping serial
+// mirroring active (used when /dev/fb0 is mapped by a userland compositor).
+void console_set_fb_suppressed(bool suppressed);
 
 // 清除屏幕
 void console_clear(void);

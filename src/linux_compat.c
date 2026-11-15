@@ -185,6 +185,7 @@ typedef struct {
 
 typedef struct {
     uint32_t *address;
+    uint64_t pml4;
     futex_waiter_t waiters[MAX_TASKS];
 } futex_slot_t;
 
@@ -781,6 +782,9 @@ static int compat_entry_retain(const fd_entry_t *entry) {
     }
     if (entry->type == FD_PIPE && entry->pipe) {
         entry->pipe->ref_count++;
+        return 0;
+    }
+    if (entry->type == FD_FILE) {
         return 0;
     }
     return compat_set_errno(EOPNOTSUPP);
@@ -2706,41 +2710,41 @@ int linux_compat_unix_recv_rights(int fd, int *fds, size_t capacity,
     if (!receiver) return compat_set_errno(EBADF);
     if (!receiver->rights_count) return 0;
 
-    unix_rights_message_t *message =
-        &receiver->rights[receiver->rights_read];
-    for (uint8_t i = 0; i < message->count; i++) {
-        int new_fd = -1;
-        if (*received < capacity) {
-            for (int candidate = 3; candidate < POSIX_MAX_FDS; candidate++) {
-                if (!task->fd_table->entries[candidate].used) {
-                    new_fd = candidate;
-                    break;
+    while (receiver->rights_count > 0) {
+        unix_rights_message_t *message =
+            &receiver->rights[receiver->rights_read];
+        if (*received > 0 && *received + message->count > capacity)
+            break;
+        for (uint8_t i = 0; i < message->count; i++) {
+            int new_fd = -1;
+            if (*received < capacity) {
+                for (int candidate = 3; candidate < POSIX_MAX_FDS; candidate++) {
+                    if (!task->fd_table->entries[candidate].used) {
+                        new_fd = candidate;
+                        break;
+                    }
                 }
             }
+            if (new_fd < 0) {
+                *truncated = 1;
+                compat_entry_release(&message->entries[i]);
+                continue;
+            }
+            task->fd_table->entries[new_fd] = message->entries[i];
+            task->fd_table->entries[new_fd].used = true;
+            linux_fdid_record(new_fd, "scm");
+            if (!strncmp(task->fd_table->entries[new_fd].path, "/dev/shm/", 9))
+                shm_trace_push("scm", task->fd_table->entries[new_fd].path, new_fd,
+                               task->fd_table->entries[new_fd].flags, 0, 0);
+            fds[(*received)++] = new_fd;
         }
-        if (new_fd < 0) {
-            *truncated = 1;
-            compat_entry_release(&message->entries[i]);
-            continue;
-        }
-        task->fd_table->entries[new_fd] = message->entries[i];
-        task->fd_table->entries[new_fd].used = true;
-        linux_fdid_record(new_fd, "scm");
-        /* 收权也进同一条时间线：共享内存 fd 大多不是本进程 open 出来的，
-         * 而是 SCM_RIGHTS 从浏览器进程递过来的。它一旦被后面的
-         * dup2(/dev/null → 同号) 顶掉，Chromium 的 F_GETFL 校验就会在
-         * 一个 /dev/null 上失败 —— 这条记录是判"顶掉"还是"从未到达"的唯一依据。 */
-        if (!strncmp(task->fd_table->entries[new_fd].path, "/dev/shm/", 9))
-            shm_trace_push("scm", task->fd_table->entries[new_fd].path, new_fd,
-                           task->fd_table->entries[new_fd].flags, 0, 0);
-        fds[(*received)++] = new_fd;
-        /* The queue's retained reference is transferred to the new fd. */
+        kfree(message->entries);
+        memset(message, 0, sizeof(*message));
+        receiver->rights_read =
+            (uint8_t)((receiver->rights_read + 1) % UNIX_RIGHTS_QUEUE);
+        receiver->rights_count--;
+        if (*truncated) break;
     }
-    kfree(message->entries);
-    memset(message, 0, sizeof(*message));
-    receiver->rights_read =
-        (uint8_t)((receiver->rights_read + 1) % UNIX_RIGHTS_QUEUE);
-    receiver->rights_count--;
     return 0;
 }
 
@@ -3588,14 +3592,18 @@ void linux_compat_shm_unmap(struct vfs_node *node, uint64_t backing_offset,
 }
 
 static futex_slot_t *futex_find(uint32_t *address, int create) {
+    task_t *task = compat_task();
+    uint64_t pml4 = (task && task->mm) ? task->mm->pml4_phys : 0;
     futex_slot_t *empty = NULL;
     for (int i = 0; i < LINUX_FUTEX_SLOTS; i++) {
-        if (futex_slots[i].address == address) return &futex_slots[i];
+        if (futex_slots[i].address == address && futex_slots[i].pml4 == pml4)
+            return &futex_slots[i];
         if (!futex_slots[i].address && !empty) empty = &futex_slots[i];
     }
     if (create && empty) {
         memset(empty, 0, sizeof(*empty));
         empty->address = address;
+        empty->pml4 = pml4;
         return empty;
     }
     return NULL;
@@ -3699,6 +3707,7 @@ int linux_compat_futex6(uint32_t *address, int operation, uint32_t value,
         if (slot->waiters[i].used) any_waiters = 1;
     if (!any_waiters) {
         slot->address = NULL;
+        slot->pml4 = 0;
     }
     return result;
 }
