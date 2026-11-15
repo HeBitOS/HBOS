@@ -31,6 +31,12 @@ struct fb_surface {
     struct wl_resource *res;
     struct wl_resource *pending_buf;
     struct wl_resource *frame_cb;
+    /* 上一帧已上屏的像素副本。客户端「只 commit 不 attach」时，用它把上一次
+     * 的内容重画一遍并把 frame callback 还回去，否则渲染循环停在第一帧。
+     * 存副本而不是存 wl_shm_buffer 指针：buffer release 之后指针可能被复用。 */
+    uint8_t *last_px;
+    uint32_t last_w, last_h;
+    uint32_t commit_count;
     int is_cursor;
 };
 
@@ -105,6 +111,10 @@ static void surf_commit(struct wl_client *c, struct wl_resource *r) {
     (void)c;
     struct fb_surface *s = wl_resource_get_user_data(r);
     if (!s) return;
+    /* 客户端常见的节奏是 attach+commit 一帧，之后只 commit（复用同一 buffer）
+     * 来请求下一帧。若只在 pending_buf 非空时工作，第二帧起就不再上屏，
+     * 而 frame callback 也永远不回 —— KWin 会停在第一帧等回调。
+     * 因此：没有新 buffer 时把上一次的像素副本重画一遍。 */
     if (s->pending_buf) {
         struct wl_shm_buffer *shm = wl_shm_buffer_get(s->pending_buf);
         if (shm) {
@@ -124,9 +134,31 @@ static void surf_commit(struct wl_client *c, struct wl_resource *r) {
                     for (uint32_t y = 0; y < ch; y++) {
                         memcpy(g_fb + y * g_fb_pitch, src + y * stride, cw * 4);
                     }
+                    /* 存一份完整帧，供后续无 attach 的 commit 重放 */
+                    size_t need = (size_t)cw * ch * 4;
+                    if (!s->last_px || s->last_w != cw || s->last_h != ch) {
+                        free(s->last_px);
+                        s->last_px = malloc(need);
+                        s->last_w = cw;
+                        s->last_h = ch;
+                    }
+                    if (s->last_px) {
+                        for (uint32_t y = 0; y < ch; y++) {
+                            memcpy(s->last_px + (size_t)y * cw * 4,
+                                   src + (size_t)y * stride, cw * 4);
+                        }
+                    }
                     wl_shm_buffer_end_access(shm);
                 }
                 g_frame_count++;
+                /* 每个 surface 单独计数：用来判断 KWin 到底提交了几个独立表面，
+                 * 以及桌面上到底有哪些尺寸的内容在走。 */
+                s->commit_count++;
+                if (s->commit_count <= 3) {
+                    fprintf(stderr,
+                            "HBOS_WL_FB_SURF res=%p first=%d commits=%d %dx%d\n",
+                            (void *)r, (g_main_surf == r), s->commit_count, w, h);
+                }
                 if (g_frame_count <= 5 || (g_frame_count % 30) == 0) {
                     fprintf(stderr, "HBOS_WL_FB_FRAME count=%d %dx%d\n", g_frame_count, w, h);
                 }
@@ -134,6 +166,17 @@ static void surf_commit(struct wl_client *c, struct wl_resource *r) {
         }
         wl_buffer_send_release(s->pending_buf);
         s->pending_buf = NULL;
+    } else if (s->last_px && g_fb && !s->is_cursor) {
+        /* 无新 buffer：重放上一帧，让 frame callback 按时归还 */
+        for (uint32_t y = 0; y < s->last_h; y++) {
+            memcpy(g_fb + (size_t)y * g_fb_pitch,
+                   s->last_px + (size_t)y * s->last_w * 4, s->last_w * 4);
+        }
+        g_frame_count++;
+        if (g_frame_count <= 5 || (g_frame_count % 30) == 0) {
+            fprintf(stderr, "HBOS_WL_FB_FRAME count=%d (replay) %ux%u\n",
+                    g_frame_count, s->last_w, s->last_h);
+        }
     }
     if (s->frame_cb) {
         wl_callback_send_done(s->frame_cb, now_ms());
@@ -217,6 +260,10 @@ static void xs_get_tl(struct wl_client *c, struct wl_resource *r, uint32_t id) {
     tl->xs = xs;
     tl->res = wl_resource_create(c, &xdg_toplevel_interface, wl_resource_get_version(r), id);
     wl_resource_set_implementation(tl->res, &g_tl_iface, tl, NULL);
+    /* 每来一个 xdg_toplevel 就打一行：用来数 KWin 到底给几个客户端窗口
+     * 建了顶层（壁纸/面板/Chromium 各自应该有一个）。 */
+    fprintf(stderr, "HBOS_WL_FB_TOPLEVEL new surf=%p tl=%p\n",
+            (void *)(xs && xs->surf ? xs->surf->res : NULL), (void *)tl->res);
     if (xs && xs->surf && xs->surf->res) {
         g_main_surf = xs->surf->res;
     }

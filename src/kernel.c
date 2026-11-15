@@ -107,6 +107,11 @@ void kmain(void *mbi) {
     // 从 Multiboot2 内存映射构建位图，跟踪每个 4KB 页的分配状态
     pmm_init(mbi);
 
+    /* 把共享文件页缓存的回收器挂到 PMM 上：内存耗尽时先回收页缓存再失败。
+     * 这是 HBOS 目前唯一的"回收"来源（还没有 swap / 常规页回收）。 */
+    extern uint64_t linux_compat_shm_reclaim(uint64_t want);
+    pmm_set_reclaim_hook(linux_compat_shm_reclaim);
+
     // ---- Phase 4: 虚拟内存管理器 ----
     // 接管 boot.asm 创建的 4-level 页表（恒等映射 0-4GB）
     uint64_t cr3 = 0;
@@ -156,6 +161,51 @@ void kmain(void *mbi) {
     vfs_init();
     task_init();
     net_init();
+    /* 静态配置 IPv4（QEMU user-net 的固定约定）：
+     *   guest 10.0.2.15 / 24，网关 10.0.2.2，DNS 10.0.2.3
+     * 之前开机从不调用 net_configure()/net_dhcp()，所以 guest 永远没有 IP，
+     * DNS 解析和 TCP 连接全部失败（Chromium 表现为
+     * DNS_PROBE_FINISHED_NO_INTERNET / ERR_CONNECTION_REFUSED）。
+     * 用静态地址而不是 DHCP：无需握手、不依赖 slirp 的 DHCP 服务，确定性更高。
+     * 若网卡不存在或链路未就绪，net_configure 会返回 -1，这里忽略即可。 */
+    {
+        extern int net_configure(uint32_t ip, uint32_t netmask,
+                                 uint32_t gateway, uint32_t dns);
+        /* 网络字节序（与 net.c 内部一致：10.0.2.15 存成 0A 00 02 0F） */
+        const uint32_t ip   = 0x0F02000Au;
+        const uint32_t mask = 0x00FFFFFFu;
+        const uint32_t gw   = 0x0202000Au;
+        const uint32_t dns  = 0x0302000Au;
+        int ncfg = net_configure(ip, mask, gw, dns);
+        if (ncfg == 0) {
+            serial_print("[KERN] net: ip 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3\n");
+            extern int net_ping(uint32_t ip, uint32_t timeout_ms);
+            int pong = net_ping(gw, 4000);
+            serial_print(pong == 0 ? "[KERN] net: ping 10.0.2.2 OK\n"
+                                   : "[KERN] net: ping 10.0.2.2 FAIL\n");
+            /* 收发计数：区分"没发出去" / "发了没回" / "回了没收到" */
+            {
+                const net_device_t *dev = net_primary();
+                if (dev) {
+                    uint64_t v[3];
+                    v[0] = dev->tx_packets; v[1] = dev->rx_packets; v[2] = dev->tx_errors;
+                    const char *nm[3] = { " tx=", " rx=", " txerr=" };
+                    for (int k2 = 0; k2 < 3; k2++) {
+                        char nb[24]; int ii = 0; uint64_t vv = v[k2];
+                        if (!vv) nb[ii++] = '0';
+                        else { char t[24]; int jj = 0;
+                               while (vv) { t[jj++] = (char)('0' + (int)(vv % 10)); vv /= 10; }
+                               while (jj) nb[ii++] = t[--jj]; }
+                        nb[ii] = 0;
+                        serial_print(nm[k2]); serial_print(nb);
+                    }
+                    serial_print("\n");
+                }
+            }
+        } else {
+            serial_print("[KERN] net: configure FAILED (no NIC or link down)\n");
+        }
+    }
     selftest_run();
 
     // 内置 HPT 软件仓库（/packages）：镜像自带的 HAX 应用，供 hpt 装卸

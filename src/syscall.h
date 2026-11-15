@@ -222,6 +222,7 @@ typedef enum {
     /** ppoll(fds,nfds,timespec,sigmask)：Chromium 的事件循环主等待点。
      * 和 poll 的唯一区别是超时用 timespec（纳秒精度），sigmask 这里忽略。 */
     HBOS_SYS_PPOLL,
+    HBOS_SYS_PSELECT6,         /**< pselect6(nfds, r, w, e, ts, sigmask) */
     HBOS_SYS_PIPE2,          /**< pipe2(pipefd,flags) */
     HBOS_SYS_EVENTFD2,       /**< eventfd2(initial_value,flags) */
     HBOS_SYS_EPOLL_CREATE1,  /**< epoll_create1(flags) */

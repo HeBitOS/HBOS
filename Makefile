@@ -448,7 +448,7 @@ HAX_OBJS     = $(BUILD_DIR)/hax_manifest.o $(BUILD_DIR)/user/hax_blob.o
 
 ALL_OBJS = $(C_OBJS) $(ASM_OBJS) $(HAX_OBJS) $(SECURE_NET_OBJS)
 
-.PHONY: all clean run run-kde vm mouse-test test-all run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps test
+.PHONY: all clean run run-kde kde-accept vm mouse-test test-all run-bios run-iso run-bios-nodisk run-bios-disk run-bios-ahci install-img vmware-bios vmware-uefi vbox-bios vbox-uefi release smoke bench-boot xhci-smoke chromium-baseline browser-test crypto-test ext2-diff hbfs-batch-test inflate-bench ui-test hive-test hive-sync linux-compat-lib nogui nogui-bios nogui-uefi nogui-smoke fat32-smoke tcp-bulk-test run-nogui run-nogui-bios run-nogui-uefi core-only run-hdd run-hdd-bios run-hdd-uefi iso bios-iso uefi uefi-iso uefi-img disk-img run-uefi run-iso-uefi run-uefi-nodisk run-uefi-headless run-uefi-disk run-uefi-ahci run-uefi-img limine-uefi help font user-progs user-progs-clean linux-compat-smoke deps test
 
 # 全新 clone 的第一站：递归拉子模块（含 mbedtls 嵌套）+ 检查宿主机工具。
 # 幂等，不发 sudo、不装包，缺包时只打印安装命令。
@@ -1249,18 +1249,50 @@ run-bios-ahci: $(ISO_BIOS) $(DISK_IMG)
 		-serial stdio -vga std -monitor none
 
 KDE_IMG ?= $(BUILD_DIR)/hbos-kde-chromium.img
+# 4096M 不够：实测 plasmashell 在 KDE+Chromium 并存时会
+#   [MMAP] fail err=12 (ENOMEM) 映射 libxml2.so.2 失败 -> kickoff 加载失败 -> SIGSEGV
+# 6144M 下 mmap_fail=0 / segv=0 / "Did not find a valid screen" 也消失。
+KDE_MEM ?= 6144M
+# 显示后端：gtk = 真窗口，人可以看画面并移动鼠标（推荐给人用）；
+# none = 无窗口，只给自动化验证用（screendump 仍可取帧）。
+KDE_DISPLAY ?= gtk
 run-kde: $(ISO_BIOS)
 	@if [ ! -f "$(KDE_IMG)" ]; then \
 		echo "错误: 未找到 $(KDE_IMG)，请先生成 KDE + Chromium 磁盘镜像"; \
 		exit 1; \
 	fi
-	$(QEMU_ENV) $(QEMU) -m 4096M -smp 1 -enable-kvm -cpu host \
+	@# 用 fuser 精确查镜像写锁持有者，不要用 pgrep -f（会匹配到 make 自己）。
+	@if command -v fuser >/dev/null 2>&1 && fuser "$(KDE_IMG)" >/dev/null 2>&1; then \
+		echo "错误: 已有进程占用 $(KDE_IMG)（可能是另一个 QEMU）"; \
+		fuser -v "$(KDE_IMG)" 2>&1 | head -5; \
+		echo "      先关掉它，否则镜像写锁拿不到。"; \
+		exit 1; \
+	fi
+	@mkdir -p $(BUILD_DIR)/tmp/monitor
+	@echo "画面/日志同时提供给监控面板: python3 scripts/kde_monitor.py"
+	@echo "  http://127.0.0.1:8770/   （左上是画面，右下是 serial 日志）"
+	@# serial 同时给两个消费者：
+	@#   - 终端（stdio）：像以前一样实时滚动打印
+	@#   - 文件（build/tmp/monitor/serial.log）：给监控面板读写干净的纯文本
+	@# 用 tee 分流；QEMU 放后台 + wait，避免退出信号被管道吃掉。
+	@rm -f $(BUILD_DIR)/tmp/monitor/serial.log
+	@$(QEMU_ENV) $(QEMU) -m $(KDE_MEM) -smp 1 -enable-kvm -cpu host \
 		-device ich9-ahci,id=ahci \
 		-drive id=disk0,file=$(KDE_IMG),format=raw,if=none \
 		-device ide-hd,drive=disk0,bus=ahci.0 \
-		-netdev user,id=hbosnet -device virtio-net-pci,netdev=hbosnet,disable-modern=on \
+		-netdev user,id=hbosnet -device e1000,netdev=hbosnet \
 		-cdrom $(ISO_BIOS) -boot d \
-		-serial stdio -vga std -monitor none
+		-monitor unix:$(BUILD_DIR)/tmp/monitor/mon.sock,server,nowait \
+		-vga std -display $(KDE_DISPLAY) -serial stdio \
+		| tee $(BUILD_DIR)/tmp/monitor/serial.log
+	@echo ""
+	@echo "QEMU 已退出。完整 serial 日志: $(BUILD_DIR)/tmp/monitor/serial.log"
+
+# 自动验收：启动 VM，按时间采样，判定「面板 / 桌面壁纸 / 窗口」是否达成。
+# 单核下面板约需 400~600 秒才出现，默认观测 700 秒。
+kde-accept: $(ISO_BIOS)
+	@bash scripts/kde_accept.sh --secs $(or $(ACCEPT_SECS),700)
+
 
 limine-uefi: $(LIMINE_EFI)
 

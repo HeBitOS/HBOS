@@ -18,6 +18,10 @@
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
 #include "lwip/ethip6.h"
+/* IPv4 / ARP / DNS：静态地址上网所需 */
+#include "lwip/etharp.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/dns.h"
 
 #define ETH_TYPE_IPV6 0x86DDU
 
@@ -93,6 +97,8 @@ static err_t net6_interface_init(struct netif *interface) {
     interface->mtu = 1500;
     interface->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
                        NETIF_FLAG_ETHERNET | NETIF_FLAG_MLD6;
+    /* IPv4 出口走 ARP 解析（etharp_output 会先查/发 ARP 请求） */
+    interface->output = etharp_output;
     interface->output_ip6 = ethip6_output;
     interface->linkoutput = net6_link_output;
     return ERR_OK;
@@ -101,9 +107,13 @@ static err_t net6_interface_init(struct netif *interface) {
 static int net6_input_frame(const uint8_t *frame, uint16_t length,
                             void *context) {
     struct netif *interface = context;
-    if (!frame || length < 14U ||
-        (((uint16_t)frame[12] << 8) | frame[13]) != ETH_TYPE_IPV6)
-        return 0;
+    if (!frame || length < 14U) return 0;
+    {
+        uint16_t type = (uint16_t)(((uint16_t)frame[12] << 8) | frame[13]);
+        /* IPv6 与 IPv4 都收：之前只收 0x86DD，IPv4 报文被静默丢掉，
+         * 于是 ARP/ICMP/UDP(DNS)/TCP 全都进不来。 */
+        if (type != ETH_TYPE_IPV6 && type != 0x0800U) return 0;
+    }
 
     struct pbuf *packet = pbuf_alloc(PBUF_RAW, length, PBUF_POOL);
     if (!packet) return 0;
@@ -128,6 +138,21 @@ int net6_init(void) {
     if (!netif_add_noaddr(&ipv6_netif, NULL, net6_interface_init,
                           ethernet_input))
         return -1;
+    /* IPv4 静态地址（QEMU user-net 约定：guest 10.0.2.15/24，网关 10.0.2.2）。
+     * 不用 DHCP：lwIP 的 DHCP 需要额外状态机与租约处理，静态地址足够上网。 */
+    {
+        ip4_addr_t ip, mask, gw;
+        IP4_ADDR(&ip,   10, 0, 2, 15);
+        IP4_ADDR(&mask, 255, 255, 255, 0);
+        IP4_ADDR(&gw,   10, 0, 2, 2);
+        netif_set_addr(&ipv6_netif, &ip, &mask, &gw);
+        /* DNS 服务器也指向 QEMU 的内置解析器 */
+        {
+            ip_addr_t dns;
+            IP_ADDR4(&dns, 10, 0, 2, 3);
+            dns_setserver(0, &dns);
+        }
+    }
     netif_set_default(&ipv6_netif);
     netif_set_up(&ipv6_netif);
     netif_set_link_up(&ipv6_netif);

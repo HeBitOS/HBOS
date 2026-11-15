@@ -1,6 +1,6 @@
 /**
  * @file    tty.h
- * @brief   导出 81 个接口（6 类型 / 58 宏 / 17 函数）
+ * @brief   导出 81 个接口（6 类型 / 58 宏 / 19 函数）
  *
  * @layer   input
  * @owner   src/
@@ -255,5 +255,11 @@ const void *tty_console_ops(void);        /* /dev/tty、/dev/console 的 ioctl �
 int    tty_node_is_tty(const void *node);
 void  *pty_open_master(void);             /* open("/dev/ptmx")：返回新 master vfs 节点 */
 int    pty_master_index(const void *node);
+
+/* pty 的"有数据可读"查询（不消费数据）。
+ * read 与 poll 必须共用同一判据，否则 poll 报可读、read 却永久阻塞。
+ * 返回 1/0；node 不是对应 pty 节点时返回 -1。 */
+int    pty_node_readable(const void *node);
+int    pty_slave_readable(const void *node);
 
 #endif /* HBOS_TTY_H */

@@ -37,6 +37,13 @@ LWIP_SRCS := \
 	$(LWIP_DIR)/src/core/ipv6/ip6_frag.c \
 	$(LWIP_DIR)/src/core/ipv6/mld6.c \
 	$(LWIP_DIR)/src/core/ipv6/nd6.c \
+	$(LWIP_DIR)/src/core/ipv4/etharp.c \
+	$(LWIP_DIR)/src/core/ipv4/icmp.c \
+	$(LWIP_DIR)/src/core/ipv4/ip4.c \
+	$(LWIP_DIR)/src/core/ipv4/ip4_addr.c \
+	$(LWIP_DIR)/src/core/ipv4/ip4_frag.c \
+	$(LWIP_DIR)/src/core/udp.c \
+	$(LWIP_DIR)/src/core/dns.c \
 	$(LWIP_DIR)/src/netif/ethernet.c
 
 LWIP_OBJS := $(patsubst $(LWIP_DIR)/src/%.c,$(SECURE_BUILD_DIR)/lwip/%.o,$(LWIP_SRCS))

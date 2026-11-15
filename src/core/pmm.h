@@ -84,4 +84,8 @@ uint64_t pmm_get_free_mem(void);
 // Mark a physical region as used (reserved by bootloader/hardware)
 void pmm_reserve_region(uint64_t base, uint64_t length);
 
+// 注册物理内存回收钩子：pmm_alloc_page() 在空闲页耗尽时会先调用它一次。
+// 钩子在 **不持 pmm 锁** 的情况下被调用，内部可以安全地调 pmm_free_page()。
+void pmm_set_reclaim_hook(uint64_t (*fn)(uint64_t want));
+
 #endif /* HBOS_PMM_H */

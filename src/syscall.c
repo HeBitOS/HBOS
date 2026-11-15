@@ -2439,7 +2439,10 @@ void linux_exec_fd_snapshot(void) {
     if (!cur || !cur->fd_table || !budget) return;
     budget--;
     console_puts("[EXEC-FD]");
-    for (int fd = 3; fd <= 12; fd++) {
+    /* 从 fd 0 开始打：Konsole 空白的排查里最关键的一行就是"execve 那一
+     * 刻 fd 0/1/2 到底还活着吗、指向哪个节点"。原来从 3 起，恰好把
+     * 标准输入输出漏掉，于是只能靠 bash 的报错反推。 */
+    for (int fd = 0; fd <= 12; fd++) {
         const fd_entry_t *e = &cur->fd_table->entries[fd];
         console_puts(" ");
         trace_put_udec((uint64_t)fd);
@@ -3049,10 +3052,15 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
             for (int i = lowest; i < POSIX_MAX_FDS; i++) {
                 if (!cur->fd_table->entries[i].used) {
                     cur->fd_table->entries[i] = *entry;
-                    /* F_DUPFD_CLOEXEC：新 fd 必须带上 FD_CLOEXEC，
-                     * 否则 Chromium 的 IPC 通道会在 exec 后漏进子进程。 */
+                    /* F_DUPFD 复制的是"文件描述符"，不是"打开标志"：
+                     * Linux 上 F_DUPFD 的新 fd **不带** FD_CLOEXEC，只有
+                     * F_DUPFD_CLOEXEC 才带（两者实测都确认过）。这里原来
+                     * 无条件保留源条目的 O_CLOEXEC，等于把 F_DUPFD 变成了
+                     * F_DUPFD_CLOEXEC —— exec 之后那条 fd 就消失了。 */
                     if (cmd == 1030)
                         cur->fd_table->entries[i].flags |= O_CLOEXEC;
+                    else
+                        cur->fd_table->entries[i].flags &= ~O_CLOEXEC;
                     linux_compat_retain(i);
                     linux_fdid_record(i, "fdup");
                     return (uint64_t)i;
@@ -3068,10 +3076,12 @@ static uint64_t linux_fcntl(int fd, int cmd, long argument) {
             for (int i = 3; i < lowest && i < POSIX_MAX_FDS; i++) {
                 if (!cur->fd_table->entries[i].used) {
                     cur->fd_table->entries[i] = *entry;
-                    /* F_DUPFD_CLOEXEC：新 fd 必须带上 FD_CLOEXEC，
-                     * 否则 Chromium 的 IPC 通道会在 exec 后漏进子进程。 */
+                    /* 同上面的解释：F_DUPFD 不带 FD_CLOEXEC，
+                     * 只有 F_DUPFD_CLOEXEC 才带。 */
                     if (cmd == 1030)
                         cur->fd_table->entries[i].flags |= O_CLOEXEC;
+                    else
+                        cur->fd_table->entries[i].flags &= ~O_CLOEXEC;
                     linux_compat_retain(i);
                     linux_fdid_record(i, "fdup");
                     return (uint64_t)i;
@@ -3340,6 +3350,9 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
         /* 271 = ppoll。实测 Chromium 的事件循环主等待点就在这条上，
          * 缺了它浏览器起不来（日志里刷 "unimplemented nr=271"）。 */
         case 271: native.nr = HBOS_SYS_PPOLL; break;
+        /* 270 = pselect6。bash 在交互式 shell 里用它等待键盘输入；
+         * 缺了它会刷 "unimplemented nr=270"，Konsole 里敲键没反应。 */
+        case 270: native.nr = HBOS_SYS_PSELECT6; break;
 
         /* 444/445/446 = landlock（LSM 沙箱）。HBOS 没有 LSM。
          *
@@ -4224,6 +4237,37 @@ static int vm_fill_vfs_snapshot(vfs_node_t *node, uint64_t address,
     return 0;
 }
 
+/* 只读文件映射的**共享**回填（Linux page cache 语义）。
+ *
+ * 原来只读映射（.so / .pak 等）走 vm_fill_vfs_snapshot，**每个进程各自
+ * 分配一份物理页并读盘**：Chromium 有 6~7 个进程，每个都要映射几百 MB
+ * 的共享库，内存被成倍放大 —— 实测 4GB guest 连映射 1.8MB 的
+ * libxml2.so.2 都返回 ENOMEM，kickoff applet 加载失败、plasmashell 随后 SIGSEGV。
+ *
+ * 这里改为按 (node, page_index) 复用同一批物理页。任何异常都直接返回错误
+ * （调用方按原来的失败路径处理），不做"失败后再退回私有快照"——
+ * 因为部分页已经指向共享页，再写回私有内容会污染共享缓存。
+ */
+static int vm_fill_vfs_shared(vfs_node_t *node, uint64_t address,
+                              size_t length, uint64_t file_offset) {
+    if (!node || node->type != VFS_NODE_FILE) return -ENODEV;
+    if (file_offset & (PAGE_SIZE - 1)) return -EINVAL;
+    size_t pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t first_index = file_offset / PAGE_SIZE;
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t va = address + i * PAGE_SIZE;
+        int created = 0;
+        uint64_t phys = linux_compat_shm_page(node, first_index + i,
+                                              node->private_data, &created);
+        if (!phys) return -ENOMEM;
+        uint64_t old = vmm_get_phys(va);
+        if (old == phys) continue;          /* 已经是共享页（页缓存命中） */
+        if (old) vmm_release_page(va);      /* 释放刚分配的私有副本 */
+        if (vmm_map_page(va, phys, VMM_P | VMM_U) != 0) return -ENOMEM;
+    }
+    return 0;
+}
+
 static int vm_fill_memfd_snapshot(int fd, uint64_t address,
                                   size_t length, uint64_t file_offset,
                                   uint64_t file_size) {
@@ -4827,6 +4871,10 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             }
             if (newfd < 0) return (uint64_t)(-EMFILE);
             cur->fd_table->entries[newfd] = cur->fd_table->entries[oldfd];
+            /* dup(2) 与 dup2(2) 一样**清掉**新 fd 的 FD_CLOEXEC（Linux
+             * 语义，实测确认）。留着的话 shell/子进程 exec 后这条 fd 就
+             * 没了 —— 见 HBOS_SYS_DUP2 那段注释里的 Konsole 终端案例。 */
+            cur->fd_table->entries[newfd].flags &= ~O_CLOEXEC;
             linux_compat_retain(newfd);
             linux_fdid_record(newfd, "dup2");
             return (uint64_t)newfd;
@@ -4882,6 +4930,23 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             }
             cur->fd_table->entries[newfd] = cur->fd_table->entries[oldfd];
             linux_compat_retain(newfd);
+            /* dup2 **清掉**目标条目的 FD_CLOEXEC（Linux 语义，实测确认：
+             * dup2 之后目标的 F_GETFD 恒为 0）。
+             *
+             * 这条是 Konsole 终端空白的直接原因。KDE 的 KPty::open() 在
+             * openpty() 之后立刻对 master 和 slave 各做一次
+             * fcntl(fd, F_SETFD, FD_CLOEXEC)，随后 KPtyProcess 在子进程里
+             * 用 dup2(slave, 0/1/2) 把 slave 铺到标准输入输出上。
+             * 原来 dup2 把 flags 原样复制（连 O_CLOEXEC 一起），于是
+             * execve(/usr/bin/bash) 时 task_exec_inherit() 按 O_CLOEXEC
+             * 关闭条目 —— fd 0/1/2 全被关掉，子进程的 bash 拿到的标准输入
+             * 输出是空的：
+             *   bash: cannot set terminal process group (46): Bad file descriptor
+             *   bash: no job control in this shell
+             *   [FDERR] nr=72 fd=0 cmd=3 arg=0 ret=-9        (EBADF)
+             * 而且 posix write() 在 fd 1 未占用时会退回 console_write，
+             * 所以提示符跑到了串口上，Konsole 窗口里一片空白。 */
+            cur->fd_table->entries[newfd].flags &= ~O_CLOEXEC;
             return (uint64_t)newfd;
         }
 
@@ -5393,6 +5458,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 }
                 if (!anonymous) {
                     int fill_result;
+                    int used_shared = 0;
                     if (mapping_entry->type == FD_MEMFD) {
                         fill_result = vm_fill_memfd_snapshot(
                             fd, (uint64_t)p, len, (uint64_t)off,
@@ -5404,6 +5470,14 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                          * 直接跳过，不要让 vm_fill_vfs_snapshot 返回 -ENODEV
                          * 把整次 mmap 判死。 */
                         fill_result = 0;
+                    } else if ((prot & 0x02) == 0 &&
+                               mapping_entry->node->size > 0 &&
+                               (((uint64_t)off % PAGE_SIZE) == 0)) {
+                        /* 只读 + 页对齐 → 走共享页缓存，避免每个进程各存一份 */
+                        fill_result = vm_fill_vfs_shared(
+                            mapping_entry->node, (uint64_t)p, len,
+                            (uint64_t)off);
+                        if (fill_result == 0) used_shared = 1;
                     } else {
                         fill_result = vm_fill_vfs_snapshot(
                             mapping_entry->node, (uint64_t)p, len,
@@ -5417,7 +5491,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                                          mapping_file_size, (int)fill_result);
                         return (uint64_t)fill_result;
                     }
-                    vma->backing_type = mapping_kind == 0x01 ?
+                    vma->backing_type = (mapping_kind == 0x01 || used_shared) ?
                         VM_BACKING_VFS_SHARED : VM_BACKING_VFS_PRIVATE;
                     vma->backing_node = mapping_entry->type == FD_FILE ?
                         mapping_entry->node : NULL;
@@ -6253,6 +6327,80 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 console_puts(" ret=");
                 trace_put_udec((uint64_t)(uint32_t)ret);
                 console_putchar('\n');
+            }
+            return finish_syscall(ret);
+        }
+
+        case HBOS_SYS_PSELECT6: {
+            /* [A/B 实验] 暂时恢复成未实现，用于验证它是否是面板消失的原因。
+             * 15:03 那一轮（面板与窗口同屏）用的内核里还没有 pselect6。 */
+            static int pselect6_enabled = -1;
+            if (pselect6_enabled < 0) {
+                pselect6_enabled = 1;   /* 1 = 启用 */
+            }
+            if (!pselect6_enabled) return (uint64_t)(-ENOSYS);
+            /* pselect6(nfds, readfds, writefds, exceptfds, timeout, sigmask)
+             *
+             * bash 的交互式命令行用它在 read(0) 之前等键盘；之前完全没实现，
+             * 日志里刷 "unimplemented nr=270"，Konsole 里敲键毫无反应。
+             *
+             * fd_set 是位图。这里把它转成 pollfd 数组，复用 ppoll 那条
+             * linux_compat_poll 路径，返回后再把就绪位写回用户位图。
+             * exceptfds 与 sigmask 忽略：HBOS 没有"异常条件"语义，
+             * 也没有"等待期间原子替换信号掩码"的能力（忽略只会让信号
+             * 晚一点送达，不会丢）。 */
+            int nfds = (int)f->a0;
+            uint8_t *rfds = (uint8_t *)(uintptr_t)f->a1;
+            uint8_t *wfds = (uint8_t *)(uintptr_t)f->a2;
+            const uint64_t *ts = (const uint64_t *)(uintptr_t)f->a4;
+            int timeout_ms = -1;
+
+            if (ts && linux_user_range_mapped((uint64_t)(uintptr_t)ts, 16)) {
+                uint64_t seconds = ts[0];
+                uint64_t nanos = ts[1];
+                if (seconds > 0x7fffffffULL) seconds = 0x7fffffffULL;
+                uint64_t millis = seconds * 1000ULL + nanos / 1000000ULL;
+                if (millis > 0x7fffffffULL) millis = 0x7fffffffULL;
+                timeout_ms = (int)millis;
+            }
+            if (nfds < 0) return (uint64_t)(-EINVAL);
+            if (nfds > POSIX_MAX_FDS) nfds = POSIX_MAX_FDS;
+
+            linux_pollfd_t pfds[POSIX_MAX_FDS];
+            int16_t map[POSIX_MAX_FDS];
+            int n = 0;
+            for (int fd = 0; fd < nfds; fd++) {
+                int16_t ev = 0;
+                if (rfds && (rfds[fd >> 3] & (1u << (fd & 7)))) ev |= 0x001; /* POLLIN  */
+                if (wfds && (wfds[fd >> 3] & (1u << (fd & 7)))) ev |= 0x004; /* POLLOUT */
+                if (!ev) continue;
+                pfds[n].fd = fd;
+                pfds[n].events = ev;
+                pfds[n].revents = 0;
+                map[n] = (int16_t)fd;
+                n++;
+            }
+
+            int ret = linux_compat_poll(pfds, (uint32_t)n, timeout_ms);
+
+            size_t nbytes = (size_t)((nfds + 7) / 8);
+            if (rfds && nbytes && linux_user_range_mapped((uint64_t)(uintptr_t)rfds, nbytes)) {
+                for (size_t i = 0; i < nbytes; i++) rfds[i] = 0;
+                for (int i = 0; i < n; i++) {
+                    if (pfds[i].revents & 0x001) {
+                        int fd = map[i];
+                        rfds[fd >> 3] |= (uint8_t)(1u << (fd & 7));
+                    }
+                }
+            }
+            if (wfds && nbytes && linux_user_range_mapped((uint64_t)(uintptr_t)wfds, nbytes)) {
+                for (size_t i = 0; i < nbytes; i++) wfds[i] = 0;
+                for (int i = 0; i < n; i++) {
+                    if (pfds[i].revents & 0x004) {
+                        int fd = map[i];
+                        wfds[fd >> 3] |= (uint8_t)(1u << (fd & 7));
+                    }
+                }
             }
             return finish_syscall(ret);
         }

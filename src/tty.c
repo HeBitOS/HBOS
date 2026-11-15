@@ -441,8 +441,32 @@ static int pty_master_ioctl_(vfs_node_t *nd, uint32_t cmd, void *arg)
         if (!arg) return -EFAULT;
         p->locked = *(int *)arg != 0;
         return 0;
-    case TIOCGPGRP: case TIOCSPGRP: case TIOCSCTTY: case TIOCNOTTY: case TIOCGSID:
+    /* master 侧的前台进程组查询：Linux 上**恒返回成功**，没有会话挂上来
+     * 时就报 0（实测：openpty 之后立刻 tcgetpgrp(master) == 0，返回 0；
+     * 子进程 setsid+TIOCSCTTY 之后再查，返回那个子进程的 pgid）。
+     * 而且它不要求调用者属于那个会话 —— master 的持有者本来就在会话外。
+     *
+     * 原来这里一律 -ENOTTY，于是 Konsole 的
+     * TerminalProcess::foregroundProcessGroup() 在每一个渲染帧都刷一行
+     * "Failed to get foreground process group id for 17: Inappropriate
+     * ioctl for device"。它本身不致命，但会把真正的 PTY 错误淹掉，
+     * 也让"拿到 master 却还没挂会话"这个中间态看起来像永久故障。 */
+    case TIOCGPGRP:
+        if (!arg) return -EFAULT;
+        *(int *)arg = (int)p->ld.fg_pgid;
+        return 0;
+    case TIOCGSID:
+        /* 会话 id 则相反：没有会话时 Linux 确实返回 ENOTTY。 */
+        if (!arg) return -EFAULT;
+        if (!p->ld.sid) return -ENOTTY;
+        *(int *)arg = (int)p->ld.sid;
+        return 0;
+    /* master 不是任何会话的控制终端：Linux 对 TIOCSPGRP 报 ENOTTY、
+     * 对 TIOCSCTTY 报 EPERM。照抄，避免调用方把"能设置"当成"已设置"。 */
+    case TIOCSPGRP: case TIOCNOTTY:
         return -ENOTTY;
+    case TIOCSCTTY:
+        return -EPERM;
     case FIONREAD:
         if (!arg) return -EFAULT;
         *(int *)arg = (int)p->s2m.count;
@@ -454,6 +478,37 @@ static int pty_master_ioctl_(vfs_node_t *nd, uint32_t cmd, void *arg)
 static const vfs_ops_t pty_master_ops = {
     .read = pty_master_read_, .write = pty_master_write_, .ioctl = pty_master_ioctl_,
 };
+
+/* master 侧是否有数据可读（不消费数据）。read/poll 共用同一判据，
+ * 避免 poll 报可读、read 却永久阻塞 —— 那会让 Konsole 的事件循环
+ * 在 QSocketNotifier 里卡死，窗口内容区一片空白。 */
+int pty_node_readable(const void *node)
+{
+    const vfs_node_t *n = node;
+    if (!n || n->ops != &pty_master_ops) return -1;
+    return PTY_OF(n)->s2m.count != 0;
+}
+
+/* slave 侧是否有数据可读（不消费数据）。
+ *
+ * bash/readline 在交互式提示符上跑的是 select(0, &rfds, NULL, NULL, NULL)，
+ * 也就是 poll(fd 0)。原来 fd_ready_mask 对 fd==0 无条件报 POLLIN，
+ * 于是 select 立刻返回"可读"、read 却因为没行可提交而阻塞，
+ * 循环空转但屏幕上什么都不出现。这里给出真实判据。
+ *
+ * 返回 1/0；非 pty slave 节点返回 -1。 */
+int pty_slave_readable(const void *node)
+{
+    const vfs_node_t *n = node;
+    if (!n || n->ops != &pty_slave_ops) return -1;
+    const ldisc_t *ld = &PTY_OF(n)->ld;
+    if (!(ld->termios.c_lflag & ICANON))
+        return ld->input.count != 0;
+    /* 规范模式：只有"已提交的整行"才算可读（read 就是等这个）。
+     * 已经按过 ^D 时 read 会立刻返回 0，同样算就绪，否则 select 会
+     * 永远等不到那个 EOF。 */
+    return ld->lines != 0 || ld->eof;
+}
 
 void *pty_open_master(void)
 {

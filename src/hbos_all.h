@@ -4344,7 +4344,7 @@ int xhci_dev_interrupt_transfer(int dev_idx, int ep_addr, void *data, uint32_t l
 int xhci_dev_bulk_transfer(int dev_idx, int ep_addr, void *data, uint32_t len);
 /* 见 src/xhci.h:204 */
 int xhci_dev_bulk_transfer_packet(int dev_idx, int ep_addr, void *data, uint32_t len, uint32_t max_packet);
-
+    
 #endif
 
 #endif /* HBOS_ALL_H */

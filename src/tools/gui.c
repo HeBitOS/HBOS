@@ -7486,6 +7486,17 @@ static int hive_topbar_h(const gui_state_t *st) {
                ? GNOME_TOPBAR_H : 0;
 }
 
+/**
+ * @brief `kde` 命令：从命令行进入 KDE Plasma 6 桌面环境
+ *
+ * 复用与开机自动启动完全相同的入口脚本，避免两条路径行为不一致。
+ */
+static void cmd_kde(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_puts("\r\n\x1b[36m正在启动 KDE Plasma 6 + Konsole + Chromium ...\x1b[0m\r\n");
+    cmd_execute("run /usr/bin/bash -c \"/usr/bin/start_kde_chromium.sh\"");
+}
+
 static void cmd_gui(int argc, char **argv) {
     fb_info_t fb;
     if (fb_get_info(&fb) < 0) {
@@ -9413,6 +9424,7 @@ void tool_gui_init(void) {
         {"hive", CMD_GROUP_GRAPHICS, "Start HIVE desktop", "hive", cmd_gui},
         {"gui", CMD_GROUP_GRAPHICS, "Start HIVE desktop", "gui", cmd_gui},
         {"startx", CMD_GROUP_GRAPHICS, "Start HIVE desktop", "startx", cmd_gui},
+        {"kde", CMD_GROUP_GRAPHICS, "Start KDE Plasma 6 desktop (Konsole + Chromium)", "kde", cmd_kde},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         cmd_register(&cmds[i]);

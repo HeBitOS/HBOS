@@ -208,6 +208,19 @@ ssize_t write(int fd, const void *buf, size_t count) {
                 }
                 return (ssize_t)written;
             }
+            /* 同 read()：终端设备绕开 vfs_write 的全局锁。
+             * fd 1 被 dup2 到 pty slave 后，bash 每打印一个提示符都走这里；
+             * 而 s2m 缓冲满了会在 ld_out 里 task_yield 等 Konsole 取走，
+             * 持着全局 VFS 锁等就等于把整个桌面挂起。 */
+            if (redir->type == FD_FILE && redir->node &&
+                redir->node->ops && redir->node->ops->write &&
+                tty_node_is_tty(redir->node)) {
+                int r = redir->node->ops->write(redir->node, redir->offset,
+                                                buf, (uint32_t)count);
+                if (r < 0) return set_errno(-r);
+                redir->offset += (uint32_t)r;
+                return (ssize_t)r;
+            }
             uint32_t offset = (redir->flags & O_APPEND) ? redir->node->size : redir->offset;
             int written = vfs_write(redir->node, offset, buf, (uint32_t)count);
             if (written < 0) return set_errno(ENOSPC);
@@ -243,6 +256,19 @@ ssize_t write(int fd, const void *buf, size_t count) {
 
     if ((ent->flags & O_ACCMODE) == O_RDONLY) return set_errno(EBADF);
 
+    /* 同 read()：pty 绕开 vfs_write 的全局锁。
+     * master→slave 方向也要走 emit_s2m，而 s2m 满了会 task_yield 等
+     * Konsole 取走数据 —— 持着全局 VFS 锁等，整个桌面就停了。 */
+    if (ent->type == FD_FILE && ent->node &&
+        ent->node->ops && ent->node->ops->write &&
+        tty_node_is_tty(ent->node)) {
+        int r = ent->node->ops->write(ent->node, ent->offset, buf,
+                                      (uint32_t)count);
+        if (r < 0) return set_errno(-r);
+        ent->offset += (uint32_t)r;
+        return (ssize_t)r;
+    }
+
     uint32_t offset = (ent->flags & O_APPEND) ? ent->node->size : ent->offset;
     int written = vfs_write(ent->node, offset, buf, (uint32_t)count);
     if (written < 0) return set_errno(ENOSPC);
@@ -273,6 +299,27 @@ ssize_t read(int fd, void *buf, size_t count) {
                     if (p->count == 0) break;
                 }
                 return (ssize_t)got;
+            }
+            /* 终端设备必须绕开 vfs_read —— 见本函数后面那段长注释。
+             * 这一支是交互式 bash 真正走的路：fd 0 被 dup2 到 pty slave
+             * 之后，bash 就在这里阻塞等一整行输入，而 vfs_read 会把**全局**
+             * VFS 锁一起锁住，整个桌面（Konsole 写 master、hbos_wl_fb 读
+             * /dev/input/event0）就都排在这把锁后面停摆。 */
+            if (redir->type == FD_FILE && redir->node &&
+                redir->node->ops && redir->node->ops->read &&
+                tty_node_is_tty(redir->node)) {
+                if (redir->flags & O_NONBLOCK) {
+                    extern int pty_node_readable(const void *node);
+                    extern int pty_slave_readable(const void *node);
+                    int ro = pty_node_readable(redir->node);
+                    if (ro < 0) ro = pty_slave_readable(redir->node);
+                    if (ro == 0) return set_errno(EAGAIN);
+                }
+                int r = redir->node->ops->read(redir->node, redir->offset,
+                                               buf, (uint32_t)count);
+                if (r < 0) return set_errno(-r);
+                redir->offset += (uint32_t)r;
+                return (ssize_t)r;
             }
             int got_i = vfs_read(redir->node, redir->offset, buf, (uint32_t)count);
             if (got_i < 0) return set_errno(EIO);
@@ -307,6 +354,39 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
 
     if ((ent->flags & O_ACCMODE) == O_WRONLY) return set_errno(EBADF);
+
+    /* pty slave 必须绕开 vfs_read。
+     *
+     * vfs_read 在整个 node->ops->read 调用期间持有**全局** VFS 锁，
+     * 而 pty slave 的 read 是要阻塞等键盘输入的（ld_read 在 ICANON 下
+     * 循环 task_yield 直到有一整行）。交互式 bash 一起来就卡在 read(0)
+     * 上，于是这把锁被整个桌面的唯一读者长期占住 —— Konsole 写 master、
+     * hbos_wl_fb 读 /dev/input/event0 全在同一把锁后面排队，整个 GUI
+     * 一起停摆。
+     *
+     * 终端设备本来就没有"目录项/元数据"要保护：ldisc 的状态全部在
+     * pty_t/ldisc_t 里，由行规程自己维护。直接调 ops->read 即可。 */
+    if (ent->type == FD_FILE && ent->node &&
+        ent->node->ops && ent->node->ops->read &&
+        tty_node_is_tty(ent->node)) {
+        /* O_NONBLOCK：Konsole 拿到 master 后立刻 fcntl(F_SETFL, O_NONBLOCK)，
+         * 之后按"没数据就 EAGAIN"来驱动事件循环。Linux 在这种情况下
+         * read 返回 EAGAIN（实测），而在 HBOS 里若让它阻塞等数据，
+         * 这个进程就再也不回去 poll 了。pty_node_readable 对非 master
+         * 节点返回 -1，所以这里只影响 master。 */
+        if (ent->flags & O_NONBLOCK) {
+            extern int pty_node_readable(const void *node);
+            extern int pty_slave_readable(const void *node);
+            int ro = pty_node_readable(ent->node);
+            if (ro < 0) ro = pty_slave_readable(ent->node);
+            if (ro == 0) return set_errno(EAGAIN);
+        }
+        int r = ent->node->ops->read(ent->node, ent->offset, buf,
+                                     (uint32_t)count);
+        if (r < 0) return set_errno(-r);
+        ent->offset += (uint32_t)r;
+        return (ssize_t)r;
+    }
 
     int got_i = vfs_read(ent->node, ent->offset, buf, (uint32_t)count);
     if (got_i < 0) return set_errno(EIO);

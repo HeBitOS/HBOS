@@ -1071,8 +1071,12 @@ static int e1000_init_hw(const pci_device_t *pdev) {
                               ((uint32_t)primary.mac[1] << 8) |
                               ((uint32_t)primary.mac[2] << 16) |
                               ((uint32_t)primary.mac[3] << 24));
-        reg_write(E1000_RAH0, (uint32_t)primary.mac[4] |
-                              ((uint32_t)primary.mac[5] << 8));
+        /* bit31 = AV（Address Valid）：**必须置位**，否则地址过滤不生效，
+         * 发往本机 MAC 的单播帧会被硬件丢弃 —— 表现是 tx 正常但 rx 恒为 0，
+         * ARP 应答收不到，于是 ping/网关/一切 TCP 全部失败。 */
+        reg_write(E1000_RAH0, ((uint32_t)primary.mac[4] |
+                               ((uint32_t)primary.mac[5] << 8)) |
+                              (1U << 31));
     }
     primary.mac_valid = true;
 

@@ -13,7 +13,7 @@
 #define LWIP_SOCKET                     0
 #define LWIP_NETIF_API                  0
 
-#define LWIP_IPV4                       0
+#define LWIP_IPV4                       1
 #define LWIP_IPV6                       1
 #define LWIP_IPV6_AUTOCONFIG            1
 #define LWIP_IPV6_SEND_ROUTER_SOLICIT   1
@@ -26,15 +26,15 @@
 #define LWIP_IPV6_NUM_ADDRESSES         4
 
 #define LWIP_ETHERNET                   1
-#define LWIP_ARP                        0
-#define LWIP_ICMP                       0
+#define LWIP_ARP                        1
+#define LWIP_ICMP                       1
 #define LWIP_ICMP6                      1
 #define LWIP_IGMP                       0
 #define LWIP_RAW                        1
-#define LWIP_UDP                        0
-#define LWIP_DHCP                       0
+#define LWIP_UDP                        1
+#define LWIP_DHCP                       0   /* 用静态地址：QEMU user-net 固定 10.0.2.15/24, gw 10.0.2.2 */
 #define LWIP_DHCP6                      0
-#define LWIP_DNS                        0
+#define LWIP_DNS                        1
 
 #define LWIP_TCP                        1
 #define LWIP_CALLBACK_API               1

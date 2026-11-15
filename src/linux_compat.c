@@ -1095,11 +1095,21 @@ static int unix_address_export(const unix_socket_slot_t *slot,
 }
 
 static uint32_t fd_ready_mask(task_t *task, int fd) {
-    if (fd == 0) return LINUX_POLLIN;
-    if (fd == 1 || fd == 2) return LINUX_POLLOUT;
-
+    /* fd 0/1/2 曾经直接短路返回"永远可读/可写"。
+     * dup2 修好之后（见 syscall.c 里 HBOS_SYS_DUP2 的注释），这三个号
+     * 真的会指向 pty slave 了，短路就变成错的：bash 的 readline 在
+     * select(0) 上会立刻返回"可读"，而 read 因为还没有整行可提交而阻塞，
+     * 两边来回空转 —— 提示符永远画不出来。
+     * 所以这里不再短路，交给下面按节点类型判断（pty slave 有独立分支）。 */
     fd_entry_t *entry = compat_fd(task, fd);
-    if (!entry) return LINUX_POLLNVAL;
+    if (!entry) {
+        /* 未占用的 0/1/2 仍按旧语义报"就绪"：HBOS 的 console 直接吃
+         * fd 0/1/2（posix read/write 在没有重定向节点时退化到 console），
+         * 这种情况下确实是"随时可读写"。 */
+        if (fd == 0) return LINUX_POLLIN;
+        if (fd == 1 || fd == 2) return LINUX_POLLOUT;
+        return LINUX_POLLNVAL;
+    }
 
     if (entry->type == FD_EVENT) {
         event_slot_t *slot = event_for_fd(task, fd);
@@ -1183,6 +1193,25 @@ static uint32_t fd_ready_mask(task_t *task, int fd) {
         if (evdev_is_node && evdev_is_node(entry->node)) {
             return (evdev_event_pending && evdev_event_pending(entry->node))
                 ? LINUX_POLLIN : 0;
+        }
+        /* pty master 不能落到下面"普通文件永远就绪"的兜底。
+         * Linux 上没数据时 POLLIN 就绪位为 0（实测 poll(master) == []），
+         * 而 master 的 read 会阻塞等数据 —— 两边不一致，Konsole 的
+         * QSocketNotifier 就永远报可读、每次 read 都卡住，终端渲染循环
+         * 再也不会转起来（窗口空白、敲键无反应）。 */
+        {
+            extern int pty_node_readable(const void *node);
+            extern int pty_slave_readable(const void *node);
+            int ro = pty_node_readable(entry->node);
+            if (ro >= 0)
+                return ro ? (LINUX_POLLIN | LINUX_POLLOUT) : LINUX_POLLOUT;
+            /* pty slave：bash 的 readline 在 select(0) 上等一整行，
+             * 只有真的有一行可提交时才该报 POLLIN。 */
+            {
+                int sr = pty_slave_readable(entry->node);
+                if (sr >= 0)
+                    return sr ? (LINUX_POLLIN | LINUX_POLLOUT) : LINUX_POLLOUT;
+            }
         }
     }
 
@@ -3513,6 +3542,45 @@ typedef struct shm_page {
  * resources.pak 就要近 5000 页，定长表会被挤爆（实测 mmap 直接 ENOMEM，
  * DataPack 加载失败）。 */
 static shm_page_t *shm_buckets[SHM_BUCKETS];
+/* 引用归零的共享文件页**不立即释放**，留在表里当页缓存；
+ * 物理内存紧张时由 linux_compat_shm_reclaim() 统一回收。
+ * 这样同一份 .so 在多个进程反复 map/unmap 之间不必重新读盘。 */
+static uint64_t g_shm_cached_pages = 0;
+uint64_t linux_compat_shm_reclaim(uint64_t want);
+
+/* ---- 共享页表条目的专用 slab ----------------------------------------
+ * 为什么不用 kmalloc：内核堆是 2MB 的固定 BSS 池（HEAP_POOL_SIZE）。
+ * 共享页缓存要给"每个 (文件,页号)"存一条 40 字节的元数据，KWin 光加载
+ * 共享库就要几万页 —— 40B × 几万 ≈ 2MB，直接把堆池吃光，随后连
+ * libicui18n.so.76（3.7MB）都映射不了（实测 err=12，而内存只用了 25%）。
+ * 所以这里从 PMM 取整页、自己切成条目，不占那块固定堆。 */
+static shm_page_t *g_shm_free_list = 0;
+
+static shm_page_t *shm_entry_alloc(void) {
+    if (!g_shm_free_list) {
+        uint64_t page = pmm_alloc_page();
+        if (!page) return 0;
+        uint8_t *base = (uint8_t *)(uintptr_t)page;
+        size_t n = PAGE_SIZE / sizeof(shm_page_t);
+        for (size_t i = 0; i < n; i++) {
+            shm_page_t *e = (shm_page_t *)(void *)(base + i * sizeof(shm_page_t));
+            e->next = g_shm_free_list;
+            g_shm_free_list = e;
+        }
+    }
+    shm_page_t *e = g_shm_free_list;
+    g_shm_free_list = e->next;
+    e->next = 0;
+    return e;
+}
+
+static void shm_entry_free(shm_page_t *e) {
+    if (!e) return;
+    e->next = g_shm_free_list;
+    g_shm_free_list = e;
+}
+
+#define SHM_CACHE_MAX_PAGES 8192u     /* 最多缓存 32MB，超出即回收 */
 
 static unsigned shm_hash(struct vfs_node *node, uint64_t index) {
     uint64_t key = ((uint64_t)(uintptr_t)node >> 4) ^ (index * 0x9e3779b97f4a7c15ULL);
@@ -3545,7 +3613,11 @@ uint64_t linux_compat_shm_page(struct vfs_node *node, uint64_t page_index,
         return entry->phys;
     }
 
-    shm_page_t *fresh = (shm_page_t *)kmalloc(sizeof(*fresh));
+    /* 缓存超过上限就先回收一批，避免页缓存无限增长。 */
+    if (g_shm_cached_pages > SHM_CACHE_MAX_PAGES)
+        (void)linux_compat_shm_reclaim(g_shm_cached_pages - SHM_CACHE_MAX_PAGES);
+
+    shm_page_t *fresh = shm_entry_alloc();
     if (!fresh) return 0;
     uint64_t phys = pmm_alloc_page();
     if (!phys) { kfree(fresh); return 0; }
@@ -3583,12 +3655,34 @@ void linux_compat_shm_unmap(struct vfs_node *node, uint64_t backing_offset,
                 continue;
             }
             if (entry->refs > 1) { entry->refs--; break; }
-            *link = entry->next;
-            pmm_free_page(entry->phys);
-            kfree(entry);
+            /* 归零：保留为页缓存，等压力回收。 */
+            entry->refs = 0;
+            g_shm_cached_pages++;
             break;
         }
     }
+}
+
+/**
+ * 回收引用归零的共享文件页缓存。
+ * @param want 期望回收的页数（0 表示按上限策略回收）
+ * @return 实际回收的页数
+ */
+uint64_t linux_compat_shm_reclaim(uint64_t want) {
+    uint64_t freed = 0;
+    for (unsigned b = 0; b < SHM_BUCKETS && (!want || freed < want); b++) {
+        shm_page_t **link = &shm_buckets[b];
+        while (*link && (!want || freed < want)) {
+            shm_page_t *entry = *link;
+            if (entry->refs != 0) { link = &entry->next; continue; }
+            *link = entry->next;
+            pmm_free_page(entry->phys);
+            shm_entry_free(entry);
+            if (g_shm_cached_pages) g_shm_cached_pages--;
+            freed++;
+        }
+    }
+    return freed;
 }
 
 static futex_slot_t *futex_find(uint32_t *address, int create) {

@@ -135,6 +135,14 @@ static inline bool bitmap_test(size_t bit) {
 /** 分配游标：记录下次扫描的起始页索引。已分配的前缀不会被反复重扫。 */
 static uint64_t g_cursor = 0;
 
+/* 物理内存回收钩子：由 kernel 初始化时注册（当前是共享文件页缓存回收）。
+ * 只在分配失败路径调用，且**必须在拿 pmm 锁之前**调用 —— 回收自己会
+ * 调 pmm_free_page()，那个函数也要拿同一把锁。 */
+static uint64_t (*g_reclaim_hook)(uint64_t want) = 0;
+
+void pmm_set_reclaim_hook(uint64_t (*fn)(uint64_t want)) { g_reclaim_hook = fn; }
+uint64_t pmm_cached_pages_total(void);
+
 /** 返回第 w 个 64 位字（可能尾部越界位需调用方按 g_total_pages 截断）。 */
 static inline uint64_t bitmap_word(size_t w) {
     return ((const uint64_t *)g_bitmap)[w];
@@ -372,7 +380,12 @@ void pmm_init(void *mbi) {
  * @return 物理地址，0 表示内存耗尽
  */
 uint64_t pmm_alloc_page(void) {
-    if (!g_pmm_ready || g_free_pages == 0) return 0;
+    if (!g_pmm_ready) return 0;
+    if (g_free_pages == 0) {
+        /* 没有空闲页：先尝试回收（页缓存等），成功则继续分配。 */
+        if (g_reclaim_hook) (void)g_reclaim_hook(0);
+        if (g_free_pages == 0) return 0;   /* 回收后仍然不够 → ENOMEM */
+    }
     pmm_lock();
     int64_t idx = bitmap_find_first();
     if (idx < 0) {

@@ -1190,8 +1190,26 @@ void shell_run(void) {
     // runs, which keeps the PS/2 controller state clean.
 #if HBOS_ENABLE_GUI
     if (vfs_lookup("/etc/hbos-autostart")) {
-        console_puts("\r\n\x1b[36m检测到 /etc/hbos-autostart，正在启动 KDE Plasma + Chromium...\x1b[0m\r\n");
-        cmd_execute("run /usr/bin/bash -c \"/usr/bin/start_kde_chromium.sh\"");
+        /* 开机询问：进命令行还是直接进 KDE。
+         * 进命令行之后随时可以输入 `kde` 再进桌面（见 src/tools/gui.c 的 cmd_kde）。 */
+        console_puts(
+            "\r\n  \x1b[1m\x1b[36m请选择启动方式 / Select boot mode\x1b[0m\r\n"
+            "    \x1b[32m[Enter / T]\x1b[0m 命令行 Shell"
+            "        \x1b[33m[K]\x1b[0m KDE Plasma 6 桌面\r\n"
+            "    \x1b[90m（进入 Shell 后输入 kde 可随时进入桌面）\x1b[0m\r\n  > "
+        );
+        while (1) {
+            int c = get_key();
+            if (c == 'k' || c == 'K') {
+                console_puts("KDE\r\n");
+                cmd_execute("kde");
+                break;
+            }
+            if (c == 't' || c == 'T' || c == '\n' || c == '\r') {
+                console_puts("Shell\r\n\r\n");
+                break;
+            }
+        }
     } else {
     int startup_pref = shell_get_startup_pref();
     if (startup_pref == 'g') {
