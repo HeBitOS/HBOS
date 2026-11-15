@@ -590,6 +590,33 @@ static int shell_execute_argv(int argc, char **argv) {
         return 0;
     }
 
+    if (strcmp(argv[0], "bash") == 0 || strcmp(argv[0], "zsh") == 0) {
+        const char *cands[2] = {
+            strcmp(argv[0], "bash") == 0 ? "/usr/bin/bash" : "/usr/bin/zsh",
+            strcmp(argv[0], "bash") == 0 ? "/bin/bash"     : "/bin/zsh",
+        };
+        const char *found = NULL;
+        for (int i = 0; i < 2; i++) {
+            if (vfs_lookup(cands[i])) { found = cands[i]; break; }
+        }
+        if (found) {
+            char *run_argv[MAX_ARGS + 1];
+            int rargc = 0;
+            run_argv[rargc++] = "run";
+            run_argv[rargc++] = (char *)found;
+            for (int i = 1; i < argc && rargc < MAX_ARGS; i++)
+                run_argv[rargc++] = argv[i];
+            run_argv[rargc] = NULL;
+            shell_execute_argv(rargc, run_argv);
+        } else {
+            console_puts(argv[0]);
+            console_puts(": not found in /usr/bin or /bin (attach Linux rootfs image)\n");
+        }
+        shell_restore_stdio(&out_save);
+        shell_restore_stdio(&in_save);
+        return 0;
+    }
+
     shell_restore_stdio(&out_save);
     shell_restore_stdio(&in_save);
     return -1;
