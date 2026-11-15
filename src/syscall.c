@@ -2695,7 +2695,7 @@ static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
     if (!message || (!message->vectors && message->vector_count))
         return (uint64_t)(-EFAULT);
     if (message->vector_count > 1024) return (uint64_t)(-EINVAL);
-    int rights[16];
+    int rights[64];
     uint64_t control_capacity = message->control_length;
     task_t *current = task_current();
     int unix_fd = current && current->fd_table && fd >= 0 &&
@@ -2723,7 +2723,7 @@ static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
                     return (uint64_t)(-EINVAL);
                 size_t count =
                     (size_t)((header->length - sizeof(*header)) / sizeof(int));
-                if (!count || count > 16) return (uint64_t)(-EINVAL);
+                if (!count || count > 64) return (uint64_t)(-EINVAL);
                 memcpy(rights, cursor + sizeof(*header), count * sizeof(int));
                 if (linux_compat_unix_send_rights(fd, rights, count) < 0)
                     return (uint64_t)(-(errno > 0 ? errno : EINVAL));
@@ -2781,7 +2781,7 @@ static uint64_t linux_message_io(int fd, linux_x86_msghdr_t *message,
             fd_capacity =
                 (size_t)((control_capacity -
                           sizeof(linux_x86_cmsghdr_t)) / sizeof(int));
-            if (fd_capacity > 16) fd_capacity = 16;
+            if (fd_capacity > 64) fd_capacity = 64;
         }
         if (linux_compat_unix_recv_rights(
                 fd, output_fds, fd_capacity, &received, &truncated) < 0)

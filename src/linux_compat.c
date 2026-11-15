@@ -105,7 +105,7 @@
 #define UNIX_RIGHTS_QUEUE 64
 /* Chromium 的 IPC 会用 SCM_RIGHTS 一次传多个 fd（共享内存 + 管道）。
  * 上限 4 容易在传 fd 数组时被截断，放宽到 16。 */
-#define UNIX_RIGHTS_MAX_FDS 16
+#define UNIX_RIGHTS_MAX_FDS 64
 
 #define LINUX_MEMFD_SLOTS 1024
 #define LINUX_MEMFD_MAX_SIZE (64ULL * 1024ULL * 1024ULL)
