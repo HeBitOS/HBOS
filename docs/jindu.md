@@ -1803,3 +1803,37 @@ wget: tcp response truncated
 - TCP 大传输有 bug → 否（更正过，实际收到 196,607/196,608）
 - 对端 RST → 否（TCP 层零次）
 - 本端 socket 层两条 ECONNRESET 路径 → 否（零次）
+
+
+#### R35 打开 Chromium 自己的日志后，找到新的具体错误（04:35）
+
+把 Chromium 的 stderr 从 `/tmp/chromium.log` 改成直接继承（即进 serial），
+并加 `--enable-logging=stderr --log-level=0`，终于看到它自己的报错：
+
+```
+ERROR:chrome/browser/ui/views/message_box_dialog.cc:200] Unable to show message box:
+  Failed To Create Data Directory - Chromium cannot read and write to its data directory:
+  /tmp/home/.config/chromium
+ERROR:net/base/address_tracker_linux.cc:224] Could not create NETLINK socket
+ERROR:device/udev_linux/udev_watcher.cc:51] Failed to initialize a udev monitor
+ERROR:dbus/bus.cc:405] Failed to connect to the bus: /run/dbus/system_bus_socket: Connection refused
+```
+
+（netlink / udev / system-dbus 缺失都是预期的，HBOS 没有这些。）
+
+**但"数据目录不可读写"是要害**：Chromium 会因此退化到临时 profile，
+网络服务的磁盘缓存/状态全部异常。
+
+**已做的验证**（避免误判）：
+- 先把 `/tmp/home/.config/chromium`、`/tmp/home/.cache/chromium`、
+  `/tmp/home/.pki` 加进 `start_kde_chromium.sh` 的 mkdir 列表 —— 报错依旧；
+- 再在会话里做写探测：`: > /tmp/home/.config/chromium/probe.txt` → **WPROBE=OK（ret=0）**，
+  `echo hello > .../probe2.txt` → **WPROBE2=OK**。
+
+**结论：guest 能往那个目录写，是 Chromium 的"可写性判定"这一步失败。**
+它内部用的是"在目录里创建随机名的临时文件再删除"（`CreateTemporaryFileInDir`
++ `unlink`），所以要查的是这条路径依赖的系统调用在 HBOS 上的行为
+（`O_CREAT|O_EXCL` 随机名、`unlink`、以及可能的 `fchmod`/`rename`）。
+
+**踩坑记录**：第一次写探测用了 `2>/dev/null`，而 HBOS 上重定向到 `/dev/null`
+返回 EIO（老笔记里有），于是误报成"不能写"。**探测脚本里绝对不能出现 `/dev/null`。**

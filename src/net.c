@@ -2644,8 +2644,20 @@ int net_tcp_finish_connect(net_tcp_conn_t *conn) {
     int slot = (conn->tcp_slot >= 0 && conn->tcp_slot < NET_TCP_CONNS)
                    ? conn->tcp_slot : -1;
     tcp_conn_t *c = (slot >= 0) ? &tcp_conns[slot] : 0;
-    if (!c || !c->used) return -1;
-    if (!c->connecting) return c->open ? 0 : -1;
+    if (!c || !c->used) {
+        /* 诊断：槽被释放了但调用方还拿着 fd —— 后续 read 会走到
+         * "node 有效、槽无效"的降级路径，上层最终可能看到 ECONNRESET。 */
+        static int slot_dbg;
+        if (slot_dbg < 8) { slot_dbg++; console_puts("[TCP] finish_connect: slot gone\n"); }
+        return -1;
+    }
+    if (!c->connecting) {
+        if (!c->open) {
+            static int closed_dbg;
+            if (closed_dbg < 8) { closed_dbg++; console_puts("[TCP] finish_connect: conn closed\n"); }
+        }
+        return c->open ? 0 : -1;
+    }
     if (c->rst) {
         c->connecting = 0;
         c->open = false;
