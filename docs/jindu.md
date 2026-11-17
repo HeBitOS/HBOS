@@ -1837,3 +1837,30 @@ ERROR:dbus/bus.cc:405] Failed to connect to the bus: /run/dbus/system_bus_socket
 
 **踩坑记录**：第一次写探测用了 `2>/dev/null`，而 HBOS 上重定向到 `/dev/null`
 返回 EIO（老笔记里有），于是误报成"不能写"。**探测脚本里绝对不能出现 `/dev/null`。**
+
+
+#### R35 定位到具体的系统调用路由（05:00）
+
+在 `linux_socket_io_read`（即 `read()`/`recvfrom()` 走的路径）里加了
+`[SOCK-RX]` 打点，跑一轮加载 bilibili —— **零次触发**。
+
+这说明 **Chromium 根本不走 `read()`**，它用的是 **`recvmsg`(47)**：
+```
+case 47: return linux_message_io(fd, msghdr, flags, 0);   // src/syscall.c:3504
+```
+
+而 `linux_message_io`（src/syscall.c:2696）是一个以 **unix socket** 为中心的实现
+（`unix_fd = entry->type == FD_UNIX`，SCM_RIGHTS 传递等）。
+**它对 AF_INET socket 的处理路径没有被验证过** —— 如果 `recvmsg` 在
+AF_INET socket 上返回错误或 0，Chromium 就会把这条连接判成失败
+（表现为 `ERR_CONNECTION_RESET`），而我们前面查的三个 ECONNRESET 点都不会触发。
+
+**这解释了为什么三条已埋的诊断全是零次**。
+
+**下一步（很具体）**：在 `linux_message_io` 里对 AF_INET 分支加打点/补实现 ——
+确认 `recvmsg`/`sendmsg` 在 AF_INET socket 上是否正确读写并返回字节数。
+这是目前唯一未被验证、且 Chromium 实际使用的 socket 路径。
+
+**顺带确认的未实现系统调用**（清一色与本问题无关）：
+`mincore(27)` / `fadvise64(221)` / `clone3(435)` / `open_tree(436)` / `mlock2(149)` /
+`sendfile(40)` / `vfork(58)`。

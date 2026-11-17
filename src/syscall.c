@@ -3287,6 +3287,30 @@ static int64_t linux_socket_io_read(int fd, void *buffer, size_t count) {
     if (net_tcp_finish_connect(conn) == 1) return -EAGAIN;
     uint32_t got = 0;
     int ret = net_tcp_recv(conn, (uint8_t *)buffer, (uint32_t)count, &got, 10);
+    {
+        static int rx_dbg;
+        if (rx_dbg < 20) {
+            rx_dbg++;
+            console_puts("[SOCK-RX] fd=");
+            { char b[8]; int i2=0,v2=fd; char t2[8]; int j2=0;
+              if(!v2) b[i2++]='0';
+              else { while(v2){t2[j2++]=(char)('0'+v2%10);v2/=10;} while(j2) b[i2++]=t2[--j2]; }
+              b[i2]=0; console_puts(b); }
+            console_puts(" want=");
+            { char b[12]; int i2=0; uint64_t v2=count; char t2[12]; int j2=0;
+              if(!v2) b[i2++]='0';
+              else { while(v2){t2[j2++]=(char)('0'+v2%10);v2/=10;} while(j2) b[i2++]=t2[--j2]; }
+              b[i2]=0; console_puts(b); }
+            console_puts(" got=");
+            { char b[12]; int i2=0; uint64_t v2=got; char t2[12]; int j2=0;
+              if(!v2) b[i2++]='0';
+              else { while(v2){t2[j2++]=(char)('0'+v2%10);v2/=10;} while(j2) b[i2++]=t2[--j2]; }
+              b[i2]=0; console_puts(b); }
+            console_puts(" ret=");
+            console_puts(ret < 0 ? "neg" : "ok");
+            console_puts("\n");
+        }
+    }
     if (ret < 0) {
         static int rst_dbg2;
         if (rst_dbg2 < 8) {
