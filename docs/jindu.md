@@ -1575,3 +1575,22 @@ QML/插件的真实报错 —— 而它的 stderr 被重定向到 `/var/cache/hb
 2. T3 壁纸：先看 plasmashell stderr 里 `org.kde.image` 的加载痕迹，
    再决定是修插件配置还是改用 `org.kde.slideshow`。
 3. `-smp 2`：按上面的锁交接改造。
+
+#### 夜间最后一次确认跑（01:30）—— 面板出现时间**不稳定**
+
+同一份镜像、同样的 `-smp 1`，两次结果不同：
+
+| 运行 | 面板出现 |
+|---|---|
+| `build/tmp/prio1` | **s300 出现**（panel=100%） |
+| `build/tmp/night` | **460 秒仍未出现**（panel=0%，screen=30% 是 Chromium 窗口） |
+
+两次 `plasma/konsole/chromium` 都 exec 成功。所以"面板晚到"不是启动失败，
+而是**单核下合成时序的抖动**：Chromium 一旦开始光栅化就把 CPU 占满，
+plasmashell 的合成被推迟到不可预测。
+
+这解释了为什么"优先级提升"只把 400s 降到 300s、却没能稳定在 180s 内：
+**只要 Chromium 与 plasmashell 抢同一个核，结果就是抖的。**
+
+→ 结论没有变：**SMP 是唯一能消除这种抖动的手段**。在 SMP 打通之前，
+不要承诺"面板 N 秒内出现"，只能说"数分钟内"。
