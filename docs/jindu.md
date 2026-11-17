@@ -1638,3 +1638,29 @@ www.bilibili.com refused to connect.     ERR_CONNECTION_REFUSED
 1. 用客机自己的 TCP 打宿主 `http://10.0.2.2:8899`（不经过外网），
    区分是"HBOS TCP 栈有问题"还是"slirp 对外转发有问题"。
 2. 检查 SYN 的源端口/序号、以及 RST 是谁发的（slirp 还是对端）。
+
+
+#### R35 重大结论：HBOS 的网络栈是**完全可用**的（2026-11-18 02:45）
+
+用 HBOS 自带 shell 的 `wget` 做隔离测试（不经过 Chromium）：
+
+```
+hbos:/# wget http://10.0.2.2:8899/
+wget: tcp reset                      <- slirp 不转发到宿主这个端口，非 HBOS 问题
+
+hbos:/# wget http://164.52.1.62/
+saved 164.52.1.62 (HTTP 403)         <- 真实外网！TCP 连上并拿到 HTTP 响应
+```
+
+（403 是因为按 IP 直连没带 Host 头。）
+
+**所以：e1000 驱动、ARP、ICMP、TCP、还有 HTTPS 之外的应用层收发，全都是通的。**
+之前所有"net 不通"的判断，都是被"ping 第一次超时"和"Chromium 的错误页"误导的。
+
+**bilibili 仍然打不开，问题已经收缩到 Chromium 这一侧**：
+- Chromium 报 `ERR_CONNECTION_REFUSED`，但同一台机器上 HBOS 自己的 TCP 能连外网；
+- 需要查的是 Chromium 的 socket 层（Linux 兼容层的 connect/poll/epoll 对
+  AF_INET 的处理），或者它的 TLS/proxy 配置。
+- 下一步：用 `curl https://164.52.1.62/` 验证 443 端口；再用 Chromium
+  打开 `http://164.52.1.62/`（明文、无 DNS、无 TLS）复现，二分定位到
+  "TCP 连不上" 还是 "TLS/HTTP 层"。
