@@ -5,6 +5,8 @@
 #include "core/io.h"
 #include "core/task.h"
 
+extern void console_puts(const char *s);
+
 static per_cpu_t cpu_data[MAX_CPUS];
 static int cpu_count;
 static uint64_t lapic_base_phys;
@@ -14,19 +16,45 @@ static spinlock_t sched_lock;
 #define TRAMPOLINE_ADDR 0x8000
 #define TRAMPOLINE_STACK_SIZE 4096
 
+static uint32_t lapic_get_id(void);
+
 void spinlock_init(spinlock_t *lock) {
     lock->lock = 0;
 }
 
+/* 自旋超限时打印持有者：把"看不见的死锁"变成一条确定的日志。
+ * 阈值取 8000 万次 pause，正常竞争远达不到；真死锁时约几秒内触发。 */
+static void spinlock_dump_udec(uint64_t v) {
+    char b[24]; int i = 0;
+    if (!v) b[i++] = '0';
+    else { char t[24]; int j = 0;
+           while (v) { t[j++] = (char)('0' + (int)(v % 10)); v /= 10; }
+           while (j) b[i++] = t[--j]; }
+    b[i] = 0;
+    console_puts(b);
+}
+
 void spinlock_acquire(spinlock_t *lock) {
+    uint32_t spins = 0;
     while (__sync_lock_test_and_set(&lock->lock, 1)) {
+        if (++spins == 80000000u) {
+            console_puts("\n[SPIN-STUCK] lock=");
+            spinlock_dump_udec((uint64_t)(uintptr_t)lock);
+            console_puts(" holder_cpu=");
+            spinlock_dump_udec(lock->holder > 0 ? (uint64_t)(lock->holder - 1) : 0xFFFFFFFFu);
+            console_puts(" me_cpu=");
+            spinlock_dump_udec((uint64_t)lapic_get_id());
+            console_puts("\n");
+        }
         __asm__ volatile("pause");
     }
+    lock->holder = (int32_t)lapic_get_id() + 1;
     __asm__ volatile("" ::: "memory");
 }
 
 void spinlock_release(spinlock_t *lock) {
     __asm__ volatile("" ::: "memory");
+    lock->holder = 0;
     lock->lock = 0;
 }
 
@@ -46,6 +74,26 @@ void smp_send_ipi(uint32_t apic_id, uint32_t vector) {
     lapic_write(LAPIC_ICR_HI, apic_id << 24);
     lapic_write(LAPIC_ICR_LO, vector | LAPIC_DELIVERY_FIXED);
     while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_PENDING);
+}
+
+/**
+ * @brief 通知所有其他在线 CPU 刷新 TLB
+ *
+ * 背景：HBOS 之前完全没有 TLB shootdown，`smp_send_ipi()` 定义了却从未被调用。
+ * 一旦某个核释放了页表（如进程退出时销毁地址空间），其他核可能仍缓存着
+ * 这些映射，继续访问就会命中已释放的物理页 —— 在 -smp 2 下表现为
+ * 进程退出路径随机卡死。
+ *
+ * 这里向除自己以外的每个在线核发一个 IPI，接收侧在中断里重载 CR3
+ * （整表刷新，简单可靠；页表释放是低频路径，不需要按页优化）。
+ */
+void smp_tlb_shootdown(void) {
+    if (cpu_count <= 1 || !lapic_base) return;
+    uint32_t self = smp_get_apic_id();
+    for (int i = 0; i < cpu_count; i++) {
+        if (!cpu_data[i].online || cpu_data[i].apic_id == self) continue;
+        smp_send_ipi(cpu_data[i].apic_id, IRQ_TLB_SHOOTDOWN);
+    }
 }
 
 uint32_t smp_get_apic_id(void) {

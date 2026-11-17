@@ -293,6 +293,10 @@ static void task_reap_address_spaces(void) {
             retired_address_spaces[write++] = pml4;
             continue;
         }
+        /* 释放页表前先让其他核刷 TLB：否则它们可能仍用着这些映射，
+         * 命中已释放的物理页（-smp 2 下进程退出随机卡死的根因之一）。 */
+        extern void smp_tlb_shootdown(void);
+        smp_tlb_shootdown();
         vmm_destroy_address_space(pml4);
     }
     retired_address_space_count = write;
@@ -323,7 +327,13 @@ static void task_release_mm(task_t *task) {
             area = next;
         }
         memset(task->mm, 0, sizeof(*task->mm));
-        if (owns_pml4) task_retire_address_space(pml4);
+        if (owns_pml4) {
+            /* 页表即将退役/释放：先让别的核刷掉 TLB 里指向它的条目，
+             * 否则它们可能继续用已释放的映射（-smp 2 下退出路径卡死）。 */
+            extern void smp_tlb_shootdown(void);
+            smp_tlb_shootdown();
+            task_retire_address_space(pml4);
+        }
     }
     task->mm = NULL;
 }
@@ -433,7 +443,20 @@ static task_t *sched_next(void) {
      * 的那个任务，否则两边来回抖）。 */
     for (int c = 0; c < MAX_CPUS; c++) {
         if (c == me || c >= ncpu) continue;
-        if (schedq_count(&cpu_ready[c]) < 2) continue;
+        size_t cnt = schedq_count(&cpu_ready[c]);
+        if (cnt < 2) {
+            /* 对方核只剩 1 个可运行任务时默认不偷（避免两边来回抖）。
+             * 但如果那个核本身是空闲的（没有 current，或在跑自己的 idle，
+             * 或当前任务已终止），它根本不会去跑这个任务 —— 继续坚持
+             * "不偷"就会让整机停摆：这正是 -smp 2 下进程退出后静默卡死的
+             * 形态（任务被挂到休眠的核上，另一个核因为 cnt<2 也不偷）。
+             * 这种情况下允许偷走最后一个。 */
+            task_t *vc = cpu_current[c];
+            int victim_idle = (!vc) ||
+                              (cpu_idle[c] && vc == cpu_idle[c]) ||
+                              (vc->state == TASK_TERMINATED);
+            if (!victim_idle) continue;
+        }
         t = pick_from_cpu(c, 1);
         if (t) {
             t->cpu = (uint8_t)me;
@@ -607,6 +630,11 @@ void task_init(void) {
     /* 每个 AP 一个空闲任务：AP 需要一个真实的任务上下文才能参与调度
      * （task_switch 要有地方存/取 rsp），否则 current_task 为空时
      * task_schedule() 会直接返回，AP 永远接不了活。 */
+    /* 注意：**不能**把 main_task 登记为 CPU0 的 idle。
+     * main_task 是"阻塞等待"状态的真实任务，不是可运行的空闲任务；
+     * 退出路径若把它当作 idle 切过去，等于恢复一个阻塞任务的栈，
+     * 双核下会直接卡死（实测 `switch cpu=0 idle=0 cur=4` 之后静止）。 */
+
     int ncpu = smp_cpu_count();
     for (int c = 1; c < ncpu && c < MAX_CPUS; c++) {
         int id = task_create_idle(c);
@@ -1248,6 +1276,17 @@ void task_exit(void) {
     task_irq_save();
     smp_sched_lock();
     sched_mark_dead(current_task);
+    /* 唤醒所有在等我退出的任务（典型是父进程阻塞在 wait4）。
+     * 缺这一步：父进程永远停在 TASK_BLOCKED，而退出任务在下面的循环里
+     * 找不到可运行任务 → 两个核都空转/休眠，系统静止。 */
+    {
+        uint32_t my_id = current_task->id;
+        for (int i = 0; i < task_count; i++) {
+            task_t *w = &task_pool[i];
+            if (w == current_task || w->state != TASK_BLOCKED) continue;
+            if (w->parent_id == my_id) sched_mark_ready(w);
+        }
+    }
 
     while (1) {
         task_t *next = sched_pick_valid();
@@ -1256,18 +1295,37 @@ void task_exit(void) {
              * 停机等于永久少一个 CPU，而且日志里的"All tasks terminated"
              * 会误导成系统整体挂了（实际只是这个核没排到）。 */
             int me = my_cpu();
-            if (cpu_idle[me] && cpu_idle[me] != current_task &&
-                cpu_idle[me]->state != TASK_TERMINATED) {
+            if (cpu_idle[me] && cpu_idle[me] == current_task) {
+                /* 本核正在跑自己的 idle：说明确实没有别的任务可跑。
+                 * 这**不是**系统挂了，继续 hlt 等中断即可（AP 靠本核
+                 * LAPIC 定时器醒来重新选任务）。
+                 *
+                 * **必须先把调度锁放掉再 hlt**：外层 task_exit() 在进
+                 * 循环前拿了 smp_sched_lock()，若持锁 hlt，另一个核会在
+                 * smp_sched_lock() 上永久自旋 —— 表现就是 -smp 2 下
+                 * fork 之后整个系统卡死、serial 不再增长。 */
+                smp_sched_unlock();
+                __asm__ volatile("sti; hlt");
+                smp_sched_lock();
+                continue;
+            }
+            if (cpu_idle[me] && cpu_idle[me]->state != TASK_TERMINATED) {
                 next = cpu_idle[me];
                 next->state = TASK_READY;
             }
         }
         if (!next) {
-            console_puts("\n\x1b[31m[KERN] All tasks terminated, halting.\x1b[0m\n");
-            while (1) __asm__ volatile("cli; hlt");
+            /* 本核确实没有可运行任务，也没有自己的 idle 任务。
+             * 正确做法是**原地 idle**：放掉调度锁、开中断、hlt，
+             * 等下一个中断让别的任务变成就绪，再回来选。
+             * 直接停机等于永久少一个 CPU（BSP 停了整机就死了）。 */
+            smp_sched_unlock();
+            __asm__ volatile("sti; hlt");
+            smp_sched_lock();
+            continue;
         }
         sched_mark_running(next);
-        smp_trace_switch(__func__, next);
+            smp_trace_switch(__func__, next);
     smp_trace_switch(__func__, next);
         task_t *prev = current_task;
         current_task = next;

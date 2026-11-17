@@ -3475,7 +3475,10 @@ static uint64_t linux_dispatch_body(hbos_syscall_frame_t *linux_frame) {
             console_puts(" code=");
             trace_put_udec(linux_frame->a0 & 0xFF);
             console_putchar('\n');
-            if (task_get_id() == task_get_process_id()) {
+            /* 退出时的用户栈回溯默认关闭：它要直接读用户内存（可能触发缺页，
+             * 又走回退出路径），在 -smp 2 下实测会让系统静止 —— 加打印反而
+             * "不卡"，说明是时序敏感的再入问题。排查静默退出时可临时改回 1。 */
+            if (0 && task_get_id() == task_get_process_id()) {
                 linux_user_backtrace(linux_frame, "EXIT");
                 if (linux_debug_syscall_dump) linux_syscall_trace_dump();
             }

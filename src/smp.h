@@ -1,6 +1,6 @@
 /**
  * @file    smp.h
- * @brief   导出 48 个接口（2 类型 / 29 宏 / 17 函数）
+ * @brief   导出 50 个接口（2 类型 / 30 宏 / 18 函数）
  *
  * @layer   core
  * @owner   src/
@@ -111,6 +111,8 @@
  * 不占 PIC 的 0x20-0x2F：AP 收不到 8259 的 IRQ0（虚拟线模式只送 BSP），
  * 没有这个节拍的话 AP 一次都不会重新调度。 */
 #define IRQ_SMP_TIMER        0x40
+/* TLB shootdown：某核释放/改写页表后，通知其他核刷新 TLB。 */
+#define IRQ_TLB_SHOOTDOWN    0x41
 
 typedef struct {
     uint32_t apic_id;
@@ -121,11 +123,15 @@ typedef struct {
 
 typedef struct {
     volatile uint32_t lock;
+    /* 调试用持有者记录：0 表示无人持有，否则是 (CPU 号 + 1)。
+     * 仅用于死锁定位（spinlock_acquire 自旋超限时打印），不参与同步逻辑。 */
+    volatile int32_t holder;
 } spinlock_t;
 
 void smp_init(void);
 int smp_cpu_count(void);
 void smp_send_ipi(uint32_t apic_id, uint32_t vector);
+void smp_tlb_shootdown(void);
 uint32_t smp_get_apic_id(void);
 
 /** 调用者所在核心的编号（0..smp_cpu_count()-1）。smp_init 之前恒为 0。 */

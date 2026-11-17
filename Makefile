@@ -1256,6 +1256,9 @@ KDE_MEM ?= 6144M
 # 显示后端：gtk = 真窗口，人可以看画面并移动鼠标（推荐给人用）；
 # none = 无窗口，只给自动化验证用（screendump 仍可取帧）。
 KDE_DISPLAY ?= gtk
+# 核心数：暂时默认 1（2 核在进程退出路径会死锁，见 docs/kde-chromium.md §13）。
+# SMP 调试时可用 make run-kde KDE_SMP=2 复现。
+KDE_SMP ?= 1
 run-kde: $(ISO_BIOS)
 	@if [ ! -f "$(KDE_IMG)" ]; then \
 		echo "错误: 未找到 $(KDE_IMG)，请先生成 KDE + Chromium 磁盘镜像"; \

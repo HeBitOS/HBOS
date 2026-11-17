@@ -150,6 +150,14 @@ smp_timer_stub:
     push 0x40
     jmp irq_common
 
+; SMP：TLB shootdown（向量 0x41）。别的核释放页表后，用它通知本核
+; 刷新 TLB；不刷新就会继续用已释放的映射，轻则跑飞、重则卡死。
+global smp_tlb_stub
+smp_tlb_stub:
+    push 0
+    push 0x41
+    jmp irq_common
+
 global irq_stub_table
 irq_stub_table:
 

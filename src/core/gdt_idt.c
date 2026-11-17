@@ -1260,6 +1260,14 @@ void irq_handler(isr_regs_t *regs) {
     /* SMP：AP 的 LAPIC 定时器。它不走 8259，所以必须在这里分出去，
      * 否则会落到下面按 PIC 的 irq 号发 EOI，等于往串口/键盘的端口上
      * 乱写。 */
+    if (regs->int_no == IRQ_TLB_SHOOTDOWN) {
+        /* 重载 CR3 = 整表刷新 TLB（页表释放是低频路径，不必按页 invlpg） */
+        uint64_t cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+        __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+        smp_lapic_eoi();
+        return;
+    }
     if (regs->int_no == IRQ_SMP_TIMER) {
         smp_lapic_eoi();
         extern void task_schedule(void);
@@ -1358,6 +1366,9 @@ void gdt_idt_init(void) {
 
     /* SMP：AP 的 LAPIC 定时器向量（见 smp.h 的 IRQ_SMP_TIMER） */
     extern void smp_timer_stub(void);
+    extern void smp_tlb_stub(void);
+    idt_set_entry(IRQ_TLB_SHOOTDOWN, (uint64_t)smp_tlb_stub,
+                  IDT_PRESENT | IDT_DPL0 | IDT_INT_GATE);
     idt_set_entry(IRQ_SMP_TIMER, (uint64_t)smp_timer_stub,
                   IDT_PRESENT | IDT_DPL0 | IDT_INT_GATE);
 
