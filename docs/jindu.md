@@ -1441,8 +1441,11 @@ mov edx,0x8c9            → 行号 2249
       待补：敲键回显验证。
 - [ ] **T5 `-smp 2` 打通**：见下面的"锁交接"问题描述。
       验收：`-smp 2` 下能进 KDE 且无 `SPIN-STUCK`。
-- [ ] **T6 网络收包**：e1000 RX 从 0 变成能收到 ARP 应答（`rx>0`）。
+- [x] **T6 网络收包**：e1000 RX 从 0 变成能收到 ARP 应答（`rx>0`）。
       验收：`[KERN] net: ping 10.0.2.2 OK`。
+      **✅ 已达成**：ping OK on attempt 2、tx=7 rx=7。
+      真相是 RX 一直是好的（rx0_status=0x7），坏在首次 ping 的时序。
+      **新阻塞**：TCP 仍 ERR_CONNECTION_REFUSED（见下面的专项记录）。
 - [ ] **T7 交付收口**：`make run-kde` 一键可用、镜像幂等打包、
       `docs/kde-chromium.md` 与本节同��更新、提交推送。
 
@@ -1594,3 +1597,44 @@ plasmashell 的合成被推迟到不可预测。
 
 → 结论没有变：**SMP 是唯一能消除这种抖动的手段**。在 SMP 打通之前，
 不要承诺"面板 N 秒内出现"，只能说"数分钟内"。
+
+#### R35 重大进展：网络 RX 其实一直是好的（2026-11-18 02:00）
+
+之前所有"RX 不通"的结论都是**误判**。加了寄存器级诊断后真相是：
+
+```
+[NET-DIAG] RCTL=0x04008006 RDH=0x0 RDT=0x1f
+[NET-DIAG] after ping rx0_status=0x00000007   <- DD=1 / EOP=1 / IXSM=1
+```
+
+`rx0_status` 的 DD 位说明**硬件早就把帧写进描述符了**，只是第一次 ping
+在 ARP 应答到达之前就超时退出，计数器仍是 0，于是被当成"收包不通"。
+
+修法：开机自检对网关做最多 6 次 1.5s 的 ping 重试。结果：
+
+```
+[KERN] net: ping OK on attempt 2
+[KERN] net: ping 10.0.2.2 OK
+ tx=7 rx=7 txerr=0          <- rx 从 0 变成 7
+```
+
+**结论：网卡识别(e1000) / 静态地址 10.0.2.15 / ARP / ICMP 收发 全部打通。**
+
+#### 但 TCP 仍不通（bilibili 仍 ERR_CONNECTION_REFUSED）
+
+网络层通了之后，Chromium 打开 `www.bilibili.com`（DNS 用
+`--host-resolver-rules` 映射到 164.52.1.62，宿主机验证该 IP 返回 HTTP/2 200）
+仍然是：
+
+```
+This site can't be reached
+www.bilibili.com refused to connect.     ERR_CONNECTION_REFUSED
+```
+
+同一个 VM 里 `tx=4 rx=4`（包数极少，不足以完成一次 TCP 三次握手）。
+
+所以现在卡在**独立的下一层：TCP 连接建立**，与 ARP/ICMP 无关（后者已验证通过）。
+下一步排查方向：
+1. 用客机自己的 TCP 打宿主 `http://10.0.2.2:8899`（不经过外网），
+   区分是"HBOS TCP 栈有问题"还是"slirp 对外转发有问题"。
+2. 检查 SYN 的源端口/序号、以及 RST 是谁发的（slirp 还是对端）。
