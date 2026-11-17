@@ -1924,3 +1924,44 @@ Chromium 的 `AddressTrackerLinux` 用 netlink（`NETLINK_ROUTE`）枚举网络�
 - `recv` 至少能返回"空"而不报错，或按请求回一个最小可用应答（本机 lo + eth0）。
 
 这既能让 Chromium 的地址跟踪正常工作，也是"网络栈完整度"该补的一块。
+
+
+#### R35 **找到并修掉真正的阻塞点**：`net_tcp_send` 拒绝超过 MSS 的写入（06:10）
+
+一路打点到底，链路终于清楚：
+
+```
+[TCP-SYNACK] from 164.52.1.62:443 connecting=1   ×10   ← 握手包能到
+[TCP-FIN]    sent final ACK for port 443         ×10   ← 我们也补了 ACK
+[SEND]       len=1764  finish=0                        ← Chromium 要发 1764 字节
+[RECV]       0                                          ← 对端一个字节都没回
+```
+
+而 `net_tcp_send` 的开头是：
+
+```c
+if (!conn || !conn->open || !data || len == 0 || len > TCP_MSS) {
+    set_error("bad tcp send");
+    return -1;
+}
+```
+
+**`TCP_MSS = 1460`，而 Chromium 的 TLS ClientHello 是 1764 字节 ——
+第一个握手包就被直接拒绝，所以对端永远收不到 ClientHello，也就永远不回。**
+这解释了此前所有的现象：连接能建、SYN-ACK 能收、最后 ACK 能发、
+但数据一个字节都不流动。
+
+**已修**：`net_tcp_send` 在 `len > TCP_MSS` 时**按 MSS 分段发送**（递归一层，每段 ≤ MSS），
+不再拒绝。实测分段正确：
+
+```
+[TXOK] len=1460 seq=...
+[TXOK] len=304  seq=...(上一条+304)     ← 1460+304 = 1764，正好是 ClientHello 的大小
+```
+
+（`[TXOK]` 里不同 1460 段的 seq 起点接近，是因为那是 10 次独立连接尝试各自的初始序号，
+同一连接内 `+1460`、`+304` 都是对的。）
+
+**教训**：`net_tcp_send` 的"all-or-nothing per call"设计只对它自己的自研 HTTP 客户端成立
+（那边总是小请求），对真实客户端（一次 write 1764 字节）就直接失效了。
+**兼容层不能假设调用方的写入大小。**

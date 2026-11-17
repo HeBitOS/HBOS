@@ -2477,6 +2477,19 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
         }
         c->rst = 1; return 1;
     }
+    if ((flags & 0x12) == 0x12 && !c->synack) {
+        static int sa_dbg;
+        if (sa_dbg < 10) {
+            sa_dbg++;
+            console_puts("[TCP-SYNACK] from ");
+            net_diag_udec((uint64_t)ntohl(ip->src));
+            console_puts(" port ");
+            net_diag_udec((uint64_t)ntohs(tcp->src));
+            console_puts(" connecting=");
+            net_diag_udec((uint64_t)(c->connecting ? 1 : 0));
+            console_puts("\n");
+        }
+    }
     if (c->connecting && (flags & 0x12) == 0x12 && !c->synack) {
         c->ack = seq + 1;
         c->synack = 1;
@@ -2671,6 +2684,15 @@ int net_tcp_finish_connect(net_tcp_conn_t *conn) {
     if (send_tcp(c->mac, c->peer, c->sport, c->dport,
                  c->seq, c->ack, 0x10, win, 0, 0) < 0)
         return -1;
+    {
+        static int fin_ok_dbg;
+        if (fin_ok_dbg < 10) {
+            fin_ok_dbg++;
+            console_puts("[TCP-FIN] sent final ACK for port ");
+            net_diag_udec((uint64_t)c->dport);
+            console_puts("\n");
+        }
+    }
     c->win_adv = win;
     c->connecting = 0;
     c->open = true;
@@ -2716,6 +2738,24 @@ int net_tcp_connect(uint32_t ip, uint16_t port, net_tcp_conn_t *conn) {
  * @return 0 成功，-1 失败
  */
 int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
+    /* 超过 MSS 的写入必须**分段发出**，而不是拒绝。
+     *
+     * 旧实现直接 `len > TCP_MSS -> bad tcp send`。而真实客户端一次 write()
+     * 经常远大于 1460 字节 —— 实测 Chromium 的 TLS ClientHello 是 1764 字节，
+     * 于是第一个握手包就被拒，连接建好也永远发不出数据，最终报
+     * ERR_CONNECTION_RESET（找了很多轮才定位到这里）。
+     * 递归只有一层：分段后每个 chunk <= MSS，不会再进这个分支。 */
+    if (conn && data && len > TCP_MSS) {
+        uint32_t sent = 0;
+        while (sent < len) {
+            uint32_t chunk = len - sent;
+            if (chunk > TCP_MSS) chunk = TCP_MSS;
+            if (net_tcp_send(conn, data + sent, chunk) < 0)
+                return -1;
+            sent += chunk;
+        }
+        return (int)sent;
+    }
     if (!conn || !conn->open || !data || len == 0 || len > TCP_MSS) {
         set_error("bad tcp send");
         return -1;
@@ -2751,6 +2791,17 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
         return -1;
     }
     c->seq += len;
+    {
+        static int tx_ok_dbg;
+        if (tx_ok_dbg < 12) {
+            tx_ok_dbg++;
+            console_puts("[TXOK] len=");
+            net_diag_udec((uint64_t)len);
+            console_puts(" seq=");
+            net_diag_udec((uint64_t)c->seq);
+            console_puts("\n");
+        }
+    }
     conn->seq = c->seq;
     conn->ack = c->ack;
     conn->rx_len = c->rx_len;

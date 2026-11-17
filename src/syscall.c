@@ -5996,6 +5996,22 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                     sockfd, buf, len, flags);
             net_tcp_conn_t *conn = (net_tcp_conn_t *)cur->fd_table->entries[sockfd].node;
             if (!conn) return (uint64_t)(-ENOTCONN);
+            /* 诊断：Chromium 发出去了多少字节、返回什么。 */
+            {
+                static int snd_dbg;
+                if (snd_dbg < 12) {
+                    snd_dbg++;
+                    int fc = net_tcp_finish_connect(conn);
+                    console_puts("[SEND] len=");
+                    { char b[12]; int i2=0; uint64_t v2=len; char t2[12]; int j2=0;
+                      if(!v2) b[i2++]='0';
+                      else { while(v2){t2[j2++]=(char)('0'+v2%10);v2/=10;} while(j2) b[i2++]=t2[--j2]; }
+                      b[i2]=0; console_puts(b); }
+                    console_puts(" finish=");
+                    console_puts(fc == 0 ? "0" : (fc == 1 ? "1" : "-1"));
+                    console_puts("\n");
+                }
+            }
             /* net_tcp_send() returns a status code (0=success, <0=failure),
              * not a byte count -- POSIX send() must return the number of
              * bytes sent on success. It's all-or-nothing per call (any
@@ -6034,6 +6050,27 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 return (uint64_t)(-EINPROGRESS);
             uint32_t recv_len = 0;
             int ret = net_tcp_recv(conn, (uint8_t *)buf, (uint32_t)len, &recv_len, 10);
+            {
+                /* 诊断：Chromium 走的就是这条（recvmsg → linux_message_io →
+                 * HBOS_SYS_RECV）。看它到底收到过多少字节。 */
+                static uint64_t total_rx_dbg;
+                static int dbg_n;
+                if (recv_len && dbg_n < 12) {
+                    dbg_n++;
+                    total_rx_dbg += recv_len;
+                    console_puts("[RECV] got=");
+                    { char b[12]; int i2=0; uint64_t v2=recv_len; char t2[12]; int j2=0;
+                      if(!v2) b[i2++]='0';
+                      else { while(v2){t2[j2++]=(char)('0'+v2%10);v2/=10;} while(j2) b[i2++]=t2[--j2]; }
+                      b[i2]=0; console_puts(b); }
+                    console_puts(" total=");
+                    { char b[20]; int i2=0; uint64_t v2=total_rx_dbg; char t2[20]; int j2=0;
+                      if(!v2) b[i2++]='0';
+                      else { while(v2){t2[j2++]=(char)('0'+v2%10);v2/=10;} while(j2) b[i2++]=t2[--j2]; }
+                      b[i2]=0; console_puts(b); }
+                    console_puts("\n");
+                }
+            }
             if (ret < 0) return (uint64_t)(-ECONNRESET);
             /* 没有数据时必须返回 -EAGAIN，不能返回 0。
              *
