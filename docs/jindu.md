@@ -2001,3 +2001,38 @@ if (!conn || !conn->open || !data || len == 0 || len > TCP_MSS) {
 
 **这一轮把问题从"TCP 层发不出数据"推进到了"TLS 层被服务端拒绝"，
 并且有完整的双向报文级证据。**
+
+
+#### R35 **突破性结论**：HBOS 自己的 HTTPS 完全可用 —— 问题只在 Chromium（07:15）
+
+用 HBOS 自带 shell 的 `curl` 访问同一个站点：
+
+```
+hbos:/# curl -I https://www.bilibili.com/
+（返回完整 HTTP 响应头）
+Cache-Control: no-cache
+X-Cache-Webcdn: BYPASS from blzone03
+```
+
+**这是 bilibili 真实的响应头。** 意味着：
+
+| 层次 | 状态 | 证据 |
+|---|---|---|
+| e1000 驱动 / ARP / ICMP | ✅ | `ping OK on attempt 2`、`tx=7 rx=7` |
+| TCP（含大传输、MSS 分段） | ✅ | 收到 196,607 字节；服务端逐段 ACK 我们全部 1796 字节 ClientHello |
+| **TLS 握手（mbedtls）** | ✅ | **`curl -I https://www.bilibili.com/` 拿到真实响应头** |
+| HTTP 应用层 | ✅ | `wget` 拿到 HTTP 403 / curl 拿到 302 头部 |
+| **Chromium 的 TLS** | ❌ | 服务端 ACK 了 ClientHello 后不发数据直接 FIN |
+
+**所以 HBOS 的网络栈（含 HTTPS）是完整可用的。**
+卡住的是 Chromium 与这个环境之间的配合问题 —— 而 Chromium 用的 TLS 是它**自己内置的
+BoringSSL**，不是系统的 mbedtls。所以差异在于 Chromium 的 ClientHello 里某种
+它特有的扩展/协商参数被服务端拒绝。
+
+**下一步方向（很具体）**：
+1. 比较 HBOS `curl`（mbedtls）与 Chromium（BoringSSL）的 ClientHello 差异 ——
+   重点看 SNI、ALPN、supported_groups、signature_algorithms、以及
+   Chromium 默认带的 GREASE / ECH / 大 padding 等扩展；
+2. 试 `--disable-features=...` 或降级开关，逐个排除 Chromium 特有的扩展；
+3. 也可以先试 http（非 TLS）站点验证 Chromium 的明文路径 —— 之前 `http://164.52.1.62/`
+   是停在 Loading，需要复查那条路径（当时还没修 MSS 分段）。
