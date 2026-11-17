@@ -13,6 +13,23 @@ static uint64_t lapic_base_phys;
 static volatile uint32_t *lapic_base;
 static spinlock_t sched_lock;
 
+/* 每核最近的调度锁操作轨迹：记录 (0=lock / 1=unlock, 调用者返回地址)。
+ * 死锁时把持有者的轨迹打出来，就能直接看到是哪次加锁之后没有配对释放。 */
+#define LOCK_TRACE_N 16
+typedef struct { uint8_t op; uint64_t ra; } lock_trace_t;
+static lock_trace_t g_lock_trace[MAX_CPUS][LOCK_TRACE_N];
+static uint8_t g_lock_trace_pos[MAX_CPUS];
+
+static void lock_trace_push(int c, uint8_t op, uint64_t ra) {
+    if (c < 0 || c >= MAX_CPUS) return;
+    uint8_t p = g_lock_trace_pos[c];
+    g_lock_trace[c][p].op = op;
+    g_lock_trace[c][p].ra = ra;
+    g_lock_trace_pos[c] = (uint8_t)((p + 1) & (LOCK_TRACE_N - 1));
+}
+
+
+
 #define TRAMPOLINE_ADDR 0x8000
 #define TRAMPOLINE_STACK_SIZE 4096
 
@@ -43,11 +60,6 @@ volatile uint64_t g_last_rip[MAX_CPUS];
 void spinlock_acquire(spinlock_t *lock) {
     uint32_t spins = 0;
     int me_idx = smp_cpu_index();
-    /* 同核重入：持有者就是自己，直接加深计数返回（不自旋）。 */
-    if (lock->holder == (int32_t)lapic_get_id() + 1) {
-        lock->depth++;
-        return;
-    }
     if (me_idx < 0 || me_idx >= MAX_CPUS) me_idx = 0;
     while (__sync_lock_test_and_set(&lock->lock, 1)) {
         g_wait_lock[me_idx] = (uintptr_t)lock;
@@ -56,42 +68,20 @@ void spinlock_acquire(spinlock_t *lock) {
             spinlock_dump_udec((uint64_t)(uintptr_t)lock);
             console_puts(" holder_cpu=");
             spinlock_dump_udec(lock->holder > 0 ? (uint64_t)(lock->holder - 1) : 0xFFFFFFFFu);
-            console_puts(" me_cpu=");
-            spinlock_dump_udec((uint64_t)smp_cpu_index());
-            console_puts(" sched_lock=");
-            spinlock_dump_udec((uint64_t)(uintptr_t)&sched_lock);
-            console_puts(" holder_rip=");
-            {
-                int hc2 = lock->holder > 0 ? (lock->holder - 1) : -1;
-                spinlock_dump_udec((hc2 >= 0 && hc2 < MAX_CPUS) ? g_last_rip[hc2] : 0);
-            }
-            console_puts(" holder_waiting_on=");
-            {
-                int hc = lock->holder > 0 ? (lock->holder - 1) : -1;
-                uintptr_t w = (hc >= 0 && hc < MAX_CPUS) ? g_wait_lock[hc] : 0;
-                spinlock_dump_udec((uint64_t)w);
-            }
             console_puts("\n");
         }
         __asm__ volatile("pause");
     }
     g_wait_lock[me_idx] = 0;
     lock->holder = (int32_t)lapic_get_id() + 1;
-    lock->depth = 1;
     __asm__ volatile("" ::: "memory");
 }
 
 void spinlock_release(spinlock_t *lock) {
     __asm__ volatile("" ::: "memory");
-    /* 无条件彻底释放。
-     * 之前按深度"只有最外层才让出"会在跨上下文切换时泄漏持有
-     * （加锁与解锁不一定由同一个执行流完成）：实测 AP 会持着调度锁
-     * 停在 task_idle_entry 的 `sti; hlt` 上，BSP 随后永久自旋。 */
-    lock->depth = 0;
     lock->holder = 0;
     lock->lock = 0;
 }
-
 static uint32_t lapic_read(uint32_t offset) {
     return *(volatile uint32_t *)((uint8_t *)lapic_base + offset);
 }
@@ -198,9 +188,21 @@ void smp_sched_lock(void) {
     spinlock_acquire(&sched_lock);
 }
 
+/**
+ * @brief 本核当前是否持有调度锁
+ *
+ * 用于"进入 hlt 之前"的防御性检查：持锁 hlt 会让另一个核永久自旋，
+ * 整机停摆（实测 -smp 2 下 AP 就停在 task_idle_entry 的 sti;hlt 上，
+ * 手里还攥着 sched_lock）。
+ */
+int smp_sched_owned_by_me(void) {
+    return sched_lock.holder == (int32_t)lapic_get_id() + 1;
+}
+
 void smp_sched_unlock(void) {
     int c = smp_cpu_index();
     if (c < 0 || c >= MAX_CPUS) c = 0;
+    lock_trace_push(c, 1, (uint64_t)(uintptr_t)__builtin_return_address(0));
     spinlock_release(&sched_lock);
     if (sched_lock_depth[c] > 0 && --sched_lock_depth[c] == 0 && sched_lock_if[c])
         __asm__ volatile("sti" ::: "memory");

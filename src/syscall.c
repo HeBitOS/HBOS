@@ -5075,6 +5075,29 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
              * "/proc/self/exe",dirname 得到 /proc/self,icudtl.dat 与
              * *.pak 全部 ENOENT。 */
             elf_set_exec_path(exec_target);
+            /* 单核 + 软件渲染下，plasmashell 会和 Chromium/光栅化抢时间片，
+             * 实测面板要 400~600 秒才画出来。这里在内核侧直接给它最高
+             * 优先级（HBOS 的 task_set_priority 中 0 最高），
+             * 让面板尽早合成出来。setpriority(141) 目前仍是空实现，
+             * 用户态没法自己设，所以只能在这里做。 */
+            {
+
+                const char *nm = exec_target;
+                int is_plasma = 0;
+                while (*nm) {
+                    if (nm[0]=='p'&&nm[1]=='l'&&nm[2]=='a'&&nm[3]=='s'&&nm[4]=='m'&&
+                        nm[5]=='a'&&nm[6]=='s'&&nm[7]=='h'&&nm[8]=='e'&&nm[9]=='l'&&
+                        nm[10]=='l') { is_plasma = 1; break; }
+                    nm++;
+                }
+                if (is_plasma) {
+                    extern void task_set_priority(task_t *, uint8_t);
+                    extern task_t *task_current(void);
+                    task_t *cur = task_current();
+                    if (cur) task_set_priority(cur, 0);
+                    console_puts("[PRIO] boost plasmashell -> 0\n");
+                }
+            }
             int ret = elf64_load_vfs_and_exec(node, argv, envp);
             if (ret < 0) {
                 /* 走到这里说明文件找到了、但加载失败（缺段/缺解释器/栈布局

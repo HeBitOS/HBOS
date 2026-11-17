@@ -1396,3 +1396,71 @@ mov edx,0x8c9            → 行号 2249
 
 下一步优先级：先查 zygote 为何不 fork renderer（`ZygoteHostImpl` 那条
 `kZygoteMagic` 握手 / `pid_fd` 通道），那是出窗口的前置条件。
+
+---
+
+### R35（KDE 桌面可用化：计划与执行记录）
+
+本节是**可执行计划**，按顺序做，每项都有验收口径。执行情况就地打勾。
+
+#### 已确证的现状（有实测证据，不是推测）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| KDE 面板 + Konsole + Chromium 同屏 | ✅ | `docs/evidence/THREE-ON-SCREEN-panel-konsole-chromium.png` |
+| 面板从点击到出现 | ⏱ 400~600 秒 | 多次采样：s400 panel=100% |
+| `-smp 1` | ✅ 稳定 | serial 283KB、plasmashell 正常启动 138 次 |
+| `-smp 2` | ❌ 未通 | `[SPIN-STUCK] lock==&sched_lock holder_cpu=1`，AP 持锁不放 |
+| 壁纸 | ⚠ 纯色 | `org.kde.color` #1d99f3；`org.kde.image` 的 Image 未落进 containment |
+| Chromium 联网 | ❌ | e1000 `tx=3 rx=0`（RX 不通）＋ socket 层无 UDP（无 DNS） |
+| GPU | 🚫 不做 | `docs/gpu-plan.md`：整帧拷贝 0.43ms/帧，瓶颈不在拷贝 |
+
+#### 计划（按优先级，做完一项打勾）
+
+- [ ] **T1 稳定性回归基线**：`-smp 1` 连续 2 次启动，面板都能在 600s 内出现；
+      记录每次的时间线到 `build/tmp/r35/T1-*.log`。
+- [ ] **T2 缩短出面板时间**：目标是 **≤ 180 秒**。
+      手段（按性价比，逐个 A/B）：
+      a) 把 `kde_session.sh` 里 Chromium 的启动改为**面板出现后**（用轮询文件是否存在，
+         不用 `sleep`/`read -t`，二者在 HBOS 上都不可靠 —— 已实测）；
+      b) 减少首屏 plasmoid（Kickoff 的 `libkickerplugin.so` 加载很重）；
+      c) 给 plasmashell 提优先级（内核里 `setpriority` 目前是空实现，接上
+         `task_set_priority`）。
+- [ ] **T3 壁纸真实渲染**：让 `org.kde.image` 的 `Image` 真正落进
+      `[Containments][N][Wallpaper][org.kde.image][General]`。
+      验收：桌面区域出现可辨认的 Next 壁纸（非纯色），截图存 `docs/evidence/`。
+- [ ] **T4 Konsole 可用**：终端里出现 `root@hbos:/#` 并能敲命令回显。
+      验收：截图 + 一次 `echo hi` 的回显。
+- [ ] **T5 `-smp 2` 打通**：见下面的"锁交接"问题描述。
+      验收：`-smp 2` 下能进 KDE 且无 `SPIN-STUCK`。
+- [ ] **T6 网络收包**：e1000 RX 从 0 变成能收到 ARP 应答（`rx>0`）。
+      验收：`[KERN] net: ping 10.0.2.2 OK`。
+- [ ] **T7 交付收口**：`make run-kde` 一键可用、镜像幂等打包、
+      `docs/kde-chromium.md` 与本节同��更新、提交推送。
+
+#### T5 的技术结论（留给下一轮，别重走弯路）
+
+已排除：中断重入（已关中断）、丢唤醒（已加自愈补队）、TLB（已补 shootdown）、
+idle 误用（已修）、ABBA（持锁者 `waiting_on=0`）。
+
+确证：`[SPIN-STUCK]` 打印出的 `lock` 与 `&sched_lock` **地址相同**，
+`holder_cpu=1`（AP），`holder_rip` 解析为 `task_idle_entry`。
+即 **AP 在持有调度锁的状态下停在 `task_idle_entry` 的 `sti; hlt`**。
+
+结论：这是 `task_switch` 的**锁交接语义**问题 —— 加锁与解锁不在同一执行流完成，
+跨上下文切换时会漏释放。正确做法是把"谁来解锁"写成明确契约：
+进入方（新任务的 trampoline）负责释放一次，且任何 `hlt` 之前断言"未持锁"。
+这是定向改造 `task_switch` / `task_entry_trampoline` / `task_idle_entry` 三处，
+不是继续加探测。
+
+#### 反向教训（避免明天重复踩）
+
+1. `read -t` 在 HBOS 上**不产生延时**（实测 plasmashell 与 chromium 只差 19ms）；
+   `sleep` 会挂死会话。要在客机里等，只能轮询文件/时间。
+2. `plasma_waitforname → true` 会让 plasmashell 抢在 D-Bus 就绪前启动，
+   结果只提交 1 帧、屏幕全黑 —— **已回滚，别再试**。
+3. 手写 Plasma 配置会让面板消失（上百次 `inaccessible config location`）。
+4. `kde_session.sh` 里调外部命令（`cp`/`mkdir`/`cat`）会让父 shell 停住，
+   后续组件全都不启动。
+5. `spinlock` 加"同核重入/强制释放"这类改动会**掩盖**真实泄漏并制造新问题
+   （实测 AP 出现连续 16 次无配对解锁）—— 已回滚为朴素实现。

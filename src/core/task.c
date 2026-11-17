@@ -658,6 +658,14 @@ static void task_idle_entry(void *arg) {
     (void)arg;
     for (;;) {
         task_schedule();
+        /* 绝不能持着调度锁去 hlt：另一个核会在这把锁上永久自旋。
+         * 若 task_schedule 的某条路径把锁留在了手里（跨上下文切换时
+         * 加/解锁不配平），这里强制放开。 */
+        {
+            extern int smp_sched_owned_by_me(void);
+            extern void smp_sched_unlock(void);
+            if (smp_sched_owned_by_me()) smp_sched_unlock();
+        }
         __asm__ volatile("sti; hlt");
     }
 }
