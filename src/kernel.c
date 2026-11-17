@@ -180,7 +180,47 @@ void kmain(void *mbi) {
         if (ncfg == 0) {
             serial_print("[KERN] net: ip 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3\n");
             extern int net_ping(uint32_t ip, uint32_t timeout_ms);
-            int pong = net_ping(gw, 4000);
+            /* 网络自检：ping 之前/之后把 e1000 的接收状态打出来。
+             * rx 一直是 0 时，必须区分"硬件没写描述符"和"写了但没取"。 */
+            {
+                extern uint32_t net_e1000_reg(uint32_t off);
+                extern uint32_t net_e1000_rx0_status(void);
+                serial_print("[NET-DIAG] RCTL=0x");
+                { uint32_t v = net_e1000_reg(0x0100); char b[16]; int i=0;
+                  const char *hx="0123456789abcdef";
+                  for (int sh=28; sh>=0; sh-=4) b[i++]=hx[(v>>sh)&0xF];
+                  b[i]=0; serial_print(b); }
+                serial_print(" RDH=0x");
+                { uint32_t v = net_e1000_reg(0x2810); char b[16]; int i=0;
+                  const char *hx="0123456789abcdef";
+                  for (int sh=28; sh>=0; sh-=4) b[i++]=hx[(v>>sh)&0xF];
+                  b[i]=0; serial_print(b); }
+                serial_print(" RDT=0x");
+                { uint32_t v = net_e1000_reg(0x2818); char b[16]; int i=0;
+                  const char *hx="0123456789abcdef";
+                  for (int sh=28; sh>=0; sh-=4) b[i++]=hx[(v>>sh)&0xF];
+                  b[i]=0; serial_print(b); }
+                serial_print("\n");
+            }
+            /* 重试多次：硬件确认能收到帧（rx0_status 的 DD=1），
+             * 但第一次 ping 常在 ARP 应答到达前就超时了（单核、软件栈）。 */
+            int pong = -1;
+            for (int attempt2 = 0; attempt2 < 6; attempt2++) {
+                pong = net_ping(gw, 1500);
+                if (pong == 0) {
+                    serial_print("[KERN] net: ping OK on attempt ");
+                    { char b[4]; b[0]=(char)('1'+attempt2); b[1]=0; serial_print(b); }
+                    serial_print("\n");
+                    break;
+                }
+            }
+            extern uint32_t net_e1000_rx0_status(void);
+            serial_print("[NET-DIAG] after ping rx0_status=0x");
+            { uint32_t v = net_e1000_rx0_status(); char b[16]; int i=0;
+              const char *hx="0123456789abcdef";
+              for (int sh=28; sh>=0; sh-=4) b[i++]=hx[(v>>sh)&0xF];
+              b[i]=0; serial_print(b); }
+            serial_print("\n");
             serial_print(pong == 0 ? "[KERN] net: ping 10.0.2.2 OK\n"
                                    : "[KERN] net: ping 10.0.2.2 FAIL\n");
             /* 收发计数：区分"没发出去" / "发了没回" / "回了没收到" */

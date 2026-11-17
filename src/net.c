@@ -3390,3 +3390,7 @@ int net_tcp_accept(uint16_t port, net_tcp_conn_t *conn,
     p->in_use = 0;
     return 0;
 }
+
+/* ---- 网络自检用的只读探针（供开机诊断打印 e1000 状态） ---- */
+uint32_t net_e1000_reg(uint32_t off) { return reg_read(off); }
+uint32_t net_e1000_rx0_status(void) { return (uint32_t)rx_desc[0].status; }
