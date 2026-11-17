@@ -126,6 +126,11 @@ typedef struct {
     /* 调试用持有者记录：0 表示无人持有，否则是 (CPU 号 + 1)。
      * 仅用于死锁定位（spinlock_acquire 自旋超限时打印），不参与同步逻辑。 */
     volatile int32_t holder;
+    /* 同核重入深度：同一 CPU 再次 acquire 时不自旋，直接计数返回。
+     * 自旋锁本身不可重入，一旦某条路径在持锁期间又走到 acquire，
+     * 该核就会永久自旋并霸占锁（实测 -smp 2 下 AP 卡在 task_idle_entry
+     * 就是这个形态，BSP 随后死等）。 */
+    volatile uint32_t depth;
 } spinlock_t;
 
 void smp_init(void);

@@ -1026,10 +1026,37 @@ static void sched_print_hex(uint64_t v) {
     }
 }
 
+/**
+ * @brief 自愈：把"已就绪但不在任何队列里"的任务重新入队
+ *
+ * 实测 -smp 2 下会出现 state=READY 且 snode.queued=0 的任务 —— 它既不在
+ * 队列里、也不在实际运行，于是永远选不到，整机停摆（调度快照里
+ * q[0]=q[1]=0 但仍有 READY 任务）。
+ * 维护不变量比追查每一处破坏点更可靠，所以队列空时统一扫一遍补回去。
+ *
+ * @return 补回队列的任务数
+ */
+static int sched_requeue_orphans(void) {
+    int fixed = 0;
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &task_pool[i];
+        if (t == current_task) continue;
+        if (t->state != TASK_READY || t->snode.queued) continue;
+        if (t->cpu >= MAX_CPUS) t->cpu = 0;
+        (void)schedq_push(&cpu_ready[t->cpu], &t->snode, t->prio);
+        fixed++;
+    }
+    return fixed;
+}
+
 static task_t *sched_pick_valid(void) {
     for (;;) {
         task_t *next = sched_next();
-        if (!next) return NULL;
+        if (!next) {
+            /* 队列空：先补回"就绪但漏排队"的任务，再试一次。 */
+            if (sched_requeue_orphans()) continue;
+            return NULL;
+        }
         if (sched_context_valid(next)) return next;
         console_puts("\n[SCHED] BAD CTX id=");
         sched_print_hex(next->id);
@@ -1319,6 +1346,33 @@ void task_exit(void) {
              * 正确做法是**原地 idle**：放掉调度锁、开中断、hlt，
              * 等下一个中断让别的任务变成就绪，再回来选。
              * 直接停机等于永久少一个 CPU（BSP 停了整机就死了）。 */
+            /* 诊断：连续多次找不到可运行任务时，把任务表与各核队列打一次，
+             * 看清"到底谁在等、谁本该跑"。只在饿死时触发一次，不影响时序。 */
+            {
+                static int idle_rounds;
+                if (++idle_rounds == 400) {
+                    console_puts("\n[SCHED-DUMP] my_cpu=");
+                    sched_print_hex((uint64_t)my_cpu());
+                    console_puts(" tasks=");
+                    sched_print_hex((uint64_t)task_count);
+                    console_puts("\n");
+                    for (int i = 0; i < task_count; i++) {
+                        task_t *t = &task_pool[i];
+                        console_puts("  id="); sched_print_hex(t->id);
+                        console_puts(" st="); sched_print_hex((uint64_t)t->state);
+                        console_puts(" cpu="); sched_print_hex((uint64_t)t->cpu);
+                        console_puts(" par="); sched_print_hex((uint64_t)t->parent_id);
+                        console_puts(" q="); sched_print_hex((uint64_t)t->snode.queued);
+                        console_puts(" name="); console_puts(t->name);
+                        console_puts("\n");
+                    }
+                    for (int c = 0; c < smp_cpu_count() && c < MAX_CPUS; c++) {
+                        console_puts("  q["); sched_print_hex((uint64_t)c);
+                        console_puts("]="); sched_print_hex((uint64_t)schedq_count(&cpu_ready[c]));
+                        console_puts("\n");
+                    }
+                }
+            }
             smp_sched_unlock();
             __asm__ volatile("sti; hlt");
             smp_sched_lock();

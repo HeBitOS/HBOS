@@ -1257,6 +1257,12 @@ uint64_t pit_get_ticks(void) {
 }
 
 void irq_handler(isr_regs_t *regs) {
+    {
+        extern volatile uint64_t g_last_rip[];
+        extern int smp_cpu_index(void);
+        int c = smp_cpu_index();
+        if (c >= 0 && c < 8) g_last_rip[c] = regs->rip;
+    }
     /* SMP：AP 的 LAPIC 定时器。它不走 8259，所以必须在这里分出去，
      * 否则会落到下面按 PIC 的 irq 号发 EOI，等于往串口/键盘的端口上
      * 乱写。 */

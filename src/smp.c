@@ -34,26 +34,60 @@ static void spinlock_dump_udec(uint64_t v) {
     console_puts(b);
 }
 
+/* 每个核当前正在等待的锁地址（0 = 没在等）。
+ * 死锁时把它和 holder 一起打出来，就能直接看到 ABBA 的另一半。 */
+static volatile uintptr_t g_wait_lock[MAX_CPUS];
+/* 每核在中断里记录"最后已知 RIP"：死锁时能看出那个核卡在哪段代码。 */
+volatile uint64_t g_last_rip[MAX_CPUS];
+
 void spinlock_acquire(spinlock_t *lock) {
     uint32_t spins = 0;
+    int me_idx = smp_cpu_index();
+    /* 同核重入：持有者就是自己，直接加深计数返回（不自旋）。 */
+    if (lock->holder == (int32_t)lapic_get_id() + 1) {
+        lock->depth++;
+        return;
+    }
+    if (me_idx < 0 || me_idx >= MAX_CPUS) me_idx = 0;
     while (__sync_lock_test_and_set(&lock->lock, 1)) {
+        g_wait_lock[me_idx] = (uintptr_t)lock;
         if (++spins == 80000000u) {
             console_puts("\n[SPIN-STUCK] lock=");
             spinlock_dump_udec((uint64_t)(uintptr_t)lock);
             console_puts(" holder_cpu=");
             spinlock_dump_udec(lock->holder > 0 ? (uint64_t)(lock->holder - 1) : 0xFFFFFFFFu);
             console_puts(" me_cpu=");
-            spinlock_dump_udec((uint64_t)lapic_get_id());
+            spinlock_dump_udec((uint64_t)smp_cpu_index());
+            console_puts(" sched_lock=");
+            spinlock_dump_udec((uint64_t)(uintptr_t)&sched_lock);
+            console_puts(" holder_rip=");
+            {
+                int hc2 = lock->holder > 0 ? (lock->holder - 1) : -1;
+                spinlock_dump_udec((hc2 >= 0 && hc2 < MAX_CPUS) ? g_last_rip[hc2] : 0);
+            }
+            console_puts(" holder_waiting_on=");
+            {
+                int hc = lock->holder > 0 ? (lock->holder - 1) : -1;
+                uintptr_t w = (hc >= 0 && hc < MAX_CPUS) ? g_wait_lock[hc] : 0;
+                spinlock_dump_udec((uint64_t)w);
+            }
             console_puts("\n");
         }
         __asm__ volatile("pause");
     }
+    g_wait_lock[me_idx] = 0;
     lock->holder = (int32_t)lapic_get_id() + 1;
+    lock->depth = 1;
     __asm__ volatile("" ::: "memory");
 }
 
 void spinlock_release(spinlock_t *lock) {
     __asm__ volatile("" ::: "memory");
+    /* 无条件彻底释放。
+     * 之前按深度"只有最外层才让出"会在跨上下文切换时泄漏持有
+     * （加锁与解锁不一定由同一个执行流完成）：实测 AP 会持着调度锁
+     * 停在 task_idle_entry 的 `sti; hlt` 上，BSP 随后永久自旋。 */
+    lock->depth = 0;
     lock->holder = 0;
     lock->lock = 0;
 }
@@ -141,12 +175,35 @@ void smp_ap_timer_start(void) {
     lapic_write(LAPIC_TIMER_INIT, 200000);
 }
 
+/* 调度锁必须"关中断 + 加锁"一起做：
+ *
+ * 只加锁不关中断时，AP 拿到锁之后自己的 LAPIC 定时器中断会打进来，
+ * 而中断处理里又会调 task_schedule() → 再次 smp_sched_lock() →
+ * **同一个核自死锁**，锁永远不释放，另一个核只能一直自旋。
+ * 实测表现就是 -smp 2 下 `[SPIN-STUCK] lock=... holder_cpu=1 me_cpu=0`
+ * 刷屏、整机停摆。
+ *
+ * 用 per-CPU 深度计数支持嵌套，退出时只在最外层恢复中断状态。 */
+static uint8_t sched_lock_if[MAX_CPUS];
+static uint8_t sched_lock_depth[MAX_CPUS];
+
 void smp_sched_lock(void) {
+    int c = smp_cpu_index();
+    if (c < 0 || c >= MAX_CPUS) c = 0;
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile("cli" ::: "memory");
+    if (sched_lock_depth[c]++ == 0)
+        sched_lock_if[c] = (flags & 0x200) ? 1 : 0;   /* IF 位 */
     spinlock_acquire(&sched_lock);
 }
 
 void smp_sched_unlock(void) {
+    int c = smp_cpu_index();
+    if (c < 0 || c >= MAX_CPUS) c = 0;
     spinlock_release(&sched_lock);
+    if (sched_lock_depth[c] > 0 && --sched_lock_depth[c] == 0 && sched_lock_if[c])
+        __asm__ volatile("sti" ::: "memory");
 }
 
 static volatile int aps_ready;
