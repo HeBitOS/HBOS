@@ -1685,3 +1685,34 @@ saved 164.52.1.62 (HTTP 403)         <- 真实外网！TCP 连上并拿到 HTTP 
 下一步建议：在 Chromium 的 network service 进程里看它卡在哪个 syscall
 （serial 里已有 `[LINUX_SYSCALL] unimplemented` 与 `[FDERR]` 类日志），
 重点查 `poll` 是否把 AF_INET socket 的可读事件漏报。
+
+
+#### R35 bilibili 再进一步：DNS 挂起已解决，错误推进到 ERR_CONNECTION_RESET（03:20）
+
+给 Chromium 的 `--host-resolver-rules` 末尾加了 `MAP * ~NOTFOUND`，
+使所有未映射域名**立即失败**而不是去查 DNS；并关掉它自己的联网探测
+（`--disable-background-networking` / `--disable-component-update` /
+`--disable-domain-reliability` / `--disable-sync` / `--no-pings`）。
+
+**效果（serial 实证）**：
+```
+修前： [CONN] dst=10.0.2.3 port=53   ×12 次（TCP 打 DNS，slirp 不应答 → 永久挂起）
+修后： port=53 出现次数 = 0
+       [CONN] dst=164.52.1.62 port=443   ← 直连 bilibili HTTPS
+       [CONN] connect_start ret=0        ← 连接建立成功
+```
+
+**错误类型的三段推进**（每一步都有截图/日志）：
+| 阶段 | 表现 |
+|---|---|
+| 最初 | `DNS_PROBE_FINISHED_NO_INTERNET` |
+| 加 host-resolver-rules 后 | `ERR_CONNECTION_REFUSED` |
+| 本轮修掉 DNS 挂起后 | **`ERR_CONNECTION_RESET`** |
+
+所以现在卡在**数据阶段**：connect 成功、但 TLS 握手期间收到 RST。
+已知 HBOS 自己的 wget 对 `http://164.52.1.62/` 是**能拿到完整 HTTP 响应**的
+（HTTP 403），说明小请求的收发是通的；怀疑与**较大的多段交互**
+（TLS ClientHello/ServerHello 往返、窗口/序号推进）有关。
+
+下一步：抓 `net_tcp_recv/send` 在 TLS 握手期间的行为，重点看
+序号推进、窗口通告与 RST 的触发点（是对方发的还是我们发的）。

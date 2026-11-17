@@ -3272,6 +3272,14 @@ static int64_t linux_socket_io_read(int fd, void *buffer, size_t count) {
     uint32_t got = 0;
     int ret = net_tcp_recv(conn, (uint8_t *)buffer, (uint32_t)count, &got, 10);
     if (ret < 0) return -ECONNRESET;
+    /* 没有数据时必须返回 -EAGAIN，而不是 0。
+     *
+     * 在 Linux 语义里 recv() 返回 0 表示"对端已优雅关闭"。这里返回 0 会让
+     * Chromium 认为响应体已经结束（或连接被关闭），表现就是页面永远停在
+     * "Loading..." / 空白 —— 实测 http://164.52.1.62/ 一直转圈，而同一台
+     * 机器上 HBOS 自带的 wget 对同一地址秒回 HTTP 403。
+     * 正确做法：无数据 → -EAGAIN，让调用方继续 poll 等待。 */
+    if (got == 0) return -EAGAIN;
     return (int64_t)got;
 }
 
@@ -5875,11 +5883,38 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             uint16_t port = ((uint16_t)addr_bytes[2] << 8) | addr_bytes[3];
             net_tcp_conn_t *conn = (net_tcp_conn_t *)kmalloc(sizeof(net_tcp_conn_t));
             if (!conn) return (uint64_t)(-ENOMEM);
+            /* 诊断：确认 Chromium 到底有没有发起 AF_INET connect、结果如何。
+             * 限前 12 次，避免刷屏。 */
+            {
+                static int conn_dbg;
+                if (conn_dbg < 12) {
+                    conn_dbg++;
+                    console_puts("[CONN] dst=");
+                    trace_put_udec(((uint32_t)addr_bytes[4] << 24) |
+                                   ((uint32_t)addr_bytes[5] << 16) |
+                                   ((uint32_t)addr_bytes[6] << 8) |
+                                   (uint32_t)addr_bytes[7]);
+                    console_puts(" port=");
+                    trace_put_udec((uint64_t)(((uint16_t)addr_bytes[2] << 8) | addr_bytes[3]));
+                    console_puts(" nonblock=");
+                    console_puts((cur->fd_table->entries[sockfd].flags & O_NONBLOCK) ? "1" : "0");
+                    console_puts("\n");
+                }
+            }
             if (cur->fd_table->entries[sockfd].flags & O_NONBLOCK) {
                 /* 非阻塞 connect：发 SYN 立即返回 EINPROGRESS，连接在
                  * 槽里推进；poll POLLOUT / getsockopt(SO_ERROR) / send 会
                  * 调 net_tcp_finish_connect 完成收尾。 */
                 int r2 = net_tcp_connect_start(ip, port, conn);
+                {
+                    static int r2_dbg;
+                    if (r2_dbg < 12) {
+                        r2_dbg++;
+                        console_puts("[CONN] connect_start ret=");
+                        trace_put_udec((uint64_t)(int64_t)r2);
+                        console_puts("\n");
+                    }
+                }
                 if (r2 < 0) {
                     kfree(conn);
                     return (uint64_t)(-ECONNREFUSED);
