@@ -393,6 +393,11 @@ static int on_evdev_kbd(int fd, uint32_t mask, void *data) {
     (void)mask; (void)data;
     struct input_event ev;
     while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+        if (ev.type == EV_KEY) {
+            /* 诊断：确认按键事件是否真的到达这里（键鼠交互链的第一环）。 */
+            fprintf(stderr, "HBOS_WL_FB_KEY code=%u val=%d kbd_res=%p\n",
+                    (unsigned)ev.code, (int)ev.value, (void *)g_kbd_res);
+        }
         if (ev.type == EV_KEY && g_kbd_res) {
             uint32_t mod = keycode_to_xkb_mod(ev.code);
             if (mod) {

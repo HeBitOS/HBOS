@@ -156,6 +156,28 @@ void int_enable(void);
 void int_disable(void);
 
 void kb_irq_enqueue_scancode(uint8_t sc) {
+    /* 同时把按键注入 evdev（/dev/input/event0）。
+     *
+     * 之前 `evdev_inject_key()` 在整个内核里**零调用**，所以 event0 的
+     * 事件队列永远是空的：Wayland 服务端 hbos_wl_fb 读不到任何按键，
+     * KDE 里键盘完全没反应（实测 `HBOS_WL_FB_KEY` 计数为 0）。
+     * 控制台/开机菜单走的是下面这个原始扫描码环形缓冲，所以它们一直是好的。
+     *
+     * 映射：set1 扫描码去掉 break 位就是 Linux evdev 键码
+     * （0x1E -> KEY_A=30）；0xE0 前缀表示扩展键，这里做粗映射。 */
+    {
+        static uint8_t extended;
+        extern int evdev_inject_key(uint32_t dev, uint16_t code, int32_t value);
+        if (sc == 0xE0) {
+            extended = 1;
+        } else if (sc != 0xE1) {
+            uint16_t code = (uint16_t)(sc & 0x7F);
+            if (extended) code = (uint16_t)(code + 0x60);
+            (void)evdev_inject_key(0, code, (sc & 0x80) ? 0 : 1);
+            extended = 0;
+        }
+    }
+
     uint8_t next = (uint8_t)((kb_raw_head + 1) & 63);
     if (next == kb_raw_tail) return;
     kb_raw_queue[kb_raw_head] = sc;

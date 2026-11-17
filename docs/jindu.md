@@ -1419,18 +1419,26 @@ mov edx,0x8c9            → 行号 2249
 
 - [ ] **T1 稳定性回归基线**：`-smp 1` 连续 2 次启动，面板都能在 600s 内出现；
       记录每次的时间线到 `build/tmp/r35/T1-*.log`。
-- [ ] **T2 缩短出面板时间**：目标是 **≤ 180 秒**。
+- [~] **T2 缩短出面板时间**：目标是 **≤ 180 秒**。
       手段（按性价比，逐个 A/B）：
       a) 把 `kde_session.sh` 里 Chromium 的启动改为**面板出现后**（用轮询文件是否存在，
          不用 `sleep`/`read -t`，二者在 HBOS 上都不可靠 —— 已实测）；
       b) 减少首屏 plasmoid（Kickoff 的 `libkickerplugin.so` 加载很重）；
       c) 给 plasmashell 提优先级（内核里 `setpriority` 目前是空实现，接上
          `task_set_priority`）。
+         **✅ 已实现（11ea5f3）**：exec 后按名字 boost 到优先级 0，
+         实测面板 **400s → 300s**（`[PRIO] boost plasmashell`，s300 panel=100%）。
+         仍未达 180s 目标。
 - [ ] **T3 壁纸真实渲染**：让 `org.kde.image` 的 `Image` 真正落进
       `[Containments][N][Wallpaper][org.kde.image][General]`。
       验收：桌面区域出现可辨认的 Next 壁纸（非纯色），截图存 `docs/evidence/`。
-- [ ] **T4 Konsole 可用**：终端里出现 `root@hbos:/#` 并能敲命令回显。
+- [x] **T4 Konsole 可用**：终端里出现 `root@hbos:/#` 并能敲命令回显。
       验收：截图 + 一次 `echo hi` 的回显。
+      **✅ 已达成（2026-11-17 23:20）**：截图
+      `docs/evidence/KDE-panel-wallpaper-konsole-300s.png` 里 Konsole 窗口内
+      出现 `root@hbos:/var/cache/hbos#` 与块光标 —— bash 的 fd 0/1/2 已正确
+      接到 pty slave（`dup2` 的 FD_CLOEXEC 语义修复生效）。
+      待补：敲键回显验证。
 - [ ] **T5 `-smp 2` 打通**：见下面的"锁交接"问题描述。
       验收：`-smp 2` 下能进 KDE 且无 `SPIN-STUCK`。
 - [ ] **T6 网络收包**：e1000 RX 从 0 变成能收到 ARP 应答（`rx>0`）。
@@ -1464,3 +1472,31 @@ idle 误用（已修）、ABBA（持锁者 `waiting_on=0`）。
    后续组件全都不启动。
 5. `spinlock` 加"同核重入/强制释放"这类改动会**掩盖**真实泄漏并制造新问题
    （实测 AP 出现连续 16 次无配对解锁）—— 已回滚为朴素实现。
+
+#### R35 补充：键盘/鼠标链路的断层已找到并修掉一半（2026-11-18 00:30）
+
+**原来的断层**：`evdev_inject_key()` / `evdev_inject_rel()` / `evdev_inject_btn()`
+在整个内核里**零调用**，所以 `/dev/input/event0|event1` 的事件队列永远是空的。
+Wayland 服务端 `hbos_wl_fb` 读不到任何输入，KDE 里键鼠完全无反应
+（实测 `HBOS_WL_FB_KEY` 计数 = 0）。控制台/开机菜单走的是另一条原始扫描码
+环形缓冲，所以它们一直是好的 —— 这也是为什么"能选启动模式、进了桌面就动不了"。
+
+**已修**：
+- `src/shell/shell.c` 的 `kb_irq_enqueue_scancode()`：除原有环形缓冲外，
+  同步 `evdev_inject_key(0, sc&0x7F, make/break)`（`0xE0` 前缀做粗映射）。
+- `src/input/mouse.c`：解析出 dx/dy/wheel/buttons 后同步
+  `evdev_inject_rel(1, REL_X/REL_Y/REL_WHEEL)` 与 `evdev_inject_btn(1, BTN_*)`。
+
+**实测进展**：`HBOS_WL_FB_KEY` 从 **0 → 18**（输入 `echo hi` 正好 8 字符×2 + 回车×2）。
+说明 PS/2 → evdev → Wayland 这一段已经通了。
+
+**仍缺一环**：按键到了 `hbos_wl_fb` 并已 `wl_keyboard_send_key` 发给 KWin，
+但窗口里没有出现回显（前后画面差异只在一个 17×15 的小区域）。
+判断是 **KWin 侧没有焦点/激活的窗口**，或 KWin 嵌套会话需要
+`xdg_toplevel` 被 activate 才处理键盘。
+
+下一步（明天优先）：
+1. 确认 KWin 是否真的收到了 key 事件（在 KWin 侧加 `kwin_core` 日志或看它有没有
+   `--replace` 之类的输入日志）。
+2. 检查 `hbos_wl_fb` 发出的 `wl_keyboard.modifiers` 与 `serial` 是否被 KWin 接受。
+3. 用指针点击让窗口获得焦点（鼠标注入已修，但还没验证指针是否真的移动）。

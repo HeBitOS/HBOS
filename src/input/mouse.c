@@ -441,6 +441,30 @@ static int ps2_mouse_poll(mouse_event_t *ev) {
             }
             last_z = z;
         }
+        /* 同时注入 evdev（/dev/input/event1）。
+         * 之前 `evdev_inject_rel/btn` 在内核里零调用，Wayland 服务端读不到
+         * 任何指针事件 —— KDE 里鼠标完全不动、也点不了窗口（因此键盘
+         * 即使送到了 KWin 也没有焦点窗口可以投递）。 */
+        {
+            extern int evdev_inject_rel(uint32_t dev, uint16_t code, int32_t value);
+            extern int evdev_inject_btn(uint32_t dev, uint16_t btn, int32_t value);
+            if (x) (void)evdev_inject_rel(1, 0, x);        /* REL_X */
+            if (y) (void)evdev_inject_rel(1, 1, -y);       /* REL_Y */
+            if (z) (void)evdev_inject_rel(1, 8, z);        /* REL_WHEEL */
+            {
+                static int prev_buttons = -1;
+                int b = (int)(packet[0] & 0x07);
+                if (b != prev_buttons) {
+                    for (int i = 0; i < 3; i++) {
+                        int nb = (b >> i) & 1;
+                        int pb = (prev_buttons < 0) ? 0 : ((prev_buttons >> i) & 1);
+                        if (nb != pb)
+                            (void)evdev_inject_btn(1, (uint16_t)(0x110 + i), nb);
+                    }
+                    prev_buttons = b;
+                }
+            }
+        }
         ps2_q_push(x, -y, z, (int)(packet[0] & 0x07));
     }
 
