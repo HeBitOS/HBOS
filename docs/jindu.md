@@ -1664,3 +1664,24 @@ saved 164.52.1.62 (HTTP 403)         <- 真实外网！TCP 连上并拿到 HTTP 
 - 下一步：用 `curl https://164.52.1.62/` 验证 443 端口；再用 Chromium
   打开 `http://164.52.1.62/`（明文、无 DNS、无 TLS）复现，二分定位到
   "TCP 连不上" 还是 "TLS/HTTP 层"。
+
+
+#### R35 bilibili 定位再进一步：Chromium 能建连，但读不到数据（03:00）
+
+二分实验：把 Chromium 的首页改成**明文 IP 直连** `http://164.52.1.62/`
+（无 DNS、无 TLS、无 Host 头），截图（`build/tmp/plain/s450.png`）显示：
+
+- 地址栏是 `164.52.1.62`，标题停在 **"Loading..."**，内容区空白并持续转圈；
+- **不是** `ERR_CONNECTION_REFUSED`（bilibili 走 HTTPS 时才是那个错）。
+
+对照：同一台 VM 上 HBOS 自带 `wget http://164.52.1.62/` 秒回 `HTTP 403`。
+
+→ **TCP 连接建立是好的，卡在 Chromium 读不到响应数据。**
+范围收缩到 Linux 兼容层的 socket 数据通路：
+`poll/epoll` 对 AF_INET 就绪位的上报、或 `recv` 的返回处理。
+（之前 HANDOFF 里记过 headless 模式下 Chromium 能跑通 DOM，说明这条路本身有基础，
+可能是这次带 UI 的多进程模式下 network service 进程的 socket 没被正确唤醒。）
+
+下一步建议：在 Chromium 的 network service 进程里看它卡在哪个 syscall
+（serial 里已有 `[LINUX_SYSCALL] unimplemented` 与 `[FDERR]` 类日志），
+重点查 `poll` 是否把 AF_INET socket 的可读事件漏报。
