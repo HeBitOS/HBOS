@@ -1864,3 +1864,27 @@ AF_INET socket 上返回错误或 0，Chromium 就会把这条连接判成失败
 **顺带确认的未实现系统调用**（清一色与本问题无关）：
 `mincore(27)` / `fadvise64(221)` / `clone3(435)` / `open_tree(436)` / `mlock2(149)` /
 `sendfile(40)` / `vfork(58)`。
+
+
+#### R35 又修掉一个真实的语义 bug：`HBOS_SYS_RECV` 无数据时返回 0（05:15）
+
+顺着"Chromium 走 recvmsg"这条线索读下去，在 `HBOS_SYS_RECV` 的 AF_INET 分支
+（`src/syscall.c:6030` 附近）发现：
+
+```c
+uint32_t recv_len = 0;
+int ret = net_tcp_recv(conn, buf, len, &recv_len, 10);
+if (ret < 0) return -ECONNRESET;
+return recv_len;          /* ← 没有数据时返回 0 */
+```
+
+**Linux 语义里 `recv()` 返回 0 = 对端已优雅关闭。**
+Chromium 通过 `recvmsg(47) → linux_message_io → HBOS_SYS_RECV` 读 AF_INET socket
+（不走 `read()`），所以之前在 `linux_socket_io_read` 里修的同一类问题**没覆盖到它**。
+连接建得好好的却报 `ERR_CONNECTION_RESET`，正是这个语义错误造成的。
+
+已修：`if (recv_len == 0) return -EAGAIN;`（无数据 ≠ 对端关闭）。
+
+**教训**：同一个语义错误在兼容层里可能有多份实现（`read` 路径 / `recv` 路径 /
+`recvmsg` 路径），修一处不等于修全。这次的排查顺序值得记住：
+先确认真实调用路径（打点零触发 → 说明走的不是我改的那条），再去修那条。

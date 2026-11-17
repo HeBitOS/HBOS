@@ -6035,6 +6035,14 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
             uint32_t recv_len = 0;
             int ret = net_tcp_recv(conn, (uint8_t *)buf, (uint32_t)len, &recv_len, 10);
             if (ret < 0) return (uint64_t)(-ECONNRESET);
+            /* 没有数据时必须返回 -EAGAIN，不能返回 0。
+             *
+             * Linux 语义里 recv()/recvmsg() 返回 0 = 对端已优雅关闭。
+             * 这里返回 0 会让 Chromium 认为连接结束 —— 而它正是通过
+             * recvmsg(47) → linux_message_io → HBOS_SYS_RECV 这条路径读
+             * AF_INET socket 的（不走 read()，所以之前修 linux_socket_io_read
+             * 没覆盖到）。表现就是连接建得好好的、却报 ERR_CONNECTION_RESET。 */
+            if (recv_len == 0) return (uint64_t)(-EAGAIN);
             return (uint64_t)recv_len;
         }
 
