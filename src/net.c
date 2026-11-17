@@ -10,6 +10,19 @@
 #include "net/nic_e1000e_ids.h"
 #include "pci.h"
 #include "string.h"
+
+extern void console_puts(const char *s);
+
+/** @brief 诊断用十进制打印（net.c 内部使用，避免依赖 tools 层） */
+void net_diag_udec(uint64_t v) {
+    char b[24]; int i = 0;
+    if (!v) b[i++] = '0';
+    else { char t[24]; int j = 0;
+           while (v) { t[j++] = (char)('0' + (int)(v % 10)); v /= 10; }
+           while (j) b[i++] = t[--j]; }
+    b[i] = 0;
+    console_puts(b);
+}
 #include "core/cpu.h"
 #include "core/io.h"
 #include "core/vmm.h"
@@ -2444,7 +2457,26 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
     uint32_t thl = (tcp->off_flags_hi >> 4) * 4;
     const uint8_t *data = (const uint8_t *)tcp + thl;
     uint32_t dlen = ip_len > ihl + thl ? ip_len - ihl - thl : 0;
-    if (flags & 0x04) { c->rst = 1; return 1; }
+    if (flags & 0x04) {
+        /* 诊断：谁在重置我们。打印对端 IP/端口与双方序号，判断是我们发的
+         * 段不被接受（对端 RST），还是本端状态已经错乱。 */
+        static int rst_dbg;
+        if (rst_dbg < 8) {
+            rst_dbg++;
+            console_puts("[TCP-RST] from ");
+            net_diag_udec((uint64_t)ntohl(ip->src));
+            console_puts(" port ");
+            net_diag_udec((uint64_t)ntohs(tcp->src));
+            console_puts(" seq=");
+            net_diag_udec((uint64_t)ntohl(tcp->seq));
+            console_puts(" our_ack=");
+            net_diag_udec((uint64_t)c->ack);
+            console_puts(" our_seq=");
+            net_diag_udec((uint64_t)c->seq);
+            console_puts("\n");
+        }
+        c->rst = 1; return 1;
+    }
     if (c->connecting && (flags & 0x12) == 0x12 && !c->synack) {
         c->ack = seq + 1;
         c->synack = 1;
@@ -3008,6 +3040,26 @@ int net_tcp_exchange(uint32_t ip, uint16_t port, const uint8_t *request, uint32_
              * 兜底，否则慢启动的服务端会被误判。 */
             break;
         }
+    }
+    /* 诊断：把"为什么停下"打出来。
+     * 大响应截断时，必须区分：对端发了 FIN（连接正常结束但没发完）、
+     * 空闲判定超时（本端提前放弃）、recv 出错、还是响应缓冲写满。 */
+    {
+        extern void net_diag_udec(uint64_t v);
+        console_puts("[HTTP-LOOP] total=");
+        net_diag_udec(total);
+        console_puts(" cap=");
+        net_diag_udec((uint64_t)response_cap);
+        console_puts(" clen=");
+        net_diag_udec((uint64_t)(clen < 0 ? 0 : clen));
+        console_puts((clen < 0) ? "(none)" : "");
+        console_puts(" hdr_end=");
+        net_diag_udec(hdr_end);
+        console_puts(" fin=");
+        net_diag_udec((uint64_t)saw_fin);
+        console_puts(" open=");
+        net_diag_udec((uint64_t)(conn.open ? 1 : 0));
+        console_puts("\n");
     }
     net_tcp_close(&conn);
     response[total < response_cap ? total : response_cap - 1] = 0;

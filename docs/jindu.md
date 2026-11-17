@@ -1774,3 +1774,32 @@ wget: tcp response truncated
 **教训**：这次差点把"缓冲区满了"误判成"TCP 有 bug"。
 诊断必须打印**具体的数字**（已收字节 vs 缓冲区上限），
 不能只看"成功了没有"。
+
+
+#### R35 bilibili 诊断再收窄：对端没有发 RST（04:00）
+
+加了两处诊断：
+1. **TCP 输入层**：收到 `flags & 0x04`（RST）时打印对端 IP/端口/序号 ——
+   这是全工程**唯一**置位 `c->rst` 的地方；
+2. **socket 层**：`linux_socket_io_read` 返回 `-ECONNRESET` 的两条路径
+   （`entry->node == NULL`、`net_tcp_recv() < 0`）。
+
+跑一轮 KDE 加载 bilibili（`build/tmp/sock1`）：
+
+```
+[CONN] dst=164.52.1.62 port=443  connect_start ret=0   ← 连接建立成功
+（无 [TCP-RST]）                                        ← 对端没有重置我们
+（无 [SOCK]）                                           ← 我们也没返回 ECONNRESET
+```
+
+**所以 `ERR_CONNECTION_RESET` 既不是对端发的、也不是这两个已知返回点产生的。**
+范围进一步收窄到：`net_tcp_finish_connect()` 的失败路径、或 Chromium 自身
+对某个 socket 错误的归类。
+
+**已排除的清单（都有实测）**：
+- 网络栈不可用 → 否，`wget` 直连外网成功、单连接收到 196KB
+- DNS 挂起 → 已修（`MAP * ~NOTFOUND` 后 port=53 计数归零）
+- 接收缓冲太小 → 否（8192→32768 不影响）
+- TCP 大传输有 bug → 否（更正过，实际收到 196,607/196,608）
+- 对端 RST → 否（TCP 层零次）
+- 本端 socket 层两条 ECONNRESET 路径 → 否（零次）

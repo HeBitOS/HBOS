@@ -3267,11 +3267,34 @@ static int64_t linux_socket_io_read(int fd, void *buffer, size_t count) {
     if (entry->type == FD_UNIX)
         return linux_compat_unix_recv(fd, buffer, count, 0);
     net_tcp_conn_t *conn = (net_tcp_conn_t *)entry->node;
-    if (!conn) return -ECONNRESET;
+    if (!conn) {
+        /* 诊断：fd 还标着 FD_SOCKET 但 node 已经空了 —— 上层会看到
+         * ECONNRESET（Chromium 显示 ERR_CONNECTION_RESET）。
+         * 打印出来区分"连接真被重置"与"fd 槽被提前清空"。 */
+        static int no_conn_dbg;
+        if (no_conn_dbg < 8) {
+            no_conn_dbg++;
+            console_puts("[SOCK] read on fd ");
+            { char b[8]; int i=0, v=fd; char t[8]; int j=0;
+              if (!v) b[i++]='0';
+              else { while (v) { t[j++]=(char)('0'+v%10); v/=10; }
+                     while (j) b[i++]=t[--j]; }
+              b[i]=0; console_puts(b); }
+            console_puts(": node is NULL -> ECONNRESET\n");
+        }
+        return -ECONNRESET;
+    }
     if (net_tcp_finish_connect(conn) == 1) return -EAGAIN;
     uint32_t got = 0;
     int ret = net_tcp_recv(conn, (uint8_t *)buffer, (uint32_t)count, &got, 10);
-    if (ret < 0) return -ECONNRESET;
+    if (ret < 0) {
+        static int rst_dbg2;
+        if (rst_dbg2 < 8) {
+            rst_dbg2++;
+            console_puts("[SOCK] net_tcp_recv<0 -> ECONNRESET (conn rst/fin state)\n");
+        }
+        return -ECONNRESET;
+    }
     /* 没有数据时必须返回 -EAGAIN，而不是 0。
      *
      * 在 Linux 语义里 recv() 返回 0 表示"对端已优雅关闭"。这里返回 0 会让
