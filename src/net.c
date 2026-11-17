@@ -12,6 +12,7 @@
 #include "string.h"
 
 extern void console_puts(const char *s);
+extern void console_putchar(char c);
 
 /** @brief 诊断用十进制打印（net.c 内部使用，避免依赖 tools 层） */
 void net_diag_udec(uint64_t v) {
@@ -2477,6 +2478,22 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
         }
         c->rst = 1; return 1;
     }
+    {
+        /* 诊断：每条连接收到的 TCP 段（标志/数据长度），确认服务端是否回应。 */
+        static int in_dbg;
+        if (in_dbg < 16 && c->dport == 443) {
+            in_dbg++;
+            console_puts("[TCP-IN] flags=");
+            net_diag_udec((uint64_t)flags);
+            console_puts(" dlen=");
+            net_diag_udec((uint64_t)dlen);
+            console_puts(" seq=");
+            net_diag_udec((uint64_t)seq);
+            console_puts(" our_ack=");
+            net_diag_udec((uint64_t)c->ack);
+            console_puts("\n");
+        }
+    }
     if ((flags & 0x12) == 0x12 && !c->synack) {
         static int sa_dbg;
         if (sa_dbg < 10) {
@@ -2773,6 +2790,22 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
     for (int attempt = 0; attempt < 3 && !c->acked && !c->rst; attempt++) {
         /* §6.1.5②：数据段也带真实窗口，对端的在途上限不再被常量 4096 砍半 */
         uint16_t win = tcp_conn_window(c);
+        {
+            /* 诊断：把发出的前 16 字节打出来，确认内容没被破坏。
+             * TLS ClientHello 应以 0x16 0x03 0x01 开头。 */
+            static int tx_bytes_dbg;
+            if (tx_bytes_dbg < 4) {
+                tx_bytes_dbg++;
+                console_puts("[TXBYTES] ");
+                for (uint32_t q = 0; q < 16 && q < len; q++) {
+                    const char *hx = "0123456789abcdef";
+                    console_putchar(hx[(data[q] >> 4) & 0xF]);
+                    console_putchar(hx[data[q] & 0xF]);
+                    console_putchar(' ');
+                }
+                console_puts("\n");
+            }
+        }
         if (send_tcp(c->mac, c->peer, c->sport, c->dport,
                      c->seq, c->ack, 0x18, win, data, (uint16_t)len) < 0)
             return -1;

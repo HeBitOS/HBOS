@@ -1965,3 +1965,39 @@ if (!conn || !conn->open || !data || len == 0 || len > TCP_MSS) {
 **教训**：`net_tcp_send` 的"all-or-nothing per call"设计只对它自己的自研 HTTP 客户端成立
 （那边总是小请求），对真实客户端（一次 write 1764 字节）就直接失效了。
 **兼容层不能假设调用方的写入大小。**
+
+
+#### R35 **决定性证据**：ClientHello 正确发出、服务端确认后直接 FIN（06:40）
+
+加了入站段诊断和发送内容诊断，终于看到完整的握手后行为：
+
+**入站**（服务端 → 我们）：
+```
+[TCP-IN] flags=18 dlen=0 seq=64001 our_ack=0        ← 18 = SYN+ACK
+[TCP-IN] flags=16 dlen=0 seq=64002 our_ack=64002    ← 16 = 纯 ACK：确认了我们的数据
+[TCP-IN] flags=17 dlen=0 seq=64002 our_ack=64002    ← 17 = FIN+ACK：服务端主动关闭
+```
+
+**出站**（我们 → 服务端）：
+```
+[SEND]   len=1796 finish=0                          ← Chromium 的 TLS ClientHello
+[TXOK]   len=1460 seq=268486069                     ← 分段第 1 段
+[TXOK]   len=336  seq=268486405                     ← 分段第 2 段（+1460，正确）
+[TXBYTES] 16 03 01 06 ff 01 00 06 fb 03 03 ...      ← 内容完全正确
+```
+
+`16 03 01 06 ff` = TLS Handshake / TLS1.0 record / **长度 0x06ff = 1791**；
+`01 00 06 fb` = ClientHello / 长度 0x06fb = 1787。**这是标准、合法的 ClientHello。**
+
+**结论：**
+1. MSS 分段修好后，ClientHello **完整、正确、按序**发出（1796 = 1460 + 336）；
+2. 服务端**收到了并 ACK 了**（`our_ack=64002`）；
+3. 但服务端**没有回任何数据（dlen 恒为 0），直接发 FIN 关闭**。
+
+所以问题不再是"发不出去"，而是**服务端主动拒绝这次 TLS 会话**。
+下一步要查的是为什么（都属于应用层，不是 TCP 层了）：
+- 服务端是否在等更多数据（我们宣布的窗口/长度是否让它以为还有后续）；
+- 或 ClientHello 里的某个扩展在当前环境不合法（例如 SNI / ALPN / 支持的组）。
+
+**这一轮把问题从"TCP 层发不出数据"推进到了"TLS 层被服务端拒绝"，
+并且有完整的双向报文级证据。**
