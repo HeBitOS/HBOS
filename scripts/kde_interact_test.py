@@ -100,10 +100,20 @@ while time.time() - t0 < a.wait_konsole:
         Image.open(p).save(f"{OUT}/probe.png")
     except Exception:
         time.sleep(3); continue
-    pct = nonblack_pct(f"{OUT}/probe.png")
-    if pct >= 5:
+    # 用"底部面板非黑"判断 KDE 真的起来了。
+    # 只看整屏非黑太早：Chromium 窗口先映射就会触发，结果键敲进了浏览器。
+    def panel_pct(path):
+        try:
+            from PIL import Image
+            g = Image.open(path).convert("L"); px = g.load(); w, h = g.size
+            n = sum(1 for y in range(h - 45, h, 3) for x in range(0, w, 10) if px[x, y] > 16)
+            return n * 100 // (len(range(h - 45, h, 3)) * len(range(0, w, 10)))
+        except Exception:
+            return 0
+    pct = panel_pct(f"{OUT}/probe.png")
+    if pct >= 20:
         ready = True
-        print(f"screen ready after {int(time.time()-t0)}s (nonblack={pct}%)", flush=True)
+        print(f"panel ready after {int(time.time()-t0)}s (panel={pct}%)", flush=True)
         break
     time.sleep(5)
 if not ready:

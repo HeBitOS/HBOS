@@ -1500,3 +1500,28 @@ Wayland 服务端 `hbos_wl_fb` 读不到任何输入，KDE 里键鼠完全无反
    `--replace` 之类的输入日志）。
 2. 检查 `hbos_wl_fb` 发出的 `wl_keyboard.modifiers` 与 `serial` 是否被 KWin 接受。
 3. 用指针点击让窗口获得焦点（鼠标注入已修，但还没验证指针是否真的移动）。
+
+#### R35 补充 2：鼠标也接通了（2026-11-18 00:55）
+
+在键盘之后，鼠标还有两层断点，都已修掉：
+
+1. 鼠标原始字节**只在 `mouse_poll()` 里解析**，而 KDE/Wayland 会话不调用它
+   → `/dev/input/event1` 永远没有事件。修法：新增 `mouse_drain_irq()`，
+   由 PIT 定时器每拍排空并解析。
+2. 更前一层：**PS/2 鼠标只在 HBOS 自己的 GUI 启动时才 `mouse_init()`**，
+   KDE 会话里 `mouse_ready` 一直是 0，连包都不解析。修法：排空钩子里按需初始化。
+
+实测：`HBOS_WL_FB_PTR` 从 **0 → 41**，日志可见
+`code=0 val=30`(REL_X +30) / `code=1 val=15`(REL_Y +15)，`ptr_res` 非空。
+
+**当前输入链路状态**：
+```
+PS/2 → evdev(event0/1) → hbos_wl_fb → wl_keyboard/wl_pointer → KWin   ✅ 全通
+KWin → 焦点窗口（Konsole/Chromium）                                   ❓ 未验证
+```
+未知的只剩最后一跳。之前几次按键测试都因为**判据太早**（Chromium 窗口先映射
+就触发"画面非黑"）而把键敲进了浏览器，所以看不出效果。已把判据改成
+"底部面板非黑 ≥20%"，但那一轮面板在 700 秒内没出现，测试没跑到敲键阶段。
+
+**明天的第一步建议**：先用一次干净运行确认面板出现时间（当前基线约 300 秒），
+再用"面板就绪"判据跑 `scripts/kde_interact_test.py`，看 Konsole 里是否回显。
