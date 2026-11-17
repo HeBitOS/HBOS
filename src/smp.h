@@ -1,6 +1,6 @@
 /**
  * @file    smp.h
- * @brief   导出 50 个接口（2 类型 / 30 宏 / 18 函数）
+ * @brief   导出 52 个接口（2 类型 / 30 宏 / 20 函数）
  *
  * @layer   core
  * @owner   src/
@@ -137,6 +137,8 @@ void smp_init(void);
 int smp_cpu_count(void);
 void smp_send_ipi(uint32_t apic_id, uint32_t vector);
 void smp_tlb_shootdown(void);
+int  smp_sched_trylock_other(int cpu);
+void smp_sched_unlock_other(int cpu);
 uint32_t smp_get_apic_id(void);
 
 /** 调用者所在核心的编号（0..smp_cpu_count()-1）。smp_init 之前恒为 0。 */

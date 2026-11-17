@@ -457,7 +457,15 @@ static task_t *sched_next(void) {
                               (vc->state == TASK_TERMINATED);
             if (!victim_idle) continue;
         }
-        t = pick_from_cpu(c, 1);
+        /* 跨核偷任务要短暂锁住对方队列；用 trylock：对方正忙/卡住就跳过，
+         * 绝不在这里阻塞（否则又会退化成"一核卡住、全机停摆"）。 */
+        {
+            extern int smp_sched_trylock_other(int cpu);
+            extern void smp_sched_unlock_other(int cpu);
+            if (!smp_sched_trylock_other(c)) continue;
+            t = pick_from_cpu(c, 1);
+            smp_sched_unlock_other(c);
+        }
         if (t) {
             t->cpu = (uint8_t)me;
             return t;

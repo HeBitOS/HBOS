@@ -11,7 +11,13 @@ static per_cpu_t cpu_data[MAX_CPUS];
 static int cpu_count;
 static uint64_t lapic_base_phys;
 static volatile uint32_t *lapic_base;
-static spinlock_t sched_lock;
+/* 每核一把调度锁（不是一把全局锁）。
+ *
+ * 之前用单把全局 sched_lock：任何一个核在持锁状态下卡住（实测 AP 会停在
+ * task_idle_entry 的 sti;hlt），另一个核就永久自旋、整机停摆。
+ * 每个核只管自己的就绪队列，本来就不需要跨核串行化；跨核只有"偷任务"
+ * 需要短暂的互斥，那里用 trylock（抢不到就跳过），不会阻塞。 */
+static spinlock_t sched_lock_per[MAX_CPUS];
 
 /* 每核最近的调度锁操作轨迹：记录 (0=lock / 1=unlock, 调用者返回地址)。
  * 死锁时把持有者的轨迹打出来，就能直接看到是哪次加锁之后没有配对释放。 */
@@ -185,7 +191,7 @@ void smp_sched_lock(void) {
     __asm__ volatile("cli" ::: "memory");
     if (sched_lock_depth[c]++ == 0)
         sched_lock_if[c] = (flags & 0x200) ? 1 : 0;   /* IF 位 */
-    spinlock_acquire(&sched_lock);
+    spinlock_acquire(&sched_lock_per[c]);
 }
 
 /**
@@ -196,14 +202,31 @@ void smp_sched_lock(void) {
  * 手里还攥着 sched_lock）。
  */
 int smp_sched_owned_by_me(void) {
-    return sched_lock.holder == (int32_t)lapic_get_id() + 1;
+    int c = smp_cpu_index();
+    if (c < 0 || c >= MAX_CPUS) c = 0;
+    return sched_lock_per[c].holder == (int32_t)lapic_get_id() + 1;
+}
+
+/** @brief 尝试锁住另一个核的调度锁（抢不到立即失败，绝不阻塞） */
+int smp_sched_trylock_other(int cpu) {
+    if (cpu < 0 || cpu >= MAX_CPUS) return 0;
+    if (__sync_lock_test_and_set(&sched_lock_per[cpu].lock, 1)) return 0;
+    __asm__ volatile("" ::: "memory");
+    return 1;
+}
+
+/** @brief 释放另一个核的调度锁 */
+void smp_sched_unlock_other(int cpu) {
+    if (cpu < 0 || cpu >= MAX_CPUS) return;
+    __asm__ volatile("" ::: "memory");
+    sched_lock_per[cpu].lock = 0;
 }
 
 void smp_sched_unlock(void) {
     int c = smp_cpu_index();
     if (c < 0 || c >= MAX_CPUS) c = 0;
     lock_trace_push(c, 1, (uint64_t)(uintptr_t)__builtin_return_address(0));
-    spinlock_release(&sched_lock);
+    spinlock_release(&sched_lock_per[c]);
     if (sched_lock_depth[c] > 0 && --sched_lock_depth[c] == 0 && sched_lock_if[c])
         __asm__ volatile("sti" ::: "memory");
 }
@@ -358,7 +381,7 @@ static int start_ap(uint32_t apic_id, uint32_t cpu_idx) {
 void smp_init(void) {
     cpu_count = 0;
     memset(cpu_data, 0, sizeof(cpu_data));
-    spinlock_init(&sched_lock);
+    for (int i = 0; i < MAX_CPUS; i++) spinlock_init(&sched_lock_per[i]);
 
     const acpi_madt_info_t *madt = acpi_get_madt();
 
