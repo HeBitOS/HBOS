@@ -1429,7 +1429,7 @@ mov edx,0x8c9            → 行号 2249
          **✅ 已实现（11ea5f3）**：exec 后按名字 boost 到优先级 0，
          实测面板 **400s → 300s**（`[PRIO] boost plasmashell`，s300 panel=100%）。
          仍未达 180s 目标。
-- [ ] **T3 壁纸真实渲染**：让 `org.kde.image` 的 `Image` 真正落进
+- [ ] **T3 壁纸真实渲染**（已尝试 2 种写法，均失败，见下）：让 `org.kde.image` 的 `Image` 真正落进
       `[Containments][N][Wallpaper][org.kde.image][General]`。
       验收：桌面区域出现可辨认的 Next 壁纸（非纯色），截图存 `docs/evidence/`。
 - [x] **T4 Konsole 可用**：终端里出现 `root@hbos:/#` 并能敲命令回显。
@@ -1525,3 +1525,53 @@ KWin → 焦点窗口（Konsole/Chromium）                                   �
 
 **明天的第一步建议**：先用一次干净运行确认面板出现时间（当前基线约 300 秒），
 再用"面板就绪"判据跑 `scripts/kde_interact_test.py`，看 Konsole 里是否回显。
+
+#### T3 实测记录（2026-11-18 01:10）
+
+| 写法 | 结果 |
+|---|---|
+| `Image = "file:///usr/share/wallpapers/Next/contents/images/1920x1080.png"` | 桌面纯黑 |
+| `Image = "Next"`（壁纸包名） | 桌面纯黑，**且面板也不出现** |
+| `org.kde.color`，`Color=29,153,243` | 桌面亮蓝、面板正常（当前默认） |
+
+结论：`org.kde.image` 在当前环境下画不出任何东西，甚至影响 plasmashell 启动时序。
+已回滚到 `org.kde.color` 保证可用性。要解决 T3，需要能看到 plasmashell 侧
+QML/插件的真实报错 —— 而它的 stderr 被重定向到 `/var/cache/hbos/diag/plasmashell.log`，
+内核对那个文件 read 返回 ESPIPE（-29），读不出来。**先修这条诊断通道**是 T3 的前置。
+
+#### R35 夜间收工交接（2026-11-18 01:25）
+
+**现在的可用状态**（`make run-kde`，默认 `KDE_SMP=1`、`KDE_MEM=6144M`、`-display gtk`）
+- 开机询问 `[Enter/T] 命令行 / [K] KDE`；进 Shell 后输入 `kde` 也能进桌面。
+- KDE 起来后：**纯色壁纸（#1d99f3）+ 底部面板 + Konsole + Chromium** 可同屏。
+  证据：`docs/evidence/KDE-panel-wallpaper-konsole-300s.png`
+  （Konsole 窗口内是真正的 bash 提示符 `root@hbos:/var/cache/hbos#`）。
+- 面板出现时间：**约 300 秒**（提升优先级后从 400s 降下来）。
+
+**这一夜完成的三件事**
+1. 修好输入链路的两个断层：`evdev_inject_key/rel/btn` 在此之前**全工程零调用**，
+   键盘/鼠标事件从未进过 `/dev/input/event0|1`。
+   现在 `HBOS_WL_FB_KEY`=18、`HBOS_WL_FB_PTR`=41，PS/2 → evdev → Wayland 全通。
+2. 面板提速：exec 后按名字把 plasmashell 提到优先级 0（`[PRIO] boost plasmashell`）。
+3. 把 `-smp 2` 的死锁诊断推进到最后一步（见下）。
+
+**`-smp 2`：还差一步**
+`[SPIN-STUCK] lock==&sched_lock holder_cpu=1`，`holder_rip` 解析为
+`task_idle_entry` —— AP 持着调度锁停在 `sti; hlt`。
+已排除：中断重入、丢唤醒、TLB、idle 误用、ABBA、同核重入。
+**唯一正确方向**：重写 `task_switch` 的锁交接契约（进入方负责释放一次，
+任何 `hlt` 之前断言"未持锁"），涉及 `task_switch.asm` / `task.c` / `smp.c`。
+不要再往 spinlock 里加"重入/强制释放"补丁 —— 实测会掩盖真实泄漏并制造新问题。
+
+**两条诊断通道已经打通，明天直接用**
+- plasmashell 的 stderr 现在直接进 serial（去掉了 `>>diag/plasmashell.log`），
+  所以 QML/插件报错看得见了。
+- `scripts/kde_smp_drive.py`（`-smp N` + 定时截图 + 双 monitor socket）和
+  `scripts/kde_interact_test.py`（等面板 → 移动点击 → 敲键 → 截图）。
+
+**明天的建议顺序**
+1. 用 `kde_interact_test.py` 验证 Konsole 里能否敲出 `echo hi`
+   （面板就绪判据已改成"底部 45px 非黑 ≥20%"，不会再误触发）。
+2. T3 壁纸：先看 plasmashell stderr 里 `org.kde.image` 的加载痕迹，
+   再决定是修插件配置还是改用 `org.kde.slideshow`。
+3. `-smp 2`：按上面的锁交接改造。
