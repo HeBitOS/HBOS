@@ -504,6 +504,28 @@ static int usb_mouse_poll(mouse_event_t *ev) {
     return 1;
 }
 
+/**
+ * @brief 定时器侧排空鼠标原始字节并解析（供无人调用 mouse_poll 的场景）
+ *
+ * 鼠标包原本只在 mouse_poll() 里解析，而 KDE/Wayland 会话不调用它，
+ * 于是 /dev/input/event1 永远没有事件、指针完全不动。
+ * 由 PIT 定时器周期性调用这里，把积压的字节解析掉 —— 解析过程中会同步
+ * 注入 evdev（见 packet 处理里的 evdev_inject_rel/btn）。
+ */
+void mouse_drain_irq(void) {
+    /* 只在使用 HBOS 自己的 GUI 时才会调 mouse_init()；KDE/Wayland 会话
+     * 走的是 /dev/input/event1，没人初始化 PS/2 鼠标，所以这里按需拉起。 */
+    if (!mouse_ready) {
+        extern int mouse_init(void);
+        (void)mouse_init();
+        if (!mouse_ready) return;
+    }
+    mouse_event_t ev;
+    for (int i = 0; i < 32; i++) {
+        if (!mouse_poll(&ev)) break;
+    }
+}
+
 int mouse_poll(mouse_event_t *ev) {
     if (!mouse_ready || !ev) return 0;
     if (mouse_backend == MOUSE_BACKEND_USB) return usb_mouse_poll(ev);

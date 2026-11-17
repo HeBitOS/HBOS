@@ -1291,6 +1291,11 @@ void irq_handler(isr_regs_t *regs) {
     if (irq == 0) {
         pic_send_eoi(0);
         g_pit_ticks++;
+        {   /* 排空 PS/2 鼠标原始字节：KDE 会话不调 mouse_poll，
+             * 不在这里解析的话 /dev/input/event1 永远没有事件。 */
+            extern void mouse_drain_irq(void);
+            mouse_drain_irq();
+        }
         extern void task_schedule(void);
         task_schedule();
         return;

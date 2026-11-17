@@ -422,6 +422,8 @@ static int on_evdev_ptr(int fd, uint32_t mask, void *data) {
     int moved = 0;
     while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
         if (ev.type == EV_REL) {
+            fprintf(stderr, "HBOS_WL_FB_PTR code=%u val=%d ptr_res=%p\n",
+                    (unsigned)ev.code, (int)ev.value, (void *)g_ptr_res);
             if (ev.code == REL_X) { g_mx += ev.value; moved = 1; }
             else if (ev.code == REL_Y) { g_my += ev.value; moved = 1; }
             else if (ev.code == REL_WHEEL && g_ptr_res) {
