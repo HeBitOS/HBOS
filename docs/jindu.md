@@ -1888,3 +1888,39 @@ Chromium 通过 `recvmsg(47) → linux_message_io → HBOS_SYS_RECV` 读 AF_INET
 **教训**：同一个语义错误在兼容层里可能有多份实现（`read` 路径 / `recv` 路径 /
 `recvmsg` 路径），修一处不等于修全。这次的排查顺序值得记住：
 先确认真实调用路径（打点零触发 → 说明走的不是我改的那条），再去修那条。
+
+
+#### R35 新缺口：Chromium 需要 AF_NETLINK，HBOS 返回 EAFNOSUPPORT（05:25）
+
+修掉 `HBOS_SYS_RECV` 的 EAGAIN 语义后重跑，从崩溃/错误转储里看到：
+
+```
+[ERRNO]  errno=97 ? pid=25 nr=41 a0=0x0x10      <- socket(domain=0x10=16)
+[ERRNO]  errno=111 ECONNREFUSED pid=25 nr=42 a0=0x0x11
+[ERRNO]  errno=38 ENOSYS pid=25 nr=202
+```
+
+**`nr=41` 是 `socket()`，`a0=16` 就是 `AF_NETLINK`，我们返回 `EAFNOSUPPORT(97)`。**
+这与 Chromium 自己的日志对得上：
+
+```
+ERROR:net/base/address_tracker_linux.cc:224] Could not create NETLINK socket:
+       Address family not supported by protocol (97)
+```
+
+Chromium 的 `AddressTrackerLinux` 用 netlink（`NETLINK_ROUTE`）枚举网络接口与地址。
+拿不到它就会退化：网络服务对"本机有没有网"的判断不可靠，进而影响连接行为。
+
+**现状汇总（这轮的实测）**：
+- 连接目标只有 `164.52.1.62:443` × 12 次（**没有 DNS 连接了**，`MAP * ~NOTFOUND` 生效）；
+- `connect_start ret=0`（SYN 发出成功）；
+- 先前埋的三处 RST/ECONNRESET 诊断、以及 `net_tcp_finish_connect` 的 `[TCP]`
+  诊断**全部零触发**；
+- `SO_ERROR` 实现正确（只在连接中返回 EINPROGRESS，否则 0）。
+
+**下一步（很具体）**：给 Linux 兼容层补一个**最小的 `AF_NETLINK` / `NETLINK_ROUTE`**：
+- `socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)` 返回可用 fd；
+- `bind` / `send`（RTM_GETLINK / RTM_GETADDR / RTM_GETROUTE）接受；
+- `recv` 至少能返回"空"而不报错，或按请求回一个最小可用应答（本机 lo + eth0）。
+
+这既能让 Chromium 的地址跟踪正常工作，也是"网络栈完整度"该补的一块。
