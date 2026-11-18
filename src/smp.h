@@ -1,6 +1,6 @@
 /**
  * @file    smp.h
- * @brief   导出 54 个接口（2 类型 / 30 宏 / 22 函数）
+ * @brief   导出 55 个接口（2 类型 / 31 宏 / 23 函数）
  *
  * @layer   core
  * @owner   src/
