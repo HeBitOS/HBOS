@@ -3546,6 +3546,16 @@ static shm_page_t *shm_buckets[SHM_BUCKETS];
  * 物理内存紧张时由 linux_compat_shm_reclaim() 统一回收。
  * 这样同一份 .so 在多个进程反复 map/unmap 之间不必重新读盘。 */
 static uint64_t g_shm_cached_pages = 0;
+
+/* 共享页表的全局锁。
+ *
+ * 多核并发映射同一个共享库时，两个核会同时进入 linux_compat_shm_page()：
+ * 都查不到条目、都 kmalloc 新条目、都往同一个散列桶头插 —— 链表指针互相
+ * 覆盖，链被破坏，之后遍历就是死循环或读到野指针。
+ * 实测 -smp 2 下会在加载共享库（libselinux 等）时直接卡死，而单核正常。
+ * 这段是低频路径（每次 mmap 一页一次），用一把全局自旋锁足够。 */
+static spinlock_t g_shm_lock;
+static int g_shm_lock_ready;
 uint64_t linux_compat_shm_reclaim(uint64_t want);
 
 /* ---- 共享页表条目的专用 slab ----------------------------------------
@@ -3606,11 +3616,18 @@ uint64_t linux_compat_shm_page(struct vfs_node *node, uint64_t page_index,
     (void)private_data;
     if (created) *created = 0;
     if (!node) return 0;
+    if (!g_shm_lock_ready) { spinlock_init(&g_shm_lock); g_shm_lock_ready = 1; }
+    spinlock_acquire(&g_shm_lock);
+    uint64_t locked_result = 0;
+    int locked_created = 0;
+#define SHM_PAGE_RETURN(v, c) do { locked_result = (v); locked_created = (c); \
+        spinlock_release(&g_shm_lock); \
+        if (created) *created = locked_created; return locked_result; } while (0)
 
     shm_page_t *entry = shm_find(node, page_index);
     if (entry) {
         if (entry->refs != UINT32_MAX) entry->refs++;
-        return entry->phys;
+        SHM_PAGE_RETURN(entry->phys, 0);
     }
 
     /* 缓存超过上限就先回收一批，避免页缓存无限增长。 */
@@ -3618,9 +3635,9 @@ uint64_t linux_compat_shm_page(struct vfs_node *node, uint64_t page_index,
         (void)linux_compat_shm_reclaim(g_shm_cached_pages - SHM_CACHE_MAX_PAGES);
 
     shm_page_t *fresh = shm_entry_alloc();
-    if (!fresh) return 0;
+    if (!fresh) SHM_PAGE_RETURN(0, 0);
     uint64_t phys = pmm_alloc_page();
-    if (!phys) { kfree(fresh); return 0; }
+    if (!phys) { shm_entry_free(fresh); SHM_PAGE_RETURN(0, 0); }
     memset((void *)(uintptr_t)phys, 0, PAGE_SIZE);
     uint64_t offset = page_index * PAGE_SIZE;
     if (node->size > offset) {
@@ -3636,8 +3653,7 @@ uint64_t linux_compat_shm_page(struct vfs_node *node, uint64_t page_index,
     unsigned bucket = shm_hash(node, page_index);
     fresh->next = shm_buckets[bucket];
     shm_buckets[bucket] = fresh;
-    if (created) *created = 1;
-    return phys;
+    SHM_PAGE_RETURN(phys, 1);
 }
 
 void linux_compat_shm_unmap(struct vfs_node *node, uint64_t backing_offset,

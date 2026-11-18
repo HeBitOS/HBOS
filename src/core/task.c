@@ -144,10 +144,16 @@ static void sched_mark_ready(task_t *t) {
     if (!t) return;
     if (sched_trace_on) smp_trace_mark("ready", t);
     t->state = TASK_READY;
-    if (!t->snode.queued) {
-        if (t->cpu >= MAX_CPUS) t->cpu = 0;
-        (void)schedq_push(&cpu_ready[t->cpu], &t->snode, t->prio);
-    }
+    if (t->snode.queued) return;
+    if (t->cpu >= MAX_CPUS) t->cpu = 0;
+    /* 不要把"本核正在运行的那个任务"放进就绪队列。
+     *
+     * pick_from_cpu() 会跳过 cpu_current[cpu]（防止两个核同时跑同一个任务、
+     * 共用同一份 rsp 把栈串线）。如果队列里唯一那个就是本核正在跑的，
+     * 取出来必然被跳过 → 队列非空却返回 NULL → 调度器判定"无任务可跑"，
+     * 整个核空转（实测 -smp 2 下 [PICK-FAIL] qcount=1 curid=1 就是这个）。 */
+    if (t == cpu_current[t->cpu]) return;
+    (void)schedq_push(&cpu_ready[t->cpu], &t->snode, t->prio);
 }
 
 /* 运行态：从它所在核心的就绪队列摘掉。 */
@@ -430,10 +436,34 @@ static task_t *pick_from_cpu(int cpu, int stealing) {
  * 一个核忙死、另一个核 hlt 空转，正是笔记里说的"卡顿/中断"。
  */
 static task_t *sched_next(void) {
-    if (!current_task || task_count <= 1) return NULL;
+    if (!current_task || task_count <= 1) {
+        static int early_dbg;
+        if (early_dbg < 3) {
+            early_dbg++;
+            console_puts("[NEXT-NULL] cur=");
+            console_putchar(current_task ? (char)('0' + (current_task->id % 10)) : 'x');
+            console_puts(" count=");
+            console_putchar((char)('0' + (task_count % 10)));
+            console_puts("\n");
+        }
+        return NULL;
+    }
 
     int me = my_cpu();
     task_t *t = pick_from_cpu(me, 0);
+    {
+        static int pick_dbg;
+        if (!t && pick_dbg < 3) {
+            pick_dbg++;
+            console_puts("[PICK-FAIL] me=");
+            console_putchar((char)('0' + (me % 10)));
+            console_puts(" qcount=");
+            console_putchar((char)('0' + (schedq_count(&cpu_ready[me]) % 10)));
+            console_puts(" curid=");
+            console_putchar(cpu_current[me] ? (char)('0' + (cpu_current[me]->id % 10)) : 'x');
+            console_puts("\n");
+        }
+    }
     if (t) { t->cpu = (uint8_t)me; return t; }
 
     int ncpu = smp_cpu_count();
@@ -1306,6 +1336,7 @@ static void task_robust_cleanup(task_t *task) {
  */
 void task_exit(void) {
     if (!current_task) return;
+    console_putchar('A');
     task_robust_cleanup(current_task);
     if (current_task->clear_child_tid) {
         uint32_t *tid = current_task->clear_child_tid;
@@ -1317,7 +1348,9 @@ void task_exit(void) {
     task_release_fd_table(current_task);
     task_release_mm(current_task);
     task_irq_save();
+    console_putchar('B');
     smp_sched_lock();
+    console_putchar('C');
     sched_mark_dead(current_task);
     /* 唤醒所有在等我退出的任务（典型是父进程阻塞在 wait4）。
      * 缺这一步：父进程永远停在 TASK_BLOCKED，而退出任务在下面的循环里
@@ -1333,6 +1366,7 @@ void task_exit(void) {
 
     while (1) {
         task_t *next = sched_pick_valid();
+        console_putchar(next ? 'T' : 'N');
         if (!next) {
             /* 本核没活可干了：退回自己的空闲任务，而不是把整个核停机。
              * 停机等于永久少一个 CPU，而且日志里的"All tasks terminated"
@@ -1370,7 +1404,7 @@ void task_exit(void) {
                     console_puts("\n[SCHED-DUMP] my_cpu=");
                     sched_print_hex((uint64_t)my_cpu());
                     console_puts(" tasks=");
-                    sched_print_hex((uint64_t)task_count);
+                    console_putchar((char)('0' + (task_count % 10)));
                     console_puts("\n");
                     for (int i = 0; i < task_count; i++) {
                         task_t *t = &task_pool[i];
@@ -2254,12 +2288,17 @@ void task_schedule(void) {
     smp_trace_switch(__func__, next);
     task_t *prev = current_task;
     current_task = next;
+    console_putchar('1');
     if (next->mm && next->mm->pml4_phys)
         vmm_set_pml4(next->mm->pml4_phys);
+    console_putchar('2');
     task_reap_address_spaces();
+    console_putchar('3');
     tss_set_stack_cpu(my_cpu(), next->stack_base + next->stack_size);
     task_switch_tls(prev, next);
+    console_putchar('4');
     task_sig_deliver(next);
+    console_putchar('5');
     task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);
     smp_sched_unlock();
     task_irq_restore(irq_flags);

@@ -2451,7 +2451,29 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
             break;
         }
     }
-    if (!c) return 0; /* 不是活动客户端连接（listen/accept 走自己的回调） */
+    if (!c) {
+        /* 诊断：这条 TCP 段没能匹配到任何连接槽 —— 服务端回的数据可能就
+         * 在这里被静默丢弃了（例如端口/对端不匹配、槽已被释放）。
+         * Chromium 的 TLS 握手要收 ServerHello，丢了就永远等不到。 */
+        static int nomatch_dbg;
+        if (nomatch_dbg < 12) {
+            nomatch_dbg++;
+            console_puts("[TCP-NOMATCH] from ");
+            net_diag_udec((uint64_t)ntohl(ip->src));
+            console_puts(" dport=");
+            net_diag_udec((uint64_t)ntohs(tcp->dst));
+            console_puts(" sport=");
+            net_diag_udec((uint64_t)ntohs(tcp->src));
+            console_puts(" flags=");
+            net_diag_udec((uint64_t)tcp->flags);
+            console_puts(" dlen=");
+            net_diag_udec((uint64_t)(ntohs(ip->len) >
+                (uint32_t)((tcp->off_flags_hi >> 4) * 4) + (uint32_t)((ip->ver_ihl & 0x0F) * 4)
+                ? ntohs(ip->len) - ((tcp->off_flags_hi >> 4) * 4) - ((ip->ver_ihl & 0x0F) * 4) : 0));
+            console_puts("\n");
+        }
+        return 0;
+    }
     uint8_t flags = tcp->flags;
     uint32_t seq = ntohl(tcp->seq);
     uint32_t ip_len = ntohs(ip->len);
@@ -2489,12 +2511,16 @@ static int tcp_dispatch_cb(const uint8_t *pkt, uint16_t len, void *arg) {
             net_diag_udec((uint64_t)dlen);
             console_puts(" seq=");
             net_diag_udec((uint64_t)seq);
-            console_puts(" our_ack=");
+            console_puts(" our_expect=");
             net_diag_udec((uint64_t)c->ack);
+            console_puts(" peer_acks_our_seq=");
+            net_diag_udec((uint64_t)ntohl(tcp->ack));
+            console_puts(" our_seq=");
+            net_diag_udec((uint64_t)c->seq);
             console_puts("\n");
         }
     }
-    if ((flags & 0x12) == 0x12 && !c->synack) {
+    if ((c->connecting && (flags & 0x12) == 0x12 && !c->synack)) {
         static int sa_dbg;
         if (sa_dbg < 10) {
             sa_dbg++;
@@ -2803,6 +2829,23 @@ int net_tcp_send(net_tcp_conn_t *conn, const uint8_t *data, uint32_t len) {
                     console_putchar(hx[data[q] & 0xF]);
                     console_putchar(' ');
                 }
+                console_puts("\n");
+            }
+        }
+        {
+            /* 诊断：打印**实际写进 TCP 头**的 seq/ack/len，以及连接标识，
+             * 用来核对我们发的序号与服务端确认的是否同一个连接。 */
+            static int txseq_dbg;
+            if (txseq_dbg < 10) {
+                txseq_dbg++;
+                console_puts("[TXSEQ] sport=");
+                net_diag_udec((uint64_t)c->sport);
+                console_puts(" seq=");
+                net_diag_udec((uint64_t)c->seq);
+                console_puts(" ack=");
+                net_diag_udec((uint64_t)c->ack);
+                console_puts(" len=");
+                net_diag_udec((uint64_t)len);
                 console_puts("\n");
             }
         }
