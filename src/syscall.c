@@ -5530,7 +5530,18 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                 vma->backing_node = mapping_entry->node;
                 vma->backing_offset = (uint64_t)off;
             } else {
-                int map_result = vm_allocate_owned_pages((uint64_t)p, pages);
+                /* 只读文件映射**不要**先分配私有页再替换成共享页：
+                 * 那个"替换"动作会把私有页释放掉，而同进程的另一个线程
+                 * 可能正在另一核上执行这一页的代码 —— 释放后它继续跑，
+                 * 就是 SIGSEGV/GPF/Invalid Opcode（-smp 2 下实测反复出现）。
+                 * 直接从共享页表映射，全程不产生私有副本，从根上避免这个窗口。 */
+                int ro_file_direct = (!anonymous && (prot & 0x02) == 0 &&
+                                      mapping_entry->node &&
+                                      mapping_entry->node->type == VFS_NODE_FILE &&
+                                      mapping_entry->node->size > 0 &&
+                                      (((uint64_t)off % PAGE_SIZE) == 0));
+                int map_result = ro_file_direct ? 0
+                                                : vm_allocate_owned_pages((uint64_t)p, pages);
                 if (map_result < 0) {
                     kfree(vma);
                     mmap_log_failure(fd, len, prot, flags, (uint64_t)off,
@@ -5551,9 +5562,7 @@ uint64_t syscall_dispatch_frame(hbos_syscall_frame_t *f) {
                          * 直接跳过，不要让 vm_fill_vfs_snapshot 返回 -ENODEV
                          * 把整次 mmap 判死。 */
                         fill_result = 0;
-                    } else if ((prot & 0x02) == 0 &&
-                               mapping_entry->node->size > 0 &&
-                               (((uint64_t)off % PAGE_SIZE) == 0)) {
+                    } else if (ro_file_direct) {
                         /* 只读 + 页对齐 → 走共享页缓存，避免每个进程各存一份 */
                         fill_result = vm_fill_vfs_shared(
                             mapping_entry->node, (uint64_t)p, len,

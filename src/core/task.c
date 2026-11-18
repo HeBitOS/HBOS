@@ -440,6 +440,18 @@ static task_t *pick_from_cpu(int cpu, int stealing) {
          * 更不能被别的核偷走——否则两个核同时跑同一个任务，共用同一份
          * rsp，栈立刻串线（实测就是这样炸的）。 */
         if (t == cpu_current[cpu]) continue;
+        /* 只在"那个核确实在线"时才排除它正在运行的任务。
+         * 启动早期离线核的 cpu_current[] 里还留着初始化阶段的指针，
+         * 无条件排除会把所有任务都跳过 —— 实测直接卡在开机阶段。 */
+        {
+            int busy_elsewhere = 0;
+            for (int oc = 0; oc < MAX_CPUS; oc++) {
+                if (oc == cpu) continue;
+                if (!cpu_idle[oc]) continue;              /* 该核还没建 idle = 未启用 */
+                if (cpu_current[oc] == t) { busy_elsewhere = 1; break; }
+            }
+            if (busy_elsewhere) continue;
+        }
         /* 偷取只对"允许铺开"的任务生效。钉在某个核上的任务（主任务/
          * shell/GUI、各核空闲任务）被别的核偷走会直接要命：实测把 main
          * 偷到 AP 上之后，BSP 这边的任务跑完就再也找不到可运行任务，
