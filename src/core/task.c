@@ -2443,7 +2443,19 @@ void task_preempt_enable(void) {
 }
 
 void task_schedule(void) {
-    if (!preempt_state_allows_schedule(&g_preempt[my_cpu()])) return;
+    if (!preempt_state_allows_schedule(&g_preempt[my_cpu()])) {
+        static int blk_dbg[MAX_CPUS];
+        int c0 = my_cpu();
+        if (c0 >= 0 && c0 < MAX_CPUS && blk_dbg[c0] < 4) {
+            blk_dbg[c0]++;
+            console_puts("[SCHED-BLOCK] cpu=");
+            console_putchar((char)('0' + (c0 % 10)));
+            console_puts(" q=");
+            console_putchar((char)('0' + (schedq_count(&cpu_ready[c0]) % 10)));
+            console_puts("\n");
+        }
+        return;
+    }
     if (!current_task || current_task->state == TASK_TERMINATED) return;
     uint64_t irq_flags = task_irq_save();
     smp_sched_lock();
