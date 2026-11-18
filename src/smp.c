@@ -19,6 +19,10 @@ static volatile uint32_t *lapic_base;
  * 需要短暂的互斥，那里用 trylock（抢不到就跳过），不会阻塞。 */
 static spinlock_t sched_lock_per[MAX_CPUS];
 
+/* AP 的 LAPIC 定时器中断计数（诊断用：确认 AP 抢占节拍是否在走）。
+ * gdt_idt.c 的 IRQ_SMP_TIMER 分支递增它，内核 diag 打印读取它。 */
+volatile uint64_t g_ap_timer_ticks;
+
 /* 每核最近的调度锁操作轨迹：记录 (0=lock / 1=unlock, 调用者返回地址)。
  * 死锁时把持有者的轨迹打出来，就能直接看到是哪次加锁之后没有配对释放。 */
 #define LOCK_TRACE_N 16
@@ -189,9 +193,10 @@ void smp_sched_lock(void) {
     uint64_t flags;
     __asm__ volatile("pushfq; pop %0" : "=r"(flags));
     __asm__ volatile("cli" ::: "memory");
-    if (sched_lock_depth[c]++ == 0)
+    if (sched_lock_depth[c]++ == 0) {
         sched_lock_if[c] = (flags & 0x200) ? 1 : 0;   /* IF 位 */
-    spinlock_acquire(&sched_lock_per[c]);
+        spinlock_acquire(&sched_lock_per[c]);
+    }
 }
 
 /**
@@ -226,8 +231,34 @@ void smp_sched_unlock(void) {
     int c = smp_cpu_index();
     if (c < 0 || c >= MAX_CPUS) c = 0;
     lock_trace_push(c, 1, (uint64_t)(uintptr_t)__builtin_return_address(0));
-    spinlock_release(&sched_lock_per[c]);
-    if (sched_lock_depth[c] > 0 && --sched_lock_depth[c] == 0 && sched_lock_if[c])
+    if (sched_lock_depth[c] > 0 && --sched_lock_depth[c] == 0) {
+        spinlock_release(&sched_lock_per[c]);
+        if (sched_lock_if[c])
+            __asm__ volatile("sti" ::: "memory");
+    }
+}
+
+/** @brief 锁住指定核的调度锁（不可在已持本核调度锁时对其他核调用） */
+uint64_t smp_sched_lock_cpu(int cpu) {
+    if (cpu < 0 || cpu >= MAX_CPUS) cpu = 0;
+    if (cpu == smp_cpu_index()) {
+        smp_sched_lock();
+        return 0;
+    }
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    spinlock_acquire(&sched_lock_per[cpu]);
+    return flags;
+}
+
+void smp_sched_unlock_cpu(int cpu, uint64_t flags) {
+    if (cpu < 0 || cpu >= MAX_CPUS) cpu = 0;
+    if (cpu == smp_cpu_index()) {
+        smp_sched_unlock();
+        return;
+    }
+    spinlock_release(&sched_lock_per[cpu]);
+    if (flags & 0x200)
         __asm__ volatile("sti" ::: "memory");
 }
 
@@ -288,6 +319,8 @@ static void ap_entry(void) {
         uint64_t stack_top = (uint64_t)(uintptr_t)&ap_kernel_stack[my_idx][AP_STACK_SIZE];
         cpu_data[my_idx].stack = stack_top;
         gdt_idt_load_ap(my_idx, stack_top);
+        fpu_enable();
+        pat_init();
         cpu_data[my_idx].online = 1;
         ap_serial("[AP] online cpu=");
         ap_serial_uint((uint32_t)my_idx);

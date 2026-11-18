@@ -48,9 +48,19 @@ typedef uint64_t pte_t;              /**< 页表条目类型 (64-bit) */
 // 内部状态
 // ============================================================
 
-static pte_t *g_pml4 = NULL;         /**< PML4 表指针（虚拟地址） */
-static uint64_t g_pml4_phys = 0;     /**< PML4 表物理地址 */
+static uint64_t g_kernel_pml4_phys = 0; /**< 内核初始 PML4 表物理地址 */
 static bool g_nx_enabled;
+
+static inline uint64_t vmm_active_pml4_phys(void) {
+    if (!g_kernel_pml4_phys) return 0;
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    return cr3 & ~0xFFFULL;
+}
+
+static inline pte_t *vmm_active_pml4(void) {
+    return (pte_t *)(uintptr_t)vmm_active_pml4_phys();
+}
 
 // ============================================================
 // 页表遍历 — 获取指定虚拟地址的 PTE 指针
@@ -69,10 +79,10 @@ static bool g_nx_enabled;
  * @return PTE 指针，失败返回 NULL
  */
 static pte_t *vmm_get_pte(uint64_t virt_addr, bool create, uint64_t flags) {
-    if (!g_pml4) return NULL;
+    pte_t *pml4 = vmm_active_pml4();
+    if (!pml4) return NULL;
 
     // ---- Level 4: PML4 ----
-    pte_t *pml4 = g_pml4;
     pte_t *pml4e = &pml4[VMM_IDX(virt_addr, VMM_PML4)];
     if (!(*pml4e & VMM_P)) {
         if (!create) return NULL;
@@ -155,8 +165,7 @@ static inline void vmm_invlpg(uint64_t virt_addr) {
  * @param p4_phys  PML4 表的物理地址（从 CR3 读取）
  */
 void vmm_init(uint64_t p4_phys) {
-    g_pml4_phys = p4_phys;
-    g_pml4 = (pte_t *)(uintptr_t)p4_phys;  // 恒等映射 → 虚拟地址 = 物理地址
+    g_kernel_pml4_phys = p4_phys;
 }
 
 /**
@@ -191,14 +200,15 @@ int vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
 
 int vmm_identity_map_2m(uint64_t start, uint64_t end, uint64_t flags) {
     const uint64_t HUGE = 2ULL * 1024 * 1024;
-    if (!g_pml4) return -1;
+    pte_t *pml4 = vmm_active_pml4();
+    if (!pml4) return -1;
     if (start & (HUGE - 1)) return -1;
     end = (end + HUGE - 1) & ~(HUGE - 1);
     if (end <= start) return 0;
 
     uint64_t permitted = flags & 0xFFFULL;
     for (uint64_t va = start; va < end; va += HUGE) {
-        pte_t *pml4e = &g_pml4[VMM_IDX(va, VMM_PML4)];
+        pte_t *pml4e = &pml4[VMM_IDX(va, VMM_PML4)];
         if (!(*pml4e & VMM_P)) {
             uint64_t phys = pmm_alloc_page();
             if (!phys) return -1;
@@ -317,10 +327,11 @@ void vmm_release_page(uint64_t virt_addr) {
  * @return 物理地址，0 表示未映射
  */
 uint64_t vmm_get_phys(uint64_t virt_addr) {
-    if (!g_pml4) return 0;
+    pte_t *pml4 = vmm_active_pml4();
+    if (!pml4) return 0;
 
     // PML4 (Level 4)
-    pte_t *pml4e = &g_pml4[VMM_IDX(virt_addr, VMM_PML4)];
+    pte_t *pml4e = &pml4[VMM_IDX(virt_addr, VMM_PML4)];
     if (!(*pml4e & VMM_P)) return 0;
 
     // PDPT (Level 3)
@@ -367,7 +378,7 @@ uint64_t vmm_alloc_page_at(uint64_t virt_addr, uint64_t flags) {
 }
 
 /** 获取当前 PML4 表的物理地址 */
-uint64_t vmm_get_pml4(void) { return g_pml4_phys; }
+uint64_t vmm_get_pml4(void) { return vmm_active_pml4_phys(); }
 
 /*
  * User PML4 entries must not share lower-level page-table pages.  The old
@@ -482,17 +493,17 @@ static uint64_t clone_lower_half(uint64_t src_p4_phys,
 }
 
 uint64_t vmm_create_address_space(void) {
-    return clone_lower_half(g_pml4_phys, false, true);
+    return clone_lower_half(g_kernel_pml4_phys, false, true);
 }
 
 uint64_t vmm_clone_address_space(uint64_t src_p4_phys) {
     uint64_t clone = clone_lower_half(src_p4_phys, true, false);
-    if (clone && src_p4_phys == g_pml4_phys) vmm_flush_tlb();
+    if (clone && src_p4_phys == vmm_active_pml4_phys()) vmm_flush_tlb();
     return clone;
 }
 
 void vmm_destroy_address_space(uint64_t pml4_phys) {
-    if (!pml4_phys || pml4_phys == g_pml4_phys) return;
+    if (!pml4_phys || pml4_phys == g_kernel_pml4_phys) return;
     pte_t *pml4 = (pte_t *)(uintptr_t)pml4_phys;
     for (int index = 0; index < 256; index++)
         if (pml4[index] & VMM_P)
@@ -513,8 +524,6 @@ void vmm_destroy_address_space(uint64_t pml4_phys) {
  * 低 12 位是 PCID/标志位，比较时屏蔽。
  */
 void vmm_set_pml4(uint64_t pml4_phys) {
-    g_pml4_phys = pml4_phys;
-    g_pml4      = (pte_t *)(uintptr_t)pml4_phys;
     uint64_t current;
     __asm__ volatile("mov %%cr3, %0" : "=r"(current));
     if ((current & ~0xFFFULL) == (pml4_phys & ~0xFFFULL))
@@ -547,9 +556,10 @@ uint64_t vmm_virt_to_phys(uint64_t virt_addr) {
  * @return 0 成功，-1 失败（不是大页，或分配新页表失败）
  */
 static int vmm_split_large_page(uint64_t virt_2mb_aligned) {
-    if (!g_pml4) return -1;
+    pte_t *pml4 = vmm_active_pml4();
+    if (!pml4) return -1;
 
-    pte_t *pml4e = &g_pml4[VMM_IDX(virt_2mb_aligned, VMM_PML4)];
+    pte_t *pml4e = &pml4[VMM_IDX(virt_2mb_aligned, VMM_PML4)];
     if (!(*pml4e & VMM_P)) return -1;
     pte_t *pdpt = (pte_t *)(uintptr_t)(*pml4e & ~0xFFFULL);
 
@@ -577,7 +587,8 @@ static int vmm_split_large_page(uint64_t virt_2mb_aligned) {
 }
 
 int vmm_set_range_wc(uint64_t phys_addr, uint64_t size) {
-    if (!g_pml4 || size == 0) return -1;
+    pte_t *pml4 = vmm_active_pml4();
+    if (!pml4 || size == 0) return -1;
 
     uint64_t start = phys_addr & ~(PAGE_SIZE - 1);
     uint64_t end = (phys_addr + size + PAGE_SIZE - 1) & ~((uint64_t)PAGE_SIZE - 1);
@@ -585,7 +596,7 @@ int vmm_set_range_wc(uint64_t phys_addr, uint64_t size) {
     // 先把范围内涉及到的每个 2MB 大页都拆分成 4KB 页
     const uint64_t LARGE_PAGE_SIZE = 1ULL << 21;
     for (uint64_t va = start & ~(LARGE_PAGE_SIZE - 1); va < end; va += LARGE_PAGE_SIZE) {
-        pte_t *pml4e = &g_pml4[VMM_IDX(va, VMM_PML4)];
+        pte_t *pml4e = &pml4[VMM_IDX(va, VMM_PML4)];
         if (!(*pml4e & VMM_P)) continue;
         pte_t *pdpt = (pte_t *)(uintptr_t)(*pml4e & ~0xFFFULL);
         pte_t *pdpte = &pdpt[VMM_IDX(va, VMM_PDPT)];

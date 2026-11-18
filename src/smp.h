@@ -1,6 +1,6 @@
 /**
  * @file    smp.h
- * @brief   导出 52 个接口（2 类型 / 30 宏 / 20 函数）
+ * @brief   导出 54 个接口（2 类型 / 30 宏 / 22 函数）
  *
  * @layer   core
  * @owner   src/
@@ -53,6 +53,8 @@
  *         smp_panic_hex         （待补）
  *         smp_sched_lock        （待补）
  *         smp_sched_unlock      （待补）
+ *         smp_sched_lock_cpu    锁住指定核的调度锁
+ *         smp_sched_unlock_cpu  释放指定核的调度锁
  *         spinlock_init         （待补）
  *         spinlock_acquire      （待补）
  *         spinlock_release      （待补）
@@ -155,6 +157,8 @@ void smp_panic_hex(uint64_t v);
 
 void smp_sched_lock(void);
 void smp_sched_unlock(void);
+uint64_t smp_sched_lock_cpu(int cpu);
+void smp_sched_unlock_cpu(int cpu, uint64_t flags);
 
 void spinlock_init(spinlock_t *lock);
 void spinlock_acquire(spinlock_t *lock);

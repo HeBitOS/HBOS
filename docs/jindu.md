@@ -2062,3 +2062,38 @@ BoringSSL**，不是系统的 mbedtls。所以差异在于 Chromium 的 ClientHe
 **修完的效果**：上下文切换标记 `12345` 开始反复出现（完整切换序列），
 说明**任务切换真的跑起来了**（此前是 43 次后完全静止）。
 但仍在 7934 字节处停下，两个核都进入 idle —— 还有下一处，待续。
+
+
+#### R35 SMP 再推进：抢占泄漏修好，双核能拉起 plasmashell（10:05）
+
+**修掉的**：
+1. `g_ap_timer_ticks` 只有 extern 声明、无定义 → 补上（AP 定时器计数可观测）。
+2. `g_preempt[]` 定义在 2400 行却在前面的诊断函数里被引用 → 定义前移。
+3. **AP 带抢占深度 1 进 idle**：`[SMP-DIAG] pre1=1 / cur1=idle1 / q1=7`
+   —— task_schedule() 第一句就被"抢占被关"挡住，该核队列里 7 个任务永远跑不到。
+   修法：idle 循环入口强制清零本核抢占计数（idle 里没有需要保护的临界区）。
+
+**效果（实测）**：
+```
+pre1: 1 -> 0
+serial: 7934 -> 85121 字节
+plasmashell: 0 次 -> 5 次（双核下真的被拉起来了）
+[IDLE-WAKE] cpu=1 q=0 cur=1     ← AP 醒来时队列确实空，是健康负载均衡
+AP 定时器：0x488E -> 0x49C7     ← 节拍正常
+```
+
+**新的阻塞点（已经定位到具体崩溃）**：
+```
+[EXEC] /usr/bin/plasmashell --no-respawn
+[TRAP] user Invalid Opcode rip=0x1100081C58 err=0 -> task terminated
+  fault pid=21 tid=21 (main)
+```
+双核下 plasmashell 起来后**立刻因 Invalid Opcode 崩掉**（单核正常）。
+说明用户态指令流跑飞 —— 方向是**代码页一致性**：多核并发 mmap 同一只读代码页时，
+必须保证"页填好内容之后才发布到共享表"，否则另一个核可能映射到半写的页。
+
+已排除：共享页表哈希链表竞争（已加锁）、`memset` 清零时机（在 pmm_alloc 之后，安全）。
+
+**下一步**：给 `linux_compat_shm_page()` 的发布顺序做严格化 ——
+先填内容 → 内存屏障 → 再挂进散列桶；并在 `vm_fill_vfs_shared()` 里
+映射共享页前对页内容做一次可见性确认。这是双核 Invalid Opcode 最可能的原因。

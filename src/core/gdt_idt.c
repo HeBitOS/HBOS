@@ -750,20 +750,17 @@ void gdt_init(void) {
     tss_flush(SEL_TSS(0));
 }
 
+extern uint64_t linux_syscall_percpu_rsp[GDT_MAX_CPUS * 2];
+
 void tss_set_stack(uint64_t rsp0) {
     g_tss[0].rsp0 = rsp0;
-    extern uint64_t linux_syscall_kernel_rsp;
-    linux_syscall_kernel_rsp = rsp0;
+    linux_syscall_percpu_rsp[0] = rsp0;
 }
 
 void tss_set_stack_cpu(int cpu, uint64_t rsp0) {
     if (cpu < 0 || cpu >= GDT_MAX_CPUS) cpu = 0;
     g_tss[cpu].rsp0 = rsp0;
-    /* SYSCALL 的内核栈仍只在 BSP 上维护一份；AP 上的用户态任务走 int 路径。 */
-    if (cpu == 0) {
-        extern uint64_t linux_syscall_kernel_rsp;
-        linux_syscall_kernel_rsp = rsp0;
-    }
+    linux_syscall_percpu_rsp[cpu * 2] = rsp0;
 }
 
 // ============================================================
@@ -1275,6 +1272,8 @@ void irq_handler(isr_regs_t *regs) {
         return;
     }
     if (regs->int_no == IRQ_SMP_TIMER) {
+        extern volatile uint64_t g_ap_timer_ticks;
+        g_ap_timer_ticks++;
         smp_lapic_eoi();
         extern void task_schedule(void);
         task_schedule();
@@ -1291,6 +1290,10 @@ void irq_handler(isr_regs_t *regs) {
     if (irq == 0) {
         pic_send_eoi(0);
         g_pit_ticks++;
+        if (g_pit_ticks == 7000 || g_pit_ticks == 7100) {
+            extern void task_dump_smp_diag(void);
+            task_dump_smp_diag();
+        }
         {   /* 排空 PS/2 鼠标原始字节：KDE 会话不调 mouse_poll，
              * 不在这里解析的话 /dev/input/event1 永远没有事件。 */
             extern void mouse_drain_irq(void);
@@ -1336,6 +1339,32 @@ void irq_handler(isr_regs_t *regs) {
     }
 
     pic_send_eoi(irq);
+}
+
+static bool gdt_idt_setup_cpu_msrs(void) {
+    /* Linux ELF binaries enter through the architectural SYSCALL path.
+     * The assembly return uses iretq, so STAR's user-selector half is not
+     * constrained by SYSRET's descriptor ordering. */
+    wrmsr(MSR_STAR, (uint64_t)SEL_KCODE << 32);
+    wrmsr(MSR_LSTAR, (uint64_t)(uintptr_t)linux_syscall_entry);
+    wrmsr(MSR_SFMASK, (1ULL << 8) | (1ULL << 9) | (1ULL << 10));
+    uint32_t max_extended, unused_b, unused_c, extended_features;
+    __asm__ volatile("cpuid"
+                     : "=a"(max_extended), "=b"(unused_b),
+                       "=c"(unused_c), "=d"(extended_features)
+                     : "a"(0x80000000U), "c"(0));
+    bool nx_supported = false;
+    if (max_extended >= 0x80000001U) {
+        __asm__ volatile("cpuid"
+                         : "=a"(max_extended), "=b"(unused_b),
+                           "=c"(unused_c), "=d"(extended_features)
+                         : "a"(0x80000001U), "c"(0));
+        nx_supported = (extended_features & (1U << 20)) != 0;
+    }
+    uint64_t efer = rdmsr(MSR_EFER) | EFER_SCE;
+    if (nx_supported) efer |= EFER_NXE;
+    wrmsr(MSR_EFER, efer);
+    return nx_supported;
 }
 
 // ============================================================
@@ -1386,29 +1415,9 @@ void gdt_idt_init(void) {
     idt_set_entry(HBOS_SYSCALL_VECTOR, (uint64_t)syscall_int80_stub,
                   IDT_PRESENT | IDT_DPL3 | IDT_TRAP_GATE);
 
-    /* Linux ELF binaries enter through the architectural SYSCALL path.
-     * The assembly return uses iretq, so STAR's user-selector half is not
-     * constrained by SYSRET's descriptor ordering. */
-    wrmsr(MSR_STAR, (uint64_t)SEL_KCODE << 32);
-    wrmsr(MSR_LSTAR, (uint64_t)(uintptr_t)linux_syscall_entry);
-    wrmsr(MSR_SFMASK, (1ULL << 8) | (1ULL << 9) | (1ULL << 10));
-    uint32_t max_extended, unused_b, unused_c, extended_features;
-    __asm__ volatile("cpuid"
-                     : "=a"(max_extended), "=b"(unused_b),
-                       "=c"(unused_c), "=d"(extended_features)
-                     : "a"(0x80000000U), "c"(0));
-    bool nx_supported = false;
-    if (max_extended >= 0x80000001U) {
-        __asm__ volatile("cpuid"
-                         : "=a"(max_extended), "=b"(unused_b),
-                           "=c"(unused_c), "=d"(extended_features)
-                         : "a"(0x80000001U), "c"(0));
-        nx_supported = (extended_features & (1U << 20)) != 0;
-    }
-    uint64_t efer = rdmsr(MSR_EFER) | EFER_SCE;
-    if (nx_supported) efer |= EFER_NXE;
-    wrmsr(MSR_EFER, efer);
+    bool nx_supported = gdt_idt_setup_cpu_msrs();
     vmm_set_nx_enabled(nx_supported);
+    wrmsr(0xC0000102U, (uint64_t)(uintptr_t)&linux_syscall_percpu_rsp[0]);
 
     // Load IDT
     idt_ptr_t idt_ptr;
@@ -1431,8 +1440,12 @@ void gdt_idt_load_ap(int cpu_idx, uint64_t rsp0) {
 
     if (cpu_idx >= 0 && cpu_idx < GDT_MAX_CPUS) {
         g_tss[cpu_idx].rsp0 = rsp0;
+        linux_syscall_percpu_rsp[cpu_idx * 2] = rsp0;
         tss_flush(SEL_TSS(cpu_idx));
+        wrmsr(0xC0000102U, (uint64_t)(uintptr_t)&linux_syscall_percpu_rsp[cpu_idx * 2]);
     }
+
+    (void)gdt_idt_setup_cpu_msrs();
 
     idt_ptr_t idt_ptr2;
     idt_ptr2.limit = sizeof(idt_entries) - 1;

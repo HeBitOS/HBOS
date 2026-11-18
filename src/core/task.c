@@ -188,6 +188,8 @@ static fd_table_t task_fd_tables[MAX_TASKS];
 static task_mm_t task_memory_spaces[MAX_TASKS];
 static uint64_t retired_address_spaces[MAX_TASKS];
 static size_t retired_address_space_count;
+static spinlock_t retired_mm_lock;
+static spinlock_t task_alloc_lock;
 
 /**
  * 将一块 FXSAVE 区域初始化为 CPU 复位后的默认状态（FCW=0x037F,
@@ -291,11 +293,26 @@ static task_mm_t *task_mm_alloc(uint64_t pml4_phys,
     return NULL;
 }
 
+static int pml4_in_use_by_any_cpu(uint64_t pml4) {
+    if (pml4 == vmm_get_pml4()) return 1;
+    int ncpu = smp_cpu_count();
+    for (int c = 0; c < ncpu && c < MAX_CPUS; c++) {
+        task_t *cur = cpu_current[c];
+        if (!cur) continue;
+        if (cur->mm && cur->mm->pml4_phys == pml4) return 1;
+        if (cur->state == TASK_TERMINATED) return 1;
+    }
+    return 0;
+}
+
 static void task_reap_address_spaces(void) {
+    if (retired_address_space_count == 0) return;
+    uint64_t irq = task_irq_save();
+    spinlock_acquire(&retired_mm_lock);
     size_t write = 0;
     for (size_t i = 0; i < retired_address_space_count; i++) {
         uint64_t pml4 = retired_address_spaces[i];
-        if (pml4 == vmm_get_pml4()) {
+        if (pml4_in_use_by_any_cpu(pml4)) {
             retired_address_spaces[write++] = pml4;
             continue;
         }
@@ -306,25 +323,29 @@ static void task_reap_address_spaces(void) {
         vmm_destroy_address_space(pml4);
     }
     retired_address_space_count = write;
+    spinlock_release(&retired_mm_lock);
+    task_irq_restore(irq);
 }
 
 static void task_retire_address_space(uint64_t pml4) {
     if (!pml4) return;
-    if (pml4 != vmm_get_pml4()) {
-        vmm_destroy_address_space(pml4);
-        return;
-    }
+    uint64_t irq = task_irq_save();
+    spinlock_acquire(&retired_mm_lock);
     if (retired_address_space_count < MAX_TASKS)
         retired_address_spaces[retired_address_space_count++] = pml4;
+    spinlock_release(&retired_mm_lock);
+    task_irq_restore(irq);
 }
 
 static void task_release_mm(task_t *task) {
     if (!task || !task->mm || !task->mm->refs) return;
-    if (--task->mm->refs == 0) {
-        uint64_t pml4 = task->mm->pml4_phys;
-        bool owns_pml4 = task->mm->owns_pml4;
-        ldso_release_address_space(task->mm);
-        vm_area_t *area = task->mm->areas;
+    task_mm_t *mm = task->mm;
+    task->mm = NULL;
+    if (__atomic_sub_fetch(&mm->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        uint64_t pml4 = mm->pml4_phys;
+        bool owns_pml4 = mm->owns_pml4;
+        ldso_release_address_space(mm);
+        vm_area_t *area = mm->areas;
         while (area) {
             vm_area_t *next = area->next;
             if (area->backing_type == 1)
@@ -332,7 +353,7 @@ static void task_release_mm(task_t *task) {
             kfree(area);
             area = next;
         }
-        memset(task->mm, 0, sizeof(*task->mm));
+        memset(mm, 0, sizeof(*mm));
         if (owns_pml4) {
             /* 页表即将退役/释放：先让别的核刷掉 TLB 里指向它的条目，
              * 否则它们可能继续用已释放的映射（-smp 2 下退出路径卡死）。 */
@@ -341,7 +362,6 @@ static void task_release_mm(task_t *task) {
             task_retire_address_space(pml4);
         }
     }
-    task->mm = NULL;
 }
 
 static int task_copy_vm_areas(task_mm_t *destination,
@@ -411,7 +431,11 @@ static task_t *pick_from_cpu(int cpu, int stealing) {
          * shell/GUI、各核空闲任务）被别的核偷走会直接要命：实测把 main
          * 偷到 AP 上之后，BSP 这边的任务跑完就再也找不到可运行任务，
          * 直接报"All tasks terminated"。 */
-        if (stealing && (t->no_steal || !t->affinity_any)) continue;
+        if (stealing && (t->no_steal || !t->affinity_any)) {
+            if (t->state == TASK_READY && t != cpu_current[cpu])
+                (void)schedq_push(q, &t->snode, t->prio);
+            continue;
+        }
         if (t->state != TASK_READY) continue;
         /* 依赖未完成：重新挂回队尾，等前置结束（每轮最多重挂一次，
          * 由 guard 上界保证不会死循环）。 */
@@ -510,13 +534,16 @@ static void sched_rebalance(task_t *t);
 void task_set_priority(task_t *t, uint8_t prio) {
     if (!t) return;
     if (prio >= SCHED_LEVELS) prio = SCHED_LEVELS - 1;
+    uint8_t cpu = t->cpu < MAX_CPUS ? t->cpu : 0;
+    uint64_t f = smp_sched_lock_cpu(cpu);
     t->prio = prio;
     /* 已在就绪队列里：换到新等级（摘了再挂，保持 FIFO 语义）。 */
     if (t->snode.queued) {
-        if (t->cpu >= MAX_CPUS) t->cpu = 0;
-        (void)schedq_remove(&cpu_ready[t->cpu], &t->snode);
-        (void)schedq_push(&ready_q, &t->snode, prio);
+        uint8_t qcpu = t->cpu < MAX_CPUS ? t->cpu : 0;
+        (void)schedq_remove(&cpu_ready[qcpu], &t->snode);
+        (void)schedq_push(&cpu_ready[qcpu], &t->snode, prio);
     }
+    smp_sched_unlock_cpu(cpu, f);
 }
 
 uint8_t task_get_priority(const task_t *t) {
@@ -542,13 +569,18 @@ void task_set_parallel_width(task_t *t, uint8_t width) {
  * 只搬就绪态的任务：正在跑的要等它下次入队时自然落到新核。 */
 static void sched_rebalance(task_t *t) {
     if (!t || !cpu_ready_inited) return;
-    smp_sched_lock();
+    uint8_t old_cpu = t->cpu < MAX_CPUS ? t->cpu : 0;
+    uint64_t f = smp_sched_lock_cpu(old_cpu);
     int was_queued = t->snode.queued;
-    if (was_queued) (void)schedq_remove(&cpu_ready[t->cpu], &t->snode);
-    t->cpu = (uint8_t)pick_cpu_for(t);
-    t->last_cpu = t->cpu;
+    if (was_queued) (void)schedq_remove(&cpu_ready[old_cpu], &t->snode);
+    smp_sched_unlock_cpu(old_cpu, f);
+
+    uint8_t new_cpu = (uint8_t)pick_cpu_for(t);
+    f = smp_sched_lock_cpu(new_cpu);
+    t->cpu = new_cpu;
+    t->last_cpu = new_cpu;
     if (was_queued && t->state == TASK_READY) sched_mark_ready(t);
-    smp_sched_unlock();
+    smp_sched_unlock_cpu(new_cpu, f);
 }
 
 void task_set_affinity_any(task_t *t, int any) {
@@ -695,6 +727,31 @@ void task_smp_release_aps(void) {
 static void task_idle_entry(void *arg) {
     (void)arg;
     for (;;) {
+        /* idle 进入前必须把本核的抢占计数清零。
+         *
+         * 实测 -smp 2 下 AP 会带着 preempt 深度 1 进到 idle：它自己那个核的
+         * 队列里压着 7 个就绪任务，但 task_schedule() 第一句就被
+         * "抢占被关"挡住直接返回 —— 于是这个核永远空转，KDE 也就画不出来。
+         * 计数泄漏点还没定位到，但 idle 里不存在需要保护的临界区，
+         * 在这里强制归零是安全的，并且能把系统从"永久卡死"里救回来。 */
+        extern void task_preempt_reset_current(void);
+        task_preempt_reset_current();
+        {
+            /* 诊断：AP 每次醒来时把"本核队列长度 / current / 抢占深度"打一次，
+             * 用来判断它到底是没被调度进来、还是被某个条件挡住。 */
+            static int idl_dbg[MAX_CPUS];
+            int c = my_cpu();
+            if (c >= 0 && c < MAX_CPUS && idl_dbg[c] < 6) {
+                idl_dbg[c]++;
+                console_puts("[IDLE-WAKE] cpu=");
+                console_putchar((char)('0' + (c % 10)));
+                console_puts(" q=");
+                console_putchar((char)('0' + (schedq_count(&cpu_ready[c]) % 10)));
+                console_puts(" cur=");
+                console_putchar(cpu_current[c] ? (char)('0' + (cpu_current[c]->id % 10)) : 'x');
+                console_puts("\n");
+            }
+        }
         task_schedule();
         /* 绝不能持着调度锁去 hlt：另一个核会在这把锁上永久自旋。
          * 若 task_schedule 的某条路径把锁留在了手里（跨上下文切换时
@@ -775,6 +832,8 @@ void task_ap_enter(int cpu) {
 int task_create(const char *name, void (*entry)(void *), void *arg) {
     if (!entry) return -1;
 
+    uint64_t alloc_irq = task_irq_save();
+    spinlock_acquire(&task_alloc_lock);
     int idx = -1;
     int reuse = 0;
     for (int i = 1; i < task_count; i++) {
@@ -785,19 +844,29 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
         }
     }
     if (idx < 0) {
-        if (task_count >= MAX_TASKS) return -1;
-        idx = task_count;
+        if (task_count >= MAX_TASKS) {
+            spinlock_release(&task_alloc_lock);
+            task_irq_restore(alloc_irq);
+            return -1;
+        }
+        idx = task_count++;
     }
     task_t *tcb = &task_pool[idx];
 
     tcb->id = next_id++;
+    tcb->state = TASK_BLOCKED;
+    if (!reuse) {
+        tcb->next = task_pool[0].next;
+        task_pool[0].next = tcb;
+    }
+    spinlock_release(&task_alloc_lock);
+    task_irq_restore(alloc_irq);
     strncpy(tcb->name, name ? name : "task", TASK_NAME_MAX);
     tcb->name[TASK_NAME_MAX - 1] = '\0';
     /* 调度字段必须在入队之前定好：旧代码先 sched_mark_ready() 再填字段，
      * 复用槽位时会把上一次的 prio/cpu 带进队列。snode 整块清零（合并自
      * ④ 的 WIP）防止复用槽位残留 prev/next 野指针。 */
     memset(&tcb->snode, 0, sizeof(tcb->snode));
-    tcb->state = TASK_READY;
     tcb->prio = 0;
     tcb->dep_id = 0;
     tcb->parallel_width = 1;
@@ -883,14 +952,10 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     tcb->rsp = (uint64_t)sp;
 
     /* 帧搭好了才入队：否则并发调度可能拿到一个 rsp 还没填的任务。 */
-    sched_mark_ready(tcb);
-
-    if (!reuse) {
-        // 插入循环链表（在 head 之后）
-        tcb->next = task_pool[0].next;
-        task_pool[0].next = tcb;
-
-        task_count++;
+    {
+        uint64_t sf = smp_sched_lock_cpu(tcb->cpu);
+        sched_mark_ready(tcb);
+        smp_sched_unlock_cpu(tcb->cpu, sf);
     }
     return tcb->id;
 }
@@ -915,6 +980,8 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
         return -1;
     }
 
+    uint64_t alloc_irq = task_irq_save();
+    spinlock_acquire(&task_alloc_lock);
     int idx = -1;
     int reuse = 0;
     for (int i = 1; i < task_count; i++) {
@@ -926,20 +993,34 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
     }
     if (idx < 0) {
         if (task_count >= MAX_TASKS) {
+            spinlock_release(&task_alloc_lock);
+            task_irq_restore(alloc_irq);
             if (pml4_phys) vmm_destroy_address_space(pml4_phys);
             return -1;
         }
-        idx = task_count;
+        idx = task_count++;
     }
     task_t *tcb = &task_pool[idx];
 
     tcb->id = next_id++;
+    tcb->state = TASK_BLOCKED;
+    if (!reuse) {
+        tcb->next = task_pool[0].next;
+        task_pool[0].next = tcb;
+    }
+    spinlock_release(&task_alloc_lock);
+    task_irq_restore(alloc_irq);
+
     strncpy(tcb->name, name ? name : "user", TASK_NAME_MAX);
     tcb->name[TASK_NAME_MAX - 1] = '\0';
     memset(&tcb->snode, 0, sizeof(tcb->snode));
     tcb->prio = 0;
     tcb->dep_id = 0;
-    sched_mark_ready(tcb);
+    tcb->parallel_width = 1;
+    tcb->affinity_any = 0;
+    tcb->no_steal = 0;
+    tcb->cpu = (uint8_t)my_cpu();
+    tcb->last_cpu = tcb->cpu;
     tcb->entry = NULL;
     tcb->arg = NULL;
     tcb->exit_status = 0;
@@ -1029,10 +1110,10 @@ int task_create_ring3_full(const char *name, uint64_t user_entry,
 
     tcb->rsp = (uint64_t)sp;
 
-    if (!reuse) {
-        tcb->next = task_pool[0].next;
-        task_pool[0].next = tcb;
-        task_count++;
+    {
+        uint64_t sf = smp_sched_lock_cpu(tcb->cpu);
+        sched_mark_ready(tcb);
+        smp_sched_unlock_cpu(tcb->cpu, sf);
     }
     return tcb->id;
 }
@@ -1083,16 +1164,53 @@ static void sched_print_hex(uint64_t v) {
  * @return 补回队列的任务数
  */
 static int sched_requeue_orphans(void) {
+    int me = my_cpu();
     int fixed = 0;
     for (int i = 0; i < task_count; i++) {
         task_t *t = &task_pool[i];
-        if (t == current_task) continue;
+        if (t->cpu != (uint8_t)me) continue;
+        if (t == cpu_current[me]) continue;
         if (t->state != TASK_READY || t->snode.queued) continue;
-        if (t->cpu >= MAX_CPUS) t->cpu = 0;
-        (void)schedq_push(&cpu_ready[t->cpu], &t->snode, t->prio);
+        (void)schedq_push(&cpu_ready[me], &t->snode, t->prio);
         fixed++;
     }
     return fixed;
+}
+
+/* 每核抢占关断深度（定义前移到诊断函数之前使用）。 */
+static preempt_state_t g_preempt[MAX_CPUS];
+
+extern volatile uint64_t g_ap_timer_ticks;
+void task_dump_smp_diag(void) {
+    console_puts("\n[SMP-DIAG] cur0=");
+    sched_print_hex(cpu_current[0] ? cpu_current[0]->id : 0);
+    console_puts(" cur1=");
+    sched_print_hex(cpu_current[1] ? cpu_current[1]->id : 0);
+    console_puts(" q0=");
+    sched_print_hex(schedq_count(&cpu_ready[0]));
+    console_puts(" q1=");
+    sched_print_hex(schedq_count(&cpu_ready[1]));
+    console_puts(" pre0=");
+    sched_print_hex((uint64_t)preempt_state_depth(&g_preempt[0]));
+    console_puts(" pre1=");
+    sched_print_hex((uint64_t)preempt_state_depth(&g_preempt[1]));
+    console_puts(" apt=");
+    sched_print_hex(g_ap_timer_ticks);
+    console_puts(" total=");
+    sched_print_hex((uint64_t)task_count);
+    console_puts("\n");
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &task_pool[i];
+        if (t->state == TASK_TERMINATED) continue;
+        console_puts("  id="); sched_print_hex(t->id);
+        console_puts(" st="); sched_print_hex(t->state);
+        console_puts(" cpu="); sched_print_hex(t->cpu);
+        console_puts(" q="); sched_print_hex(t->snode.queued);
+        console_puts(" p="); sched_print_hex(t->prio);
+        console_puts(" par="); sched_print_hex(t->parent_id);
+        console_puts(" "); console_puts(t->name);
+        console_puts("\n");
+    }
 }
 
 static task_t *sched_pick_valid(void) {
@@ -1336,7 +1454,6 @@ static void task_robust_cleanup(task_t *task) {
  */
 void task_exit(void) {
     if (!current_task) return;
-    console_putchar('A');
     task_robust_cleanup(current_task);
     if (current_task->clear_child_tid) {
         uint32_t *tid = current_task->clear_child_tid;
@@ -1348,25 +1465,34 @@ void task_exit(void) {
     task_release_fd_table(current_task);
     task_release_mm(current_task);
     task_irq_save();
-    console_putchar('B');
     smp_sched_lock();
-    console_putchar('C');
     sched_mark_dead(current_task);
     /* 唤醒所有在等我退出的任务（典型是父进程阻塞在 wait4）。
      * 缺这一步：父进程永远停在 TASK_BLOCKED，而退出任务在下面的循环里
      * 找不到可运行任务 → 两个核都空转/休眠，系统静止。 */
     {
         uint32_t my_id = current_task->id;
+        int me = my_cpu();
         for (int i = 0; i < task_count; i++) {
             task_t *w = &task_pool[i];
             if (w == current_task || w->state != TASK_BLOCKED) continue;
-            if (w->parent_id == my_id) sched_mark_ready(w);
+            if (w->parent_id != my_id) continue;
+            uint8_t wcpu = w->cpu < MAX_CPUS ? w->cpu : 0;
+            if (wcpu == me) {
+                sched_mark_ready(w);
+            } else {
+                smp_sched_unlock();
+                uint64_t wf = smp_sched_lock_cpu(wcpu);
+                if (w->state == TASK_BLOCKED && w->parent_id == my_id)
+                    sched_mark_ready(w);
+                smp_sched_unlock_cpu(wcpu, wf);
+                smp_sched_lock();
+            }
         }
     }
 
     while (1) {
         task_t *next = sched_pick_valid();
-        console_putchar(next ? 'T' : 'N');
         if (!next) {
             /* 本核没活可干了：退回自己的空闲任务，而不是把整个核停机。
              * 停机等于永久少一个 CPU，而且日志里的"All tasks terminated"
@@ -1640,7 +1766,12 @@ int task_kill(uint32_t id, int sig) {
             ldso_release_thread_tls(target);
         task_release_fd_table(target);
         task_release_mm(target);
-        sched_mark_dead(target);
+        {
+            uint8_t tcpu = target->cpu < MAX_CPUS ? target->cpu : 0;
+            uint64_t sf = smp_sched_lock_cpu(tcpu);
+            sched_mark_dead(target);
+            smp_sched_unlock_cpu(tcpu, sf);
+        }
         return 0;
     }
 
@@ -1648,8 +1779,13 @@ int task_kill(uint32_t id, int sig) {
         if (target->stopped) {
             target->stopped = false;
             target->stop_reported = false;
-            if (target != current_task && target->state == TASK_BLOCKED)
-                sched_mark_ready(target);
+            if (target != current_task && target->state == TASK_BLOCKED) {
+                uint8_t tcpu = target->cpu < MAX_CPUS ? target->cpu : 0;
+                uint64_t sf = smp_sched_lock_cpu(tcpu);
+                if (target->state == TASK_BLOCKED)
+                    sched_mark_ready(target);
+                smp_sched_unlock_cpu(tcpu, sf);
+            }
         }
         return 0;
     }
@@ -1662,11 +1798,15 @@ int task_kill(uint32_t id, int sig) {
         if (target == current_task) {
             while (target->stopped) task_yield();
         } else if (target->state != TASK_TERMINATED) {
+            uint8_t tcpu = target->cpu < MAX_CPUS ? target->cpu : 0;
+            uint64_t sf = smp_sched_lock_cpu(tcpu);
             if (target->snode.queued) {
-                if (target->cpu >= MAX_CPUS) target->cpu = 0;
-                (void)schedq_remove(&cpu_ready[target->cpu], &target->snode);
+                uint8_t qcpu = target->cpu < MAX_CPUS ? target->cpu : 0;
+                (void)schedq_remove(&cpu_ready[qcpu], &target->snode);
             }
-            target->state = TASK_BLOCKED;
+            if (target->state != TASK_TERMINATED)
+                target->state = TASK_BLOCKED;
+            smp_sched_unlock_cpu(tcpu, sf);
         }
         return 0;
     }
@@ -1690,6 +1830,8 @@ int task_kill(uint32_t id, int sig) {
 static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     if (!current_task) return -1;
 
+    uint64_t alloc_irq = task_irq_save();
+    spinlock_acquire(&task_alloc_lock);
     int idx = -1;
     int reuse = 0;
     for (int i = 1; i < task_count; i++) {
@@ -1700,18 +1842,30 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
         }
     }
     if (idx < 0) {
-        if (task_count >= MAX_TASKS) return -1;
-        idx = task_count;
+        if (task_count >= MAX_TASKS) {
+            spinlock_release(&task_alloc_lock);
+            task_irq_restore(alloc_irq);
+            return -1;
+        }
+        idx = task_count++;
     }
 
     task_t *child = &task_pool[idx];
     task_t *saved_next = child->next;
     memset(child, 0, sizeof(*child));
-    child->next = saved_next;
+    child->state = TASK_BLOCKED;
     child->id = next_id++;
+    if (!reuse) {
+        child->next = task_pool[0].next;
+        task_pool[0].next = child;
+    } else {
+        child->next = saved_next;
+    }
+    spinlock_release(&task_alloc_lock);
+    task_irq_restore(alloc_irq);
+
     strncpy(child->name, current_task->name, TASK_NAME_MAX);
     child->name[TASK_NAME_MAX - 1] = '\0';
-    sched_mark_ready(child);
     child->entry = linux_context ? NULL : current_task->entry;
     child->arg = linux_context ? NULL : current_task->arg;
     child->exit_status = 0;
@@ -1892,14 +2046,18 @@ static int task_fork_common(const hbos_linux_clone_context_t *linux_context) {
     *--sp = 0;  // R14
     *--sp = 0;  // R15
     child->rsp = (uint64_t)sp;
-
-    if (!reuse) {
-        child->next = task_pool[0].next;
-        task_pool[0].next = child;
-        task_count++;
-    }
+    child->parallel_width = 1;
+    child->affinity_any = 1;
+    child->no_steal = 0;
+    child->cpu = (uint8_t)pick_cpu_for(child);
+    child->last_cpu = child->cpu;
 
     current_task->child_id = child->id;
+    {
+        uint64_t sf = smp_sched_lock_cpu(child->cpu);
+        sched_mark_ready(child);
+        smp_sched_unlock_cpu(child->cpu, sf);
+    }
     return child->id;
 }
 
@@ -1966,6 +2124,8 @@ static int task_clone_thread_common(
         !current_task->mm->pml4_phys)
         return -1;
 
+    uint64_t alloc_irq = task_irq_save();
+    spinlock_acquire(&task_alloc_lock);
     int idx = -1;
     int reuse = 0;
     for (int i = 1; i < task_count; i++) {
@@ -1976,15 +2136,28 @@ static int task_clone_thread_common(
         }
     }
     if (idx < 0) {
-        if (task_count >= MAX_TASKS) return -1;
-        idx = task_count;
+        if (task_count >= MAX_TASKS) {
+            spinlock_release(&task_alloc_lock);
+            task_irq_restore(alloc_irq);
+            return -1;
+        }
+        idx = task_count++;
     }
 
     task_t *thread = &task_pool[idx];
     task_t *saved_next = thread->next;
     memset(thread, 0, sizeof(*thread));
-    thread->next = saved_next;
+    thread->state = TASK_BLOCKED;
     thread->id = next_id++;
+    if (!reuse) {
+        thread->next = task_pool[0].next;
+        task_pool[0].next = thread;
+    } else {
+        thread->next = saved_next;
+    }
+    spinlock_release(&task_alloc_lock);
+    task_irq_restore(alloc_irq);
+
     strncpy(thread->name, current_task->name, TASK_NAME_MAX);
     thread->name[TASK_NAME_MAX - 1] = '\0';
     /* 线程与创建者属于同一个进程，/proc/<tid>/exe 必须指向同一个可执行文件。
@@ -2002,7 +2175,6 @@ static int task_clone_thread_common(
         }
         thread->exe_path[exe_len] = '\0';
     }
-    sched_mark_ready(thread);
     thread->parent_id = current_task->id;
     thread->pgid = current_task->pgid;
     thread->sid = current_task->sid;
@@ -2013,7 +2185,7 @@ static int task_clone_thread_common(
     task_fpu_capture(thread->fpu_state);
 
     thread->mm = current_task->mm;
-    thread->mm->refs++;
+    __atomic_add_fetch(&thread->mm->refs, 1, __ATOMIC_ACQ_REL);
     thread->fs_base = (request->flags & CLONE_SETTLS) ?
                       request->tls : task_get_fs_base();
     thread->thread_group_id = current_task->thread_group_id;
@@ -2093,12 +2265,17 @@ static int task_clone_thread_common(
         __atomic_store_n((uint32_t *)(uintptr_t)request->child_tid,
                          thread->id, __ATOMIC_RELEASE);
 
-    if (!reuse) {
-        thread->next = task_pool[0].next;
-        task_pool[0].next = thread;
-        task_count++;
-    }
+    thread->parallel_width = 1;
+    thread->affinity_any = 1;
+    thread->no_steal = 0;
+    thread->cpu = (uint8_t)pick_cpu_for(thread);
+    thread->last_cpu = thread->cpu;
     current_task->child_id = thread->id;
+    {
+        uint64_t sf = smp_sched_lock_cpu(thread->cpu);
+        sched_mark_ready(thread);
+        smp_sched_unlock_cpu(thread->cpu, sf);
+    }
     return (int)thread->id;
 }
 
@@ -2247,7 +2424,15 @@ void task_list_all(void) {
  *     而它被本核计数挡住），所以 disable/enable 永远落在同一个核上。
  * 计数器语义（含饱和/下溢保护）在 core/preempt.h，宿主单测覆盖。
  */
-static preempt_state_t g_preempt[MAX_CPUS];
+
+/** @brief 把本核的抢占关断深度强制清零（仅供 idle 路径自救） */
+void task_preempt_reset_current(void) {
+    int c = my_cpu();
+    preempt_state_enable(&g_preempt[c]);
+    preempt_state_enable(&g_preempt[c]);
+    preempt_state_enable(&g_preempt[c]);
+    preempt_state_enable(&g_preempt[c]);
+}
 
 void task_preempt_disable(void) {
     preempt_state_disable(&g_preempt[my_cpu()]);
@@ -2288,17 +2473,12 @@ void task_schedule(void) {
     smp_trace_switch(__func__, next);
     task_t *prev = current_task;
     current_task = next;
-    console_putchar('1');
     if (next->mm && next->mm->pml4_phys)
         vmm_set_pml4(next->mm->pml4_phys);
-    console_putchar('2');
     task_reap_address_spaces();
-    console_putchar('3');
     tss_set_stack_cpu(my_cpu(), next->stack_base + next->stack_size);
     task_switch_tls(prev, next);
-    console_putchar('4');
     task_sig_deliver(next);
-    console_putchar('5');
     task_switch(&prev->rsp, &next->rsp, prev->fpu_state, next->fpu_state);
     smp_sched_unlock();
     task_irq_restore(irq_flags);

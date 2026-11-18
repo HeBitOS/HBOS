@@ -89,6 +89,23 @@ def _ppm_ready(path, timeout=3.0):
     return False
 
 
+def _another_consumer_active():
+    """是否有别的脚本正在用 QEMU 的 HMP（monitor）接口。
+
+    QEMU 的 HMP unix socket 同时只服务一个客户端：面板一旦连上去，
+    验证脚本的 screendump 就会全部失败（实测反复踩）。
+    所以只要发现别的消费者活跃，面板就主动让路，只复用它们产出的帧。
+    """
+    now = time.time()
+    for p in _scan_tmp(lambda f: f.endswith("ctl.sock")):
+        try:
+            if now - os.path.getmtime(p) < 600:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _share_external_frame():
     """若别的验收脚本正在产图，直接复用它，避免抢 QEMU monitor。
 
@@ -122,6 +139,15 @@ def grab_loop():
     sock = None
     while True:
         try:
+            if _another_consumer_active():
+                # 有别的脚本在用 HMP：先复用它的帧图；复用的帧太旧时，
+                # 自己抓一帧（短连接，抓完立刻断开，不会长期占用）。
+                if _share_external_frame() and \
+                        time.time() - os.path.getmtime(SCREEN_PNG) < 20:
+                    _state["err"] = ""
+                    time.sleep(1.5)
+                    continue
+                # 落到下面走正常抓帧流程
             if _share_external_frame():
                 _state["err"] = ""
                 time.sleep(1.0)
@@ -711,6 +737,7 @@ def _procs():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8770)
+    ap.add_argument("--monitor-path", default="", help="指定 QEMU monitor socket，避免与其他消费者抢")
     args = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     threading.Thread(target=grab_loop, daemon=True).start()

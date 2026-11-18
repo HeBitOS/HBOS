@@ -283,22 +283,25 @@ syscall_int80_stub:
 
 ; Native x86-64 SYSCALL entry for unmodified Linux binaries.
 global linux_syscall_entry
-global linux_syscall_kernel_rsp
-global linux_syscall_user_rsp
+global linux_syscall_percpu_rsp
 
 section .bss
-align 8
-linux_syscall_kernel_rsp: resq 1
-linux_syscall_user_rsp:   resq 1
+align 16
+; Per-CPU syscall scratch (16 bytes per CPU, up to GDT_MAX_CPUS=8):
+;   +0: kernel_rsp (updated by tss_set_stack_cpu)
+;   +8: user_rsp   (temporary scratch while IF=0 during entry)
+linux_syscall_percpu_rsp: resq 16
 
 section .text
 linux_syscall_entry:
-    mov [rel linux_syscall_user_rsp], rsp
-    mov rsp, [rel linux_syscall_kernel_rsp]
+    swapgs
+    mov [gs:8], rsp
+    mov rsp, [gs:0]
 
     ; Explicit iretq frame avoids SYSRET's fixed user GDT ordering.
     push qword 0x23
-    push qword [rel linux_syscall_user_rsp]
+    push qword [gs:8]
+    swapgs
     push r11
     push qword 0x1B
     push rcx

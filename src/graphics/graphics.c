@@ -677,57 +677,44 @@ int graphics_init(void *mbi) {
 // Console output functions
 // ============================================================
 
-void console_write(const char *str, uint64_t len) {
-    if (!g_initialized) return;
-    if (g_console_sink) {
-        for (uint64_t i = 0; i < len; i++) g_console_sink(str[i]);
+static volatile uint32_t g_console_lock;
+static volatile int32_t g_console_owner;
+static uint32_t g_console_depth;
+
+static int console_cpu_tag(void) {
+    extern int smp_cpu_index(void);
+    return smp_cpu_index() + 1;
+}
+
+static uint64_t console_lock_acquire(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    int me = console_cpu_tag();
+    if (g_console_owner == me) {
+        g_console_depth++;
+        return flags;
+    }
+    while (__sync_lock_test_and_set(&g_console_lock, 1U)) {
+        __asm__ volatile("pause");
+    }
+    g_console_owner = me;
+    g_console_depth = 1;
+    return flags;
+}
+
+static void console_lock_release(uint64_t flags) {
+    if (g_console_depth > 1) {
+        g_console_depth--;
+        if (flags & 0x200) __asm__ volatile("sti" ::: "memory");
         return;
     }
-    if (g_term) {
-        // Fast path: pure ASCII
-        int has_high = 0;
-        int has_escape = 0;
-        for (uint64_t i = 0; i < len; i++) {
-            if ((uint8_t)str[i] >= 0x80) { has_high = 1; break; }
-            if (str[i] == '\x1b') has_escape = 1;
-        }
-        if (!has_high) {
-            for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
-            for (uint64_t i = 0; i < len; i++) sb_capture_char(str[i]);
-            struct flanterm_fb_context *fc =
-                (struct flanterm_fb_context *)g_term;
-            uint64_t old_cx = fc->cursor_x;
-            uint64_t old_cy = fc->cursor_y;
-            uint64_t old_scroll_gen = g_flanterm_scroll_gen;
-            flanterm_write(g_term, str, len);
-            flanterm_flush(g_term);
-            if (has_escape) {
-                /* CSI can clear/repaint outside the cursor path. */
-                console_present();
-            } else {
-                console_present_after_char(old_cx, old_cy, fc->cursor_x,
-                                           fc->cursor_y, old_scroll_gen);
-            }
-        } else {
-            // Slow path: process byte-by-byte through UTF-8 decoder
-            for (uint64_t i = 0; i < len; i++) {
-                console_putchar(str[i]);
-            }
-        }
-    } else {
-        for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
-        vga_write_fallback(str, len);
-    }
+    g_console_depth = 0;
+    g_console_owner = 0;
+    __sync_lock_release(&g_console_lock);
+    if (flags & 0x200) __asm__ volatile("sti" ::: "memory");
 }
 
-void console_puts(const char *str) {
-    if (!g_initialized || !str) return;
-    uint64_t len = 0;
-    while (str[len]) len++;
-    console_write(str, len);
-}
-
-void console_putchar(char c) {
+static void console_putchar_unlocked(char c) {
     if (!g_initialized) return;
     if (g_console_sink) { g_console_sink(c); return; }
     if (!sb_no_capture) serial_mirror_char(c);
@@ -774,8 +761,69 @@ void console_putchar(char c) {
     }
 }
 
+void console_write(const char *str, uint64_t len) {
+    if (!g_initialized || !str) return;
+    uint64_t flags = console_lock_acquire();
+    if (g_console_sink) {
+        for (uint64_t i = 0; i < len; i++) g_console_sink(str[i]);
+        console_lock_release(flags);
+        return;
+    }
+    if (g_term) {
+        // Fast path: pure ASCII
+        int has_high = 0;
+        int has_escape = 0;
+        for (uint64_t i = 0; i < len; i++) {
+            if ((uint8_t)str[i] >= 0x80) { has_high = 1; break; }
+            if (str[i] == '\x1b') has_escape = 1;
+        }
+        if (!has_high) {
+            for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
+            for (uint64_t i = 0; i < len; i++) sb_capture_char(str[i]);
+            struct flanterm_fb_context *fc =
+                (struct flanterm_fb_context *)g_term;
+            uint64_t old_cx = fc->cursor_x;
+            uint64_t old_cy = fc->cursor_y;
+            uint64_t old_scroll_gen = g_flanterm_scroll_gen;
+            flanterm_write(g_term, str, len);
+            flanterm_flush(g_term);
+            if (has_escape) {
+                /* CSI can clear/repaint outside the cursor path. */
+                console_present();
+            } else {
+                console_present_after_char(old_cx, old_cy, fc->cursor_x,
+                                           fc->cursor_y, old_scroll_gen);
+            }
+        } else {
+            // Slow path: process byte-by-byte through UTF-8 decoder
+            for (uint64_t i = 0; i < len; i++) {
+                console_putchar_unlocked(str[i]);
+            }
+        }
+    } else {
+        for (uint64_t i = 0; i < len; i++) serial_mirror_char(str[i]);
+        vga_write_fallback(str, len);
+    }
+    console_lock_release(flags);
+}
+
+void console_puts(const char *str) {
+    if (!g_initialized || !str) return;
+    uint64_t len = 0;
+    while (str[len]) len++;
+    console_write(str, len);
+}
+
+void console_putchar(char c) {
+    if (!g_initialized) return;
+    uint64_t flags = console_lock_acquire();
+    console_putchar_unlocked(c);
+    console_lock_release(flags);
+}
+
 void console_putchar_raw(char c) {
     if (!g_initialized) return;
+    uint64_t flags = console_lock_acquire();
     if (g_term) {
         struct flanterm_fb_context *fc = (struct flanterm_fb_context *)g_term;
         uint64_t old_cx = fc->cursor_x, old_cy = fc->cursor_y;
@@ -787,10 +835,13 @@ void console_putchar_raw(char c) {
     } else {
         vga_putc_fallback(c);
     }
+    console_lock_release(flags);
 }
 
 void console_flush(void) {
+    uint64_t flags = console_lock_acquire();
     if (g_term) { flanterm_flush(g_term); console_present(); }
+    console_lock_release(flags);
 }
 
 void console_clear(void) {
