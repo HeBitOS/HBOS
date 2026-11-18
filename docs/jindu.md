@@ -2162,3 +2162,26 @@ kbd_res=(nil)                     ← 连 wl_keyboard 都没绑上
 **教训**：前几轮一直按"CPU 争用/死锁"方向查，但从队列计数看，
 问题其实是**唤醒路径**。计数（q=0 vs q=10）互相矛盾时，说明我读的是脏值，
 应该以"谁在等、谁该被唤醒"为主线。
+
+
+#### R35 尝试 reschedule IPI：基础设施就位，但直接启用会回归（10:45）
+
+按"跨核唤醒丢失"的定性，实现了 reschedule IPI：
+- `IRQ_RESCHEDULE = 0x42` + asm stub + IDT 项 + 处理器（EOI 后调 task_schedule）
+- `smp_send_reschedule(cpu)`
+- 在 `sched_mark_ready()` 里：任务排到别的核后发 IPI 叫醒它
+
+**实测结果：直接启用会严重回归**（serial 从 85302 掉到 3587，什么都起不来）。
+
+原因很可能是：`sched_mark_ready()` 在**启动早期**就会被调用（AP 还没起来、
+IDT/TSS 未就绪），此时向目标核发 IPI 会让那个核在没准备好的上下文里进中断。
+
+**处理**：IPI 的全部基础设施保留（asm stub / IDT 项 / 处理器 / 发送函数），
+但**调用点默认关闭**（`if (0 && pushed)`），等把"何时可以安全发 IPI"的条件
+（目标核 online 且已完成初始化）补上再启用。
+
+回滚后实测恢复到稳定态：`size=85302 / plasma=3 / frame=1`。
+
+**下一步**：给 `smp_send_reschedule()` 加前置条件 —— 只在
+`cpu_data[cpu].online && 内核调度器已初始化完成` 之后才真正发；
+或者改成"在 task_schedule 收尾时按需补发"，避开早期启动窗口。

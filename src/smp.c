@@ -121,6 +121,14 @@ void smp_send_ipi(uint32_t apic_id, uint32_t vector) {
  * 这里向除自己以外的每个在线核发一个 IPI，接收侧在中断里重载 CR3
  * （整表刷新，简单可靠；页表释放是低频路径，不需要按页优化）。
  */
+/** @brief 叫醒指定核重新调度（跨核唤醒用） */
+void smp_send_reschedule(int cpu) {
+    if (cpu < 0 || cpu >= MAX_CPUS || !lapic_base) return;
+    if (!cpu_data[cpu].online) return;
+    if (cpu_data[cpu].apic_id == smp_get_apic_id()) return;   /* 自己不用发 */
+    smp_send_ipi(cpu_data[cpu].apic_id, IRQ_RESCHEDULE);
+}
+
 void smp_tlb_shootdown(void) {
     if (cpu_count <= 1 || !lapic_base) return;
     uint32_t self = smp_get_apic_id();

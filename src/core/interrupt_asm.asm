@@ -158,6 +158,14 @@ smp_tlb_stub:
     push 0x41
     jmp irq_common
 
+; SMP：跨核唤醒（向量 0x42）。A 核把任务排到 B 核队列后，用它叫醒 B 核，
+; 否则 B 核如果正 hlt，那个任务就永远等不到调度。
+global smp_resched_stub
+smp_resched_stub:
+    push 0
+    push 0x42
+    jmp irq_common
+
 global irq_stub_table
 irq_stub_table:
 

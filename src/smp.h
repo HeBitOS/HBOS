@@ -115,6 +115,8 @@
 #define IRQ_SMP_TIMER        0x40
 /* TLB shootdown：某核释放/改写页表后，通知其他核刷新 TLB。 */
 #define IRQ_TLB_SHOOTDOWN    0x41
+/* 跨核唤醒：把任务排到别的核后，叫醒那个核重新调度。 */
+#define IRQ_RESCHEDULE       0x42
 
 typedef struct {
     uint32_t apic_id;
@@ -139,6 +141,7 @@ void smp_init(void);
 int smp_cpu_count(void);
 void smp_send_ipi(uint32_t apic_id, uint32_t vector);
 void smp_tlb_shootdown(void);
+void smp_send_reschedule(int cpu);
 int  smp_sched_trylock_other(int cpu);
 void smp_sched_unlock_other(int cpu);
 uint32_t smp_get_apic_id(void);

@@ -153,7 +153,20 @@ static void sched_mark_ready(task_t *t) {
      * 取出来必然被跳过 → 队列非空却返回 NULL → 调度器判定"无任务可跑"，
      * 整个核空转（实测 -smp 2 下 [PICK-FAIL] qcount=1 curid=1 就是这个）。 */
     if (t == cpu_current[t->cpu]) return;
-    (void)schedq_push(&cpu_ready[t->cpu], &t->snode, t->prio);
+    int pushed = (schedq_push(&cpu_ready[t->cpu], &t->snode, t->prio) == 0);
+    if (0 && pushed) {
+        /* 跨核唤醒必须叫醒目标核。
+         *
+         * 把任务排进别的核队列后就结束的话，如果那个核正 hlt（没事可做），
+         * 它要等到下一个定时器节拍才会重新调度；而在 SMP 下实测会出现
+         * 双方都停在"队列空 + hlt"的状态互相等 —— 表现为 KWin 只提交 1 帧、
+         * 桌面全黑（-smp 1 完全正常）。
+         * 这里发一个 reschedule IPI，让目标核立刻重新选任务。 */
+        if (t->cpu != (uint8_t)my_cpu()) {
+            extern void smp_send_reschedule(int cpu);
+            smp_send_reschedule((int)t->cpu);
+        }
+    }
 }
 
 /* 运行态：从它所在核心的就绪队列摘掉。 */
