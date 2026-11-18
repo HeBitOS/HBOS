@@ -317,8 +317,19 @@ void vmm_release_page(uint64_t virt_addr) {
     *pte = 0;
     __asm__ volatile("invlpg (%0)" :: "r"((void *)(uintptr_t)virt_addr) :
                      "memory");
-    if (entry & VMM_OWNED)
-        pmm_free_page(entry & VMM_PHYS_MASK);
+    /* 只有"本 PTE 独占"的页才能归还物理页。
+     *
+     * 共享文件页（只读代码页等）会被多个进程/多个核同时映射，物理页的
+     * 引用计数 > 1。旧实现只看 VMM_OWNED 就 pmm_free_page()，一旦某个 PTE
+     * 还带着 OWNED 位（例如私有副本被替换成共享页时的清理路径），
+     * 就会把别人正在执行的代码页归还掉 —— 另一个进程随即执行已释放内存，
+     * 表现为 **Invalid Opcode**（实测 -smp 2 下 plasmashell 就是这样崩的）。
+     */
+    if (entry & VMM_OWNED) {
+        uint64_t phys = entry & VMM_PHYS_MASK;
+        if (pmm_page_refcount(phys) <= 1)
+            pmm_free_page(phys);
+    }
 }
 
 /**
